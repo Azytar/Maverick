@@ -1,0 +1,25 @@
+[package]
+name = "maverick"
+version = "0.1.0"
+edition = "2021"
+authors = ["azytar"]
+description = "maverick — columnar tiling WM with niri-style layout"
+license = "MIT"
+
+[[bin]]
+name = "maverick"
+path = "src/main.rs"
+
+[dependencies]
+x11rb = { version = "0.13", default-features = false, features = ["randr"] }
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1
