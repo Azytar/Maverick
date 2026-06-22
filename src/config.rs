@@ -145,7 +145,6 @@ pub fn load_config() -> Cfg {
 
         // <-- NUEVO: Inicialización de autostart
         autostart: vec![
-            vec!["setxkbmap".into(), "us".into(), "-variant".into(), "dvorak".into()],
             vec!["rviv".into(), "--bg".into(), "/home/example.png".into()],
             vec!["picom".into(), "--active-opacity".into(), "0.8".into(), "--inactive-opacity".into(), "0.8".into()],
             vec!["alacritty".into()],
