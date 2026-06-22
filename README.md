@@ -345,6 +345,6 @@ maverick was built because most tiling WMs either carry decades of C legacy, rel
 
 ## 📜 License
 
-MIT
+GPL-3.0 license 
 
 ---

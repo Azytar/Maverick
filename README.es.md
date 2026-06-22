@@ -321,4 +321,4 @@ maverick fue creado porque la mayoría de gestores de ventanas de mosaico (tilin
 
 ## 📜 Licencia
 
-MIT
+GPL-3.0 license 
