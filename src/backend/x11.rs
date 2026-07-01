@@ -49,7 +49,7 @@ pub struct WindowManager {
     hide_mon_vec: Vec<Window>,
     /// P10: Reusable placements buffer — avoids allocation per arrange() call.
     placements_buf: Placements,
-    /// Window ID of the maverick-quit dialog (if showing).
+    /// Window ID of the quit-confirmation dialog (if showing).
     quit_win: Option<Window>,
     /// Rate-limit tracker for key repeat suppression (mods, keysym → last dispatch).
     last_key_times: std::collections::BTreeMap<(u16, u32), std::time::Instant>,
@@ -301,7 +301,7 @@ impl WindowManager {
                 NEED_REGRAB.store(false, std::sync::atomic::Ordering::Release);
             }
         }
-        // Check for pending SIGTERM (from maverick-quit).
+        // Check for pending SIGTERM.
         if QUIT_REQUESTED.load(std::sync::atomic::Ordering::Acquire) {
             QUIT_REQUESTED.store(false, std::sync::atomic::Ordering::Release);
             self.engine.state.running = false;
@@ -444,8 +444,8 @@ impl WindowManager {
         let motion =
             EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION;
 
-        // SYNC grab siempre, en TODAS las ventanas (no solo unfocused).
-        // Sin esto, allow_events(ReplayPointer) en on_button_press falla con
+        // SYNC grab on ALL windows (not just unfocused).
+        // Without this, allow_events(ReplayPointer) in on_button_press fails with
         // BadValue because pointer is not frozen → process::exit(1).
         let _ = self.conn.grab_button(
             false,
@@ -964,35 +964,7 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Find the maverick-quit window in the root window tree by WM_CLASS.
-    fn find_quit_win(&self) -> Option<Window> {
-        let tree = self.conn.query_tree(self.root).ok()?.reply().ok()?;
-        for &child in &tree.children {
-            if child == self.check_win {
-                continue;
-            }
-            if self
-                .engine
-                .state
-                .monitors
-                .iter()
-                .any(|m| m.bar_win == Some(child))
-            {
-                continue;
-            }
-            let prop =
-                self.conn
-                    .get_property(false, child, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 256);
-            if let Ok(c) = prop {
-                if let Ok(ref p) = c.reply() {
-                    if p.value.starts_with(b"maverick-quit\0") {
-                        return Some(child);
-                    }
-                }
-            }
-        }
-        None
-    }
+
 
     fn apply_geom(
         &mut self,
@@ -1293,24 +1265,7 @@ impl WindowManager {
                 self.engine.state.running = false;
             }
             Action::QuitConfirm => {
-                if self.quit_win.is_some() {
-                    return Ok(());
-                }
-                match std::process::Command::new("maverick-quit")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                {
-                    Ok(_) => {
-                        log::info!("maverick-quit launched");
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        self.quit_win = self.find_quit_win();
-                        if self.quit_win.is_none() {
-                            log::warn!("maverick-quit window not found in tree");
-                        }
-                    }
-                    Err(e) => log::warn!("maverick-quit failed: {e}"),
-                }
+                self.engine.state.running = false;
             }
         }
         Ok(())
@@ -1579,8 +1534,8 @@ impl WindowManager {
                 .max(min_col as i32)
                 .min(max_w as i32) as u32;
             col.width = new_w;
-            // Niri-style: no tocar las otras columnas, solo cambiar el ancho de esta.
-            // El scroll se ajustará abajo si hace falta.
+            // Niri-style: don't touch other columns, only change this column's width.
+            // Scroll will be adjusted below if needed.
         }
         // Niri-style: recalcular scroll para que la columna focuseada sea visible.
         let scroll = ideal_scroll(&self.engine.state.monitors[mi], &self.engine.cfg);
@@ -1874,7 +1829,6 @@ impl WindowManager {
         }
         if self.quit_win == Some(e.window) {
             self.quit_win = None;
-            log::info!("maverick-quit dialog closed");
         }
         Ok(())
     }
@@ -2412,7 +2366,7 @@ impl WindowManager {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(drag) = self.drag.take() {
             self.conn.ungrab_pointer(x11rb::CURRENT_TIME)?.check()?;
-            // Usar el monitor real de la ventana, no sel_mon (H3).
+            // Use the window's actual monitor, not sel_mon (H3).
             // Tras hotplug durante un drag, sel_mon puede estar stale.
             let win = drag.win;
             let mi = self
@@ -2544,9 +2498,9 @@ impl WindowManager {
             self.numlock = ks.numlock;
             self.grab_keys()?;
 
-            // Regrabear botones en todas las ventanas existentes.
+            // Re-grab buttons on all existing windows.
             // Without this, existing grab_button still uses the old numlock
-            // → Mod4+click deja de funcionar tras toggle de NumLock.
+            // → Mod4+click stops working after NumLock toggle.
             let wins: Vec<Window> = self.engine.state.clients.keys().copied().collect();
             for win in wins {
                 let _ = self.grab_buttons(win, false);
@@ -2864,7 +2818,7 @@ impl WindowManager {
             &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),
         );
 
-        // Ungrab botones en todas las ventanas gestionadas
+        // Ungrab buttons on all managed windows
         for win in self.engine.state.clients.keys() {
             let _ = self
                 .conn
