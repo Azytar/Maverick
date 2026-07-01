@@ -20,7 +20,8 @@ use crate::log;
 use crate::types::*;
 
 pub static NEED_REGRAB: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
+pub static QUIT_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub struct WindowManager {
     conn: RustConnection,
@@ -48,7 +49,8 @@ pub struct WindowManager {
     hide_mon_vec: Vec<Window>,
     /// P10: Reusable placements buffer — avoids allocation per arrange() call.
     placements_buf: Placements,
-
+    /// Window ID of the maverick-quit dialog (if showing).
+    quit_win: Option<Window>,
     /// Rate-limit tracker for key repeat suppression (mods, keysym → last dispatch).
     last_key_times: std::collections::BTreeMap<(u16, u32), std::time::Instant>,
 }
@@ -127,6 +129,7 @@ impl WindowManager {
             hide_ws_set: std::collections::HashSet::with_capacity(32),
             hide_mon_vec: Vec::with_capacity(64),
             placements_buf: Placements::with_capacity(32),
+            quit_win: None,
             last_key_times: std::collections::BTreeMap::new(),
         };
 
@@ -298,6 +301,11 @@ impl WindowManager {
                 NEED_REGRAB.store(false, std::sync::atomic::Ordering::Release);
             }
         }
+        // Check for pending SIGTERM (from maverick-quit).
+        if QUIT_REQUESTED.load(std::sync::atomic::Ordering::Acquire) {
+            QUIT_REQUESTED.store(false, std::sync::atomic::Ordering::Release);
+            self.engine.state.running = false;
+        }
         match ev {
             Event::ButtonPress(e) => self.on_button_press(e)?,
             Event::ButtonRelease(e) => self.on_button_release(e)?,
@@ -436,8 +444,8 @@ impl WindowManager {
         let motion =
             EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION;
 
-        // SYNC grab always, on ALL windows (not just unfocused).
-        // Without this, allow_events(ReplayPointer) in on_button_press fails with
+        // SYNC grab siempre, en TODAS las ventanas (no solo unfocused).
+        // Sin esto, allow_events(ReplayPointer) en on_button_press falla con
         // BadValue because pointer is not frozen → process::exit(1).
         let _ = self.conn.grab_button(
             false,
@@ -946,7 +954,44 @@ impl WindowManager {
             }
         }
 
+        // 3. Raise quit dialog above fullscreen
+        if let Some(qw) = self.quit_win {
+            let _ = self
+                .conn
+                .configure_window(qw, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+        }
+
         Ok(())
+    }
+
+    /// Find the maverick-quit window in the root window tree by WM_CLASS.
+    fn find_quit_win(&self) -> Option<Window> {
+        let tree = self.conn.query_tree(self.root).ok()?.reply().ok()?;
+        for &child in &tree.children {
+            if child == self.check_win {
+                continue;
+            }
+            if self
+                .engine
+                .state
+                .monitors
+                .iter()
+                .any(|m| m.bar_win == Some(child))
+            {
+                continue;
+            }
+            let prop =
+                self.conn
+                    .get_property(false, child, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 256);
+            if let Ok(c) = prop {
+                if let Ok(ref p) = c.reply() {
+                    if p.value.starts_with(b"maverick-quit\0") {
+                        return Some(child);
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn apply_geom(
@@ -1177,6 +1222,7 @@ impl WindowManager {
                             | Action::ToggleBar
                             | Action::Restart
                             | Action::Quit
+                            | Action::QuitConfirm
                     )
                 {
                     return Ok(());
@@ -1246,11 +1292,33 @@ impl WindowManager {
             Action::Quit => {
                 self.engine.state.running = false;
             }
-
+            Action::QuitConfirm => {
+                if self.quit_win.is_some() {
+                    return Ok(());
+                }
+                match std::process::Command::new("maverick-quit")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                {
+                    Ok(_) => {
+                        log::info!("maverick-quit launched");
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        self.quit_win = self.find_quit_win();
+                        if self.quit_win.is_none() {
+                            log::warn!("maverick-quit window not found in tree");
+                        }
+                    }
+                    Err(e) => log::warn!("maverick-quit failed: {e}"),
+                }
+            }
         }
         Ok(())
     }
 
+    /// Open the quit-confirmation dialog as a non-blocking overlay.
+    /// The dialog runs in the main event loop via process_dialog_event().
+    /// When confirmed, self.engine.state.running is set to false.
     fn spawn(&self, cmd: &[String]) {
         if cmd.is_empty() {
             return;
@@ -1491,38 +1559,30 @@ impl WindowManager {
             .focus
             .column_idx;
         let workarea_w = self.engine.state.monitors[mi].workarea.w;
-        let n = self.engine.state.monitors[mi].workspaces[ws_i]
+
+        if self.engine.state.monitors[mi].workspaces[ws_i]
             .columns
-            .len();
-        if n == 0 {
+            .is_empty()
+        {
             return Ok(());
         }
 
         let min_col = 100u32;
+        let max_w = workarea_w;
 
         if let Some(col) = self.engine.state.monitors[mi].workspaces[ws_i]
             .columns
             .get_mut(ci)
         {
             let old_w = col.width.min(i32::MAX as u32) as i32;
-            let max_w = workarea_w.saturating_sub(40 * (n as u32 - 1));
             let new_w = (old_w.saturating_add(px))
                 .max(min_col as i32)
                 .min(max_w as i32) as u32;
             col.width = new_w;
-            let diff = new_w as i32 - old_w;
-
-            // Solo ajustar la columna adyacente (derecha si existe, izquierda si no)
-            if n > 1 {
-                let adj_i = if ci + 1 < n { ci + 1 } else { ci - 1 };
-                if let Some(adj) = self.engine.state.monitors[mi].workspaces[ws_i]
-                    .columns
-                    .get_mut(adj_i)
-                {
-                    adj.width = ((adj.width as i32).saturating_sub(diff).max(40)) as u32;
-                }
-            }
+            // Niri-style: no tocar las otras columnas, solo cambiar el ancho de esta.
+            // El scroll se ajustará abajo si hace falta.
         }
+        // Niri-style: recalcular scroll para que la columna focuseada sea visible.
         let scroll = ideal_scroll(&self.engine.state.monitors[mi], &self.engine.cfg);
         self.engine.state.monitors[mi].workspaces[ws_i].scroll = scroll;
         self.arrange(mi)?;
@@ -1811,6 +1871,10 @@ impl WindowManager {
     fn on_destroy(&mut self, e: DestroyNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
         if self.engine.state.clients.contains_key(&e.window) {
             self.unmanage(e.window, true)?;
+        }
+        if self.quit_win == Some(e.window) {
+            self.quit_win = None;
+            log::info!("maverick-quit dialog closed");
         }
         Ok(())
     }
@@ -2348,8 +2412,8 @@ impl WindowManager {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(drag) = self.drag.take() {
             self.conn.ungrab_pointer(x11rb::CURRENT_TIME)?.check()?;
-            // Use the window's actual monitor, not sel_mon (H3).
-            // After hotplug during a drag, sel_mon may be stale.
+            // Usar el monitor real de la ventana, no sel_mon (H3).
+            // Tras hotplug durante un drag, sel_mon puede estar stale.
             let win = drag.win;
             let mi = self
                 .engine
@@ -2480,9 +2544,9 @@ impl WindowManager {
             self.numlock = ks.numlock;
             self.grab_keys()?;
 
-            // Regrab buttons on all existing windows.
+            // Regrabear botones en todas las ventanas existentes.
             // Without this, existing grab_button still uses the old numlock
-            // → Mod4+click stops working after NumLock toggle.
+            // → Mod4+click deja de funcionar tras toggle de NumLock.
             let wins: Vec<Window> = self.engine.state.clients.keys().copied().collect();
             for win in wins {
                 let _ = self.grab_buttons(win, false);
@@ -2793,14 +2857,14 @@ impl WindowManager {
     pub fn cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
         let _ = self.conn.ungrab_key(0u8, self.root, ModMask::ANY);
 
-        // Restore root event mask: remove SUBSTRUCTURE_REDIRECT so that
-        // the next WM doesn't fail on startup.
+        // Restaurar root event mask: quitar SUBSTRUCTURE_REDIRECT para que
+        // so the next WM doesn't fail on startup.
         let _ = self.conn.change_window_attributes(
             self.root,
             &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),
         );
 
-        // Ungrab buttons on all managed windows
+        // Ungrab botones en todas las ventanas gestionadas
         for win in self.engine.state.clients.keys() {
             let _ = self
                 .conn
