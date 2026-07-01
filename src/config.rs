@@ -224,10 +224,6 @@ pub fn load_config() -> Cfg {
             "--fade-delta".into(),
             "8".into(),
             "--no-fading-openclose".into(),
-            "--active-opacity".into(),
-            "1.0".into(),
-            "--inactive-opacity".into(),
-            "0.87".into(),
             "--frame-opacity".into(),
             "1.0".into(),
         ],
@@ -243,7 +239,7 @@ pub fn load_config() -> Cfg {
         // benefits from compositing from its very first frame.
         // Each entry is a command + args: vec!["binary", "arg1", "arg2", ...]
         autostart: vec![
-            vec!["setxkbmap".into(), "us".into(), "-variant".into(), "dvorak".into()],
+            //vec!["setxkbmap".into(), "us".into(), "-variant".into(), "dvorak".into()],
             vec!["feh".into(), "--bg-fill".into(), "/path/to/wallpaper.png".into()],
             vec!["alacritty".into()],
         ],
