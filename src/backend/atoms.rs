@@ -9,6 +9,7 @@ use x11rb::protocol::xproto::ConnectionExt as XConnExt;
 
 /// All atoms used by RustWM
 /// Grouped by protocol for clarity
+// All atoms are fetched for _NET_SUPPORTED even if not directly used in WM logic
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct Atoms {
@@ -323,21 +324,5 @@ impl Atoms {
             self.net_frame_extents,
             self.net_wm_pid,
         ]
-    }
-
-    /// Check if a window type atom means "force floating"
-    #[allow(dead_code)]
-    pub fn is_floating_type(&self, atom: u32) -> bool {
-        atom == self.net_wm_window_type_dialog
-            || atom == self.net_wm_window_type_menu
-            || atom == self.net_wm_window_type_toolbar
-            || atom == self.net_wm_window_type_utility
-            || atom == self.net_wm_window_type_splash
-    }
-
-    /// Check if window type should be completely unmanaged
-    #[allow(dead_code)]
-    pub fn is_unmanaged_type(&self, atom: u32) -> bool {
-        atom == self.net_wm_window_type_desktop || atom == self.net_wm_window_type_dock
     }
 }
