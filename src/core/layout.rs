@@ -208,7 +208,7 @@ pub fn ideal_scroll(mon: &Monitor, cfg: &Cfg) -> i32 {
     let wa_w = mon.workarea.w as i32;
 
     // x of focused column (relative to virtual origin).
-    // Usar saturating_add para evitar overflow con muchas columnas.
+    // Use saturating_add to avoid overflow with many columns.
     let col_x_virtual: i32 = ws.columns[..col_idx]
         .iter()
         .map(|c| (c.width as i32).saturating_add(gap))
