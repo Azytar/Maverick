@@ -116,7 +116,7 @@ pub fn load_config() -> Cfg {
         (sup, k!(b'g'), Action::SetLayout(LayoutKind::Grid)),
         (sup, k!(b't'), Action::SetLayout(LayoutKind::Column)),
         // ── misc ──
-        (shs, XK_ESC, Action::Quit), // Mod4+Shift+Escape — quit
+        (shs, XK_ESC, Action::QuitConfirm), // Mod4+Shift+Escape — confirm quit
         (shs, k!(b'r'), Action::Restart),
         (sup, XK_F5, Action::Restart),
         (sup, XK_TAB, Action::FocusMon(Dir::Next)),
@@ -242,13 +242,19 @@ pub fn load_config() -> Cfg {
         // ── Autostart ─────────────────────────────────────────────────────────
         // Launched after compositor + WM are ready — every app benefits from
         // compositing from its very first frame.
-        //
-        // Uncomment and customise for your system:
-        // autostart: vec![
-        //     vec!["setxkbmap".into(), "us".into()],
-        //     vec!["feh".into(), "--bg-fill".into(), "/path/to/wallpaper".into()],
-        //     vec!["alacritty".into()],
-        // ],
-        autostart: vec![],
+        autostart: vec![
+            vec![
+                "setxkbmap".into(),
+                "us".into(),
+                "-variant".into(),
+                "dvorak".into(),
+            ],
+            vec![
+                "rviv".into(),
+                "--bg".into(),
+                "/home/example.png".into(),
+            ],
+            vec!["alacritty".into()],
+        ],
     }
 }
