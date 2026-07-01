@@ -161,16 +161,16 @@ impl Workspace {
     }
 
     /// P3: &mut self — no clone needed at call sites
-    pub fn add_tiled(&mut self, window: Window, default_col_width: u32, workarea_w: u32) {
+    pub fn add_tiled(&mut self, window: Window, _default_col_width: u32, workarea_w: u32) {
         if self.columns.is_empty() {
-            // Primera ventana: ocupa todo el workarea (100%)
+            // First window: occupies the entire workarea (100%)
             let mut col = Column::new(workarea_w);
             col.windows.push(window);
             self.columns.push(col);
             self.focus.column_idx = 0;
             self.focus.window_idx = 0;
         } else {
-            // Segunda ventana en adelante: 75% del workarea
+            // Second window onwards: 75% of the workarea
             let new_col_w = (workarea_w as f32 * 0.75) as u32;
             let mut new_col = Column::new(new_col_w);
             new_col.windows.push(window);
