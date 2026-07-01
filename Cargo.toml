@@ -1,3 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["maverick-quit"]
+
 [package]
 name = "maverick"
 version = "0.2.0"
