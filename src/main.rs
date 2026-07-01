@@ -37,7 +37,7 @@ fn main() {
     setup_signals();
     detach_from_terminal();
 
-    // Write PID file so maverick-quit can find us.
+    // Write PID file so external tools can find us.
     if let Err(e) = std::fs::write("/tmp/maverick.pid", format!("{}\n", std::process::id())) {
         log::warn!("failed to write PID file: {e}");
     }
@@ -201,7 +201,7 @@ fn setup_signals() {
         libc::sigemptyset(&mut sa.sa_mask);
         libc::sigaction(libc::SIGCONT, &sa, std::ptr::null_mut());
 
-        // SIGTERM: set quit flag (from maverick-quit on confirm).
+        // SIGTERM: set quit flag.
         extern "C" fn sigterm_handler(_: libc::c_int) {
             crate::backend::x11::QUIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
         }
