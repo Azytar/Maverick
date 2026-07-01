@@ -163,21 +163,16 @@ impl Workspace {
     /// P3: &mut self — no clone needed at call sites
     pub fn add_tiled(&mut self, window: Window, default_col_width: u32, workarea_w: u32) {
         if self.columns.is_empty() {
+            // Primera ventana: ocupa todo el workarea (100%)
             let mut col = Column::new(workarea_w);
             col.windows.push(window);
             self.columns.push(col);
             self.focus.column_idx = 0;
             self.focus.window_idx = 0;
-        } else if self.columns.len() == 1 && self.columns[0].windows.len() == 1 {
-            // Split evenly like niri: 1→2 gives both columns half the screen
-            self.columns[0].width = workarea_w / 2;
-            let mut new_col = Column::new(workarea_w / 2);
-            new_col.windows.push(window);
-            self.columns.push(new_col);
-            self.focus.column_idx = 1;
-            self.focus.window_idx = 0;
         } else {
-            let mut new_col = Column::new(default_col_width);
+            // Segunda ventana en adelante: 75% del workarea
+            let new_col_w = (workarea_w as f32 * 0.75) as u32;
+            let mut new_col = Column::new(new_col_w);
             new_col.windows.push(window);
             self.columns.push(new_col);
             self.focus.column_idx = self.columns.len() - 1;
@@ -462,6 +457,8 @@ pub enum Action {
     MoveMon(Dir),
     Restart,
     Quit,
+    /// Show a native confirmation dialog before quitting.
+    QuitConfirm,
 }
 
 // ─── Global state ────────────────────────────────────────────────────────────
@@ -526,8 +523,8 @@ impl State {
 
     pub fn remove_client(&mut self, win: Window) -> Option<Client> {
         let c = self.clients.remove(&win)?;
-        // c.monitor may be stale after hotplug (fewer monitors than before).
-        // Clamp to avoid panic index out-of-bounds.
+        // c.monitor puede ser stale tras un hotplug (menos monitores que antes).
+        // Clampear para evitar panic index out-of-bounds.
         let mon_i = c.monitor.min(self.monitors.len().saturating_sub(1));
         let mon = &mut self.monitors[mon_i];
         mon.focus_stack.retain(|&w| w != win);
