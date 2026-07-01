@@ -1,4 +1,4 @@
-# 🦅 maverick
+# 🦅 Maverick
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white">
@@ -25,32 +25,23 @@
 
 ## ✨ About
 
-**maverick** is a lightweight X11/XLibre tiling window manager built around a scrollable column layout inspired by [niri](https://github.com/YaLTeR/niri).
-Written entirely in Rust using `x11rb 0.13` — no Cairo, no Pango, no heavy runtimes.
+**maverick** is a lightweight, columnar tiling window manager written in Rust. It features a scrollable column layout inspired by [niri](https://github.com/YaLTeR/niri), and is built directly on top of `x11rb 0.13` to minimize dependencies and bloat.
 
-Designed around:
+### Key Features
+- 🦅 Horizontally scrollable column-based layout.
+- ⚡ Minimal footprint (~3–4 MB memory usage).
+- 🔲 Three layout modes: Column (stable), Monocle & Grid (experimental).
+- 🖥 Multi-monitor support via RandR.
+- 🧩 Floating + fullscreen window support.
+- 📐 Highly configurable (gaps, borders, bar, split bias).
+- 🔧 Declarative window rules.
+- 🚀 Autostart programs.
+- 📋 EWMH compliant.
 
-- 🦅 horizontally scrollable columns (niri-inspired)
-- ⚡ extremely low memory footprint (~3–4 MB)
-- 🧠 direct X11/XLibre via `x11rb` — zero bloat
-- 🔲 three layout modes: Column · Monocle · Grid
-- 🖥 true multi-monitor support via RandR
-- 🧩 floating + fullscreen window support
-- 📐 configurable gaps, borders, bar, and split bias
-- 🔧 declarative window rules
-- 🚀 autostart programs
-- 🎨 fully themeable status bar and borders with clickable workspaces
-- 📋 EWMH compliant
 
 ---
 
-## 📸 Preview
 
-<p align="center">
-  <img src="assets/preview.png" alt="maverick preview" width="900">
-</p>
-
----
 
 ## 🚀 Installation
 
@@ -94,11 +85,13 @@ Type=XSession
 
 ## 🔲 Layouts
 
-maverick ships three layout modes switchable at runtime:
+maverick ships three layout modes switchable at runtime. 
+
+*Note: The `Monocle` and `Grid` modes are currently experimental and still under active development.*
 
 | Mode | Shortcut | Description |
 | --- | --- | --- |
-| **Column** | `Super+T` | Scrollable columns. Each window lives in its own column by default. |
+| **Column** | `Super+T` | Scrollable columns (default). Each window lives in its own column. |
 | **Monocle** | `Super+M` | One window at a time, fullscreen within the workarea. |
 | **Grid** | `Super+G` | All windows in a uniform grid. |
 
@@ -173,9 +166,13 @@ Cycle through all modes with `Super+Space`.
 
 | Shortcut | Action |
 | --- | --- |
-| `Super+Shift+Escape` | Quit (with confirmation dialog) |
+| `Super+Shift+Q` | Quit maverick |
 | `Super+Shift+R` | Hot restart maverick in-place |
 | `Super+F5` | Hot restart maverick in-place |
+| `Super+Space` | Cycle layout modes |
+| `Super+T` | Set Column layout |
+| `Super+M` | Set Monocle layout |
+| `Super+G` | Set Grid layout |
 
 ### Mouse (floating windows)
 
@@ -189,7 +186,13 @@ Cycle through all modes with `Super+Space`.
 
 ## 🔧 Configuration
 
-maverick is configured in `src/config.rs` (recompile to apply).
+**Note:** maverick is configured entirely in `src/config.rs`. **You must recompile the project after making any changes to this file to apply them.**
+
+```bash
+cargo build --release
+# Then restart maverick
+```
+
 
 ### Core Options
 
@@ -230,6 +233,21 @@ tag_names: ["1", "2", "3", "4", "5", "6", "7", "8", "9"].to_vec(),
 
 ```
 
+### Startup
+
+```rust
+compositor: vec!["picom", "--vsync"],            // compositor launched before the WM
+compositor_delay_ms: 180,                        // ms to wait after compositor spawns
+startup_sound: None,                             // optional WAV/OGG chime on startup
+autostart: vec![
+    vec!["feh", "--bg-fill", "/path/to/wallpaper.png"],
+    vec!["alacritty"],
+],
+
+```
+
+The compositor starts **before** the WM so every window gets compositing from its first frame. Autostart programs launch after both compositor and WM are ready. `startup_sound` accepts a path to a `.wav` or `.ogg` file; it tries `pw-play → paplay → canberra-gtk-play → mpv → aplay` in order.
+
 ---
 
 ## 📋 Window Rules
@@ -260,40 +278,20 @@ rules: vec![
 
 ---
 
-## 🚀 Autostart
-
-Programs to launch when maverick starts:
-
-```rust
-autostart: vec![
-    vec!["setxkbmap", "us", "-variant", "dvorak"],
-    vec!["rviv", "--bg", "/home/example.png"],
-    vec!["picom", "--active-opacity", "0.8", "--inactive-opacity", "0.8"],
-    vec!["alacritty"],
-],
-
-```
-
-Each entry is a `Vec<String>` — the first element is the binary, remaining elements are arguments. Processes are spawned with `setsid` in the background.
-
----
-
 ## 🏗 Technical Details
 
-maverick avoids unnecessary abstraction layers wherever possible:
+maverick minimizes abstraction layers by avoiding unnecessary dependencies:
 
-* **X11 / XLibre via `x11rb 0.13**` — type-safe protocol bindings, no libx11.
-* **Custom XFT wrapper** (`xft.rs`) — fonts via FFI instead of cairo-rs (~18MB saved).
+* **X11 / XLibre via `x11rb 0.13`** — Type-safe protocol bindings, no libx11.
+* **Raw X11 bar rendering** — Status bar drawn with `image_text8` and `poly_fill_rectangle`, no external font libraries.
 * **`HashMap` client map** — O(1) window lookups by XID.
-* **Bar batching** — queue is drained before each `flush()` to avoid O(N) redraws per event burst.
-* **O(N) column layout** — row heights precomputed in a single forward pass, not re-summed per row.
-* **RandR monitor detection** — correct workarea accounting for each monitor's bar.
-* **EWMH support** — `_NET_WM_STATE`, `_NET_WM_DESKTOP`, `_NET_ACTIVE_WINDOW`, `_NET_WM_STRUT_PARTIAL`, client list.
-* **`exec`-based restart** — replaces the process in-place, no X11 grab race condition.
-* **`override_redirect` isolation** — bars and overlays are invisible to the WM itself.
-* **Float centering guard** — prevents the float-center heuristic from misfiring on fullscreen capture tools (≥90% workarea coverage = skip centering).
-
-Memory footprint: **~3–4 MB** resident with a typical desktop open.
+* **Bar batching** — Queue is drained before each `flush()` to avoid O(N) redraws.
+* **O(N) column layout** — Row heights precomputed in a single forward pass.
+* **RandR monitor detection** — Correct workarea accounting for each monitor.
+* **EWMH support** — Including `_NET_WM_STATE`, `_NET_WM_DESKTOP`, `_NET_ACTIVE_WINDOW`, etc.
+* **`exec`-based restart** — Replaces the process in-place, preventing X11 grab race conditions.
+* **`override_redirect` isolation** — Bars and overlays remain invisible to the WM.
+* **Float centering guard** — Skips centering for fullscreen apps (≥90% workarea coverage).
 
 ---
 
@@ -316,30 +314,15 @@ maverick/
 │   └── backend/
 │       ├── mod.rs
 │       ├── atoms.rs     EWMH / ICCCM atom cache
-│       ├── bar.rs       status bar rendering via XFT
+│       ├── bar.rs       status bar rendering
 │       └── x11.rs       X11 event loop, window management, RandR
 ├── Cargo.toml
 ├── Cargo.lock
-└── README.md
+├── LICENSE
+├── README.md
+└── README.es.md
 
 ```
-
----
-
-## 🌌 Philosophy
-
-> one window, one column
-> scroll, don't stack
-> low memory, high control
-> rust all the way down
-
-maverick was built because most tiling WMs either carry decades of C legacy, rely on Lua runtimes, or ship a 20 MB Cairo dependency just to draw a bar. maverick uses none of that. Just Rust, x11rb, and XFT.
-
----
-
-## 🤝 Related
-
-* **[mavshot](https://github.com/azytar/mavshot)** — screenshot + annotation tool built specifically for maverick (`override_redirect` aware, zero WM interference).
 
 ---
 
