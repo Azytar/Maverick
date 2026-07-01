@@ -37,6 +37,11 @@ fn main() {
     setup_signals();
     detach_from_terminal();
 
+    // Write PID file so maverick-quit can find us.
+    if let Err(e) = std::fs::write("/tmp/maverick.pid", format!("{}\n", std::process::id())) {
+        log::warn!("failed to write PID file: {e}");
+    }
+
     let cfg = config::load_config();
     log::info!(
         "config: {} tags, {} keybinds, {} rules, {} autostart",
@@ -195,5 +200,15 @@ fn setup_signals() {
         sa.sa_flags = libc::SA_RESTART;
         libc::sigemptyset(&mut sa.sa_mask);
         libc::sigaction(libc::SIGCONT, &sa, std::ptr::null_mut());
+
+        // SIGTERM: set quit flag (from maverick-quit on confirm).
+        extern "C" fn sigterm_handler(_: libc::c_int) {
+            crate::backend::x11::QUIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = sigterm_handler as *const () as usize;
+        sa.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
     }
 }
