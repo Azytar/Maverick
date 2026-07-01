@@ -66,7 +66,6 @@ pub fn load_config() -> Cfg {
 
     // XK_ keysym constants (X11 keysym values)
     const XK_RETURN: u32 = 0xff0d;
-    const XK_ESC: u32 = 0xff1b;
     const XK_SPACE: u32 = 0x0020;
     const XK_F5: u32 = 0xffc2;
     const XK_TAB: u32 = 0xff09;
@@ -116,7 +115,7 @@ pub fn load_config() -> Cfg {
         (sup, k!(b'g'), Action::SetLayout(LayoutKind::Grid)),
         (sup, k!(b't'), Action::SetLayout(LayoutKind::Column)),
         // ── misc ──
-        (shs, XK_ESC, Action::QuitConfirm), // Mod4+Shift+Escape — confirm quit
+        (shs, k!(b'q'), Action::QuitConfirm), // Mod4+Shift+Q — quit
         (shs, k!(b'r'), Action::Restart),
         (sup, XK_F5, Action::Restart),
         (sup, XK_TAB, Action::FocusMon(Dir::Next)),
@@ -240,20 +239,12 @@ pub fn load_config() -> Cfg {
         startup_sound: None,
 
         // ── Autostart ─────────────────────────────────────────────────────────
-        // Launched after compositor + WM are ready — every app benefits from
-        // compositing from its very first frame.
+        // Programs launched AFTER compositor + WM are ready so every window
+        // benefits from compositing from its very first frame.
+        // Each entry is a command + args: vec!["binary", "arg1", "arg2", ...]
         autostart: vec![
-            vec![
-                "setxkbmap".into(),
-                "us".into(),
-                "-variant".into(),
-                "dvorak".into(),
-            ],
-            vec![
-                "rviv".into(),
-                "--bg".into(),
-                "/home/example.png".into(),
-            ],
+            vec!["setxkbmap".into(), "us".into(), "-variant".into(), "dvorak".into()],
+            vec!["feh".into(), "--bg-fill".into(), "/path/to/wallpaper.png".into()],
             vec!["alacritty".into()],
         ],
     }
