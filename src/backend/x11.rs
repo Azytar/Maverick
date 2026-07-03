@@ -49,8 +49,6 @@ pub struct WindowManager {
     hide_mon_vec: Vec<Window>,
     /// P10: Reusable placements buffer — avoids allocation per arrange() call.
     placements_buf: Placements,
-    /// Window ID of the quit-confirmation dialog (if showing).
-    quit_win: Option<Window>,
     /// Rate-limit tracker for key repeat suppression (mods, keysym → last dispatch).
     last_key_times: std::collections::BTreeMap<(u16, u32), std::time::Instant>,
 }
@@ -129,7 +127,6 @@ impl WindowManager {
             hide_ws_set: std::collections::HashSet::with_capacity(32),
             hide_mon_vec: Vec::with_capacity(64),
             placements_buf: Placements::with_capacity(32),
-            quit_win: None,
             last_key_times: std::collections::BTreeMap::new(),
         };
 
@@ -954,13 +951,6 @@ impl WindowManager {
             }
         }
 
-        // 3. Raise quit dialog above fullscreen
-        if let Some(qw) = self.quit_win {
-            let _ = self
-                .conn
-                .configure_window(qw, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
-        }
-
         Ok(())
     }
 
@@ -1194,7 +1184,6 @@ impl WindowManager {
                             | Action::ToggleBar
                             | Action::Restart
                             | Action::Quit
-                            | Action::QuitConfirm
                     )
                 {
                     return Ok(());
@@ -1264,16 +1253,10 @@ impl WindowManager {
             Action::Quit => {
                 self.engine.state.running = false;
             }
-            Action::QuitConfirm => {
-                self.engine.state.running = false;
-            }
         }
         Ok(())
     }
 
-    /// Open the quit-confirmation dialog as a non-blocking overlay.
-    /// The dialog runs in the main event loop via process_dialog_event().
-    /// When confirmed, self.engine.state.running is set to false.
     fn spawn(&self, cmd: &[String]) {
         if cmd.is_empty() {
             return;
@@ -1826,9 +1809,6 @@ impl WindowManager {
     fn on_destroy(&mut self, e: DestroyNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
         if self.engine.state.clients.contains_key(&e.window) {
             self.unmanage(e.window, true)?;
-        }
-        if self.quit_win == Some(e.window) {
-            self.quit_win = None;
         }
         Ok(())
     }

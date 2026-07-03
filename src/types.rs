@@ -456,9 +456,8 @@ pub enum Action {
     FocusMon(Dir),
     MoveMon(Dir),
     Restart,
+    /// Quit immediately (sets running = false). No confirmation dialog.
     Quit,
-    /// Show a native confirmation dialog before quitting.
-    QuitConfirm,
 }
 
 // ─── Global state ────────────────────────────────────────────────────────────

@@ -115,7 +115,7 @@ pub fn load_config() -> Cfg {
         (sup, k!(b'g'), Action::SetLayout(LayoutKind::Grid)),
         (sup, k!(b't'), Action::SetLayout(LayoutKind::Column)),
         // ── misc ──
-        (shs, k!(b'q'), Action::QuitConfirm), // Mod4+Shift+Q — quit
+        (shs, k!(b'q'), Action::Quit), // Mod4+Shift+Q — quit
         (shs, k!(b'r'), Action::Restart),
         (sup, XK_F5, Action::Restart),
         (sup, XK_TAB, Action::FocusMon(Dir::Next)),
