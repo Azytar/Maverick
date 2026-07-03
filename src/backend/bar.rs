@@ -1,4 +1,4 @@
-// maverick/src/bar.rs
+// maverick/src/backend/bar.rs
 // Status bar rendered with plain X11 GC + XDrawString.
 // No deps beyond x11rb. Layout: [tags] [layout] [window title ... ] [status]
 //
