@@ -522,8 +522,8 @@ impl State {
 
     pub fn remove_client(&mut self, win: Window) -> Option<Client> {
         let c = self.clients.remove(&win)?;
-        // c.monitor puede ser stale tras un hotplug (menos monitores que antes).
-        // Clampear para evitar panic index out-of-bounds.
+        // c.monitor may be stale after hotplug (fewer monitors than before).
+        // Clamp to avoid panic index out-of-bounds.
         let mon_i = c.monitor.min(self.monitors.len().saturating_sub(1));
         let mon = &mut self.monitors[mon_i];
         mon.focus_stack.retain(|&w| w != win);

@@ -1029,7 +1029,7 @@ impl WindowManager {
                 )
             };
 
-            // unfocus previous — solo si realmente vamos a enfocar la nueva
+            // unfocus previous — only if we're actually about to focus the new one
             let prev = self.engine.state.monitors[self.engine.state.sel_mon].focused;
             if prev != valid_win {
                 if let Some(pw) = prev {
@@ -1519,7 +1519,7 @@ impl WindowManager {
             // Niri-style: don't touch other columns, only change this column's width.
             // Scroll will be adjusted below if needed.
         }
-        // Niri-style: recalcular scroll para que la columna focuseada sea visible.
+        // Niri-style: recalculate scroll so the focused column is visible.
         let scroll = ideal_scroll(&self.engine.state.monitors[mi], &self.engine.cfg);
         self.engine.state.monitors[mi].workspaces[ws_i].scroll = scroll;
         self.arrange(mi)?;
@@ -2057,7 +2057,7 @@ impl WindowManager {
                     self.engine.state.monitors[mon_idx].bar_gc = Some(gc);
                 }
 
-                // Actualizar EWMH properties para taskbars externas
+                // Update EWMH properties for external taskbars
                 self.update_ewmh_desktops()?;
                 self.update_workarea()?;
 
@@ -2223,7 +2223,7 @@ impl WindowManager {
 
     fn on_button_press(&mut self, e: ButtonPressEvent) -> Result<(), Box<dyn std::error::Error>> {
         // Scroll buttons (4=up,5=down,6=left,7=right) — early return.
-        // Sin esto, cada scroll pasa por todo el handler: find_client RTT,
+        // Without this, every scroll tick goes through the full handler: find_client RTT,
         // focus change, drag intent, allow_events → C1 crash, erratic focus.
         if e.detail >= 4 {
             self.conn.allow_events(Allow::REPLAY_POINTER, e.time)?;
@@ -2348,7 +2348,7 @@ impl WindowManager {
         if let Some(drag) = self.drag.take() {
             self.conn.ungrab_pointer(x11rb::CURRENT_TIME)?.check()?;
             // Use the window's actual monitor, not sel_mon (H3).
-            // Tras hotplug durante un drag, sel_mon puede estar stale.
+            // After a hotplug during a drag, sel_mon may be stale.
             let win = drag.win;
             let mi = self
                 .engine
@@ -2792,8 +2792,8 @@ impl WindowManager {
     pub fn cleanup(&self) -> Result<(), Box<dyn std::error::Error>> {
         let _ = self.conn.ungrab_key(0u8, self.root, ModMask::ANY);
 
-        // Restaurar root event mask: quitar SUBSTRUCTURE_REDIRECT para que
-        // so the next WM doesn't fail on startup.
+        // Restore root event mask: remove SUBSTRUCTURE_REDIRECT so that
+        // the next WM doesn't fail on startup.
         let _ = self.conn.change_window_attributes(
             self.root,
             &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),

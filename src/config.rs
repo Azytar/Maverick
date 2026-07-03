@@ -212,8 +212,8 @@ pub fn load_config() -> Cfg {
         // Picom launches BEFORE the WM so compositing is active from frame 0.
         //   --vsync                  prevent screen tearing
         //   --fade-*                 smooth open/close animations
-        //   --active/inactive-opacity per-focus transparency
         //   --no-fading-openclose    apps appear instantly, only fade on close
+        //   --frame-opacity          border/frame opacity (windows stay opaque)
         compositor: vec![
             "picom".into(),
             "--vsync".into(),
