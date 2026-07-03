@@ -248,7 +248,9 @@ impl Bar {
     pub fn tag_at_x(&self, x: i16, tag_names: &[&'static str]) -> Option<usize> {
         let mut cur_x: i16 = 4;
         for (i, name) in tag_names.iter().enumerate() {
-            let glyph_count = name.chars().filter(|&c| c as u32 <= 0xFF).count().min(255) as i16;
+            // Mirrors draw()'s to_latin1() glyph count exactly: every char counts
+            // toward width (non-Latin1 chars render as '?' but still take a slot).
+            let glyph_count = to_latin1(name, 255).len() as i16;
             let label_w = glyph_count * self.char_w as i16 + TAG_PAD * 2;
             let right = cur_x + label_w + 2; // +2 is the inter-tag gap from draw()
             if x >= cur_x && x < right {
