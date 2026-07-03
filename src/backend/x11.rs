@@ -1364,8 +1364,7 @@ impl WindowManager {
             None => return Ok(()),
         };
 
-        let default_col_w = self.engine.cfg.default_col_w;
-        if !self.engine.state.apply_move_dir(dir, default_col_w) {
+        if !self.engine.state.apply_move_dir(dir) {
             return Ok(()); // float, boundary no-op, etc.
         }
 
@@ -1546,7 +1545,9 @@ impl WindowManager {
             return Ok(());
         }
 
-        let dw = self.engine.cfg.default_col_w;
+        // Same 75%-of-workarea sizing as add_tiled/apply_move_dir.
+        let workarea_w = self.engine.state.monitors[mi].workarea.w;
+        let dw = (workarea_w as f32 * 0.75) as u32;
         let ci = self.engine.state.monitors[mi].workspaces[ws_i]
             .focus
             .column_idx;

@@ -539,7 +539,7 @@ impl State {
     /// Pure workspace rearrangement for MoveDir — no X11 calls.
     /// Call this from x11.rs then follow up with arrange/focus.
     /// Returns false if there was nothing to do (float, empty workspace, boundary no-op).
-    pub fn apply_move_dir(&mut self, dir: Dir, default_col_w: u32) -> bool {
+    pub fn apply_move_dir(&mut self, dir: Dir) -> bool {
         if self.monitors.is_empty() {
             return false;
         }
@@ -548,6 +548,10 @@ impl State {
             Some(m) => m.active_ws,
             None => return false,
         };
+        // Same 75%-of-workarea sizing as Workspace::add_tiled, so a column
+        // created by extracting a window looks the same as one created by
+        // opening a new window.
+        let workarea_w = self.monitors[mi].workarea.w;
         let focused = match self.monitors[mi].focused {
             Some(w) => w,
             None => return false,
@@ -597,7 +601,8 @@ impl State {
                     ws.remove_window(focused);
                     let insert_pos =
                         (if dir == Dir::Left { ci } else { ci + 1 }).min(ws.columns.len());
-                    let mut new_col = Column::new(default_col_w);
+                    let new_col_w = (workarea_w as f32 * 0.75) as u32;
+                    let mut new_col = Column::new(new_col_w);
                     new_col.windows.push(focused);
                     new_col.focused = 0;
                     ws.columns.insert(insert_pos, new_col);

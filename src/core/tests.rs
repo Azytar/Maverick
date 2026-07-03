@@ -156,7 +156,7 @@ mod unit_tests {
     #[test]
     fn test_move_right_single_window_swaps_not_merges() {
         let mut engine = setup_two_columns();
-        engine.state.apply_move_dir(crate::types::Dir::Right, 700);
+        engine.state.apply_move_dir(crate::types::Dir::Right);
         let ws = &engine.state.monitors[0].workspaces[0];
         assert_eq!(ws.columns.len(), 2, "swap must keep 2 separate columns");
         assert_eq!(ws.columns[0].windows, vec![20]);
@@ -167,8 +167,8 @@ mod unit_tests {
     #[test]
     fn test_move_left_right_reversible() {
         let mut engine = setup_two_columns();
-        engine.state.apply_move_dir(crate::types::Dir::Right, 700);
-        engine.state.apply_move_dir(crate::types::Dir::Left, 700);
+        engine.state.apply_move_dir(crate::types::Dir::Right);
+        engine.state.apply_move_dir(crate::types::Dir::Left);
         let ws = &engine.state.monitors[0].workspaces[0];
         assert_eq!(ws.columns.len(), 2);
         assert_eq!(ws.columns[0].windows, vec![10], "10 back at col 0");
@@ -194,7 +194,7 @@ mod unit_tests {
         };
         engine.state.monitors[0].focused = Some(10);
 
-        engine.state.apply_move_dir(crate::types::Dir::Right, 700);
+        engine.state.apply_move_dir(crate::types::Dir::Right);
         let ws = &engine.state.monitors[0].workspaces[0];
         assert_eq!(ws.columns.len(), 2, "extract must create a new column");
         assert_eq!(ws.columns[0].windows, vec![20]);
@@ -218,7 +218,7 @@ mod unit_tests {
         };
         engine.state.monitors[0].focused = Some(10);
 
-        let changed = engine.state.apply_move_dir(crate::types::Dir::Right, 700);
+        let changed = engine.state.apply_move_dir(crate::types::Dir::Right);
         assert!(!changed, "move at rightmost boundary must return false");
         assert_eq!(engine.state.monitors[0].workspaces[0].columns.len(), 1);
     }
