@@ -240,6 +240,11 @@ pub fn load_config() -> Cfg {
         // Each entry is a command + args: vec!["binary", "arg1", "arg2", ...]
         autostart: vec![
             //vec!["setxkbmap".into(), "us".into(), "-variant".into(), "dvorak".into()],
+            // Not on $PATH by convention — Arch installs these under /usr/lib.
+            // Without them, GTK/portal-based file pickers (e.g. browser upload
+            // dialogs) silently fail to open.
+            vec!["/usr/lib/xdg-desktop-portal-gtk".into()],
+            vec!["/usr/lib/xdg-desktop-portal".into()],
             vec!["feh".into(), "--bg-fill".into(), "/path/to/wallpaper.png".into()],
             vec!["alacritty".into()],
         ],
