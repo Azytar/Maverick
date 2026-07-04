@@ -300,6 +300,7 @@ maverick/
 │       ├── atoms.rs     caché de átomos EWMH / ICCCM
 │       ├── bar.rs       barra de estado
 │       └── x11.rs       bucle de eventos X11, gestión de ventanas, RandR
+├── CHANGELOG.md
 ├── Cargo.toml
 ├── Cargo.lock
 ├── LICENSE

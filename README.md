@@ -316,6 +316,7 @@ maverick/
 │       ├── atoms.rs     EWMH / ICCCM atom cache
 │       ├── bar.rs       status bar rendering
 │       └── x11.rs       X11 event loop, window management, RandR
+├── CHANGELOG.md
 ├── Cargo.toml
 ├── Cargo.lock
 ├── LICENSE
