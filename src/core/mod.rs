@@ -1,11 +1,12 @@
-pub mod commands;
+pub mod effect;
 pub mod engine;
-pub mod events;
+pub mod ipc;
 pub mod layout;
+pub mod present;
 
 #[cfg(test)]
 mod tests;
 
-pub use commands::Command;
+pub use effect::Effect;
 pub use engine::Engine;
-pub use events::AppEvent;
+pub use ipc::{parse_action, state_json};

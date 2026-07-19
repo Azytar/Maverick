@@ -1,0 +1,393 @@
+use super::*;
+
+impl WindowManager {
+    pub(super) fn on_map_request(&mut self, e: MapRequestEvent) -> Result<(), Box<dyn std::error::Error>> {
+        let attrs = match self.conn.get_window_attributes(e.window)?.reply() {
+            Ok(a) => a,
+            Err(err) => {
+                log::debug!("Failed to get attributes for window {}: {}", e.window, err);
+                return Ok(());
+            }
+        };
+        if !attrs.override_redirect && !self.engine.state.clients.contains_key(&e.window) {
+            if let Err(err) = self.manage(e.window, &attrs) {
+                log::warn!(
+                    "Failed to manage window {} on map request: {}",
+                    e.window,
+                    err
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_destroy(&mut self, e: DestroyNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
+        if self.engine.state.clients.contains_key(&e.window) {
+            self.unmanage(e.window, true)?;
+        }
+        // Drop any dock reservation the (unmanaged) window held.
+        if self.docks.contains_key(&e.window) {
+            self.remove_dock(e.window)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_unmap(&mut self, e: UnmapNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.engine.state.clients.contains_key(&e.window) {
+            // A dock being withdrawn should release its reserved space.
+            if self.docks.contains_key(&e.window) {
+                self.remove_dock(e.window)?;
+            }
+            return Ok(());
+        }
+        if e.response_type & 0x80 != 0 {
+            let _ = self.set_wm_state(e.window, 0);
+        } else {
+            self.unmanage(e.window, false)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_configure_request(
+        &mut self,
+        e: ConfigureRequestEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(client) = self.engine.state.clients.get(&e.window) {
+            if !client.is_float() && !client.is_fullscreen() {
+                let geom = client.geom;
+                let bw = client.border_w;
+                let ev = ConfigureNotifyEvent {
+                    response_type: CONFIGURE_NOTIFY_EVENT,
+                    sequence: 0,
+                    event: e.window,
+                    window: e.window,
+                    above_sibling: x11rb::NONE,
+                    x: geom.x as i16,
+                    y: geom.y as i16,
+                    width: geom.w as u16,
+                    height: geom.h as u16,
+                    border_width: bw as u16,
+                    override_redirect: false,
+                };
+                let _ = self
+                    .conn
+                    .send_event(false, e.window, EventMask::STRUCTURE_NOTIFY, ev);
+                return Ok(());
+            }
+        }
+        // floating or unmanaged: honor the request
+        let mut aux = ConfigureWindowAux::new();
+        if e.value_mask.contains(ConfigWindow::X) {
+            aux = aux.x(e.x as i32);
+        }
+        if e.value_mask.contains(ConfigWindow::Y) {
+            aux = aux.y(e.y as i32);
+        }
+        if e.value_mask.contains(ConfigWindow::WIDTH) {
+            aux = aux.width(e.width as u32);
+        }
+        if e.value_mask.contains(ConfigWindow::HEIGHT) {
+            aux = aux.height(e.height as u32);
+        }
+        if e.value_mask.contains(ConfigWindow::BORDER_WIDTH) {
+            aux = aux.border_width(e.border_width as u32);
+        }
+        if e.value_mask.contains(ConfigWindow::STACK_MODE) {
+            aux = aux.stack_mode(e.stack_mode);
+        }
+        let _ = self.conn.configure_window(e.window, &aux);
+
+        if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
+            if e.value_mask.contains(ConfigWindow::X) {
+                c.geom.x = e.x as i32;
+            }
+            if e.value_mask.contains(ConfigWindow::Y) {
+                c.geom.y = e.y as i32;
+            }
+            if e.value_mask.contains(ConfigWindow::WIDTH) {
+                c.geom.w = e.width as u32;
+            }
+            if e.value_mask.contains(ConfigWindow::HEIGHT) {
+                c.geom.h = e.height as u32;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_configure_notify(
+        &mut self,
+        e: ConfigureNotifyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if e.window == self.root {
+            // Monitor change — re-detect topology and redistribute clients
+            let setup = self.conn.setup();
+            let screen = &setup.roots[self.screen_num];
+            let new_mons = detect_monitors(&self.conn, screen, &self.engine.cfg)?;
+            if new_mons.len() != self.engine.state.monitors.len() {
+                log::info!(
+                    "monitor topology changed ({} -> {})",
+                    self.engine.state.monitors.len(),
+                    new_mons.len()
+                );
+
+                // Collect all managed windows before replacing the monitor vec.
+                let old_clients: Vec<Window> = self.engine.state.clients.keys().copied().collect();
+
+                // Free old bar resources before replacing monitors
+                for mon in &self.engine.state.monitors {
+                    if let (Some(bw), Some(gc)) = (mon.bar_win, mon.bar_gc) {
+                        let _ = self.conn.free_gc(gc);
+                        let _ = self.conn.destroy_window(bw);
+                    }
+                }
+
+                // Replace monitors with fresh ones (empty workspaces).
+                self.engine.state.monitors = new_mons;
+
+                // Clamp sel_mon so no code tries to index a monitor that no longer exists.
+                let n_mons = self.engine.state.monitors.len();
+                self.engine.state.sel_mon = self.engine.state.sel_mon.min(n_mons.saturating_sub(1));
+
+                // Re-assign every client to monitor 0 / workspace 0 and
+                // insert it into the column/float structure.
+                let dw = self.engine.cfg.default_col_w;
+                for win in old_clients {
+                    // Update client metadata
+                    if let Some(c) = self.engine.state.clients.get_mut(&win) {
+                        c.monitor = 0;
+                        c.workspace = 0;
+                    }
+                    // Re-insert into the workspace structure
+                    let is_float = self
+                        .engine
+                        .state
+                        .clients
+                        .get(&win)
+                        .is_some_and(crate::types::Client::is_float);
+                    let workarea_w = self.engine.state.monitors[0].workarea.w;
+                    if is_float {
+                        self.engine.state.monitors[0].workspaces[0].floats.push(win);
+                    } else {
+                        self.engine.state.monitors[0].workspaces[0].add_tiled(win, dw, workarea_w);
+                    }
+                }
+
+                // Recreate bar_wins with the new geometry.
+                #[cfg(feature = "internal-bar")]
+                for mon_idx in 0..self.engine.state.monitors.len() {
+                    self.create_bar_window(mon_idx)?;
+                }
+
+                // Update EWMH properties for external taskbars
+                self.update_ewmh_desktops()?;
+                self.update_workarea()?;
+
+                for i in 0..self.engine.state.monitors.len() {
+                    self.arrange(i)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_property(&mut self, e: PropertyNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
+        if e.window == self.root && e.atom == u32::from(AtomEnum::WM_NAME) {
+            self.update_status()?;
+            return Ok(());
+        }
+        // A dock changing (or clearing) its strut updates its reservation. This
+        // fires for unmanaged windows too, so handle it before the DELETE guard
+        // and before the client lookup.
+        if (e.atom == self.atoms.net_wm_strut_partial || e.atom == self.atoms.net_wm_strut)
+            && !self.engine.state.clients.contains_key(&e.window)
+        {
+            self.apply_dock_strut(e.window)?;
+            return Ok(());
+        }
+
+        if e.state == Property::DELETE {
+            return Ok(());
+        }
+
+        if self.engine.state.clients.contains_key(&e.window) {
+            let win = e.window;
+            let bar_relevant;
+            if e.atom == self.atoms.net_wm_name || e.atom == u32::from(AtomEnum::WM_NAME) {
+                self.refresh_title(win)?;
+                bar_relevant = true;
+            } else if e.atom == u32::from(AtomEnum::WM_HINTS) {
+                self.refresh_hints(win)?;
+                bar_relevant = true;
+            } else {
+                // Other property changes (size hints, ICCCM state, etc.) don't
+                // affect the bar — skip the redraw to avoid thrashing during
+                // Firefox page loads, GTK tooltip updates, etc.
+                bar_relevant = false;
+            }
+            if bar_relevant {
+                let mi = self
+                    .engine
+                    .state
+                    .clients
+                    .get(&win)
+                    .map_or(0, |c| c.monitor);
+                self.draw_bar(mi);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_client_message(
+        &mut self,
+        e: ClientMessageEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if e.type_ == self.atoms.net_wm_state {
+            let data = e.data.as_data32();
+            let action = data[0];
+            let a1 = data[1];
+            let a2 = data[2];
+            let fs_atom = self.atoms.net_wm_state_fullscreen;
+            if a1 == fs_atom || a2 == fs_atom {
+                let cur = self
+                    .engine
+                    .state
+                    .clients
+                    .get(&e.window)
+                    .is_some_and(crate::types::Client::is_fullscreen);
+                let new_fs = match action {
+                    0 => false,
+                    1 => true,
+                    _ => !cur,
+                };
+                if new_fs != cur {
+                    self.set_fullscreen(e.window, new_fs)?;
+                }
+            }
+            let max_v = self.atoms.net_wm_state_maximized_vert;
+            let max_h = self.atoms.net_wm_state_maximized_horiz;
+            if a1 == max_v || a2 == max_v || a1 == max_h || a2 == max_h {
+                let cur = self
+                    .engine
+                    .state
+                    .clients
+                    .get(&e.window)
+                    .is_some_and(crate::types::Client::is_maximized);
+                let new_max = match action {
+                    0 => false,
+                    1 => true,
+                    _ => !cur,
+                };
+                if new_max != cur {
+                    self.set_maximized(e.window, new_max)?;
+                }
+            }
+            let urg = self.atoms.net_wm_state_demands_attention;
+            if a1 == urg || a2 == urg {
+                if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
+                    c.flags.set(WinFlags::URGENT);
+                }
+                let mi = self
+                    .engine
+                    .state
+                    .clients
+                    .get(&e.window)
+                    .map_or(0, |c| c.monitor);
+                self.draw_bar(mi);
+            }
+        } else if e.type_ == self.atoms.net_current_desktop {
+            let ws = e.data.as_data32()[0] as usize;
+            self.do_action(Action::View(ws))?;
+        } else if e.type_ == self.atoms.net_active_window {
+            // _NET_ACTIVE_WINDOW: focus the window on whatever monitor it's on.
+            // Don't change the monitor's active_ws — that's the user's decision.
+            if self.engine.state.clients.contains_key(&e.window) {
+                self.focus(Some(e.window))?;
+            }
+        } else if e.type_ == self.atoms.net_close_window {
+            self.kill(e.window)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_key(&mut self, e: KeyPressEvent) -> Result<(), Box<dyn std::error::Error>> {
+        let ksym = self.keycode_to_keysym(e.detail, u16::from(e.state))?;
+        let ksym = normalize_ksym(ksym);
+        let mods = clean_mask(u16::from(e.state), self.numlock);
+        let key = (mods, ksym);
+        if let Some(action) = self.keymap.get(&key).cloned() {
+            let min_interval = match action {
+                Action::Spawn(_) => std::time::Duration::from_millis(200),
+                _ => std::time::Duration::from_millis(60),
+            };
+            if let Some(t) = self.last_key_times.get(&key) {
+                if t.elapsed() < min_interval {
+                    return Ok(());
+                }
+            }
+            let cutoff = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(1)).unwrap();
+            self.last_key_times.retain(|_, v| *v >= cutoff);
+            self.last_key_times.insert(key, std::time::Instant::now());
+            self.do_action(action)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_enter(&mut self, e: EnterNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
+        if e.mode != NotifyMode::NORMAL || e.detail == NotifyDetail::INFERIOR {
+            return Ok(());
+        }
+        if self.engine.cfg.focus_mouse {
+            if let Some(cw) = self.find_client(e.event) {
+                if self.engine.state.monitors[self.engine.state.sel_mon].focused != Some(cw) {
+                    self.focus(Some(cw))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_expose(&mut self, e: ExposeEvent) -> Result<(), Box<dyn std::error::Error>> {
+        if e.count == 0 {
+            for mi in 0..self.engine.state.monitors.len() {
+                if self.engine.state.monitors[mi].bar_win == Some(e.window) {
+                    self.draw_bar(mi);
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_focus_in(&mut self, e: FocusInEvent) -> Result<(), Box<dyn std::error::Error>> {
+        if e.mode != NotifyMode::NORMAL || e.detail == NotifyDetail::INFERIOR {
+            return Ok(());
+        }
+        let focused = self.engine.state.monitors[self.engine.state.sel_mon].focused;
+        if let (Some(fw), Some(cw)) = (focused, self.find_client(e.event)) {
+            if cw != fw {
+                let _ = self.set_focus_x(fw);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_mapping(&mut self, e: MappingNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
+        if e.request == Mapping::KEYBOARD || e.request == Mapping::MODIFIER {
+            let ks = fetch_keyboard_state(&self.conn)?;
+            self.raw_keymap = ks.keysyms;
+            self.raw_kpk = ks.kpk;
+            self.raw_min = ks.min;
+            self.numlock = ks.numlock;
+            self.grab_keys()?;
+
+            // Re-grab buttons on all existing windows.
+            // Without this, existing grab_button still uses the old numlock
+            // → Mod4+click stops working after NumLock toggle.
+            let wins: Vec<Window> = self.engine.state.clients.keys().copied().collect();
+            for win in wins {
+                let _ = self.grab_buttons(win, false);
+            }
+        }
+        Ok(())
+    }
+}

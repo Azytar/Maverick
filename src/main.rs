@@ -1,5 +1,50 @@
 // maverick/src/main.rs
 
+// Opt into clippy's pedantic lint set for higher code quality, then allow the
+// handful of categories that are inherent to an X11 window manager and would
+// only add noise if "fixed":
+//   * X11 protocol coordinates freely mix i16/u16/u32/i32 (window geometry,
+//     event fields, CARDINAL props). Wrapping every conversion in From/try_into
+//     or asserting ranges buys nothing here — the casts are protocol-correct.
+//   * `module_name_repetitions` / `wildcard_imports`: the backend uses
+//     `use super::*;` re-exports and x11rb's flat type names by design.
+//   * `missing_errors_doc`: internal fns return boxed errors that are logged,
+//     not part of a documented public API surface.
+//   * `must_use_candidate`: most getters are used immediately; annotating all
+//     is churn without safety value.
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::cast_lossless,
+    clippy::module_name_repetitions,
+    clippy::wildcard_imports,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate,
+    clippy::too_many_lines,
+    clippy::similar_names,
+    // Hex colour literals (0x1a1b26) and X11 bit masks read better without
+    // digit-group separators.
+    clippy::unreadable_literal,
+    // Stylistic pedantic lints where the current form is intentional and, in
+    // this codebase, at least as clear as the suggested rewrite. Event handlers
+    // uniformly return `Result<(), Box<dyn Error>>` for a consistent dispatch
+    // signature (hence unit/Result "unnecessary" returns and unused-self on a
+    // few); the early-`match`/`return` style is deliberate for readability.
+    clippy::manual_let_else,
+    clippy::semicolon_if_nothing_returned,
+    clippy::items_after_statements,
+    clippy::unused_self,
+    clippy::unnecessary_wraps,
+    clippy::struct_excessive_bools,
+    clippy::many_single_char_names,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::needless_pass_by_value
+)]
+
 mod backend;
 mod config;
 pub mod core;
@@ -12,32 +57,86 @@ fn main() {
     log::init();
     log::info!("maverick v{} starting", env!("CARGO_PKG_VERSION"));
 
-    if let Some(arg) = std::env::args().nth(1) {
-        match arg.as_str() {
-            "-v" | "--version" => {
-                println!("maverick {}", env!("CARGO_PKG_VERSION"));
-                process::exit(0);
-            }
-            "-h" | "--help" => {
-                println!("Usage: maverick [-v] [-h]");
-                println!("  -v, --version    Print version and exit");
-                println!("  -h, --help       Show this help");
-                println!();
-                println!("Configuration is compiled into the binary (src/config.rs).");
-                println!("Start from .xinitrc: exec maverick");
-                process::exit(0);
-            }
+    // Parse args (any order). Only --name is added; -v/-h stay.
+    let mut instance_name = maverick_sys::DEFAULT_NAME.to_string();
+    let mut show_help = false;
+    let mut show_version = false;
+    let mut bad_arg: Option<String> = None;
+
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-v" | "--version" => show_version = true,
+            "-h" | "--help" => show_help = true,
+            "--name" => if let Some(n) = args.next() { instance_name = n } else {
+                bad_arg = Some("--name requires a value".into());
+                break;
+            },
             unknown => {
-                eprintln!("maverick: unknown argument: {unknown}");
-                process::exit(1);
+                bad_arg = Some(format!("unknown argument: {unknown}"));
+                break;
             }
         }
     }
 
-    setup_signals();
-    detach_from_terminal();
+    if let Some(msg) = bad_arg {
+        eprintln!("maverick: {msg}");
+        process::exit(1);
+    }
+    if show_version {
+        println!("maverick {}", env!("CARGO_PKG_VERSION"));
+        process::exit(0);
+    }
+    if show_help {
+        println!("Usage: maverick [--name <id>] [-v] [-h]");
+        println!("  --name <id>      Instance name for control/identification");
+        println!("  -v, --version    Print version and exit");
+        println!("  -h, --help       Show this help");
+        println!();
+        println!("Configuration is compiled into the binary (src/config.rs).");
+        println!("Start from .xinitrc: exec maverick");
+        process::exit(0);
+    }
 
-    // Write PID file so external tools can find us.
+    log::info!("instance name: {}", instance_name);
+
+    // Export the instance name so child processes (notably `maverickctl`, e.g.
+    // the Mod+Shift+Q quit-confirm keybind) target *this* instance by default,
+    // even when several Mavericks run on different TTYs/DISPLAYs.
+    std::env::set_var("MAVERICK_INSTANCE", &instance_name);
+
+    maverick_sys::detach_from_terminal();
+    maverick_sys::Signal::new()
+        .ignore(libc::SIGPIPE)
+        .on_sigterm(libc::SIGTERM)
+        .on_sigcont(libc::SIGCONT)
+        .install();
+
+    // ── Identity + control socket ───────────────────────────────────────────
+    // Advertise this instance so an external tool can discover/close it,
+    // even when several Mavericks run on different TTYs/DISPLAYs.
+    let info = maverick_sys::self_info(&instance_name);
+    if let Err(e) = maverick_sys::identity::write_meta(&info) {
+        log::warn!("failed to write instance ficha: {e}");
+    }
+    let identity_json = maverick_sys::control::identity_json(&info);
+    // The hub bridges the control-socket thread and the WM event loop: it
+    // queues dispatched commands, caches the state snapshot, and fans out
+    // events to `subscribe` clients.
+    let hub = maverick_sys::ControlHub::new();
+    let control = match maverick_sys::ControlServer::spawn(
+        &instance_name,
+        identity_json,
+        hub.clone(),
+    ) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            log::warn!("failed to start control socket: {e}");
+            None
+        }
+    };
+
+    // Write PID file so external tools can find us (legacy compat).
     if let Err(e) = std::fs::write("/tmp/maverick.pid", format!("{}\n", std::process::id())) {
         log::warn!("failed to write PID file: {e}");
     }
@@ -75,6 +174,13 @@ fn main() {
     // ── Phase 2: WM init ──────────────────────────────────────────────────────
     match backend::x11::WindowManager::new(cfg) {
         Ok(mut manager) => {
+            // Hand over the control socket + instance name so cleanup() can
+            // tear them down and remove the identity ficha on exit.
+            manager.set_instance_name(instance_name.clone());
+            manager.set_hub(hub);
+            if let Some(server) = control {
+                manager.set_control(server);
+            }
             // ── Phase 3: startup sound ────────────────────────────────────────
             // Compositor is up, WM is ready — ideal moment for the startup chime.
             let sound = manager.engine.cfg.startup_sound.clone();
@@ -154,61 +260,6 @@ fn play_sound(path: &str) {
     log::warn!("startup sound: no audio player found");
 }
 
-/// Detach from the launching terminal so the WM outlives the shell.
-fn detach_from_terminal() {
-    unsafe {
-        libc::setsid();
-        if libc::isatty(libc::STDIN_FILENO) == 0 {
-            return;
-        }
-        let devnull = std::ffi::CString::new("/dev/null").unwrap();
-        let fd = libc::open(devnull.as_ptr(), libc::O_RDWR);
-        if fd < 0 {
-            return;
-        }
-        libc::dup2(fd, libc::STDIN_FILENO);
-        libc::dup2(fd, libc::STDOUT_FILENO);
-        // stderr left open so log messages reach journald / the terminal.
-        if fd > 2 {
-            libc::close(fd);
-        }
-    }
-}
-
-fn setup_signals() {
-    unsafe {
-        // SIGCHLD: reap children without zombies.
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = libc::SIG_DFL;
-        sa.sa_flags = libc::SA_NOCLDWAIT | libc::SA_RESTART;
-        libc::sigemptyset(&mut sa.sa_mask);
-        libc::sigaction(libc::SIGCHLD, &sa, std::ptr::null_mut());
-
-        // SIGPIPE: ignore — broken pipes must not kill the WM.
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = libc::SIG_IGN;
-        libc::sigemptyset(&mut sa.sa_mask);
-        libc::sigaction(libc::SIGPIPE, &sa, std::ptr::null_mut());
-
-        // SIGCONT: flag that pointer/keyboard grabs need to be redone
-        // after a system suspend/resume cycle.
-        extern "C" fn sigcont_handler(_: libc::c_int) {
-            crate::backend::x11::NEED_REGRAB.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = sigcont_handler as *const () as usize;
-        sa.sa_flags = libc::SA_RESTART;
-        libc::sigemptyset(&mut sa.sa_mask);
-        libc::sigaction(libc::SIGCONT, &sa, std::ptr::null_mut());
-
-        // SIGTERM: set quit flag.
-        extern "C" fn sigterm_handler(_: libc::c_int) {
-            crate::backend::x11::QUIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = sigterm_handler as *const () as usize;
-        sa.sa_flags = libc::SA_RESTART;
-        libc::sigemptyset(&mut sa.sa_mask);
-        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
-    }
-}
+// Detach + signal setup now live in the `maverick-sys` crate, which is the
+// only place in the project that touches libc FFI. See `detach_from_terminal`
+// and `Signal` there.

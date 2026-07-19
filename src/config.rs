@@ -42,6 +42,38 @@ pub struct Cfg {
     pub autostart: Vec<Vec<String>>,
 }
 
+impl Default for Cfg {
+    /// Minimal config with no keybinds/rules — intended for tests and as a
+    /// safe baseline. The real runtime config is built by `load_config`.
+    fn default() -> Self {
+        Cfg {
+            border_w: 2,
+            gaps: 6,
+            bar_height: 22,
+            top_bar: true,
+            n_tags: 9,
+            default_col_w: 700,
+            split_bias: 0.6,
+            focus_mouse: false,
+            warp_cursor: false,
+            col_normal: 0x45475a,
+            col_focused: 0x89b4fa,
+            col_urgent: 0xf38ba8,
+            col_bar_bg: 0x1e1e2e,
+            col_bar_fg: 0xcdd6f4,
+            col_bar_sel: 0x89b4fa,
+            col_bar_occ: 0xa6e3a1,
+            tag_names: ["1", "2", "3", "4", "5", "6", "7", "8", "9"].to_vec(),
+            keybinds: vec![],
+            rules: vec![],
+            compositor: vec![],
+            compositor_delay_ms: 0,
+            startup_sound: None,
+            autostart: vec![],
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Rule {
     pub class: Option<&'static str>,
@@ -115,7 +147,18 @@ pub fn load_config() -> Cfg {
         (sup, k!(b'g'), Action::SetLayout(LayoutKind::Grid)),
         (sup, k!(b't'), Action::SetLayout(LayoutKind::Column)),
         // ── misc ──
-        (shs, k!(b'q'), Action::Quit), // Mod4+Shift+Q — quit
+        // Mod4+Shift+Q asks maverickctl for confirmation instead of quitting
+        // outright, so a stray keypress can't kill the session. The raw
+        // Action::Quit still exists and is reachable via the control socket.
+        (
+            shs,
+            k!(b'q'),
+            Action::Spawn(vec![
+                "maverickctl".to_string(),
+                "quit".to_string(),
+                "--confirm".to_string(),
+            ]),
+        ),
         (shs, k!(b'r'), Action::Restart),
         (sup, XK_F5, Action::Restart),
         (sup, XK_TAB, Action::FocusMon(Dir::Next)),

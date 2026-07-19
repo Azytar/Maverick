@@ -6,6 +6,15 @@ use x11rb::protocol::xproto::Window;
 
 pub type TagMask = u32;
 
+/// Backend-agnostic window identifier used throughout the core domain model.
+///
+/// On X11 this is the server-assigned `Window` id; a future Wayland backend
+/// would map its own surface handles onto the same id space. Kept as an alias
+/// (currently identical to x11rb's `Window`) so the core can stop importing the
+/// protocol type without any behavioural change. The frontier: the core speaks
+/// `WindowId`, the backend converts `Window <-> WindowId` at its edges.
+pub type WindowId = Window;
+
 // ─── Geometry ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -49,6 +58,7 @@ impl WinFlags {
     pub const URGENT: u8 = 1 << 2;
     pub const NO_FOCUS: u8 = 1 << 3;
     pub const FIXED: u8 = 1 << 4;
+    pub const MAXIMIZED: u8 = 1 << 5;
 
     #[inline]
     pub fn set(&mut self, f: u8) {
@@ -96,7 +106,7 @@ pub struct SizeHints {
 
 #[derive(Debug, Clone)]
 pub struct Column {
-    pub windows: Vec<Window>, // top-to-bottom
+    pub windows: Vec<WindowId>, // top-to-bottom
     pub width: u32,           // pixel width of this column
     pub focused: usize,       // index into `windows` that has focus
 }
@@ -109,7 +119,7 @@ impl Column {
             focused: 0,
         }
     }
-    pub fn focused_win(&self) -> Option<Window> {
+    pub fn focused_win(&self) -> Option<WindowId> {
         self.windows.get(self.focused).copied()
     }
 }
@@ -128,7 +138,7 @@ pub struct Workspace {
     pub columns: Vec<Column>,
     pub focus: Focus,
     pub scroll: i32,
-    pub floats: Vec<Window>,
+    pub floats: Vec<WindowId>,
     /// Layout mode for this specific workspace — independent of every other workspace.
     pub layout: LayoutKind,
 }
@@ -156,12 +166,24 @@ impl Workspace {
         self.columns.is_empty() && self.floats.is_empty()
     }
 
-    pub fn focused_win(&self) -> Option<Window> {
+    pub fn focused_win(&self) -> Option<WindowId> {
         self.columns.get(self.focus.column_idx)?.focused_win()
     }
 
+    /// Advance this workspace's layout Column→Monocle→Grid→Column.
+    /// Pure state mutation (no X11); the single source of truth shared by the
+    /// backend's `do_action` and the core `Engine`.
+    pub fn cycle_layout(&mut self) -> LayoutKind {
+        self.layout = match self.layout {
+            LayoutKind::Column => LayoutKind::Monocle,
+            LayoutKind::Monocle => LayoutKind::Grid,
+            LayoutKind::Grid => LayoutKind::Column,
+        };
+        self.layout
+    }
+
     /// P3: &mut self — no clone needed at call sites
-    pub fn add_tiled(&mut self, window: Window, _default_col_width: u32, workarea_w: u32) {
+    pub fn add_tiled(&mut self, window: WindowId, _default_col_width: u32, workarea_w: u32) {
         if self.columns.is_empty() {
             // First window: occupies the entire workarea (100%)
             let mut col = Column::new(workarea_w);
@@ -181,41 +203,14 @@ impl Workspace {
     }
 
     /// P3: &mut self — no clone needed at call sites
-    pub fn move_window_right(&mut self, default_col_w: u32) {
-        let col_idx = self.focus.column_idx;
-        let win_idx = self.focus.window_idx;
-
-        if col_idx >= self.columns.len() {
-            return;
-        }
-        let window = self.columns[col_idx].windows.remove(win_idx);
-
-        if col_idx + 1 < self.columns.len() {
-            self.columns[col_idx + 1].windows.insert(0, window);
-            self.focus.column_idx = col_idx + 1;
-            self.focus.window_idx = 0;
-            self.columns[col_idx + 1].focused = 0;
-        } else {
-            self.columns.push(Column {
-                windows: vec![window],
-                width: default_col_w,
-                focused: 0,
-            });
-            self.focus.column_idx = col_idx + 1;
-            self.focus.window_idx = 0;
-        }
-
-        self.cleanup_empty_columns();
-    }
-
     /// P3: &mut self — no clone needed at call sites
-    pub fn remove_window(&mut self, win: Window) {
+    pub fn remove_window(&mut self, win: WindowId) {
         if let Some(fi) = self.floats.iter().position(|&w| w == win) {
             self.floats.remove(fi);
             return;
         }
 
-        for col in self.columns.iter_mut() {
+        for col in &mut self.columns {
             if let Some(wi) = col.windows.iter().position(|&w| w == win) {
                 col.windows.remove(wi);
                 if col.focused >= col.windows.len() && !col.windows.is_empty() {
@@ -250,7 +245,7 @@ impl Workspace {
 
 #[derive(Debug, Clone)]
 pub struct Client {
-    pub window: Window,
+    pub window: WindowId,
     pub name: String,
     pub class: String,
     pub instance: String,
@@ -271,7 +266,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(win: Window, mon: usize, ws: usize) -> Self {
+    pub fn new(win: WindowId, mon: usize, ws: usize) -> Self {
         Self {
             window: win,
             name: String::new(),
@@ -303,8 +298,83 @@ impl Client {
         self.flags.has(WinFlags::FULLSCREEN)
     }
     #[inline]
+    pub fn is_maximized(&self) -> bool {
+        self.flags.has(WinFlags::MAXIMIZED)
+    }
+    #[inline]
     pub fn no_focus(&self) -> bool {
         self.flags.has(WinFlags::NO_FOCUS)
+    }
+}
+
+// ─── Reserved space ─────────────────────────────────────────────────────────────
+//
+// Reservation is modelled in two layers:
+//
+//   ReservedRegion[]  — individual, trackable reservations (one per dock/bar),
+//                       each tagged with its owner so it can be removed exactly
+//                       when that window disappears.
+//   ReservedArea      — the collapsed per-edge totals, derived from the regions.
+//
+// The layout only ever sees the resulting `workarea` (screen − ReservedArea) and
+// knows nothing about *what* reserved the space. This is deliberately
+// backend-agnostic: on X11 the regions come from the internal bar plus each
+// external dock's `_NET_WM_STRUT[_PARTIAL]`; a future Wayland backend would fill
+// the same regions from layer-shell exclusive zones.
+
+/// Which screen edge a reservation pushes in from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// A single trackable reservation. `owner` identifies the source: the internal
+/// bar uses `ReservedRegion::INTERNAL_BAR`, external docks use their window id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReservedRegion {
+    pub owner: WindowId,
+    pub edge: Edge,
+    /// Thickness in px pushed in from `edge`.
+    pub thickness: u32,
+}
+
+impl ReservedRegion {
+    /// Sentinel owner id for the internal bar (real X11 window ids are never 0).
+    pub const INTERNAL_BAR: WindowId = 0;
+}
+
+/// Collapsed per-edge reservation totals derived from a set of regions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReservedArea {
+    pub top: u32,
+    pub bottom: u32,
+    pub left: u32,
+    pub right: u32,
+}
+
+impl ReservedArea {
+    /// Collapse trackable regions into per-edge totals. Multiple reservations on
+    /// the same edge stack (e.g. internal bar + a top dock).
+    pub fn from_regions(regions: &[ReservedRegion]) -> Self {
+        let mut a = ReservedArea::default();
+        for r in regions {
+            let slot = match r.edge {
+                Edge::Top => &mut a.top,
+                Edge::Bottom => &mut a.bottom,
+                Edge::Left => &mut a.left,
+                Edge::Right => &mut a.right,
+            };
+            *slot = slot.saturating_add(r.thickness);
+        }
+        a
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.top == 0 && self.bottom == 0 && self.left == 0 && self.right == 0
     }
 }
 
@@ -313,38 +383,34 @@ impl Client {
 #[derive(Debug, Clone)]
 pub struct Monitor {
     pub screen: Rect,
-    pub workarea: Rect, // screen minus bar
-    pub bar_win: Option<Window>,
+    pub workarea: Rect, // screen minus reserved (derived)
+    /// Individual trackable reservations (internal bar + external docks).
+    pub reserved_regions: Vec<ReservedRegion>,
+    /// Collapsed per-edge totals, derived from `reserved_regions`.
+    pub reserved: ReservedArea,
+    /// The internal bar's own thickness in px. Authoritative and independent of
+    /// `workarea` — do NOT derive it from `screen.h - workarea.h`, because that
+    /// difference also includes external docks.
+    pub internal_bar_height: u32,
+    pub bar_win: Option<WindowId>,
     pub bar_gc: Option<u32>, // GC id
     pub show_bar: bool,
     pub top_bar: bool,
     pub workspaces: Vec<Workspace>,
     pub active_ws: usize,
-    pub focused: Option<Window>,
-    pub focus_stack: Vec<Window>,
+    pub focused: Option<WindowId>,
+    pub focus_stack: Vec<WindowId>,
 }
 
 impl Monitor {
     pub fn new(screen: Rect, bar_height: u32, top_bar: bool, n_tags: usize) -> Self {
-        let workarea = if top_bar {
-            Rect::new(
-                screen.x,
-                screen.y + bar_height as i32,
-                screen.w,
-                screen.h.saturating_sub(bar_height),
-            )
-        } else {
-            Rect::new(
-                screen.x,
-                screen.y,
-                screen.w,
-                screen.h.saturating_sub(bar_height),
-            )
-        };
         let workspaces = (0..n_tags).map(|i| Workspace::new(i as u32)).collect();
-        Self {
+        let mut m = Self {
             screen,
-            workarea,
+            workarea: screen,
+            reserved_regions: Vec::new(),
+            reserved: ReservedArea::default(),
+            internal_bar_height: bar_height,
             bar_win: None,
             bar_gc: None,
             show_bar: true,
@@ -353,7 +419,10 @@ impl Monitor {
             active_ws: 0,
             focused: None,
             focus_stack: Vec::with_capacity(16),
-        }
+        };
+        m.sync_internal_bar_region();
+        m.recalc_geometry();
+        m
     }
 
     pub fn bar_y(&self) -> i32 {
@@ -364,9 +433,10 @@ impl Monitor {
         }
     }
 
+    /// Height of the INTERNAL bar only (0 when hidden). Never includes docks.
     pub fn bar_height(&self) -> u32 {
         if self.show_bar {
-            self.screen.h - self.workarea.h
+            self.internal_bar_height
         } else {
             0
         }
@@ -379,21 +449,65 @@ impl Monitor {
         &mut self.workspaces[self.active_ws]
     }
 
-    pub fn recalc_workarea(&mut self, bar_h: u32) {
-        if self.show_bar {
-            self.workarea.h = self.screen.h.saturating_sub(bar_h);
-            if self.top_bar {
-                self.workarea.y = self.screen.y + bar_h as i32;
-                self.workarea.x = self.screen.x;
-                self.workarea.w = self.screen.w;
-            } else {
-                self.workarea.y = self.screen.y;
-                self.workarea.x = self.screen.x;
-                self.workarea.w = self.screen.w;
-            }
-        } else {
-            self.workarea = self.screen;
+    // ── Reservation management ──────────────────────────────────────────────
+    //
+    // All mutations go through these helpers so `reserved` and `workarea` stay
+    // consistent with `reserved_regions` (the single source of truth).
+
+    /// Insert or replace the region owned by `owner`. `thickness == 0` removes it.
+    pub fn set_reserved_region(&mut self, owner: WindowId, edge: Edge, thickness: u32) {
+        self.reserved_regions.retain(|r| r.owner != owner);
+        if thickness > 0 {
+            self.reserved_regions.push(ReservedRegion {
+                owner,
+                edge,
+                thickness,
+            });
         }
+        self.recalc_geometry();
+    }
+
+    /// Remove any region owned by `owner`. Returns true if something was removed.
+    pub fn remove_reserved_region(&mut self, owner: WindowId) -> bool {
+        let before = self.reserved_regions.len();
+        self.reserved_regions.retain(|r| r.owner != owner);
+        let removed = self.reserved_regions.len() != before;
+        if removed {
+            self.recalc_geometry();
+        }
+        removed
+    }
+
+    /// Keep the internal bar's own region in sync with `show_bar`/`top_bar`.
+    fn sync_internal_bar_region(&mut self) {
+        self.reserved_regions
+            .retain(|r| r.owner != ReservedRegion::INTERNAL_BAR);
+        if self.show_bar && self.internal_bar_height > 0 {
+            let edge = if self.top_bar { Edge::Top } else { Edge::Bottom };
+            self.reserved_regions.push(ReservedRegion {
+                owner: ReservedRegion::INTERNAL_BAR,
+                edge,
+                thickness: self.internal_bar_height,
+            });
+        }
+    }
+
+    /// Recompute `reserved` and `workarea` from `reserved_regions`.
+    pub fn recalc_geometry(&mut self) {
+        self.reserved = ReservedArea::from_regions(&self.reserved_regions);
+        let r = self.reserved;
+        let x = self.screen.x + r.left as i32;
+        let y = self.screen.y + r.top as i32;
+        let w = self.screen.w.saturating_sub(r.left + r.right);
+        let h = self.screen.h.saturating_sub(r.top + r.bottom);
+        self.workarea = Rect::new(x, y, w, h);
+    }
+
+    /// Toggle the internal bar and recompute geometry. `_bar_h` kept for call-site
+    /// compatibility; the authoritative height lives in `internal_bar_height`.
+    pub fn recalc_workarea(&mut self, _bar_h: u32) {
+        self.sync_internal_bar_region();
+        self.recalc_geometry();
     }
 }
 
@@ -464,7 +578,7 @@ pub enum Action {
 
 #[derive(Debug)]
 pub struct State {
-    pub clients: HashMap<Window, Client>,
+    pub clients: HashMap<WindowId, Client>,
     pub monitors: Vec<Monitor>,
     pub sel_mon: usize,
     pub focus_serial: u64,
@@ -501,6 +615,29 @@ impl State {
         &mut self.monitors[i]
     }
 
+    /// Pick the best window to focus on `mon_idx`'s active workspace: the
+    /// column-focused window, else the most-recently focused window in the
+    /// focus stack that still lives on that workspace. Pure (no X11).
+    pub fn best_focus(&self, mon_idx: usize) -> Option<WindowId> {
+        let mon = self.monitors.get(mon_idx)?;
+        let ws_idx = mon.active_ws;
+        if ws_idx >= mon.workspaces.len() {
+            return None;
+        }
+        let col_win = mon.workspaces[ws_idx].focused_win();
+        let from_stack = mon
+            .focus_stack
+            .iter()
+            .rev()
+            .find(|&&w| {
+                self.clients
+                    .get(&w)
+                    .is_some_and(|c| c.workspace == ws_idx)
+            })
+            .copied();
+        col_win.or(from_stack)
+    }
+
     pub fn mon_at(&self, x: i32, y: i32) -> usize {
         for (i, m) in self.monitors.iter().enumerate() {
             if m.screen.contains(x, y) {
@@ -520,7 +657,7 @@ impl State {
         self.clients.insert(win, c);
     }
 
-    pub fn remove_client(&mut self, win: Window) -> Option<Client> {
+    pub fn remove_client(&mut self, win: WindowId) -> Option<Client> {
         let c = self.clients.remove(&win)?;
         // c.monitor may be stale after hotplug (fewer monitors than before).
         // Clamp to avoid panic index out-of-bounds.
@@ -536,7 +673,7 @@ impl State {
         Some(c)
     }
 
-    /// Pure workspace rearrangement for MoveDir — no X11 calls.
+    /// Pure workspace rearrangement for `MoveDir` — no X11 calls.
     /// Call this from x11.rs then follow up with arrange/focus.
     /// Returns false if there was nothing to do (float, empty workspace, boundary no-op).
     pub fn apply_move_dir(&mut self, dir: Dir) -> bool {
@@ -560,8 +697,7 @@ impl State {
         if self
             .clients
             .get(&focused)
-            .map(|c| c.is_float())
-            .unwrap_or(false)
+            .is_some_and(Client::is_float)
         {
             return false;
         }
@@ -573,8 +709,7 @@ impl State {
                 ws.columns.len(),
                 ws.columns
                     .get(ws.focus.column_idx)
-                    .map(|c| c.windows.len())
-                    .unwrap_or(0),
+                    .map_or(0, |c| c.windows.len()),
             )
         };
 
@@ -633,5 +768,87 @@ impl State {
             _ => return false,
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+
+    fn mon(bar_h: u32, top: bool) -> Monitor {
+        Monitor::new(Rect::new(0, 0, 1920, 1080), bar_h, top, 9)
+    }
+
+    #[test]
+    fn internal_top_bar_reserves_top_only() {
+        let m = mon(22, true);
+        assert_eq!(m.reserved, ReservedArea { top: 22, ..Default::default() });
+        assert_eq!(m.workarea, Rect::new(0, 22, 1920, 1058));
+        assert_eq!(m.bar_height(), 22);
+    }
+
+    #[test]
+    fn internal_bottom_bar_reserves_bottom_only() {
+        let m = mon(30, false);
+        assert_eq!(m.reserved, ReservedArea { bottom: 30, ..Default::default() });
+        assert_eq!(m.workarea, Rect::new(0, 0, 1920, 1050));
+    }
+
+    #[test]
+    fn internal_and_external_stack_on_same_edge() {
+        // Internal top bar (22) + an external top dock (40) both reserve the top.
+        let mut m = mon(22, true);
+        m.set_reserved_region(0x1001, Edge::Top, 40);
+        assert_eq!(m.reserved.top, 62);
+        assert_eq!(m.workarea, Rect::new(0, 62, 1920, 1018));
+    }
+
+    #[test]
+    fn removing_external_dock_restores_workarea() {
+        let mut m = mon(22, true);
+        let before = m.workarea;
+        m.set_reserved_region(0x1001, Edge::Bottom, 40);
+        assert_eq!(m.workarea, Rect::new(0, 22, 1920, 1018));
+        assert!(m.remove_reserved_region(0x1001));
+        assert_eq!(m.workarea, before);
+        // Removing a non-existent owner is a no-op.
+        assert!(!m.remove_reserved_region(0x9999));
+    }
+
+    #[test]
+    fn bar_height_is_authoritative_not_derived() {
+        // Even with a big external dock, bar_height() reports ONLY the internal
+        // bar's own height — never screen.h - workarea.h.
+        let mut m = mon(22, true);
+        m.set_reserved_region(0x1001, Edge::Bottom, 300);
+        assert_eq!(m.bar_height(), 22);
+        assert_eq!(m.screen.h - m.workarea.h, 322);
+    }
+
+    #[test]
+    fn left_and_right_docks_shrink_width() {
+        let mut m = mon(0, true); // no internal bar
+        m.set_reserved_region(0x1, Edge::Left, 50);
+        m.set_reserved_region(0x2, Edge::Right, 60);
+        assert_eq!(m.workarea, Rect::new(50, 0, 1810, 1080));
+    }
+
+    #[test]
+    fn hiding_internal_bar_frees_its_reservation() {
+        let mut m = mon(22, true);
+        m.show_bar = false;
+        m.recalc_workarea(22);
+        assert_eq!(m.reserved.top, 0);
+        assert_eq!(m.workarea, m.screen);
+    }
+
+    #[test]
+    fn zero_thickness_region_is_removal() {
+        let mut m = mon(0, true);
+        m.set_reserved_region(0x1, Edge::Top, 40);
+        assert_eq!(m.reserved.top, 40);
+        m.set_reserved_region(0x1, Edge::Top, 0);
+        assert_eq!(m.reserved.top, 0);
+        assert!(m.reserved.is_empty());
     }
 }

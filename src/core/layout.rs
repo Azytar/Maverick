@@ -6,10 +6,15 @@
 // No mutable geom drift — every arrange() is a pure function over State.
 
 use crate::config::Cfg;
-use crate::types::{LayoutKind, Monitor, Rect, State};
-use x11rb::protocol::xproto::Window;
+use crate::types::{LayoutKind, Monitor, Rect, State, WindowId};
 
-pub type Placements = Vec<(Window, Rect, u32)>; // (win, geom, border_w)
+pub type Placements = Vec<(WindowId, Rect, u32)>; // (win, geom, border_w)
+
+// NOTE: `arrange` computes ONLY the logical layout geometry (layout_rect).
+// It is intentionally unaware of presentation modes such as fullscreen —
+// that is applied afterwards by `core::present::present`, which decides the
+// final rendered geometry (rendered_rect) based on focus. Keeping layout pure
+// means focus can move freely without the layout and presentation desyncing.
 
 /// P10: Clear and refill `out` instead of allocating a new Vec each call.
 pub fn arrange(state: &State, mon_idx: usize, cfg: &Cfg, out: &mut Placements) {
@@ -88,12 +93,7 @@ fn arrange_columns(state: &State, mon: &Monitor, cfg: &Cfg, out: &mut Placements
         };
 
         for (ri, &win) in col.windows.iter().enumerate() {
-            let client = match state.clients.get(&win) {
-                Some(c) => c,
-                None => continue,
-            };
-            if client.is_fullscreen() {
-                out.push((win, mon.screen, 0));
+            if !state.clients.contains_key(&win) {
                 continue;
             }
 
@@ -118,12 +118,8 @@ fn arrange_columns(state: &State, mon: &Monitor, cfg: &Cfg, out: &mut Placements
             Some(c) => c,
             None => continue,
         };
-        if client.is_fullscreen() {
-            out.push((win, mon.screen, 0));
-        } else {
-            let g = client.geom;
-            out.push((win, g, cfg.border_w));
-        }
+        let g = client.geom;
+        out.push((win, g, cfg.border_w));
     }
 }
 
@@ -133,7 +129,7 @@ fn arrange_monocle(state: &State, mon: &Monitor, cfg: &Cfg, out: &mut Placements
     let ws = mon.ws();
     let wa = mon.workarea;
 
-    let all_wins: Vec<Window> = ws
+    let all_wins: Vec<WindowId> = ws
         .columns
         .iter()
         .flat_map(|c| c.windows.iter().copied())
@@ -155,7 +151,7 @@ fn arrange_grid(state: &State, mon: &Monitor, cfg: &Cfg, out: &mut Placements) {
     let gap = cfg.gaps as i32;
     let bw = cfg.border_w as i32;
 
-    let wins: Vec<Window> = ws
+    let wins: Vec<WindowId> = ws
         .columns
         .iter()
         .flat_map(|c| c.windows.iter().copied())
@@ -212,7 +208,7 @@ pub fn ideal_scroll(mon: &Monitor, cfg: &Cfg) -> i32 {
     let col_x_virtual: i32 = ws.columns[..col_idx]
         .iter()
         .map(|c| (c.width as i32).saturating_add(gap))
-        .fold(0i32, |a, b| a.saturating_add(b));
+        .fold(0i32, i32::saturating_add);
 
     let focused_w = ws.columns[col_idx].width as i32;
     let focused_center = col_x_virtual.saturating_add(focused_w / 2);

@@ -13,7 +13,7 @@ pub(crate) const DEBUG: u8 = 4;
 static LEVEL: AtomicU8 = AtomicU8::new(INFO);
 
 /// Reads `MAVERICK_LOG` (falls back to `RUST_LOG` for muscle-memory compat).
-/// Anything unrecognized defaults to `info`, matching the old env_logger setup.
+/// Anything unrecognized defaults to `info`, matching the old `env_logger` setup.
 pub(crate) fn init() {
     let raw = std::env::var("MAVERICK_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))

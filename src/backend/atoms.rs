@@ -7,7 +7,7 @@ use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
 use x11rb::protocol::xproto::ConnectionExt as XConnExt;
 
-/// All atoms used by RustWM
+/// All atoms used by `RustWM`
 /// Grouped by protocol for clarity
 // All atoms are fetched for _NET_SUPPORTED even if not directly used in WM logic
 #[derive(Debug, Clone, Copy)]
@@ -72,11 +72,11 @@ pub struct Atoms {
     pub net_frame_extents: u32,
 
     // XDG portal / file chooser support
-    /// _GTK_SHOW_WINDOW_MENU - GTK apps send this for context menus
+    /// _`GTK_SHOW_WINDOW_MENU` - GTK apps send this for context menus
     pub gtk_show_window_menu: u32,
-    /// _GTK_FRAME_EXTENTS - GTK shadow/CSD support
+    /// _`GTK_FRAME_EXTENTS` - GTK shadow/CSD support
     pub gtk_frame_extents: u32,
-    /// _NET_WM_BYPASS_COMPOSITOR - for compositor hints
+    /// _`NET_WM_BYPASS_COMPOSITOR` - for compositor hints
     pub net_wm_bypass_compositor: u32,
 
     // Motif WM hints (used by some toolkits for decoration hints)
@@ -281,7 +281,7 @@ impl Atoms {
         })
     }
 
-    /// All EWMH atoms we support (for _NET_SUPPORTED property)
+    /// All EWMH atoms we support (for _`NET_SUPPORTED` property)
     pub fn supported_list(&self) -> Vec<u32> {
         vec![
             self.net_supported,

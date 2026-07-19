@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod unit_tests {
     use crate::config::Cfg;
-    use crate::core::{AppEvent, Command, Engine};
+    use crate::core::{Effect, Engine};
     use crate::types::{Action, LayoutKind, Monitor, Rect};
 
     // 1. Extract config into a helper to keep each test clean.
@@ -54,7 +54,7 @@ mod unit_tests {
         );
 
         // Action 1: Hide the bar
-        let cmds_hide = engine.process_event(AppEvent::ActionTriggered(Action::ToggleBar));
+        let cmds_hide = engine.dispatch(Action::ToggleBar);
         assert!(
             !engine.state.monitors[0].show_bar,
             "bar not hidden in state"
@@ -62,17 +62,17 @@ mod unit_tests {
         assert!(
             cmds_hide
                 .iter()
-                .any(|cmd| matches!(cmd, Command::UpdateBar(_))),
+                .any(|cmd| matches!(cmd, Effect::UpdateBar(_))),
             "missing command to tell backend to redraw the bar"
         );
 
         // Action 2: Show the bar again
-        let cmds_show = engine.process_event(AppEvent::ActionTriggered(Action::ToggleBar));
+        let cmds_show = engine.dispatch(Action::ToggleBar);
         assert!(engine.state.monitors[0].show_bar, "bar was not shown again");
         assert!(
             cmds_show
                 .iter()
-                .any(|cmd| matches!(cmd, Command::UpdateBar(_))),
+                .any(|cmd| matches!(cmd, Effect::UpdateBar(_))),
             "missing redraw command on the second pass"
         );
     }
@@ -86,19 +86,19 @@ mod unit_tests {
             LayoutKind::Column
         );
 
-        engine.process_event(AppEvent::ActionTriggered(Action::CycleLayout));
+        engine.dispatch(Action::CycleLayout);
         assert_eq!(
             engine.state.monitors[0].workspaces[0].layout,
             LayoutKind::Monocle
         );
 
-        engine.process_event(AppEvent::ActionTriggered(Action::CycleLayout));
+        engine.dispatch(Action::CycleLayout);
         assert_eq!(
             engine.state.monitors[0].workspaces[0].layout,
             LayoutKind::Grid
         );
 
-        engine.process_event(AppEvent::ActionTriggered(Action::CycleLayout));
+        engine.dispatch(Action::CycleLayout);
         assert_eq!(
             engine.state.monitors[0].workspaces[0].layout,
             LayoutKind::Column,
@@ -107,24 +107,48 @@ mod unit_tests {
     }
 
     #[test]
-    fn test_window_created_emits_layout_commands() {
+    fn test_window_created_produces_layout_placement() {
+        use crate::core::layout::{arrange, Placements};
+        use crate::types::Client;
+
         let mut engine = setup_engine();
         let new_window_id = 1001;
 
-        // Simulate the backend capturing a MapRequest and forwarding it to the core
-        let event = AppEvent::WindowCreated(new_window_id);
-        let commands = engine.process_event(event);
-
-        // Verify the WM computed the layout math and
-        // emitted the physical command to move the window to its coordinates.
-        let has_move_resize = commands
-            .iter()
-            .any(|cmd| matches!(cmd, Command::MoveResize { win, .. } if *win == new_window_id));
-
-        assert!(
-            has_move_resize,
-            "creating a window must trigger layout computation and emit MoveResize"
+        // Reproduce exactly what the backend's `manage` does on a MapRequest:
+        // register the client and add it to the active workspace's columns.
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        let workarea_w = engine.state.monitors[mi].workarea.w;
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(
+            new_window_id,
+            engine.cfg.default_col_w,
+            workarea_w,
         );
+        let mut client = Client::new(new_window_id, mi, ws_i);
+        client.border_w = engine.cfg.border_w;
+        engine.state.add_client(client);
+
+        // Run the pure layout the live path uses (backend::arrange → layout::arrange).
+        let mut placements = Placements::with_capacity(4);
+        arrange(&engine.state, mi, &engine.cfg, &mut placements);
+
+        let placed = placements.iter().any(|(win, _, _)| *win == new_window_id);
+        assert!(
+            placed,
+            "a newly managed window must receive a layout placement"
+        );
+    }
+
+    #[test]
+    fn test_workspace_cycle_layout_helper_wraps() {
+        // Directly exercise the shared pure helper both the backend and the
+        // engine now delegate to (single source of truth).
+        use crate::types::Workspace;
+        let mut ws = Workspace::new(0);
+        assert_eq!(ws.layout, LayoutKind::Column);
+        assert_eq!(ws.cycle_layout(), LayoutKind::Monocle);
+        assert_eq!(ws.cycle_layout(), LayoutKind::Grid);
+        assert_eq!(ws.cycle_layout(), LayoutKind::Column);
     }
 
     // ── move_dir tests ──────────────────────────────────────────────────────
