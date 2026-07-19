@@ -45,7 +45,15 @@ name = "maverick"
 version = "0.2.0"
 dependencies = [
  "libc",
+ "maverick-sys",
  "x11rb",
+]
+
+[[package]]
+name = "maverick-sys"
+version = "0.2.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

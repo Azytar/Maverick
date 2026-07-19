@@ -1,3 +1,7 @@
+[workspace]
+members = ["maverick-sys"]
+resolver = "2"
+
 [package]
 name = "maverick"
 version = "0.2.0"
@@ -11,8 +15,9 @@ name = "maverick"
 path = "src/main.rs"
 
 [dependencies]
-x11rb = { version = "0.13", default-features = false, features = ["randr"] }
+maverick-sys = { path = "maverick-sys" }
 libc = "0.2"
+x11rb = { version = "0.13", default-features = false, features = ["randr"] }
 
 [profile.release]
 opt-level = 3
