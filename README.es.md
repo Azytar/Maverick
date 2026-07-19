@@ -30,10 +30,13 @@ Escrito íntegramente en Rust usando `x11rb 0.13` — sin Cairo, sin Pango, sin 
 
 ### Características Principales
 - 🦅 Columnas desplazables horizontalmente (estilo niri).
-- ⚡ Consumo de memoria extremadamente bajo (~3–4 MB).
+- ⚡ Consumo ligero — sin cairo/pango/Xft, sin runtime async, binario estático único.
 - 🔲 Tres modos de layout: Column (estable), Monocle & Grid (experimental).
+- 🖼 Maximizar de verdad (llena el área de trabajo, conserva el borde) además de pantalla completa.
 - 🖥 Multi-monitor real vía RandR.
 - 🧩 Soporte de ventanas flotantes y pantalla completa.
+- 🧱 Soporte de docks/barras externas (Waybar, Polybar, …) vía struts EWMH.
+- 🔌 Socket de control `maverickctl` — list/state/dispatch/restart/reload/quit sobre cualquier instancia corriendo.
 - 📐 Gaps, bordes, barra y split bias configurables.
 - 🔧 Reglas de ventanas declarativas.
 - 🚀 Autostart de programas.
@@ -45,12 +48,36 @@ Escrito íntegramente en Rust usando `x11rb 0.13` — sin Cairo, sin Pango, sin 
 
 ### Compilar desde fuente
 
+Maverick es un workspace de Cargo con tres binarios: `maverick` (el WM),
+`maverickctl` (CLI de control) y `maverick-dialog` (el diálogo de
+confirmación al salir). Compílalos todos juntos:
+
 ```bash
 git clone https://github.com/azytar/Maverick.git
 cd Maverick
-cargo build --release
-cp target/release/maverick ~/.local/bin
+cargo build --release --workspace
 ```
+
+(`--workspace` es necesario porque el `Cargo.toml` raíz ES el paquete
+`maverick` — sin esa bandera, Cargo solo compila `maverick` y se salta
+los binarios de `maverick-sys`/`maverick-dialog`.)
+
+Compilar sin la barra de estado interna (si usas Waybar/Polybar — ver
+[Detalles Técnicos](#-detalles-técnicos)):
+
+```bash
+cargo build --release --workspace --no-default-features
+```
+
+### Añadir al PATH
+
+```bash
+cp target/release/maverick target/release/maverickctl target/release/maverick-dialog ~/.local/bin/
+```
+
+`maverick-dialog` solo hace falta en el `PATH` si quieres que aparezca
+el diálogo de confirmación de `Super+Shift+Q`; sin él, `maverickctl`
+recurre a `zenity`/`kdialog`/un prompt de terminal.
 
 ### Iniciar con `.xinitrc`
 
@@ -87,7 +114,7 @@ maverick incluye tres modos de layout intercambiables en tiempo de ejecución:
 
 Ciclar entre los tres: `Super+Space`.
 
-> El layout es global en todos los monitores. Al cambiarlo, se reorganizan todos simultáneamente.
+> El layout se establece **por workspace**, no globalmente — cambiarlo solo reorganiza el workspace activo del monitor seleccionado.
 
 ---
 
@@ -156,13 +183,15 @@ Ciclar entre los tres: `Super+Space`.
 
 | Atajo                    | Acción                            |
 | ------------------------ | --------------------------------- |
-| `Super+Shift+Q`          | Salir de maverick              |
+| `Super+Shift+Q`          | Pide confirmación y luego sale de maverick |
 | `Super+Shift+R`          | Reiniciar maverick en caliente    |
 | `Super+F5`               | Reiniciar maverick en caliente    |
 | `Super+Space`            | Ciclar modos de layout            |
 | `Super+T`                | Establecer layout Column          |
 | `Super+M`                | Establecer layout Monocle         |
 | `Super+G`                | Establecer layout Grid            |
+
+> `Super+Shift+Q` lanza `maverickctl quit --confirm` (recurre a `zenity`/`kdialog`/terminal si `maverick-dialog` no está instalado), así una tecla apretada por error no puede matar la sesión. Todo el WM también es controlable desde fuera por un socket Unix vía `maverickctl` — ver [Detalles Técnicos](#-detalles-técnicos).
 
 ### Ratón (ventanas flotantes)
 
@@ -233,6 +262,8 @@ autostart: vec![
 
 El compositor se inicia **antes** que el WM para que todas las ventanas tengan compositing desde el primer fotograma. Los programas de autostart se lanzan después de que tanto el compositor como el WM estén listos. `startup_sound` acepta una ruta a un archivo `.wav` u `.ogg`; prueba `pw-play → paplay → canberra-gtk-play → mpv → aplay` en ese orden.
 
+> El `autostart` por defecto también lanza `/usr/lib/xdg-desktop-portal` y `/usr/lib/xdg-desktop-portal-gtk` — sin ellos, los selectores de archivos basados en GTK/portal (subir archivos en el navegador, etc.) nunca aparecen.
+
 ---
 
 ## 📋 Reglas de ventanas
@@ -266,8 +297,12 @@ rules: vec![
 
 maverick evita capas de abstracción innecesarias siempre que es posible:
 
-- **X11 / XLibre vía `x11rb 0.13`** — bindings del protocolo con tipado seguro, sin libx11.
-- **Renderizado de barra con X11 puro** — Barra de estado dibujada con `image_text8` y `poly_fill_rectangle`, sin librerías de fuentes externas.
+- **X11 / XLibre vía `x11rb 0.13`** — bindings del protocolo con tipado seguro, sin libx11. Solo el WM y `maverick-dialog` enlazan `x11rb`; el resto del workspace es `std` puro.
+- **Un único punto de despacho** — `Engine::dispatch(Action) -> Vec<Effect>` es el ÚNICO camino de un atajo o comando IPC hacia la mutación de estado. `Effect` es un vocabulario semántico (`ArrangeMonitor`, `FocusWindow`, `SetFullscreen`, …); `execute()` del backend X11 es el único lugar que convierte eso en llamadas al protocolo. Un futuro backend no-X11 implementaría `execute()` contra los mismos efectos sin tocar el núcleo.
+- **Fullscreen/maximizar como presentación, no como bloqueo de estado** — `core/present.rs` reescribe solo el rect de la ventana *enfocada* (fullscreen → pantalla completa, maximizar → área de trabajo, ambos con precedencia sobre el layout normal) y reorganiza en cada cambio de foco, en vez de bloquear la entrada mientras una ventana está en fullscreen.
+- **Plano de control de instancias** — `maverick-sys` le da a cada instancia corriendo una identidad de PID/display/tty y un protocolo por socket Unix (`ping`/`identify`/`state`/`dispatch`/`restart`/`reload`/`subscribe`/`quit`). `maverickctl` habla con él: `list`, `state`, `msg <acción>`, `subscribe`, `quit[--confirm]`, `quit-all`, `restart`, `reload`, `prune`. Soporta varias instancias en distintos displays/ttys.
+- **Renderizado de barra con X11 puro** — Barra de estado dibujada con `image_text8` y `poly_fill_rectangle`, sin librerías de fuentes externas. Detrás del feature de Cargo `internal-bar` (activo por defecto); compila con `--no-default-features` para depender de Waybar/Polybar en su lugar.
+- **Struts de docks/barras externas** — Los docks se detectan vía `_NET_WM_WINDOW_TYPE_DOCK`/`_DESKTOP` (nunca por nombre de proceso) y reservan espacio leyendo `_NET_WM_STRUT_PARTIAL`/`_NET_WM_STRUT` heredado, rastreados por monitor y liberados al destruirse/desmapearse.
 - **Mapa de clientes `HashMap`** — búsquedas de ventana O(1) por XID.
 - **Batching en la barra** — la cola se vacía antes de cada `flush()` para evitar redibujados O(N).
 - **Layout de columnas O(N)** — las alturas de las filas se precalculan en una sola pasada.
@@ -282,26 +317,44 @@ maverick evita capas de abstracción innecesarias siempre que es posible:
 ## 📂 Estructura del proyecto
 
 ```text
-maverick/
-├── src/
-│   ├── main.rs          punto de entrada, señales, autostart
-│   ├── config.rs        configuración, atajos, reglas de ventanas
-│   ├── types.rs         tipos principales: State, Monitor, Workspace, Column, Client
-│   ├── log.rs           logging ligero
-│   ├── core/
-│   │   ├── mod.rs
-│   │   ├── engine.rs    capa de lógica pura (layout engine)
-│   │   ├── layout.rs    arrange_columns / arrange_monocle / arrange_grid
-│   │   ├── events.rs    enum AppEvent
-│   │   ├── commands.rs  enum Command (MoveResize, SetBorderColor, …)
-│   │   └── tests.rs     tests unitarios
-│   └── backend/
-│       ├── mod.rs
-│       ├── atoms.rs     caché de átomos EWMH / ICCCM
-│       ├── bar.rs       barra de estado
-│       └── x11.rs       bucle de eventos X11, gestión de ventanas, RandR
+Maverick/                    # workspace de Cargo
+├── src/                     # `maverick` — el binario del WM
+│   ├── main.rs                punto de entrada, señales, autostart, conexión al plano de control
+│   ├── config.rs               config compilada: Cfg, Rule, atajos, colores
+│   ├── types.rs                  modelo de datos principal: State, Monitor, Workspace, Column, Client
+│   ├── log.rs                     logger ligero por stderr
+│   ├── core/                       capa de lógica pura — sin X11
+│   │   ├── engine.rs                 Engine::dispatch(Action) -> Vec<Effect>
+│   │   ├── effect.rs                  enum Effect (la unión entre core y backend)
+│   │   ├── present.rs                  capa de presentación fullscreen/maximizar
+│   │   ├── layout.rs                    arrange_columns / arrange_monocle / arrange_grid
+│   │   ├── ipc.rs                        state_json / parse_action para el socket de control
+│   │   └── tests.rs                       tests unitarios
+│   └── backend/                    backend X11 — el único lugar que habla el protocolo
+│       ├── atoms.rs                  caché de átomos EWMH / ICCCM
+│       ├── bar.rs                     struct Bar: carga de fuente + draw() + tag_at_x()
+│       └── x11/                        el WindowManager en ejecución, dividido por tema
+│           ├── mod.rs                    WindowManager, bucle de eventos, RandR
+│           ├── manage.rs                  descubrimiento de ventanas, lectura de propiedades
+│           ├── events.rs                   tabla de despacho de eventos X
+│           ├── ewmh.rs                      mantenimiento de propiedades EWMH
+│           ├── actions.rs                    do_action / execute (ejecuta los Effects del core)
+│           ├── input.rs                       keymap, agarre de teclas
+│           ├── pointer.rs                      arrastrar para mover/redimensionar, foco por clic
+│           ├── render.rs                        aplicación de geometría, foco, restack
+│           ├── struts.rs                         reserva de espacio para docks externos
+│           └── bar.rs                             ciclo de vida de la ventana de barra interna (feature)
+├── maverick-sys/             # FFI libc + identidad de instancia/socket de control/hub/discover
+│   └── src/
+│       ├── identity.rs         "ficha" de PID/display/tty por instancia
+│       ├── control.rs           ControlServer — el protocolo por socket Unix
+│       ├── hub.rs                 ControlHub — puente hacia el bucle de eventos del WM
+│       ├── discover.rs             list/find/quit de instancias
+│       └── bin/maverickctl.rs       el CLI `maverickctl`
+├── maverick-dialog/           # ventana X11 standalone de confirmación sí/no al salir
+│   └── src/main.rs
 ├── CHANGELOG.md
-├── Cargo.toml
+├── Cargo.toml                 # raíz del workspace + el paquete `maverick`
 ├── Cargo.lock
 ├── LICENSE
 ├── README.md
@@ -312,4 +365,4 @@ maverick/
 
 ## 📜 Licencia
 
-GPL-3.0 license 
+GPL-3.0 license
