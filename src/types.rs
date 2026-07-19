@@ -2,18 +2,18 @@
 // Core state — niri-style columnar layout, clean coordinates, no drift.
 
 use std::collections::HashMap;
-use x11rb::protocol::xproto::Window;
 
 pub type TagMask = u32;
 
 /// Backend-agnostic window identifier used throughout the core domain model.
 ///
-/// On X11 this is the server-assigned `Window` id; a future Wayland backend
-/// would map its own surface handles onto the same id space. Kept as an alias
-/// (currently identical to x11rb's `Window`) so the core can stop importing the
-/// protocol type without any behavioural change. The frontier: the core speaks
-/// `WindowId`, the backend converts `Window <-> WindowId` at its edges.
-pub type WindowId = Window;
+/// This is a plain `u32`, not an alias for x11rb's `Window` — the core must not
+/// import any X11 protocol type. On X11 the backend's `Window` (itself a u32
+/// XID) converts losslessly to/from `WindowId` at the backend's edges (`as
+/// Window` / `as WindowId`). A future Wayland backend would map its own surface
+/// handles onto this same id space instead. The frontier is strict: the core
+/// speaks only `WindowId`, the backend does the conversion.
+pub type WindowId = u32;
 
 // ─── Geometry ────────────────────────────────────────────────────────────────
 
