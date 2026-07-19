@@ -1,6 +1,6 @@
 [package]
 name = "maverick-sys"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Safe wrapper around the libc FFI Maverick needs (signals + daemon detach)"
 license = "GPL-3.0"

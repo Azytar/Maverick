@@ -1,10 +1,10 @@
 [workspace]
-members = ["maverick-sys"]
+members = ["maverick-sys", "maverick-dialog"]
 resolver = "2"
 
 [package]
 name = "maverick"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["azytar"]
 description = "maverick — columnar tiling WM with niri-style layout"

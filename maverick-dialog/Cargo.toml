@@ -1,0 +1,13 @@
+[package]
+name = "maverick-dialog"
+version = "0.3.0"
+edition = "2021"
+description = "Tiny standalone X11 confirmation dialog for Maverick (used by maverickctl)"
+license = "GPL-3.0"
+
+[[bin]]
+name = "maverick-dialog"
+path = "src/main.rs"
+
+[dependencies]
+x11rb = { version = "0.13", default-features = false }
