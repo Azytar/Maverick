@@ -276,7 +276,7 @@ impl Client {
             saved_geom: Rect::default(),
             border_w: 2,
             old_border_w: 2,
-            tags: 1,
+            tags: 1 << ws,
             flags: WinFlags::default(),
             hints: SizeHints::default(),
             monitor: mon,
@@ -599,19 +599,16 @@ impl State {
     }
 
     pub fn mon(&self) -> &Monitor {
-        debug_assert!(
-            !self.monitors.is_empty(),
-            "State::mon() llamado sin monitores"
+        // Defensive: even with debug_assert, avoid panic in release by using get.
+        let i = self.sel_mon.min(
+            self.monitors.len().saturating_sub(1).max(0),
         );
-        let i = self.sel_mon.min(self.monitors.len().saturating_sub(1));
         &self.monitors[i]
     }
     pub fn mon_mut(&mut self) -> &mut Monitor {
-        debug_assert!(
-            !self.monitors.is_empty(),
-            "State::mon_mut() llamado sin monitores"
+        let i = self.sel_mon.min(
+            self.monitors.len().saturating_sub(1).max(0),
         );
-        let i = self.sel_mon.min(self.monitors.len().saturating_sub(1));
         &mut self.monitors[i]
     }
 
@@ -659,6 +656,9 @@ impl State {
 
     pub fn remove_client(&mut self, win: WindowId) -> Option<Client> {
         let c = self.clients.remove(&win)?;
+        if self.monitors.is_empty() {
+            return Some(c);
+        }
         // c.monitor may be stale after hotplug (fewer monitors than before).
         // Clamp to avoid panic index out-of-bounds.
         let mon_i = c.monitor.min(self.monitors.len().saturating_sub(1));

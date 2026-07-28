@@ -112,13 +112,18 @@ fn arrange_columns(state: &State, mon: &Monitor, cfg: &Cfg, out: &mut Placements
         col_x += col_w + gap;
     }
 
-    // ── floating windows — keep existing geom, just clamp to workarea ──
+    // ── floating windows — keep existing geom, clamped to workarea ──
     for &win in &ws.floats {
         let client = match state.clients.get(&win) {
             Some(c) => c,
             None => continue,
         };
-        let g = client.geom;
+        let mut g = client.geom;
+        // Clamp to workarea so the window is never completely off-screen.
+        g.x = g.x.clamp(wa.x, (wa.x + wa.w as i32).saturating_sub(g.w as i32).max(wa.x));
+        g.y = g.y.clamp(wa.y, (wa.y + wa.h as i32).saturating_sub(g.h as i32).max(wa.y));
+        g.w = g.w.min(wa.w);
+        g.h = g.h.min(wa.h);
         out.push((win, g, cfg.border_w));
     }
 }

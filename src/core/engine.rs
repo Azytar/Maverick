@@ -34,15 +34,21 @@ impl Engine {
             }
             Action::CycleLayout => {
                 let mi = self.state.sel_mon;
-                let ws_i = self.state.monitors[mi].active_ws;
-                self.state.monitors[mi].workspaces[ws_i].cycle_layout();
-                cmds.push(Effect::ArrangeMonitor(mi));
+                if mi < self.state.monitors.len() {
+                    let ws_i = self.state.monitors[mi].active_ws;
+                    self.state.monitors[mi].workspaces[ws_i].cycle_layout();
+                    cmds.push(Effect::ArrangeMonitor(mi));
+                    cmds.push(Effect::UpdateBar(mi));
+                }
             }
             Action::SetLayout(lk) => {
                 let mi = self.state.sel_mon;
-                let ws_i = self.state.monitors[mi].active_ws;
-                self.state.monitors[mi].workspaces[ws_i].layout = lk;
-                cmds.push(Effect::ArrangeMonitor(mi));
+                if mi < self.state.monitors.len() {
+                    let ws_i = self.state.monitors[mi].active_ws;
+                    self.state.monitors[mi].workspaces[ws_i].layout = lk;
+                    cmds.push(Effect::ArrangeMonitor(mi));
+                    cmds.push(Effect::UpdateBar(mi));
+                }
             }
             Action::FocusDir(dir) => self.focus_dir(dir, &mut cmds),
             Action::MoveDir(dir) => self.move_dir(dir, &mut cmds),
@@ -74,6 +80,11 @@ impl Engine {
                     cmds.push(Effect::SetFullscreen { win, on });
                 }
             }
+        }
+        // Always publish the state snapshot after any mutation so IPC
+        // subscribers (e.g. bars, maverickctl state) stay in sync.
+        if !cmds.is_empty() {
+            cmds.push(Effect::PublishIpcState);
         }
         cmds
     }
@@ -167,26 +178,30 @@ impl Engine {
             return;
         }
         let ws_i = self.state.monitors[mi].active_ws;
-        let scroll = crate::core::layout::ideal_scroll(&self.state.monitors[mi], &self.cfg);
         let ci = self.state.monitors[mi].workspaces[ws_i].focus.column_idx;
         let n_cols = self.state.monitors[mi].workspaces[ws_i].columns.len();
         if n_cols < 2 || ci == 0 || ci >= n_cols {
             return;
         }
         let target = ci - 1;
-        let ws = &mut self.state.monitors[mi].workspaces[ws_i];
-        let wins: Vec<WindowId> = std::mem::take(&mut ws.columns[ci].windows);
-        ws.columns[target].windows.extend(wins);
-        ws.columns.retain(|c| !c.windows.is_empty());
-        ws.focus.column_idx = target.min(ws.columns.len().saturating_sub(1));
-        if let Some(col) = ws.columns.get(ws.focus.column_idx) {
-            ws.focus.window_idx = col.focused.min(col.windows.len().saturating_sub(1));
+        {
+            let ws = &mut self.state.monitors[mi].workspaces[ws_i];
+            let wins: Vec<WindowId> = std::mem::take(&mut ws.columns[ci].windows);
+            ws.columns[target].windows.extend(wins);
+            ws.columns.retain(|c| !c.windows.is_empty());
+            ws.focus.column_idx = target.min(ws.columns.len().saturating_sub(1));
+            if let Some(col) = ws.columns.get(ws.focus.column_idx) {
+                ws.focus.window_idx = col.focused.min(col.windows.len().saturating_sub(1));
+            }
         }
-        ws.scroll = scroll;
+        // Compute ideal scroll AFTER collapsing (not before) so it reflects
+        // the new column count and positions.
+        let scroll = crate::core::layout::ideal_scroll(&self.state.monitors[mi], &self.cfg);
+        self.state.monitors[mi].workspaces[ws_i].scroll = scroll;
         cmds.push(Effect::ArrangeMonitor(mi));
     }
 
-    /// Move focus to the next/previous monitor.
+    /// Move focus to the next/previous/left/right monitor.
     fn focus_mon(&mut self, dir: Dir, cmds: &mut Vec<Effect>) {
         let n = self.state.monitors.len();
         if n <= 1 {
@@ -194,7 +209,8 @@ impl Engine {
         }
         let cur = self.state.sel_mon;
         let new = match dir {
-            Dir::Prev => (cur + n - 1) % n,
+            Dir::Left | Dir::Prev => (cur + n - 1) % n,
+            Dir::Right | Dir::Next => (cur + 1) % n,
             _ => (cur + 1) % n,
         };
         if let Some(fw) = self.state.monitors[cur].focused {
@@ -204,19 +220,20 @@ impl Engine {
         cmds.push(Effect::FocusWindow(self.state.best_focus(new)));
     }
 
-    /// Move the focused window to the next/previous monitor.
+    /// Move the focused window to the next/previous/left/right monitor.
     fn move_mon(&mut self, dir: Dir, cmds: &mut Vec<Effect>) {
         let n = self.state.monitors.len();
         if n <= 1 {
             return;
         }
         let mi = self.state.sel_mon;
-        let win = match self.state.monitors[mi].focused {
+        let win = match self.state.monitors.get(mi).and_then(|m| m.focused) {
             Some(w) => w,
             None => return,
         };
         let new_mi = match dir {
-            Dir::Prev => (mi + n - 1) % n,
+            Dir::Left | Dir::Prev => (mi + n - 1) % n,
+            Dir::Right | Dir::Next => (mi + 1) % n,
             _ => (mi + 1) % n,
         };
         let src_ws = self
@@ -272,6 +289,7 @@ impl Engine {
         cmds.push(Effect::SetCurrentDesktop(ws_idx));
         cmds.push(Effect::ArrangeMonitor(mi));
         cmds.push(Effect::FocusWindow(self.state.best_focus(mi)));
+        cmds.push(Effect::UpdateBar(mi));
     }
 
     /// Move the focused window to workspace `ws_idx` (same monitor).
@@ -315,6 +333,7 @@ impl Engine {
         cmds.push(Effect::SetWindowDesktop { win, ws: ws_idx });
         cmds.push(Effect::ArrangeMonitor(mi));
         cmds.push(Effect::FocusWindow(self.state.best_focus(mi)));
+        cmds.push(Effect::UpdateBar(mi));
     }
 
     /// Toggle floating for the focused window. Pure state move between the
