@@ -149,7 +149,9 @@ fn install_raw_fn(func: extern "C" fn(libc::c_int), sig: libc::c_int, flags: lib
         sa.sa_sigaction = func as *const () as usize;
         sa.sa_flags = flags;
         libc::sigemptyset(&mut sa.sa_mask);
-        libc::sigaction(sig, &sa, std::ptr::null_mut());
+        if libc::sigaction(sig, &sa, std::ptr::null_mut()) != 0 {
+            panic!("sigaction({sig}) failed");
+        }
     }
 }
 
@@ -160,7 +162,9 @@ fn install_raw(sig: libc::c_int, action: usize, flags: libc::c_int) {
         sa.sa_sigaction = action;
         sa.sa_flags = flags;
         libc::sigemptyset(&mut sa.sa_mask);
-        libc::sigaction(sig, &sa, std::ptr::null_mut());
+        if libc::sigaction(sig, &sa, std::ptr::null_mut()) != 0 {
+            panic!("sigaction({sig}) failed");
+        }
     }
 }
 
@@ -172,7 +176,8 @@ fn install_raw(sig: libc::c_int, action: usize, flags: libc::c_int) {
 pub fn detach_from_terminal() {
     unsafe {
         // New session/process group with no controlling terminal.
-        libc::setsid();
+        // Ignore failure (EPERM if already session leader) — isatty will tell us.
+        let _ = libc::setsid();
 
         // Already detached (e.g. launched by a display manager)?
         if libc::isatty(libc::STDIN_FILENO) == 0 {
@@ -220,7 +225,11 @@ pub fn wait_readable(fd: std::os::unix::io::RawFd, timeout: std::time::Duration)
     let r = unsafe { libc::poll(&mut pfd, 1, ms) };
     match r {
         0 => false,     // timeout, nothing readable
-        n if n > 0 => true,
+        n if n > 0 => {
+            // Only claim readable if POLLIN is set; POLLERR/POLLHUP/POLLNVAL
+            // should wake the caller so it can react to the error.
+            pfd.revents & libc::POLLIN != 0
+        }
         _ => true,      // error/EINTR: wake and let the caller re-check
     }
 }
