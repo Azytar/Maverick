@@ -84,8 +84,10 @@ pub struct Rule {
 
 impl Rule {
     pub fn matches(&self, class: &str, title: &str) -> bool {
-        self.class.is_none_or(|c| class.to_lowercase().contains(c))
-            && self.title.is_none_or(|t| title.to_lowercase().contains(t))
+        let class_lower = class.to_lowercase();
+        let title_lower = title.to_lowercase();
+        self.class.is_none_or(|c| class_lower.contains(&c.to_lowercase()))
+            && self.title.is_none_or(|t| title_lower.contains(&t.to_lowercase()))
     }
 }
 
