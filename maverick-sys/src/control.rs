@@ -314,19 +314,36 @@ where
     Ok(())
 }
 
+/// JSON-escape a string for inline use (same rules as identity::serde_free_json).
+fn json_esc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Convenience: build the identity JSON for `info` (mirrors `identity::write_meta`).
 pub fn identity_json(info: &InstanceInfo) -> String {
-    // Reuse the serializer in identity via write_meta to a temp buffer is overkill;
-    // instead inline a compact JSON matching our format.
     format!(
-        "{{\"name\":\"{n}\",\"pid\":{p},\"display\":\"{d}\",\"tty_nr\":{t},\"exe\":\"{e}\",\"started_at\":{s},\"alive\":{a}}}",
-        n = info.name,
-        p = info.pid,
-        d = info.display,
-        t = info.tty_nr,
-        e = info.exe,
-        s = info.started_at,
-        a = info.alive,
+        r#"{{"name":{},"pid":{},"display":{},"tty_nr":{},"exe":{},"started_at":{},"alive":{}}}"#,
+        json_esc(&info.name),
+        info.pid,
+        json_esc(&info.display),
+        info.tty_nr,
+        json_esc(&info.exe),
+        info.started_at,
+        info.alive,
     )
 }
 

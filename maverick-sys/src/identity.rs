@@ -124,7 +124,8 @@ pub fn read_proc_tty(pid: u32) -> u64 {
     if let Ok(s) = std::fs::read_to_string(&path) {
         // Format: pid (comm) state ppid pgrp session tty_nr ...
         // comm may contain spaces/parens, so find the first ')' and count from there.
-        if let Some(pos) = s.find(')') {
+        // Use rfind to handle process names containing ')' themselves.
+        if let Some(pos) = s.rfind(')') {
             let rest = &s[pos + 1..];
             let mut fields = rest.split_whitespace();
             // skip state, ppid, pgrp, session
@@ -175,6 +176,11 @@ fn serde_free_json(info: &InstanceInfo) -> io::Result<String> {
                 '"' => out.push_str("\\\""),
                 '\\' => out.push_str("\\\\"),
                 '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => {
+                    out.push_str(&format!("\\u{:04x}", c as u32));
+                }
                 _ => out.push(c),
             }
         }
@@ -205,17 +211,72 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
         started_at: 0,
         alive: false,
     };
-    // Strip the outer { } so key/value splitting is straightforward.
+    // Walk the JSON body manually rather than splitting on ',' to correctly
+    // handle commas that appear inside quoted string values.
     let body = json.trim().strip_prefix('{').unwrap_or(json.trim());
     let body = body.strip_suffix('}').unwrap_or(body);
-    for pair in body.split(',') {
-        let kv: Vec<&str> = pair.splitn(2, ':').collect();
-        if kv.len() != 2 {
-            continue;
+    let bytes = body.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        // Skip whitespace and commas
+        while i < len && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b',') {
+            i += 1;
         }
-        let key = kv[0].trim().trim_matches('"');
-        let val = kv[1].trim();
-        match key {
+        if i >= len {
+            break;
+        }
+        // Read key (unquoted or quoted)
+        let key = if bytes[i] == b'"' {
+            i += 1;
+            let start = i;
+            while i < len && bytes[i] != b'"' {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            let k = &body[start..i];
+            i += 1;
+            k
+        } else {
+            let start = i;
+            while i < len && bytes[i] != b':' && bytes[i] != b' ' {
+                i += 1;
+            }
+            &body[start..i]
+        };
+        // Skip ':' and whitespace
+        while i < len && (bytes[i] == b':' || bytes[i] == b' ') {
+            i += 1;
+        }
+        // Read value: either a quoted string or a bare token until next ',' or '}'
+        let val = if i < len && bytes[i] == b'"' {
+            i += 1;
+            let start = i;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    break;
+                }
+                i += 1;
+            }
+            let v = &body[start..i];
+            if i < len {
+                i += 1;
+            }
+            v
+        } else {
+            let start = i;
+            while i < len && bytes[i] != b',' && bytes[i] != b'}' {
+                i += 1;
+            }
+            body[start..i].trim()
+        };
+        match key.trim_matches('"') {
             "name" => info.name = unquote(val),
             "pid" => info.pid = val.parse().unwrap_or(0),
             "display" => info.display = unquote(val),
@@ -234,7 +295,28 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
 }
 
 fn unquote(s: &str) -> String {
-    s.trim().trim_matches('"').to_string()
+    let mut out = String::with_capacity(s.len());
+    let trimmed = s.trim().trim_matches('"');
+    let mut chars = trimmed.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Build the `InstanceInfo` for the current process under `name`.
