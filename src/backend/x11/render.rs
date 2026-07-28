@@ -162,11 +162,11 @@ impl WindowManager {
             event: win,
             window: win,
             above_sibling: x11rb::NONE,
-            x: geom.x as i16,
-            y: geom.y as i16,
-            width: geom.w as u16,
-            height: geom.h as u16,
-            border_width: bw as u16,
+            x: geom.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            y: geom.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            width: geom.w.clamp(0, u16::MAX as u32) as u16,
+            height: geom.h.clamp(0, u16::MAX as u32) as u16,
+            border_width: bw.clamp(0, u16::MAX as u32) as u16,
             override_redirect: false,
         };
         // Fire-and-forget: no .check() here — this is called for every window
@@ -220,8 +220,18 @@ impl WindowManager {
                 )
             };
 
+            // Guard against stale client.monitor after hotplug
+            if mon_i >= self.engine.state.monitors.len() {
+                return Ok(());
+            }
+
             // unfocus previous — only if we're actually about to focus the new one
-            let prev = self.engine.state.monitors[self.engine.state.sel_mon].focused;
+            let prev = self
+                .engine
+                .state
+                .monitors
+                .get(self.engine.state.sel_mon)
+                .and_then(|m| m.focused);
             if prev != valid_win {
                 if let Some(pw) = prev {
                     if self.engine.state.clients.contains_key(&pw) {

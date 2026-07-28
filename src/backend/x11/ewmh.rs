@@ -5,7 +5,9 @@ impl WindowManager {
         let a = &self.atoms;
         // _NET_WORKAREA: array de CARDINAL[4] por desktop (x, y, w, h)
         let n = self.engine.cfg.n_tags;
-        let mon = &self.engine.state.monitors[0]; // usar monitor primario como referencia
+        let Some(mon) = self.engine.state.monitors.first() else {
+            return Ok(());
+        };
         let mut data = Vec::with_capacity(n * 4);
         for _ in 0..n {
             data.push(mon.workarea.x as u32);

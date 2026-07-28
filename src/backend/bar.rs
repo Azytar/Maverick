@@ -126,7 +126,7 @@ impl Bar {
 
             // Convert UTF-8 → Latin-1 and cap at 255 glyphs before computing geometry.
             let tag_l1 = to_latin1(name, 255);
-            let label_w = (tag_l1.len() as u16) * (self.char_w as u16) + TAG_PAD as u16 * 2;
+            let label_w = ((tag_l1.len() as u32) * self.char_w + TAG_PAD as u32 * 2).min(u16::MAX as u32) as u16;
 
             if is_active || has_urgent {
                 let _ = conn.change_gc(gc, &ChangeGCAux::new().foreground(bg));
@@ -146,7 +146,7 @@ impl Bar {
             let _ = conn.image_text8(bar_win, gc, x + TAG_PAD, text_y, &tag_l1);
 
             if is_occupied && !is_active && !has_urgent {
-                let dot_x = x + TAG_PAD + tag_l1.len() as i16 * self.char_w as i16 + 2;
+                let dot_x = x.saturating_add(TAG_PAD).saturating_add((tag_l1.len() as i16).saturating_mul(self.char_w as i16)).saturating_add(2);
                 let _ = conn.change_gc(gc, &ChangeGCAux::new().foreground(cfg.col_bar_occ));
                 let _ = conn.poly_fill_rectangle(
                     bar_win,
@@ -160,7 +160,7 @@ impl Bar {
                 );
             }
 
-            x += label_w as i16 + 2;
+            x = x.saturating_add((label_w as i16).saturating_add(2));
         }
 
         // ── separator ──
@@ -186,7 +186,7 @@ impl Bar {
                 .background(cfg.col_bar_bg),
         );
         let _ = conn.image_text8(bar_win, gc, x, text_y, layout_sym.as_bytes());
-        x += (layout_sym.len() as i16) * self.char_w as i16 + SEP_W as i16;
+        x = x.saturating_add((layout_sym.len() as i16).saturating_mul(self.char_w as i16).saturating_add(SEP_W as i16));
 
         // ── separator ──
         let _ = conn.change_gc(gc, &ChangeGCAux::new().foreground(0x313244));
@@ -205,7 +205,7 @@ impl Bar {
         // ── status text (right-aligned) ──
         // Convert to Latin-1 first so char count = byte count = pixel width.
         let status_l1 = to_latin1(&state.status, 255);
-        let status_w = (status_l1.len() as u16) * self.char_w as u16 + 8;
+        let status_w = ((status_l1.len() as u32) * self.char_w + 8).min(u16::MAX as u32) as u16;
         let status_x = bar_w.saturating_sub(status_w) as i16;
 
         if status_x > x + 8 && !status_l1.is_empty() {
@@ -222,7 +222,7 @@ impl Bar {
         if let Some(focused) = mon.focused {
             if let Some(client) = state.clients.get(&focused) {
                 let avail_glyphs =
-                    ((status_x - x - 4).max(0) as usize / self.char_w as usize).min(255);
+                    ((status_x as i32 - x as i32 - 4).max(0) as usize / self.char_w as usize).min(255);
                 if avail_glyphs > 0 {
                     let title_l1 = to_latin1(&client.name, avail_glyphs);
                     if !title_l1.is_empty() {
@@ -246,14 +246,15 @@ impl Bar {
     /// Given a bar-relative x coordinate, return the workspace index that was clicked,
     /// or None if the click was outside all tag buttons. Mirrors draw() tag geometry exactly.
     pub fn tag_at_x(&self, x: i16, tag_names: &[&'static str]) -> Option<usize> {
-        let mut cur_x: i16 = 4;
+        let mut cur_x: i32 = 4;
+        let x32 = x as i32;
         for (i, name) in tag_names.iter().enumerate() {
             // Mirrors draw()'s to_latin1() glyph count exactly: every char counts
             // toward width (non-Latin1 chars render as '?' but still take a slot).
-            let glyph_count = to_latin1(name, 255).len() as i16;
-            let label_w = glyph_count * self.char_w as i16 + TAG_PAD * 2;
+            let glyph_count = to_latin1(name, 255).len() as i32;
+            let label_w = glyph_count * self.char_w as i32 + TAG_PAD as i32 * 2;
             let right = cur_x + label_w + 2; // +2 is the inter-tag gap from draw()
-            if x >= cur_x && x < right {
+            if x32 >= cur_x && x32 < right {
                 return Some(i);
             }
             cur_x = right;
