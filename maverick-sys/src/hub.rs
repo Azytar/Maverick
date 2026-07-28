@@ -125,8 +125,29 @@ impl ControlHub {
     /// the server adds the newline framing.
     pub fn emit(&self, line: impl Into<String>) {
         let line = line.into();
-        if let Ok(mut subs) = self.inner.subscribers.lock() {
-            subs.retain(|tx| tx.send(line.clone()).is_ok());
+        // Clone the subscribers list outside the lock so we never block the WM
+        // thread while sending to potentially slow subscriber channels.
+        let subs: Vec<_> = self
+            .inner
+            .subscribers
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        let mut dead = Vec::new();
+        for (i, tx) in subs.iter().enumerate() {
+            if tx.send(line.clone()).is_err() {
+                dead.push(i);
+            }
+        }
+        // Prune dead subscribers under lock.
+        if !dead.is_empty() {
+            if let Ok(mut s) = self.inner.subscribers.lock() {
+                for &i in dead.iter().rev() {
+                    if i < s.len() {
+                        s.remove(i);
+                    }
+                }
+            }
         }
     }
 
