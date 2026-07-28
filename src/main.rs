@@ -230,6 +230,9 @@ fn main() {
         }
         Err(e) => {
             eprintln!("maverick: failed to initialise: {e}");
+            // Clean up the identity ficha written earlier so it doesn't
+            // linger and confuse tools that list instances.
+            maverick_sys::identity::cleanup_meta(&instance_name);
             process::exit(1);
         }
     }
