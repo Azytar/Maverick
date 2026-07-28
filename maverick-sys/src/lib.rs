@@ -61,7 +61,7 @@ pub struct Signal {
 }
 
 enum Handler {
-    Term(libc::c_int),  // set QUIT_REQUESTED
+    Term(libc::c_int),   // set QUIT_REQUESTED
     Regrab(libc::c_int), // set NEED_REGRAB
 }
 
@@ -224,13 +224,13 @@ pub fn wait_readable(fd: std::os::unix::io::RawFd, timeout: std::time::Duration)
     // SAFETY: `pfd` is a valid, initialized pollfd for the duration of the call.
     let r = unsafe { libc::poll(&mut pfd, 1, ms) };
     match r {
-        0 => false,     // timeout, nothing readable
+        0 => false, // timeout, nothing readable
         n if n > 0 => {
             // Only claim readable if POLLIN is set; POLLERR/POLLHUP/POLLNVAL
             // should wake the caller so it can react to the error.
             pfd.revents & libc::POLLIN != 0
         }
-        _ => true,      // error/EINTR: wake and let the caller re-check
+        _ => true, // error/EINTR: wake and let the caller re-check
     }
 }
 

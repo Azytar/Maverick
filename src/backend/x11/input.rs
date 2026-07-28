@@ -111,7 +111,11 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn grab_buttons(&self, win: Window, _focused: bool) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn grab_buttons(
+        &self,
+        win: Window,
+        _focused: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let _ = self.conn.ungrab_button(ButtonIndex::ANY, win, ModMask::ANY);
         let motion =
             EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION;
@@ -158,7 +162,11 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn keycode_to_keysym(&self, code: u8, state: u16) -> Result<u32, Box<dyn std::error::Error>> {
+    pub(super) fn keycode_to_keysym(
+        &self,
+        code: u8,
+        state: u16,
+    ) -> Result<u32, Box<dyn std::error::Error>> {
         if self.raw_kpk == 0 {
             return Ok(0);
         }

@@ -10,7 +10,10 @@ pub(super) struct DragState {
 }
 
 impl WindowManager {
-    pub(super) fn on_button_press(&mut self, e: ButtonPressEvent) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn on_button_press(
+        &mut self,
+        e: ButtonPressEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Scroll buttons (4=up,5=down,6=left,7=right) — early return.
         // Without this, every scroll tick goes through the full handler: find_client RTT,
         // focus change, drag intent, allow_events → C1 crash, erratic focus.
@@ -176,7 +179,10 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn on_motion(&mut self, e: MotionNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn on_motion(
+        &mut self,
+        e: MotionNotifyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(drag) = self.drag.clone() {
             let dx = e.root_x as i32 - drag.ptr_x;
             let dy = e.root_y as i32 - drag.ptr_y;

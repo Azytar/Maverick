@@ -120,8 +120,14 @@ fn arrange_columns(state: &State, mon: &Monitor, cfg: &Cfg, out: &mut Placements
         };
         let mut g = client.geom;
         // Clamp to workarea so the window is never completely off-screen.
-        g.x = g.x.clamp(wa.x, (wa.x + wa.w as i32).saturating_sub(g.w as i32).max(wa.x));
-        g.y = g.y.clamp(wa.y, (wa.y + wa.h as i32).saturating_sub(g.h as i32).max(wa.y));
+        g.x = g.x.clamp(
+            wa.x,
+            (wa.x + wa.w as i32).saturating_sub(g.w as i32).max(wa.x),
+        );
+        g.y = g.y.clamp(
+            wa.y,
+            (wa.y + wa.h as i32).saturating_sub(g.h as i32).max(wa.y),
+        );
         g.w = g.w.min(wa.w);
         g.h = g.h.min(wa.h);
         out.push((win, g, cfg.border_w));

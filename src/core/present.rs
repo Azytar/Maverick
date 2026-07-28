@@ -82,7 +82,12 @@ mod tests {
         let (mut state, cfg) = setup();
         add(&mut state, 1);
         add(&mut state, 2);
-        state.clients.get_mut(&1).unwrap().flags.set(WinFlags::FULLSCREEN);
+        state
+            .clients
+            .get_mut(&1)
+            .unwrap()
+            .flags
+            .set(WinFlags::FULLSCREEN);
         state.monitors[0].focused = Some(1);
 
         let mut p = Placements::new();
@@ -101,7 +106,12 @@ mod tests {
         add(&mut state, 1);
         add(&mut state, 2);
         // Window 1 is fullscreen but focus is on 2.
-        state.clients.get_mut(&1).unwrap().flags.set(WinFlags::FULLSCREEN);
+        state
+            .clients
+            .get_mut(&1)
+            .unwrap()
+            .flags
+            .set(WinFlags::FULLSCREEN);
         state.monitors[0].focused = Some(2);
 
         let mut p = Placements::new();
@@ -111,7 +121,10 @@ mod tests {
 
         assert_eq!(raised, None);
         let after = p.iter().find(|e| e.0 == 1).copied().unwrap();
-        assert_eq!(before, after, "unfocused fullscreen must keep its layout rect");
+        assert_eq!(
+            before, after,
+            "unfocused fullscreen must keep its layout rect"
+        );
         assert_ne!(after.1, state.monitors[0].screen);
     }
 
@@ -122,7 +135,12 @@ mod tests {
         add(&mut state, 2);
         // Reserve a 22px top bar so workarea != screen.
         state.monitors[0].workarea = Rect::new(0, 22, 800, 578);
-        state.clients.get_mut(&1).unwrap().flags.set(WinFlags::MAXIMIZED);
+        state
+            .clients
+            .get_mut(&1)
+            .unwrap()
+            .flags
+            .set(WinFlags::MAXIMIZED);
         state.monitors[0].focused = Some(1);
 
         let mut p = Placements::new();
@@ -132,7 +150,10 @@ mod tests {
         assert_eq!(raised, Some(1));
         let (_, rect, _) = p.iter().find(|e| e.0 == 1).copied().unwrap();
         assert_eq!(rect, state.monitors[0].workarea);
-        assert_ne!(rect, state.monitors[0].screen, "maximized must respect the bar");
+        assert_ne!(
+            rect, state.monitors[0].screen,
+            "maximized must respect the bar"
+        );
     }
 
     #[test]
@@ -150,7 +171,10 @@ mod tests {
         present(&state, &state.monitors[0], &mut p);
 
         let (_, rect, bw) = p.iter().find(|e| e.0 == 1).copied().unwrap();
-        assert_eq!(rect, state.monitors[0].screen, "fullscreen wins over maximized");
+        assert_eq!(
+            rect, state.monitors[0].screen,
+            "fullscreen wins over maximized"
+        );
         assert_eq!(bw, 0);
     }
 

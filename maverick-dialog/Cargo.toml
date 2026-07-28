@@ -2,8 +2,13 @@
 name = "maverick-dialog"
 version = "0.3.0"
 edition = "2021"
+rust-version = "1.82"
+authors = ["azytar"]
 description = "Tiny standalone X11 confirmation dialog for Maverick (used by maverickctl)"
 license = "GPL-3.0"
+repository = "https://github.com/azytar/Maverick"
+categories = ["command-line-utilities"]
+keywords = ["window-manager", "dialog", "x11"]
 
 [[bin]]
 name = "maverick-dialog"

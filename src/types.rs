@@ -107,8 +107,8 @@ pub struct SizeHints {
 #[derive(Debug, Clone)]
 pub struct Column {
     pub windows: Vec<WindowId>, // top-to-bottom
-    pub width: u32,           // pixel width of this column
-    pub focused: usize,       // index into `windows` that has focus
+    pub width: u32,             // pixel width of this column
+    pub focused: usize,         // index into `windows` that has focus
 }
 
 impl Column {
@@ -483,7 +483,11 @@ impl Monitor {
         self.reserved_regions
             .retain(|r| r.owner != ReservedRegion::INTERNAL_BAR);
         if self.show_bar && self.internal_bar_height > 0 {
-            let edge = if self.top_bar { Edge::Top } else { Edge::Bottom };
+            let edge = if self.top_bar {
+                Edge::Top
+            } else {
+                Edge::Bottom
+            };
             self.reserved_regions.push(ReservedRegion {
                 owner: ReservedRegion::INTERNAL_BAR,
                 edge,
@@ -600,15 +604,11 @@ impl State {
 
     pub fn mon(&self) -> &Monitor {
         // Defensive: even with debug_assert, avoid panic in release by using get.
-        let i = self.sel_mon.min(
-            self.monitors.len().saturating_sub(1).max(0),
-        );
+        let i = self.sel_mon.min(self.monitors.len().saturating_sub(1));
         &self.monitors[i]
     }
     pub fn mon_mut(&mut self) -> &mut Monitor {
-        let i = self.sel_mon.min(
-            self.monitors.len().saturating_sub(1).max(0),
-        );
+        let i = self.sel_mon.min(self.monitors.len().saturating_sub(1));
         &mut self.monitors[i]
     }
 
@@ -626,11 +626,7 @@ impl State {
             .focus_stack
             .iter()
             .rev()
-            .find(|&&w| {
-                self.clients
-                    .get(&w)
-                    .is_some_and(|c| c.workspace == ws_idx)
-            })
+            .find(|&&w| self.clients.get(&w).is_some_and(|c| c.workspace == ws_idx))
             .copied();
         col_win.or(from_stack)
     }
@@ -694,11 +690,7 @@ impl State {
             None => return false,
         };
 
-        if self
-            .clients
-            .get(&focused)
-            .is_some_and(Client::is_float)
-        {
+        if self.clients.get(&focused).is_some_and(Client::is_float) {
             return false;
         }
 
@@ -782,7 +774,13 @@ mod reservation_tests {
     #[test]
     fn internal_top_bar_reserves_top_only() {
         let m = mon(22, true);
-        assert_eq!(m.reserved, ReservedArea { top: 22, ..Default::default() });
+        assert_eq!(
+            m.reserved,
+            ReservedArea {
+                top: 22,
+                ..Default::default()
+            }
+        );
         assert_eq!(m.workarea, Rect::new(0, 22, 1920, 1058));
         assert_eq!(m.bar_height(), 22);
     }
@@ -790,7 +788,13 @@ mod reservation_tests {
     #[test]
     fn internal_bottom_bar_reserves_bottom_only() {
         let m = mon(30, false);
-        assert_eq!(m.reserved, ReservedArea { bottom: 30, ..Default::default() });
+        assert_eq!(
+            m.reserved,
+            ReservedArea {
+                bottom: 30,
+                ..Default::default()
+            }
+        );
         assert_eq!(m.workarea, Rect::new(0, 0, 1920, 1050));
     }
 

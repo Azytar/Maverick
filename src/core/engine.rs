@@ -146,12 +146,7 @@ impl Engine {
             Some(w) => w,
             None => return,
         };
-        if self
-            .state
-            .clients
-            .get(&win)
-            .is_none_or(Client::is_float)
-        {
+        if self.state.clients.get(&win).is_none_or(Client::is_float) {
             return;
         }
         let workarea_w = self.state.monitors[mi].workarea.w;
@@ -210,7 +205,6 @@ impl Engine {
         let cur = self.state.sel_mon;
         let new = match dir {
             Dir::Left | Dir::Prev => (cur + n - 1) % n,
-            Dir::Right | Dir::Next => (cur + 1) % n,
             _ => (cur + 1) % n,
         };
         if let Some(fw) = self.state.monitors[cur].focused {
@@ -233,14 +227,9 @@ impl Engine {
         };
         let new_mi = match dir {
             Dir::Left | Dir::Prev => (mi + n - 1) % n,
-            Dir::Right | Dir::Next => (mi + 1) % n,
             _ => (mi + 1) % n,
         };
-        let src_ws = self
-            .state
-            .clients
-            .get(&win)
-            .map_or(0, |c| c.workspace);
+        let src_ws = self.state.clients.get(&win).map_or(0, |c| c.workspace);
         let is_float = self
             .state
             .clients
@@ -250,15 +239,16 @@ impl Engine {
 
         self.state.monitors[mi].workspaces[src_ws].remove_window(win);
         if is_float {
-            self.state.monitors[new_mi].workspaces[src_ws].floats.push(win);
+            self.state.monitors[new_mi].workspaces[src_ws]
+                .floats
+                .push(win);
         } else {
             let workarea_w = self.state.monitors[new_mi].workarea.w;
             self.state.monitors[new_mi].workspaces[src_ws].add_tiled(win, dw, workarea_w);
         }
         self.state.monitors[mi].focus_stack.retain(|&w| w != win);
         if self.state.monitors[mi].focused == Some(win) {
-            self.state.monitors[mi].focused =
-                self.state.monitors[mi].focus_stack.last().copied();
+            self.state.monitors[mi].focused = self.state.monitors[mi].focus_stack.last().copied();
         }
         self.state.monitors[new_mi].focus_stack.push(win);
         if let Some(c) = self.state.clients.get_mut(&win) {
@@ -282,8 +272,7 @@ impl Engine {
             return;
         }
         self.state.monitors[mi].active_ws = ws_idx;
-        let scroll =
-            crate::core::layout::ideal_scroll(&self.state.monitors[mi], &self.cfg);
+        let scroll = crate::core::layout::ideal_scroll(&self.state.monitors[mi], &self.cfg);
         self.state.monitors[mi].workspaces[ws_idx].scroll = scroll;
 
         cmds.push(Effect::SetCurrentDesktop(ws_idx));
@@ -316,8 +305,7 @@ impl Engine {
         self.state.monitors[mi].workspaces[src_ws].remove_window(win);
         self.state.monitors[mi].focus_stack.retain(|&w| w != win);
         if self.state.monitors[mi].focused == Some(win) {
-            self.state.monitors[mi].focused =
-                self.state.monitors[mi].focus_stack.last().copied();
+            self.state.monitors[mi].focused = self.state.monitors[mi].focus_stack.last().copied();
         }
 
         if is_float {
@@ -401,12 +389,8 @@ impl Engine {
                     (ws.focus.column_idx + 1) % n
                 };
                 self.state.monitors[mi].workspaces[ws_i].focus.column_idx = new_ci;
-                let win =
-                    self.state.monitors[mi].workspaces[ws_i].columns[new_ci].focused_win();
-                let scroll = crate::core::layout::ideal_scroll(
-                    &self.state.monitors[mi],
-                    &self.cfg,
-                );
+                let win = self.state.monitors[mi].workspaces[ws_i].columns[new_ci].focused_win();
+                let scroll = crate::core::layout::ideal_scroll(&self.state.monitors[mi], &self.cfg);
                 self.state.monitors[mi].workspaces[ws_i].scroll = scroll;
                 win
             }

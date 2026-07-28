@@ -2,8 +2,13 @@
 name = "maverick-sys"
 version = "0.3.0"
 edition = "2021"
+rust-version = "1.82"
+authors = ["azytar"]
 description = "Safe wrapper around the libc FFI Maverick needs (signals + daemon detach)"
 license = "GPL-3.0"
+repository = "https://github.com/azytar/Maverick"
+categories = ["os::unix-apis"]
+keywords = ["window-manager", "ipc", "ffi"]
 
 [dependencies]
 libc = "0.2"

@@ -45,7 +45,10 @@ pub enum Effect {
     MapWindow(WindowId),
     UnmapWindow(WindowId),
     /// Set the fullscreen presentation state for a window, then re-present.
-    SetFullscreen { win: WindowId, on: bool },
+    SetFullscreen {
+        win: WindowId,
+        on: bool,
+    },
     /// Recompute a monitor's reserved space / workarea (bar shown/hidden, docks).
     RecalcWorkarea(usize),
     /// Repaint the internal bar for a monitor.
@@ -59,7 +62,10 @@ pub enum Effect {
     /// Set _`NET_CURRENT_DESKTOP` on the root window.
     SetCurrentDesktop(usize),
     /// Set _`NET_WM_DESKTOP` on a window.
-    SetWindowDesktop { win: WindowId, ws: usize },
+    SetWindowDesktop {
+        win: WindowId,
+        ws: usize,
+    },
     /// Launch an external process.
     Spawn(Vec<String>),
     /// Terminate the WM cleanly.

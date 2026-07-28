@@ -1,7 +1,10 @@
 use super::*;
 
 impl WindowManager {
-    pub(super) fn on_map_request(&mut self, e: MapRequestEvent) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn on_map_request(
+        &mut self,
+        e: MapRequestEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let attrs = match self.conn.get_window_attributes(e.window)?.reply() {
             Ok(a) => a,
             Err(err) => {
@@ -21,7 +24,10 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn on_destroy(&mut self, e: DestroyNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn on_destroy(
+        &mut self,
+        e: DestroyNotifyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if self.engine.state.clients.contains_key(&e.window) {
             self.unmanage(e.window, true)?;
         }
@@ -32,7 +38,10 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn on_unmap(&mut self, e: UnmapNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn on_unmap(
+        &mut self,
+        e: UnmapNotifyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.engine.state.clients.contains_key(&e.window) {
             // A dock being withdrawn should release its reserved space.
             if self.docks.contains_key(&e.window) {
@@ -153,7 +162,8 @@ impl WindowManager {
 
                     // Clamp sel_mon so no code tries to index a monitor that no longer exists.
                     let n_mons = self.engine.state.monitors.len();
-                    self.engine.state.sel_mon = self.engine.state.sel_mon.min(n_mons.saturating_sub(1));
+                    self.engine.state.sel_mon =
+                        self.engine.state.sel_mon.min(n_mons.saturating_sub(1));
 
                     // Re-assign every client to monitor 0 / workspace 0 and
                     // insert it into the column/float structure.
@@ -175,13 +185,16 @@ impl WindowManager {
                         if is_float {
                             self.engine.state.monitors[0].workspaces[0].floats.push(win);
                         } else {
-                            self.engine.state.monitors[0].workspaces[0].add_tiled(win, dw, workarea_w);
+                            self.engine.state.monitors[0].workspaces[0]
+                                .add_tiled(win, dw, workarea_w);
                         }
                     }
                 } else {
                     // Geometry-only change: update screen/workarea in place,
                     // preserving all workspace state and client assignments.
-                    for (new_mon, old_mon) in new_mons.iter().zip(self.engine.state.monitors.iter_mut()) {
+                    for (new_mon, old_mon) in
+                        new_mons.iter().zip(self.engine.state.monitors.iter_mut())
+                    {
                         old_mon.screen = new_mon.screen;
                         old_mon.workarea = new_mon.workarea;
                     }
@@ -205,7 +218,10 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn on_property(&mut self, e: PropertyNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn on_property(
+        &mut self,
+        e: PropertyNotifyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if e.window == self.root && e.atom == u32::from(AtomEnum::WM_NAME) {
             self.update_status()?;
             return Ok(());
@@ -240,12 +256,7 @@ impl WindowManager {
                 bar_relevant = false;
             }
             if bar_relevant {
-                let mi = self
-                    .engine
-                    .state
-                    .clients
-                    .get(&win)
-                    .map_or(0, |c| c.monitor);
+                let mi = self.engine.state.clients.get(&win).map_or(0, |c| c.monitor);
                 self.draw_bar(mi);
             }
         }
@@ -339,7 +350,9 @@ impl WindowManager {
                     return Ok(());
                 }
             }
-            let cutoff = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(1)).unwrap();
+            let cutoff = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap();
             self.last_key_times.retain(|_, v| *v >= cutoff);
             self.last_key_times.insert(key, std::time::Instant::now());
             self.do_action(action)?;
@@ -347,7 +360,10 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn on_enter(&mut self, e: EnterNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn on_enter(
+        &mut self,
+        e: EnterNotifyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if e.mode != NotifyMode::NORMAL || e.detail == NotifyDetail::INFERIOR {
             return Ok(());
         }
@@ -373,7 +389,10 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn on_focus_in(&mut self, e: FocusInEvent) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn on_focus_in(
+        &mut self,
+        e: FocusInEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if e.mode != NotifyMode::NORMAL || e.detail == NotifyDetail::INFERIOR {
             return Ok(());
         }
@@ -386,7 +405,10 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn on_mapping(&mut self, e: MappingNotifyEvent) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn on_mapping(
+        &mut self,
+        e: MappingNotifyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if e.request == Mapping::KEYBOARD || e.request == Mapping::MODIFIER {
             let ks = fetch_keyboard_state(&self.conn)?;
             self.raw_keymap = ks.keysyms;

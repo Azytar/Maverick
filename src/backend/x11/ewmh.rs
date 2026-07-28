@@ -93,7 +93,11 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn set_wm_state(&self, win: Window, state: u32) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn set_wm_state(
+        &self,
+        win: Window,
+        state: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         self.conn
             .change_property32(
                 PropMode::REPLACE,
@@ -106,7 +110,11 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn has_protocol(&self, win: Window, proto: u32) -> Result<bool, Box<dyn std::error::Error>> {
+    pub(super) fn has_protocol(
+        &self,
+        win: Window,
+        proto: u32,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         let prop = self
             .conn
             .get_property(false, win, self.atoms.wm_protocols, AtomEnum::ATOM, 0, 32)?
@@ -117,7 +125,11 @@ impl WindowManager {
             .unwrap_or(false))
     }
 
-    pub(super) fn send_proto(&self, win: Window, proto: u32) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn send_proto(
+        &self,
+        win: Window,
+        proto: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let ev = ClientMessageEvent {
             response_type: CLIENT_MESSAGE_EVENT,
             format: 32,

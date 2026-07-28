@@ -36,7 +36,7 @@ pub struct InstanceInfo {
     pub pid: u32,
     /// X11 display, e.g. ":0" (may be empty if unknown).
     pub display: String,
-    /// Kernel tty device number from /proc/<pid>/stat field 7.
+    /// Kernel tty device number from `/proc/<pid>/stat` field 7.
     pub tty_nr: u64,
     /// Path to the running executable.
     pub exe: String,
@@ -54,7 +54,10 @@ impl InstanceInfo {
         } else {
             self.display.clone()
         };
-        format!("{} [{} tty={:#x} pid={}]", self.name, disp, self.tty_nr, self.pid)
+        format!(
+            "{} [{} tty={:#x} pid={}]",
+            self.name, disp, self.tty_nr, self.pid
+        )
     }
 }
 
@@ -141,7 +144,7 @@ pub fn read_proc_tty(pid: u32) -> u64 {
     0
 }
 
-/// Path to the executable of a foreign process (readlink /proc/<pid>/exe).
+/// Path to the executable of a foreign process (readlink `/proc/<pid>/exe`).
 pub fn read_proc_exe(pid: u32) -> String {
     let path = format!("/proc/{pid}/exe");
     std::fs::read_link(&path)

@@ -11,7 +11,10 @@ impl WindowManager {
     }
 
     /// Execute a batch of semantic effects emitted by the Engine, in order.
-    pub(super) fn run_effects(&mut self, effects: Vec<Effect>) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn run_effects(
+        &mut self,
+        effects: Vec<Effect>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for eff in effects {
             self.execute(eff)?;
         }
@@ -55,13 +58,7 @@ impl WindowManager {
             }
             Effect::UpdateBar(mi) => self.draw_bar(mi),
             Effect::SyncBarVisibility(mi) => {
-                if let Some(bw) = self
-                    .engine
-                    .state
-                    .monitors
-                    .get(mi)
-                    .and_then(|m| m.bar_win)
-                {
+                if let Some(bw) = self.engine.state.monitors.get(mi).and_then(|m| m.bar_win) {
                     if self.engine.state.monitors[mi].show_bar {
                         let _ = self.conn.map_window(bw);
                     } else {

@@ -46,7 +46,7 @@ impl ControlServer {
     /// the WM thread: `dispatch`/`quit`/`restart`/`reload` become
     /// `ControlCommand`s the WM drains, `state` reads the hub snapshot, and
     /// `subscribe` streams hub events.
-    pub     fn spawn(name: &str, identity_json: String, hub: ControlHub) -> std::io::Result<Self> {
+    pub fn spawn(name: &str, identity_json: String, hub: ControlHub) -> std::io::Result<Self> {
         let path = identity::sock_path(name);
         // Ensure the runtime dir exists (bind won't create parent dirs).
         if let Some(parent) = path.parent() {
@@ -216,9 +216,7 @@ fn stream_events(writer: &mut UnixStream, hub: &ControlHub, stop: &Arc<AtomicBoo
         }
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(line) => {
-                if writer.write_all(line.as_bytes()).is_err()
-                    || writer.write_all(b"\n").is_err()
-                {
+                if writer.write_all(line.as_bytes()).is_err() || writer.write_all(b"\n").is_err() {
                     break;
                 }
                 let _ = writer.flush();

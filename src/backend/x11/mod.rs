@@ -21,16 +21,15 @@ use crate::core::{parse_action, state_json, Effect, Engine};
 use crate::log;
 use crate::types::*;
 
-
-mod events;
-mod manage;
-mod render;
-mod input;
-mod ewmh;
-mod struts;
-mod bar;
 mod actions;
+mod bar;
+mod events;
+mod ewmh;
+mod input;
+mod manage;
 mod pointer;
+mod render;
+mod struts;
 use pointer::DragState;
 
 pub struct WindowManager {
@@ -84,7 +83,6 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
-
     fn dispatch(&mut self, ev: x11rb::protocol::Event) -> Result<(), Box<dyn std::error::Error>> {
         match ev {
             Event::ButtonPress(e) => self.on_button_press(e)?,

@@ -1,1 +1,17 @@
 /target
+/coverage
+*.profraw
+*.gcda
+*.gcno
+*.gcov
+*.info
+.env
+*.swp
+*.swo
+*~
+\#*\#
+.DS_Store
+tags
+*.log
+.vscode/
+result/

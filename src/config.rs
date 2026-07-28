@@ -84,8 +84,11 @@ impl Rule {
     pub fn matches(&self, class: &str, title: &str) -> bool {
         let class_lower = class.to_lowercase();
         let title_lower = title.to_lowercase();
-        self.class.is_none_or(|c| class_lower.contains(&c.to_lowercase()))
-            && self.title.is_none_or(|t| title_lower.contains(&t.to_lowercase()))
+        self.class
+            .is_none_or(|c| class_lower.contains(&c.to_lowercase()))
+            && self
+                .title
+                .is_none_or(|t| title_lower.contains(&t.to_lowercase()))
     }
 }
 

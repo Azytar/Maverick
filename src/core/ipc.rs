@@ -110,12 +110,12 @@ pub fn layout_name(l: LayoutKind) -> &'static str {
 ///   move-left|right|up|down|next|prev
 ///   kill | toggle-float | toggle-fullscreen | toggle-bar
 ///   layout column|monocle|grid | cycle-layout
-///   grow-col <px> | shrink-col <px>
+///   grow-col `<px>` | shrink-col `<px>`
 ///   new-column | collapse-column
-///   view <n> | move-to-ws <n>   (1-based workspace number)
+///   view `<n>` | move-to-ws `<n>`   (1-based workspace number)
 ///   focus-mon left|right|next|prev | move-mon left|right|next|prev
 ///   restart | quit
-///   spawn <cmd> [args…]
+///   spawn `<cmd>` [args…]
 ///
 /// Returns `None` for unknown/invalid input (the caller logs and ignores it).
 pub fn parse_action(input: &str) -> Option<Action> {
@@ -150,7 +150,11 @@ pub fn parse_action(input: &str) -> Option<Action> {
         "cycle-layout" => Some(Action::CycleLayout),
 
         "grow-col" => it.next()?.parse::<i32>().ok().map(Action::GrowCol),
-        "shrink-col" => it.next()?.parse::<i32>().ok().map(|px| Action::GrowCol(-px)),
+        "shrink-col" => it
+            .next()?
+            .parse::<i32>()
+            .ok()
+            .map(|px| Action::GrowCol(-px)),
 
         "new-column" => Some(Action::NewColumn),
         "collapse-column" => Some(Action::CollapseColumn),
@@ -228,7 +232,10 @@ mod tests {
 
     #[test]
     fn parses_grow_shrink() {
-        assert!(matches!(parse_action("grow-col 40"), Some(Action::GrowCol(40))));
+        assert!(matches!(
+            parse_action("grow-col 40"),
+            Some(Action::GrowCol(40))
+        ));
         assert!(matches!(
             parse_action("shrink-col 40"),
             Some(Action::GrowCol(-40))

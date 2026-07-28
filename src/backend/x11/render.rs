@@ -31,7 +31,11 @@ impl WindowManager {
         // Presentation layer: apply fullscreen (tied to focus) on top of the
         // pure layout geometry. Returns the window to raise, if any.
         let mut buf = std::mem::take(&mut self.placements_buf);
-        let raise = present(&self.engine.state, &self.engine.state.monitors[mon_idx], &mut buf);
+        let raise = present(
+            &self.engine.state,
+            &self.engine.state.monitors[mon_idx],
+            &mut buf,
+        );
         for &(win, geom, bw) in &buf {
             self.apply_geom(win, geom, bw)?;
         }
@@ -51,7 +55,10 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn hide_offscreen(&mut self, mon_idx: usize) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn hide_offscreen(
+        &mut self,
+        mon_idx: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mon = &self.engine.state.monitors[mon_idx];
         let ws = &mon.workspaces[mon.active_ws];
 

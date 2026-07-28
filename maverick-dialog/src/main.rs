@@ -43,10 +43,7 @@ struct Btn {
 
 impl Btn {
     fn hit(&self, px: i16, py: i16) -> bool {
-        px >= self.x
-            && px < self.x + self.w as i16
-            && py >= self.y
-            && py < self.y + self.h as i16
+        px >= self.x && px < self.x + self.w as i16 && py >= self.y && py < self.y + self.h as i16
     }
 }
 
@@ -60,8 +57,8 @@ fn main() -> ExitCode {
     };
 
     match run(&question) {
-        Ok(true) => ExitCode::SUCCESS,      // confirmed
-        Ok(false) => ExitCode::FAILURE,     // declined
+        Ok(true) => ExitCode::SUCCESS,  // confirmed
+        Ok(false) => ExitCode::FAILURE, // declined
         Err(e) => {
             eprintln!("maverick-dialog: {e}");
             ExitCode::from(2)
@@ -126,11 +123,7 @@ fn run(question: &str) -> Result<bool, Box<dyn std::error::Error>> {
     )?;
 
     let gc = conn.generate_id()?;
-    conn.create_gc(
-        gc,
-        win,
-        &CreateGCAux::new().foreground(FG).background(BG),
-    )?;
+    conn.create_gc(gc, win, &CreateGCAux::new().foreground(FG).background(BG))?;
 
     conn.map_window(win)?;
     // Grab the keyboard so Enter/Esc work even without a WM giving us focus.
@@ -245,7 +238,10 @@ fn draw(
                 height: b.h,
             }],
         )?;
-        conn.change_gc(gc, &ChangeGCAux::new().foreground(b.color).background(BTN_BG))?;
+        conn.change_gc(
+            gc,
+            &ChangeGCAux::new().foreground(b.color).background(BTN_BG),
+        )?;
         let label = to_latin1(b.label);
         let tx = b.x + (b.w as i16 - (b.label.len() as i16 * 6)) / 2;
         conn.image_text8(win, gc, tx.max(b.x + 6), b.y + 20, &label)?;

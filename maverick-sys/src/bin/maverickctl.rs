@@ -143,7 +143,11 @@ fn cmd_list() -> ExitCode {
     }
     println!("maverick instances:");
     for i in &instances {
-        let disp = if i.display.is_empty() { "?" } else { &i.display };
+        let disp = if i.display.is_empty() {
+            "?"
+        } else {
+            &i.display
+        };
         let status = if i.alive { "alive" } else { "STALE" };
         println!(
             "  {:<12} pid={:<7} display={:<6} tty={:#x} {}",

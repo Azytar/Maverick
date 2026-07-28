@@ -153,11 +153,7 @@ impl ControlHub {
 
     /// Number of currently registered subscribers (for tests/introspection).
     pub fn subscriber_count(&self) -> usize {
-        self.inner
-            .subscribers
-            .lock()
-            .map(|s| s.len())
-            .unwrap_or(0)
+        self.inner.subscribers.lock().map(|s| s.len()).unwrap_or(0)
     }
 }
 

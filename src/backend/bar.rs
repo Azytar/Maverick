@@ -105,8 +105,7 @@ impl Bar {
                     state
                         .clients
                         .get(&w)
-                        .map(|c| c.flags.has(crate::types::WinFlags::URGENT))
-                        .unwrap_or(false)
+                        .is_some_and(|c| c.flags.has(crate::types::WinFlags::URGENT))
                 });
 
             let bg = if is_active {
@@ -126,7 +125,8 @@ impl Bar {
 
             // Convert UTF-8 → Latin-1 and cap at 255 glyphs before computing geometry.
             let tag_l1 = to_latin1(name, 255);
-            let label_w = ((tag_l1.len() as u32) * self.char_w + TAG_PAD as u32 * 2).min(u16::MAX as u32) as u16;
+            let label_w = ((tag_l1.len() as u32) * self.char_w + TAG_PAD as u32 * 2)
+                .min(u16::MAX as u32) as u16;
 
             if is_active || has_urgent {
                 let _ = conn.change_gc(gc, &ChangeGCAux::new().foreground(bg));
@@ -146,7 +146,10 @@ impl Bar {
             let _ = conn.image_text8(bar_win, gc, x + TAG_PAD, text_y, &tag_l1);
 
             if is_occupied && !is_active && !has_urgent {
-                let dot_x = x.saturating_add(TAG_PAD).saturating_add((tag_l1.len() as i16).saturating_mul(self.char_w as i16)).saturating_add(2);
+                let dot_x = x
+                    .saturating_add(TAG_PAD)
+                    .saturating_add((tag_l1.len() as i16).saturating_mul(self.char_w as i16))
+                    .saturating_add(2);
                 let _ = conn.change_gc(gc, &ChangeGCAux::new().foreground(cfg.col_bar_occ));
                 let _ = conn.poly_fill_rectangle(
                     bar_win,
@@ -186,7 +189,11 @@ impl Bar {
                 .background(cfg.col_bar_bg),
         );
         let _ = conn.image_text8(bar_win, gc, x, text_y, layout_sym.as_bytes());
-        x = x.saturating_add((layout_sym.len() as i16).saturating_mul(self.char_w as i16).saturating_add(SEP_W as i16));
+        x = x.saturating_add(
+            (layout_sym.len() as i16)
+                .saturating_mul(self.char_w as i16)
+                .saturating_add(SEP_W as i16),
+        );
 
         // ── separator ──
         let _ = conn.change_gc(gc, &ChangeGCAux::new().foreground(0x313244));
@@ -221,8 +228,9 @@ impl Bar {
         // ── focused window title ──
         if let Some(focused) = mon.focused {
             if let Some(client) = state.clients.get(&focused) {
-                let avail_glyphs =
-                    ((status_x as i32 - x as i32 - 4).max(0) as usize / self.char_w as usize).min(255);
+                let avail_glyphs = ((status_x as i32 - x as i32 - 4).max(0) as usize
+                    / self.char_w as usize)
+                    .min(255);
                 if avail_glyphs > 0 {
                     let title_l1 = to_latin1(&client.name, avail_glyphs);
                     if !title_l1.is_empty() {
@@ -244,7 +252,7 @@ impl Bar {
     }
 
     /// Given a bar-relative x coordinate, return the workspace index that was clicked,
-    /// or None if the click was outside all tag buttons. Mirrors draw() tag geometry exactly.
+    /// or None if the click was outside all tag buttons. Mirrors `draw()` tag geometry exactly.
     pub fn tag_at_x(&self, x: i16, tag_names: &[&'static str]) -> Option<usize> {
         let mut cur_x: i32 = 4;
         let x32 = x as i32;
@@ -263,9 +271,9 @@ impl Bar {
     }
 }
 
-/// Convert a UTF-8 string to a Latin-1 byte vector for use with image_text8.
+/// Convert a UTF-8 string to a Latin-1 byte vector for use with `image_text8`.
 ///
-/// image_text8 uses the X11 font encoding (ISO 8859-1 / Latin-1).  Raw UTF-8
+/// `image_text8` uses the X11 font encoding (ISO 8859-1 / Latin-1).  Raw UTF-8
 /// bytes passed to it produce garbage because multi-byte sequences each render
 /// as separate Latin-1 glyphs.  The correct approach is to convert code points:
 ///
@@ -273,7 +281,7 @@ impl Bar {
 ///   U+0100+          → replaced with '?' (CJK, emoji, etc.)
 ///
 /// `max_glyphs` is the maximum number of output bytes (= display characters).
-/// image_text8 has a hard CARD8 limit of 255 bytes, so always pass ≤ 255.
+/// `image_text8` has a hard CARD8 limit of 255 bytes, so always pass ≤ 255.
 fn to_latin1(s: &str, max_glyphs: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(max_glyphs.min(s.len()));
     for ch in s.chars() {

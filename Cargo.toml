@@ -6,9 +6,13 @@ resolver = "2"
 name = "maverick"
 version = "0.3.0"
 edition = "2021"
+rust-version = "1.82"
 authors = ["azytar"]
 description = "maverick — columnar tiling WM with niri-style layout"
 license = "GPL-3.0"
+repository = "https://github.com/azytar/Maverick"
+categories = ["command-line-utilities", "gui"]
+keywords = ["window-manager", "tiling", "x11", "wayland"]
 
 [[bin]]
 name = "maverick"

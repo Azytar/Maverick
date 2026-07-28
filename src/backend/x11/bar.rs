@@ -7,7 +7,10 @@ impl WindowManager {
     /// Create (or recreate) the internal bar window + GC for one monitor and
     /// register it on the monitor. Only compiled with the `internal-bar` feature.
     #[cfg(feature = "internal-bar")]
-    pub(super) fn create_bar_window(&mut self, mon_idx: usize) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn create_bar_window(
+        &mut self,
+        mon_idx: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let setup = self.conn.setup();
         let scr = &setup.roots[self.screen_num];
         let depth = scr.root_depth;

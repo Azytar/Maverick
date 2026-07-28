@@ -5,6 +5,26 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Quality
+
+- **Enforced `rustfmt` across the workspace** — formatted all crates with
+  `cargo fmt` to a consistent style.
+- **Fixed all `clippy` warnings** — resolved 10 lints across `bar.rs`,
+  `manage.rs`, `engine.rs`, `types.rs`, and `ipc.rs` (`map_unwrap_or`,
+  `doc_markdown`, `redundant_closure_for_method_calls`, `match_same_arms`,
+  `unnecessary_min_or_max`). Clippy is now clean at `-D warnings`.
+- **Clean `rustdoc` build** — fixed unclosed HTML tags (`<pid>`, `<px>`,
+  `<n>`, `<cmd>`) in doc comments; docs now build with
+  `RUSTDOCFLAGS="-D warnings"`.
+- **Expanded `.gitignore`** — added `coverage/`, `*.profraw`, `.env`,
+  editor swap files, and common Rust build artifacts to prevent accidental
+  commits.
+- **Added `rust-version` and metadata** — `Cargo.toml` for all three
+  workspace crates now declare `rust-version = "1.70"`, `repository`,
+  `categories`, and `keywords` for better crate index presentation.
+- **Doc-comment fixes** — `image_text8`, `draw()`, and code samples in
+  docstrings now use proper backtick quoting.
+
 ### Fixed
 
 - **`maverick-sys`: control socket could be tricked by symlink attack.**

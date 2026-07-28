@@ -68,10 +68,14 @@ fn main() {
         match a.as_str() {
             "-v" | "--version" => show_version = true,
             "-h" | "--help" => show_help = true,
-            "--name" => if let Some(n) = args.next() { instance_name = n } else {
-                bad_arg = Some("--name requires a value".into());
-                break;
-            },
+            "--name" => {
+                if let Some(n) = args.next() {
+                    instance_name = n
+                } else {
+                    bad_arg = Some("--name requires a value".into());
+                    break;
+                }
+            }
             unknown => {
                 bad_arg = Some(format!("unknown argument: {unknown}"));
                 break;
@@ -124,17 +128,14 @@ fn main() {
     // queues dispatched commands, caches the state snapshot, and fans out
     // events to `subscribe` clients.
     let hub = maverick_sys::ControlHub::new();
-    let control = match maverick_sys::ControlServer::spawn(
-        &instance_name,
-        identity_json,
-        hub.clone(),
-    ) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            log::warn!("failed to start control socket: {e}");
-            None
-        }
-    };
+    let control =
+        match maverick_sys::ControlServer::spawn(&instance_name, identity_json, hub.clone()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log::warn!("failed to start control socket: {e}");
+                None
+            }
+        };
 
     // Write PID file so external tools can find us (legacy compat).
     if let Err(e) = std::fs::write("/tmp/maverick.pid", format!("{}\n", std::process::id())) {
