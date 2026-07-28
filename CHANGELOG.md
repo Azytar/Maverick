@@ -20,7 +20,7 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   editor swap files, and common Rust build artifacts to prevent accidental
   commits.
 - **Added `rust-version` and metadata** — `Cargo.toml` for all three
-  workspace crates now declare `rust-version = "1.70"`, `repository`,
+  workspace crates now declare `rust-version = "1.82"`, `repository`,
   `categories`, and `keywords` for better crate index presentation.
 - **Doc-comment fixes** — `image_text8`, `draw()`, and code samples in
   docstrings now use proper backtick quoting.

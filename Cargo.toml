@@ -12,7 +12,7 @@ description = "maverick — columnar tiling WM with niri-style layout"
 license = "GPL-3.0"
 repository = "https://github.com/azytar/Maverick"
 categories = ["command-line-utilities", "gui"]
-keywords = ["window-manager", "tiling", "x11", "wayland"]
+keywords = ["window-manager", "tiling", "x11"]
 
 [[bin]]
 name = "maverick"
