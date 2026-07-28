@@ -1,5 +1,3 @@
-// maverick/src/config.rs
-
 use crate::types::{Action, Dir, LayoutKind};
 
 #[derive(Debug, Clone)]
@@ -50,7 +48,7 @@ impl Default for Cfg {
             border_w: 2,
             gaps: 6,
             bar_height: 22,
-            top_bar: true,
+            top_bar: false,
             n_tags: 9,
             default_col_w: 700,
             split_bias: 0.6,
@@ -284,13 +282,28 @@ pub fn load_config() -> Cfg {
         // benefits from compositing from its very first frame.
         // Each entry is a command + args: vec!["binary", "arg1", "arg2", ...]
         autostart: vec![
-            //vec!["setxkbmap".into(), "us".into(), "-variant".into(), "dvorak".into()],
+            vec![
+                "setxkbmap".into(),
+                "us".into(),
+                "-variant".into(),
+                "dvorak".into(),
+            ],
             // Not on $PATH by convention — Arch installs these under /usr/lib.
             // Without them, GTK/portal-based file pickers (e.g. browser upload
             // dialogs) silently fail to open.
             vec!["/usr/lib/xdg-desktop-portal-gtk".into()],
             vec!["/usr/lib/xdg-desktop-portal".into()],
-            vec!["feh".into(), "--bg-fill".into(), "/path/to/wallpaper.png".into()],
+            vec![
+                "rviv".into(),
+                "--bg".into(),
+                "/path/to/wallpaper.png".into(),
+            ],
+            vec![
+                "ferrous-dns".into(),
+                "--config".into(),
+                "/path/to/config.toml".into(),
+            ],
+            vec!["polybar".into()],
             vec!["alacritty".into()],
         ],
     }
