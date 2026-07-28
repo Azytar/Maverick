@@ -352,7 +352,7 @@ fn run_confirm(bin: &str, args: &[&str]) -> Option<bool> {
 /// is no TTY (can't safely assume "yes").
 fn tty_confirm(prompt: &str) -> bool {
     use std::io::{IsTerminal, Write};
-    let mut stdin = std::io::stdin();
+    let stdin = std::io::stdin();
     if !stdin.is_terminal() {
         eprintln!("maverickctl: no terminal for confirmation; re-run with --yes to force");
         return false;
@@ -360,14 +360,8 @@ fn tty_confirm(prompt: &str) -> bool {
     print!("{prompt} [y/N] ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
-    use std::io::Read;
-    // read a single line
-    let mut buf = [0u8; 1];
-    while let Ok(1) = stdin.read(&mut buf) {
-        if buf[0] == b'\n' {
-            break;
-        }
-        line.push(buf[0] as char);
+    if stdin.read_line(&mut line).is_err() {
+        return false;
     }
     matches!(line.trim(), "y" | "Y" | "yes" | "YES")
 }
