@@ -469,7 +469,11 @@ impl WindowManager {
         if self.engine.state.clients.contains_key(&win) {
             return Some(win);
         }
+        let mut seen = std::collections::HashSet::new();
         loop {
+            if !seen.insert(win) {
+                return None;
+            }
             let tree = self.conn.query_tree(win).ok()?.reply().ok()?;
             let parent = tree.parent;
             if parent == self.root || parent == win || parent == x11rb::NONE {
@@ -588,7 +592,18 @@ impl WindowManager {
         let Some(c) = self.engine.state.clients.get(&win) else {
             return;
         };
-        let mut state_atoms = Vec::new();
+        let mut state_atoms: Vec<u32> = self
+            .conn
+            .get_property(false, win, self.atoms.net_wm_state, AtomEnum::ATOM, 0, 32)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|r| r.value32().map(|iter| iter.collect::<Vec<u32>>()).unwrap_or_default())
+            .unwrap_or_default();
+        state_atoms.retain(|&a| {
+            a != self.atoms.net_wm_state_fullscreen
+                && a != self.atoms.net_wm_state_maximized_vert
+                && a != self.atoms.net_wm_state_maximized_horiz
+        });
         if c.is_fullscreen() {
             state_atoms.push(self.atoms.net_wm_state_fullscreen);
         }
