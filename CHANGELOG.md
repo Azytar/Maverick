@@ -168,6 +168,25 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the expected direction instead of always wrapping to the next
   monitor (which was the behaviour of `next`).
 
+=======
+### Fixed
+
+- **Keyboard froze after mouse-focusing a window** (`backend/x11/input.rs`,
+  `grab_buttons`): the catch-all `grab_button` used to intercept clicks for
+  focus-follows-click was armed with `pointer_mode=SYNC` **and**
+  `keyboard_mode=SYNC`. Every matching `ButtonPress` therefore froze both
+  devices, but `on_button_press` only ever called
+  `allow_events(REPLAY_POINTER, ...)`, which releases the pointer but not
+  the keyboard. The keyboard stayed frozen at the X11 level after clicking
+  any managed window, breaking WM shortcuts and the client's own key input
+  — most noticeable with clients that grab focus aggressively on click
+  (Firefox, Minecraft). `keyboard_mode` changed to `ASYNC` (standard
+  practice, matches dwm/i3-style click-to-focus grabs); `pointer_mode`
+  stays `SYNC` since `on_button_press` still needs to conditionally replay
+  or keep it frozen for drags.
+  Confirmed fixed in real usage (mouse click-to-focus, tested against
+  Firefox and Minecraft)
+  
 ## [0.18.2] — 2026-07-19
 
 Two prior attempts at the next release (internally called "0.18.4" in
