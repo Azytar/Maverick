@@ -123,7 +123,13 @@ impl WindowManager {
             let setup = self.conn.setup();
             let screen = &setup.roots[self.screen_num];
             let new_mons = detect_monitors(&self.conn, screen, &self.engine.cfg)?;
-            if new_mons.len() != self.engine.state.monitors.len() {
+            let len_changed = new_mons.len() != self.engine.state.monitors.len();
+            let geom_changed = !len_changed
+                && new_mons
+                    .iter()
+                    .zip(self.engine.state.monitors.iter())
+                    .any(|(a, b)| a.screen != b.screen || a.workarea != b.workarea);
+            if len_changed || geom_changed {
                 log::info!(
                     "monitor topology changed ({} -> {})",
                     self.engine.state.monitors.len(),
@@ -141,34 +147,43 @@ impl WindowManager {
                     }
                 }
 
-                // Replace monitors with fresh ones (empty workspaces).
-                self.engine.state.monitors = new_mons;
+                if len_changed {
+                    // Replace monitors with fresh ones (empty workspaces).
+                    self.engine.state.monitors = new_mons;
 
-                // Clamp sel_mon so no code tries to index a monitor that no longer exists.
-                let n_mons = self.engine.state.monitors.len();
-                self.engine.state.sel_mon = self.engine.state.sel_mon.min(n_mons.saturating_sub(1));
+                    // Clamp sel_mon so no code tries to index a monitor that no longer exists.
+                    let n_mons = self.engine.state.monitors.len();
+                    self.engine.state.sel_mon = self.engine.state.sel_mon.min(n_mons.saturating_sub(1));
 
-                // Re-assign every client to monitor 0 / workspace 0 and
-                // insert it into the column/float structure.
-                let dw = self.engine.cfg.default_col_w;
-                for win in old_clients {
-                    // Update client metadata
-                    if let Some(c) = self.engine.state.clients.get_mut(&win) {
-                        c.monitor = 0;
-                        c.workspace = 0;
+                    // Re-assign every client to monitor 0 / workspace 0 and
+                    // insert it into the column/float structure.
+                    let dw = self.engine.cfg.default_col_w;
+                    for win in old_clients {
+                        // Update client metadata
+                        if let Some(c) = self.engine.state.clients.get_mut(&win) {
+                            c.monitor = 0;
+                            c.workspace = 0;
+                        }
+                        // Re-insert into the workspace structure
+                        let is_float = self
+                            .engine
+                            .state
+                            .clients
+                            .get(&win)
+                            .is_some_and(crate::types::Client::is_float);
+                        let workarea_w = self.engine.state.monitors[0].workarea.w;
+                        if is_float {
+                            self.engine.state.monitors[0].workspaces[0].floats.push(win);
+                        } else {
+                            self.engine.state.monitors[0].workspaces[0].add_tiled(win, dw, workarea_w);
+                        }
                     }
-                    // Re-insert into the workspace structure
-                    let is_float = self
-                        .engine
-                        .state
-                        .clients
-                        .get(&win)
-                        .is_some_and(crate::types::Client::is_float);
-                    let workarea_w = self.engine.state.monitors[0].workarea.w;
-                    if is_float {
-                        self.engine.state.monitors[0].workspaces[0].floats.push(win);
-                    } else {
-                        self.engine.state.monitors[0].workspaces[0].add_tiled(win, dw, workarea_w);
+                } else {
+                    // Geometry-only change: update screen/workarea in place,
+                    // preserving all workspace state and client assignments.
+                    for (new_mon, old_mon) in new_mons.iter().zip(self.engine.state.monitors.iter_mut()) {
+                        old_mon.screen = new_mon.screen;
+                        old_mon.workarea = new_mon.workarea;
                     }
                 }
 
