@@ -68,6 +68,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   keyboard-freeze fix entry already documented above it. Removed the
   marker and the duplicate section; no information was lost since the
   content was a verbatim repeat.
+- **`clippy::new_without_default` on `State::new()`.** Added `impl Default
+  for State` (`fn default() -> Self { Self::new() }`). Pre-existing before
+  the internal-bar removal; caught while re-verifying against the exact
+  1.82 MSRV toolchain.
 
 ### Quality
 
