@@ -262,17 +262,60 @@ impl WindowManager {
             return Ok(());
         }
 
-        // transient → inherit parent workspace
+        // transient → inherit parent workspace, and remember the parent's real
+        // (stored) geometry so we can center on it below — never on whatever X
+        // reports for the parent's *live* position, which can be its off-screen
+        // hidden coordinates if a workspace switch is racing this manage() call
+        // (see hide_offscreen() in render.rs).
+        let mut transient_parent_geom: Option<Rect> = None;
         if let Some(parent) = self.transient_for(win)? {
             if let Some(pc) = self.engine.state.clients.get(&parent) {
                 client.workspace = pc.workspace;
                 client.monitor = pc.monitor;
                 client.flags.set(WinFlags::FLOAT);
+                transient_parent_geom = Some(pc.geom);
             }
         }
 
         self.apply_rules(&mut client);
         self.detect_portal(&mut client);
+
+        // Center floating windows ourselves rather than trusting the raw X
+        // geometry captured above (`geom`/`geom_r`): toolkits position dialogs
+        // relative to their parent's *current on-screen* placement, which is
+        // wrong if the parent happens to be hidden off-screen mid-switch, and
+        // portal-spawned pickers (no real WM_TRANSIENT_FOR) get no placement
+        // help from X at all. Width/height from the original request are kept
+        // — only position is recomputed.
+        if client.is_float() {
+            let target = if let Some(pg) = transient_parent_geom {
+                Rect::new(
+                    pg.x + (pg.w as i32 - client.geom.w as i32) / 2,
+                    pg.y + (pg.h as i32 - client.geom.h as i32) / 2,
+                    client.geom.w,
+                    client.geom.h,
+                )
+            } else if client.monitor < self.engine.state.monitors.len() {
+                let wa = self.engine.state.monitors[client.monitor].workarea;
+                Rect::new(
+                    wa.x + (wa.w as i32 - client.geom.w as i32) / 2,
+                    wa.y + (wa.h as i32 - client.geom.h as i32) / 2,
+                    client.geom.w,
+                    client.geom.h,
+                )
+            } else {
+                client.geom
+            };
+            if client.monitor < self.engine.state.monitors.len() {
+                let wa = self.engine.state.monitors[client.monitor].workarea;
+                let cx = target.x.clamp(wa.x, (wa.x + wa.w as i32 - target.w as i32).max(wa.x));
+                let cy = target.y.clamp(wa.y, (wa.y + wa.h as i32 - target.h as i32).max(wa.y));
+                client.geom = Rect::new(cx, cy, target.w, target.h);
+            } else {
+                client.geom = target;
+            }
+            client.saved_geom = client.geom;
+        }
 
         // configure border
         let _ = self.conn.configure_window(
