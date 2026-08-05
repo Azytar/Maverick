@@ -31,7 +31,7 @@ Escrito íntegramente en Rust usando `x11rb 0.13` — sin Cairo, sin Pango, sin 
 ### Características Principales
 - 🦅 Columnas desplazables horizontalmente (estilo niri).
 - ⚡ Consumo ligero — sin cairo/pango/Xft, sin runtime async, binario estático único.
-- 🔲 Tres modos de layout: Column (estable), Monocle & Grid (experimental).
+- 🔲 Dos modos de layout: Column (desplazable, por defecto) & Grid.
 - 🖼 Maximizar de verdad (llena el área de trabajo, conserva el borde) además de pantalla completa.
 - 🖥 Multi-monitor real vía RandR.
 - 🧩 Soporte de ventanas flotantes y pantalla completa.
@@ -102,17 +102,14 @@ Type=XSession
 
 ## 🔲 Layouts
 
-maverick incluye tres modos de layout intercambiables en tiempo de ejecución:
-
-*Nota: Los modos `Monocle` y `Grid` son actualmente experimentales y están en desarrollo activo.*
+maverick incluye dos modos de layout intercambiables en tiempo de ejecución:
 
 | Modo     | Atajo         | Descripción                                                                |
 | -------- | ------------- | -------------------------------------------------------------------------- |
 | **Column**  | `Super+T`     | Columnas desplazables. Cada ventana vive en su propia columna por defecto. |
-| **Monocle** | `Super+M`     | Una ventana a la vez ocupando toda el área de trabajo.                     |
 | **Grid**    | `Super+G`     | Todas las ventanas en rejilla uniforme.                                    |
 
-Ciclar entre los tres: `Super+Space`.
+Ciclar entre los dos: `Super+Space`.
 
 > El layout se establece **por workspace**, no globalmente — cambiarlo solo reorganiza el workspace activo del monitor seleccionado.
 
@@ -188,7 +185,6 @@ Ciclar entre los tres: `Super+Space`.
 | `Super+F5`               | Reiniciar maverick en caliente    |
 | `Super+Space`            | Ciclar modos de layout            |
 | `Super+T`                | Establecer layout Column          |
-| `Super+M`                | Establecer layout Monocle         |
 | `Super+G`                | Establecer layout Grid            |
 
 > `Super+Shift+Q` lanza `maverickctl quit --confirm` (recurre a `zenity`/`kdialog`/terminal si `maverick-dialog` no está instalado), así una tecla apretada por error no puede matar la sesión. Todo el WM también es controlable desde fuera por un socket Unix vía `maverickctl` — ver [Detalles Técnicos](#-detalles-técnicos).
@@ -327,7 +323,7 @@ Maverick/                    # workspace de Cargo
 │   │   ├── engine.rs                 Engine::dispatch(Action) -> Vec<Effect>
 │   │   ├── effect.rs                  enum Effect (la unión entre core y backend)
 │   │   ├── present.rs                  capa de presentación fullscreen/maximizar
-│   │   ├── layout.rs                    arrange_columns / arrange_monocle / arrange_grid
+│   │   ├── layout.rs                    arrange_columns / arrange_grid
 │   │   ├── ipc.rs                        state_json / parse_action para el socket de control
 │   │   └── tests.rs                       tests unitarios
 │   └── backend/                    backend X11 — el único lugar que habla el protocolo

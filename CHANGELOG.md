@@ -5,6 +5,50 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- **`Monocle` layout removed entirely.** It never left an experimental
+  state and added a third code path to every layout-dispatching site
+  for little benefit over `Grid`. Removed `LayoutKind::Monocle` and
+  `arrange_monocle()`, the `Super+M` keybind, the `monocle` IPC/CLI
+  layout name (`maverickctl dispatch layout monocle` no longer
+  parses), and all related tests/docs. `cycle_layout()` now wraps
+  Column→Grid→Column. Only two layout modes ship: **Column** (the
+  niri-style scrollable layout, stable) and **Grid**.
+
+### Changed
+
+- **Default config genericized for distribution.** `config.rs`'s
+  `load_config()` carried a maintainer's personal machine setup —
+  a hardcoded Dvorak `setxkbmap` autostart entry, a wallpaper
+  launched from a home-directory path, and an unrelated personal
+  DNS tool — none of which mean anything on a fresh install. Removed
+  all three; the shipped `autostart` now only launches the
+  `xdg-desktop-portal(-gtk)` pair needed for file-picker dialogs to
+  work, with a commented example showing where to add your own
+  wallpaper command. Also dropped the `polybar` autostart entry,
+  which duplicated the `internal-bar` feature that's already on by
+  default.
+
+### Fixed
+
+- **Build was broken on `main`: `Monocle` removal had been done half
+  way and taken unrelated code with it.** An in-progress edit had
+  deleted `LayoutKind::Monocle` from `types.rs` but left `config.rs`,
+  `core/ipc.rs`, and `core/tests.rs` still referencing it (wouldn't
+  compile). Worse, the same edit accidentally deleted `arrange_grid()`
+  and `ideal_scroll()` from `layout.rs` in their entirety along with
+  `Workspace.scroll`, and rewrote the column-position formula from
+  `wa.x - ws.scroll` to a fixed `wa.x` — silently disabling the
+  Column layout's horizontal scrolling. All of the above is restored;
+  `Grid` and scrollable `Column` both work again and Monocle is now
+  fully (not partially) gone.
+- **`CHANGELOG.md` contained an unresolved git merge conflict
+  marker** (`=======`) followed by a duplicate copy of the
+  keyboard-freeze fix entry already documented above it. Removed the
+  marker and the duplicate section; no information was lost since the
+  content was a verbatim repeat.
+
 ### Quality
 
 - **Enforced `rustfmt` across the workspace** — formatted all crates with
@@ -48,6 +92,75 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `poll()` returning `> 0` was treated as "data available" regardless
   of `revents`. Now checks that `POLLIN` is actually set so an error
   state doesn't spin the event loop.
+
+- **UnmapNotify no longer removes windows from the workspace.**
+  Previously, every `UnmapNotify` (e.g. iconify) called `unmanage()`,
+  which removed the window from `clients`, the workspace structure, and
+  the focus stack. When the window was later remapped, it was re-managed
+  as a new window, losing its workspace assignment, floating state, and
+  column position. Now, non-synthetic `UnmapNotify` events only clear
+  `WM_STATE` and move focus if the window was focused. The window stays
+  in the workspace so its tiling state is preserved across iconify/restore.
+
+- **FocusIn handler no longer steals focus from popups and dialogs.**
+  The `on_focus_in` handler attempted to re-focus the WM's focused window
+  whenever any window received a `FocusIn` event. This caused popups and
+  dialogs (e.g. Firefox file pickers, GTK dialogs) to immediately lose
+  focus back to the main window. The handler has been removed entirely;
+  focus is now managed exclusively through keybindings, mouse clicks, and
+  EWMH requests (`_NET_ACTIVE_WINDOW`).
+
+- **Moving a window to another monitor no longer panics on workspace overflow.**
+  When moving a window to a monitor with fewer workspaces than the source,
+  the workspace index could exceed the destination monitor's workspace count,
+  causing a panic. The workspace index is now clamped to the destination
+  monitor's valid range.
+
+- **`_NET_WORKAREA` now reports all monitors.** Previously, only the first
+  monitor's workarea was reported for all desktops, which caused incorrect
+  workarea values for external taskbars and docks on secondary monitors in
+  multi-monitor setups.
+
+- **Monitor hotplug preserves client workspace assignments.** When the number
+  of monitors changes (hotplug), clients are no longer blindly reassigned to
+  monitor 0 workspace 0. Their original monitor and workspace assignments are
+  preserved where the target still exists; only clients on removed monitors
+  are reassigned to valid targets.
+
+- **Geometry-only monitor changes now trigger rearrange.** When a monitor's
+  resolution or position changes (without adding/removing monitors), the
+  previous code only updated `screen` and `workarea` without calling
+  `arrange()`, leaving windows with stale geometry. All affected monitors
+  are now re-arranged after a geometry-only change.
+
+- **`focus_mouse` no longer triggers an X11 `query_tree` round-trip on every
+  motion event.** The `on_motion` handler called `find_client()` (which walks
+  up the window tree via `query_tree`) for every mouse movement when
+  `focus_mouse` was enabled, causing significant lag. Focus-follows-mouse is
+  now handled exclusively via `EnterNotify` events in `on_enter`, which are
+  far less frequent.
+
+- **`focus()` no longer computes `prev_focused` twice.** The previously-focused
+  window was computed at the top of the function and again just before the
+  unfocus logic. The redundant second computation has been removed.
+
+- **`focus_dir` Next/Prev now filters by active workspace.** The focus stack
+  could contain windows from different workspaces. Cycling Next/Prev could
+  jump to a window on a different workspace without switching workspaces,
+  leaving the user confused about which workspace they were on. Now only
+  windows on the active workspace are considered.
+
+- **`restart()` now cleans up the control socket before `exec()`.** The
+  previous implementation called `exec()` without removing the Unix socket
+  file or the identity ficha, which could prevent the new process from
+  binding to the socket on restart. The socket and ficha are now removed
+  before `exec()`.
+
+- **Removed dead code `Focus.window_idx`.** The `window_idx` field on the
+  `Focus` struct was set in multiple places but never read for layout or
+  focus determination. The actual focused window in a column is determined
+  by `Column.focused`, not `Focus.window_idx`. The field and all references
+  to it have been removed.
 
 - **`maverick-sys`: `detach_from_terminal` ignored `setsid()` failure.**
   If the process was already a session leader, `setsid()` returns
@@ -168,25 +281,6 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the expected direction instead of always wrapping to the next
   monitor (which was the behaviour of `next`).
 
-=======
-### Fixed
-
-- **Keyboard froze after mouse-focusing a window** (`backend/x11/input.rs`,
-  `grab_buttons`): the catch-all `grab_button` used to intercept clicks for
-  focus-follows-click was armed with `pointer_mode=SYNC` **and**
-  `keyboard_mode=SYNC`. Every matching `ButtonPress` therefore froze both
-  devices, but `on_button_press` only ever called
-  `allow_events(REPLAY_POINTER, ...)`, which releases the pointer but not
-  the keyboard. The keyboard stayed frozen at the X11 level after clicking
-  any managed window, breaking WM shortcuts and the client's own key input
-  — most noticeable with clients that grab focus aggressively on click
-  (Firefox, Minecraft). `keyboard_mode` changed to `ASYNC` (standard
-  practice, matches dwm/i3-style click-to-focus grabs); `pointer_mode`
-  stays `SYNC` since `on_button_press` still needs to conditionally replay
-  or keep it frozen for drags.
-  Confirmed fixed in real usage (mouse click-to-focus, tested against
-  Firefox and Minecraft)
-  
 ## [0.18.2] — 2026-07-19
 
 Two prior attempts at the next release (internally called "0.18.4" in

@@ -30,7 +30,7 @@
 ### Key Features
 - 🦅 Horizontally scrollable column-based layout.
 - ⚡ Lean footprint — no cairo/pango/Xft, no async runtime, single static binary.
-- 🔲 Three layout modes: Column (stable), Monocle & Grid (experimental).
+- 🔲 Two layout modes: Column (scrollable, default) & Grid.
 - 🖼 Real maximize (workarea-fill, keeps border) alongside fullscreen.
 - 🖥 Multi-monitor support via RandR.
 - 🧩 Floating + fullscreen window support.
@@ -105,14 +105,11 @@ Type=XSession
 
 ## 🔲 Layouts
 
-maverick ships three layout modes switchable at runtime. 
-
-*Note: The `Monocle` and `Grid` modes are currently experimental and still under active development.*
+maverick ships two layout modes switchable at runtime.
 
 | Mode | Shortcut | Description |
 | --- | --- | --- |
 | **Column** | `Super+T` | Scrollable columns (default). Each window lives in its own column. |
-| **Monocle** | `Super+M` | One window at a time, fullscreen within the workarea. |
 | **Grid** | `Super+G` | All windows in a uniform grid. |
 
 Cycle through all modes with `Super+Space`.
@@ -191,7 +188,6 @@ Cycle through all modes with `Super+Space`.
 | `Super+F5` | Hot restart maverick in-place |
 | `Super+Space` | Cycle layout modes |
 | `Super+T` | Set Column layout |
-| `Super+M` | Set Monocle layout |
 | `Super+G` | Set Grid layout |
 
 > `Super+Shift+Q` spawns `maverickctl quit --confirm` (falls back to `zenity`/`kdialog`/TTY if `maverick-dialog` isn't installed) so a stray keypress can't kill the session. The whole WM is also controllable from outside over a Unix socket via `maverickctl` — see [Technical Details](#-technical-details).
@@ -336,7 +332,7 @@ Maverick/                    # Cargo workspace
 │   │   ├── engine.rs              Engine::dispatch(Action) -> Vec<Effect>
 │   │   ├── effect.rs               Effect enum (the core/backend seam)
 │   │   ├── present.rs               fullscreen/maximize presentation layer
-│   │   ├── layout.rs                 arrange_columns / arrange_monocle / arrange_grid
+│   │   ├── layout.rs                 arrange_columns / arrange_grid
 │   │   ├── ipc.rs                     state_json / parse_action for the control socket
 │   │   └── tests.rs                   unit tests
 │   └── backend/                 X11 backend — the only place that speaks the protocol
