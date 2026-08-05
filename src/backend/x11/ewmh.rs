@@ -3,17 +3,18 @@ use super::*;
 impl WindowManager {
     pub(super) fn update_workarea(&self) -> Result<(), Box<dyn std::error::Error>> {
         let a = &self.atoms;
-        // _NET_WORKAREA: array de CARDINAL[4] por desktop (x, y, w, h)
         let n = self.engine.cfg.n_tags;
-        let Some(mon) = self.engine.state.monitors.first() else {
+        if self.engine.state.monitors.is_empty() {
             return Ok(());
-        };
-        let mut data = Vec::with_capacity(n * 4);
-        for _ in 0..n {
-            data.push(mon.workarea.x as u32);
-            data.push(mon.workarea.y as u32);
-            data.push(mon.workarea.w);
-            data.push(mon.workarea.h);
+        }
+        let mut data = Vec::with_capacity(self.engine.state.monitors.len() * n * 4);
+        for mon in &self.engine.state.monitors {
+            for _ in 0..n {
+                data.push(mon.workarea.x as u32);
+                data.push(mon.workarea.y as u32);
+                data.push(mon.workarea.w);
+                data.push(mon.workarea.h);
+            }
         }
         self.conn
             .change_property32(
@@ -25,14 +26,14 @@ impl WindowManager {
             )?
             .check()?;
 
-        // _NET_DESKTOP_GEOMETRY
+        let first_mon = &self.engine.state.monitors[0];
         self.conn
             .change_property32(
                 PropMode::REPLACE,
                 self.root,
                 a.net_desktop_geometry,
                 AtomEnum::CARDINAL,
-                &[mon.workarea.w, mon.workarea.h],
+                &[first_mon.workarea.w, first_mon.workarea.h],
             )?
             .check()?;
         Ok(())
@@ -139,13 +140,6 @@ impl WindowManager {
             data: ClientMessageData::from([proto, x11rb::CURRENT_TIME, 0, 0, 0]),
         };
         let _ = self.conn.send_event(false, win, EventMask::NO_EVENT, ev);
-        Ok(())
-    }
-
-    pub(super) fn set_focus_x(&self, win: Window) -> Result<(), Box<dyn std::error::Error>> {
-        let _ = self
-            .conn
-            .set_input_focus(InputFocus::PARENT, win, x11rb::CURRENT_TIME);
         Ok(())
     }
 }

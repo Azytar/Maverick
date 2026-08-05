@@ -1,5 +1,5 @@
-// maverick/src/layout.rs
-// Niri-inspired columnar layout engine.
+// maverick/src/core/layout.rs
+// Columnar layout engine (niri-style).
 //
 // Key idea: coordinates are COMPUTED, never stored.
 // Column positions = f(scroll offset, column widths, gap).
@@ -23,15 +23,14 @@ pub fn arrange(state: &State, mon_idx: usize, cfg: &Cfg, out: &mut Placements) {
     out.clear();
     match layout {
         LayoutKind::Column => arrange_columns(state, mon, cfg, out),
-        LayoutKind::Monocle => arrange_monocle(state, mon, cfg, out),
         LayoutKind::Grid => arrange_grid(state, mon, cfg, out),
     }
 }
 
 // ─── Column layout ────────────────────────────────────────────────────────────
 //
-// Each column sits at a fixed x position (derived from scroll + sum of prior
-// col widths + gaps). Windows within a column split vertically.
+// Each column sits at a fixed x position (derived from sum of prior
+// column widths + gaps). Windows within a column split vertically.
 // The focused window in a focused column gets a larger share (split_bias).
 
 fn arrange_columns(state: &State, mon: &Monitor, cfg: &Cfg, out: &mut Placements) {
@@ -131,26 +130,6 @@ fn arrange_columns(state: &State, mon: &Monitor, cfg: &Cfg, out: &mut Placements
         g.w = g.w.min(wa.w);
         g.h = g.h.min(wa.h);
         out.push((win, g, cfg.border_w));
-    }
-}
-
-// ─── Monocle layout ───────────────────────────────────────────────────────────
-
-fn arrange_monocle(state: &State, mon: &Monitor, cfg: &Cfg, out: &mut Placements) {
-    let ws = mon.ws();
-    let wa = mon.workarea;
-
-    let all_wins: Vec<WindowId> = ws
-        .columns
-        .iter()
-        .flat_map(|c| c.windows.iter().copied())
-        .chain(ws.floats.iter().copied())
-        .collect();
-
-    for win in all_wins {
-        if state.clients.contains_key(&win) {
-            out.push((win, Rect::new(wa.x, wa.y, wa.w, wa.h), cfg.border_w));
-        }
     }
 }
 

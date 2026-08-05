@@ -89,12 +89,6 @@ mod unit_tests {
         engine.dispatch(Action::CycleLayout);
         assert_eq!(
             engine.state.monitors[0].workspaces[0].layout,
-            LayoutKind::Monocle
-        );
-
-        engine.dispatch(Action::CycleLayout);
-        assert_eq!(
-            engine.state.monitors[0].workspaces[0].layout,
             LayoutKind::Grid
         );
 
@@ -102,7 +96,7 @@ mod unit_tests {
         assert_eq!(
             engine.state.monitors[0].workspaces[0].layout,
             LayoutKind::Column,
-            "layout cycle must wrap Column→Monocle→Grid→Column",
+            "layout cycle must wrap Column→Grid→Column",
         );
     }
 
@@ -146,7 +140,6 @@ mod unit_tests {
         use crate::types::Workspace;
         let mut ws = Workspace::new(0);
         assert_eq!(ws.layout, LayoutKind::Column);
-        assert_eq!(ws.cycle_layout(), LayoutKind::Monocle);
         assert_eq!(ws.cycle_layout(), LayoutKind::Grid);
         assert_eq!(ws.cycle_layout(), LayoutKind::Column);
     }
@@ -169,10 +162,7 @@ mod unit_tests {
             focused: 0,
             width: 600,
         });
-        ws.focus = Focus {
-            column_idx: 0,
-            window_idx: 0,
-        };
+        ws.focus = Focus { column_idx: 0 };
         engine.state.monitors[0].focused = Some(10);
         engine
     }
@@ -212,10 +202,7 @@ mod unit_tests {
             focused: 0,
             width: 800,
         });
-        ws.focus = Focus {
-            column_idx: 0,
-            window_idx: 0,
-        };
+        ws.focus = Focus { column_idx: 0 };
         engine.state.monitors[0].focused = Some(10);
 
         engine.state.apply_move_dir(crate::types::Dir::Right);
@@ -236,10 +223,7 @@ mod unit_tests {
             focused: 0,
             width: 600,
         });
-        ws.focus = Focus {
-            column_idx: 0,
-            window_idx: 0,
-        };
+        ws.focus = Focus { column_idx: 0 };
         engine.state.monitors[0].focused = Some(10);
 
         let changed = engine.state.apply_move_dir(crate::types::Dir::Right);

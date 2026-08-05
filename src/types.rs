@@ -129,7 +129,6 @@ impl Column {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Focus {
     pub column_idx: usize,
-    pub window_idx: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -148,10 +147,7 @@ impl Workspace {
         Self {
             tag,
             columns: Vec::new(),
-            focus: Focus {
-                column_idx: 0,
-                window_idx: 0,
-            },
+            focus: Focus { column_idx: 0 },
             scroll: 0,
             floats: Vec::new(),
             layout: LayoutKind::Column,
@@ -170,13 +166,12 @@ impl Workspace {
         self.columns.get(self.focus.column_idx)?.focused_win()
     }
 
-    /// Advance this workspace's layout Column→Monocle→Grid→Column.
+    /// Advance this workspace's layout Column→Grid→Column.
     /// Pure state mutation (no X11); the single source of truth shared by the
     /// backend's `do_action` and the core `Engine`.
     pub fn cycle_layout(&mut self) -> LayoutKind {
         self.layout = match self.layout {
-            LayoutKind::Column => LayoutKind::Monocle,
-            LayoutKind::Monocle => LayoutKind::Grid,
+            LayoutKind::Column => LayoutKind::Grid,
             LayoutKind::Grid => LayoutKind::Column,
         };
         self.layout
@@ -190,7 +185,6 @@ impl Workspace {
             col.windows.push(window);
             self.columns.push(col);
             self.focus.column_idx = 0;
-            self.focus.window_idx = 0;
         } else {
             // Second window onwards: 75% of the workarea
             let new_col_w = (workarea_w as f32 * 0.75) as u32;
@@ -198,11 +192,9 @@ impl Workspace {
             new_col.windows.push(window);
             self.columns.push(new_col);
             self.focus.column_idx = self.columns.len() - 1;
-            self.focus.window_idx = 0;
         }
     }
 
-    /// P3: &mut self — no clone needed at call sites
     /// P3: &mut self — no clone needed at call sites
     pub fn remove_window(&mut self, win: WindowId) {
         if let Some(fi) = self.floats.iter().position(|&w| w == win) {
@@ -229,14 +221,8 @@ impl Workspace {
 
         if self.columns.is_empty() {
             self.focus.column_idx = 0;
-            self.focus.window_idx = 0;
         } else if self.focus.column_idx >= self.columns.len() {
             self.focus.column_idx = self.columns.len() - 1;
-            let col = &self.columns[self.focus.column_idx];
-            self.focus.window_idx = col.focused.min(col.windows.len().saturating_sub(1));
-        } else {
-            let col = &self.columns[self.focus.column_idx];
-            self.focus.window_idx = col.focused.min(col.windows.len().saturating_sub(1));
         }
     }
 }
@@ -531,15 +517,13 @@ pub enum Dir {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutKind {
-    Column,  // niri-style: one or more windows per column, columns side by side
-    Monocle, // one window fills workarea
-    Grid,    // equal grid
+    Column, // niri-style: one or more windows per column, columns side by side
+    Grid,   // equal grid
 }
 
 impl LayoutKind {
     pub fn from_str(s: &str) -> Self {
         match s {
-            "monocle" => Self::Monocle,
             "grid" => Self::Grid,
             _ => Self::Column,
         }
@@ -547,7 +531,6 @@ impl LayoutKind {
     pub fn symbol(&self) -> &'static str {
         match self {
             Self::Column => "[|]",
-            Self::Monocle => "[M]",
             Self::Grid => "[#]",
         }
     }
@@ -714,12 +697,10 @@ impl State {
                         Dir::Left if ci > 0 => {
                             ws.columns.swap(ci, ci - 1);
                             ws.focus.column_idx = ci - 1;
-                            ws.focus.window_idx = 0;
                         }
                         Dir::Right if ci + 1 < n_cols => {
                             ws.columns.swap(ci, ci + 1);
                             ws.focus.column_idx = ci + 1;
-                            ws.focus.window_idx = 0;
                         }
                         _ => return false,
                     }
@@ -734,7 +715,6 @@ impl State {
                     new_col.focused = 0;
                     ws.columns.insert(insert_pos, new_col);
                     ws.focus.column_idx = insert_pos;
-                    ws.focus.window_idx = 0;
                 }
             }
             Dir::Up | Dir::Down => {
@@ -752,7 +732,6 @@ impl State {
                     };
                     col.windows.swap(ri, new_ri);
                     col.focused = new_ri;
-                    ws.focus.window_idx = new_ri;
                 } else {
                     return false;
                 }

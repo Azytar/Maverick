@@ -1,4 +1,4 @@
-// maverick/src/wm.rs
+// maverick/src/backend/x11/mod.rs
 // Window manager core — niri-style columnar layout, real bar, clean coords.
 
 use std::collections::BTreeMap;

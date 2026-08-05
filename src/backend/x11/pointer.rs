@@ -215,11 +215,8 @@ impl WindowManager {
                 c.flags.set(WinFlags::FLOAT);
             }
         } else if self.engine.cfg.focus_mouse {
-            if let Some(cw) = self.find_client(e.event) {
-                if self.engine.state.monitors[self.engine.state.sel_mon].focused != Some(cw) {
-                    self.focus(Some(cw))?;
-                }
-            }
+            // Focus-follows-mouse is handled via on_enter (EnterNotify)
+            // to avoid an X11 query_tree round-trip on every motion event.
         }
         Ok(())
     }

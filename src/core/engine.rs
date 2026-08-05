@@ -185,9 +185,6 @@ impl Engine {
             ws.columns[target].windows.extend(wins);
             ws.columns.retain(|c| !c.windows.is_empty());
             ws.focus.column_idx = target.min(ws.columns.len().saturating_sub(1));
-            if let Some(col) = ws.columns.get(ws.focus.column_idx) {
-                ws.focus.window_idx = col.focused.min(col.windows.len().saturating_sub(1));
-            }
         }
         // Compute ideal scroll AFTER collapsing (not before) so it reflects
         // the new column count and positions.
@@ -230,6 +227,12 @@ impl Engine {
             _ => (mi + 1) % n,
         };
         let src_ws = self.state.clients.get(&win).map_or(0, |c| c.workspace);
+        let src_ws = src_ws.min(
+            self.state.monitors[new_mi]
+                .workspaces
+                .len()
+                .saturating_sub(1),
+        );
         let is_float = self
             .state
             .clients
@@ -415,7 +418,22 @@ impl Engine {
             }
             Dir::Next | Dir::Prev => {
                 let focused = self.state.monitors[mi].focused;
+                let ws_i = self.state.monitors[mi].active_ws;
                 let stack = &self.state.monitors[mi].focus_stack;
+                if stack.is_empty() {
+                    return;
+                }
+                // Only consider windows on the active workspace.
+                let stack: Vec<WindowId> = stack
+                    .iter()
+                    .copied()
+                    .filter(|&w| {
+                        self.state
+                            .clients
+                            .get(&w)
+                            .is_some_and(|c| c.workspace == ws_i)
+                    })
+                    .collect();
                 if stack.is_empty() {
                     return;
                 }
@@ -430,7 +448,7 @@ impl Engine {
                             };
                             Some(stack[ni])
                         }
-                        None => return, // focused not in stack -> stale
+                        None => Some(stack[0]),
                     },
                     None => Some(stack[0]),
                 }

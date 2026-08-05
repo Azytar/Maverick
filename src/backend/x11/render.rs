@@ -233,14 +233,8 @@ impl WindowManager {
             }
 
             // unfocus previous — only if we're actually about to focus the new one
-            let prev = self
-                .engine
-                .state
-                .monitors
-                .get(self.engine.state.sel_mon)
-                .and_then(|m| m.focused);
-            if prev != valid_win {
-                if let Some(pw) = prev {
+            if prev_focused != valid_win {
+                if let Some(pw) = prev_focused {
                     if self.engine.state.clients.contains_key(&pw) {
                         self.unfocus(pw)?;
                     }

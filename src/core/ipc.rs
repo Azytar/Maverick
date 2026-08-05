@@ -98,7 +98,6 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
 pub fn layout_name(l: LayoutKind) -> &'static str {
     match l {
         LayoutKind::Column => "column",
-        LayoutKind::Monocle => "monocle",
         LayoutKind::Grid => "grid",
     }
 }
@@ -109,7 +108,7 @@ pub fn layout_name(l: LayoutKind) -> &'static str {
 ///   focus-left|right|up|down|next|prev
 ///   move-left|right|up|down|next|prev
 ///   kill | toggle-float | toggle-fullscreen | toggle-bar
-///   layout column|monocle|grid | cycle-layout
+///   layout column|grid | cycle-layout
 ///   grow-col `<px>` | shrink-col `<px>`
 ///   new-column | collapse-column
 ///   view `<n>` | move-to-ws `<n>`   (1-based workspace number)
@@ -143,7 +142,6 @@ pub fn parse_action(input: &str) -> Option<Action> {
 
         "layout" => match it.next()? {
             "column" => Some(Action::SetLayout(LayoutKind::Column)),
-            "monocle" => Some(Action::SetLayout(LayoutKind::Monocle)),
             "grid" => Some(Action::SetLayout(LayoutKind::Grid)),
             _ => None,
         },
@@ -222,8 +220,8 @@ mod tests {
     #[test]
     fn parses_layout_and_ws() {
         assert!(matches!(
-            parse_action("layout monocle"),
-            Some(Action::SetLayout(LayoutKind::Monocle))
+            parse_action("layout grid"),
+            Some(Action::SetLayout(LayoutKind::Grid))
         ));
         // view is 1-based externally, 0-based internally.
         assert!(matches!(parse_action("view 3"), Some(Action::View(2))));

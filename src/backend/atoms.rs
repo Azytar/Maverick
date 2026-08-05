@@ -1,13 +1,13 @@
-// rustwm/src/atoms.rs
-// EWMH and ICCCM atom definitions and helpers
-// This is where RustWM beats dwm: full EWMH compliance
-// ensures file upload dialogs, Flameshot, portals work correctly
+// maverick/src/backend/atoms.rs
+// EWMH and ICCCM atom definitions and helpers.
+// Full EWMH compliance ensures file upload dialogs, screenshot tools, and
+// desktop portals work correctly.
 
 use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
 use x11rb::protocol::xproto::ConnectionExt as XConnExt;
 
-/// All atoms used by `RustWM`
+/// All atoms used by `maverick`
 /// Grouped by protocol for clarity
 // All atoms are fetched for _NET_SUPPORTED even if not directly used in WM logic
 #[derive(Debug, Clone, Copy)]

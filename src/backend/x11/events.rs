@@ -43,7 +43,6 @@ impl WindowManager {
         e: UnmapNotifyEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.engine.state.clients.contains_key(&e.window) {
-            // A dock being withdrawn should release its reserved space.
             if self.docks.contains_key(&e.window) {
                 self.remove_dock(e.window)?;
             }
@@ -52,7 +51,16 @@ impl WindowManager {
         if e.response_type & 0x80 != 0 {
             let _ = self.set_wm_state(e.window, 0);
         } else {
-            self.unmanage(e.window, false)?;
+            let _ = self.set_wm_state(e.window, 0);
+            let mi = self
+                .engine
+                .state
+                .clients
+                .get(&e.window)
+                .map_or(0, |c| c.monitor);
+            if self.engine.state.monitors.get(mi).and_then(|m| m.focused) == Some(e.window) {
+                self.focus_best(mi)?;
+            }
         }
         Ok(())
     }
@@ -165,27 +173,39 @@ impl WindowManager {
                     self.engine.state.sel_mon =
                         self.engine.state.sel_mon.min(n_mons.saturating_sub(1));
 
-                    // Re-assign every client to monitor 0 / workspace 0 and
-                    // insert it into the column/float structure.
+                    // Re-assign every client to a valid monitor/workspace,
+                    // preserving the original assignment where possible.
                     let dw = self.engine.cfg.default_col_w;
                     for win in old_clients {
-                        // Update client metadata
                         if let Some(c) = self.engine.state.clients.get_mut(&win) {
-                            c.monitor = 0;
-                            c.workspace = 0;
+                            c.monitor = c.monitor.min(n_mons.saturating_sub(1));
+                            c.workspace = c.workspace.min(
+                                self.engine.state.monitors[c.monitor]
+                                    .workspaces
+                                    .len()
+                                    .saturating_sub(1),
+                            );
                         }
-                        // Re-insert into the workspace structure
                         let is_float = self
                             .engine
                             .state
                             .clients
                             .get(&win)
                             .is_some_and(crate::types::Client::is_float);
-                        let workarea_w = self.engine.state.monitors[0].workarea.w;
+                        let mi = self.engine.state.clients.get(&win).map_or(0, |c| c.monitor);
+                        let ws_i = self
+                            .engine
+                            .state
+                            .clients
+                            .get(&win)
+                            .map_or(0, |c| c.workspace);
+                        let workarea_w = self.engine.state.monitors[mi].workarea.w;
                         if is_float {
-                            self.engine.state.monitors[0].workspaces[0].floats.push(win);
+                            self.engine.state.monitors[mi].workspaces[ws_i]
+                                .floats
+                                .push(win);
                         } else {
-                            self.engine.state.monitors[0].workspaces[0]
+                            self.engine.state.monitors[mi].workspaces[ws_i]
                                 .add_tiled(win, dw, workarea_w);
                         }
                     }
@@ -197,6 +217,9 @@ impl WindowManager {
                     {
                         old_mon.screen = new_mon.screen;
                         old_mon.workarea = new_mon.workarea;
+                    }
+                    for i in 0..self.engine.state.monitors.len() {
+                        self.arrange(i)?;
                     }
                 }
 
@@ -391,17 +414,8 @@ impl WindowManager {
 
     pub(super) fn on_focus_in(
         &mut self,
-        e: FocusInEvent,
+        _e: FocusInEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if e.mode != NotifyMode::NORMAL || e.detail == NotifyDetail::INFERIOR {
-            return Ok(());
-        }
-        let focused = self.engine.state.monitors[self.engine.state.sel_mon].focused;
-        if let (Some(fw), Some(cw)) = (focused, self.find_client(e.event)) {
-            if cw != fw {
-                let _ = self.set_focus_x(fw);
-            }
-        }
         Ok(())
     }
 

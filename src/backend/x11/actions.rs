@@ -99,6 +99,12 @@ impl WindowManager {
     /// fight over X11 grabs simultaneously.
     pub(super) fn restart(&mut self) {
         use std::os::unix::process::CommandExt;
+        // Tear down the control socket and identity ficha before exec
+        // so the new process starts with a clean slate.
+        if !self.instance_name.is_empty() {
+            maverick_sys::identity::cleanup_meta(&self.instance_name);
+        }
+        drop(self.control.take());
         if let Ok(exe) = std::env::current_exe() {
             let err = std::process::Command::new(exe).exec();
             log::error!("restart exec failed: {err}");
