@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod unit_tests {
     use crate::config::Cfg;
-    use crate::core::{Effect, Engine};
+    use crate::core::Engine;
     use crate::types::{Action, LayoutKind, Monitor, Rect};
 
     // 1. Extract config into a helper to keep each test clean.
@@ -10,8 +10,6 @@ mod unit_tests {
         Cfg {
             border_w: 2,
             gaps: 6,
-            bar_height: 22,
-            top_bar: true,
             n_tags: 9,
             default_col_w: 700,
             split_bias: 0.6,
@@ -20,10 +18,6 @@ mod unit_tests {
             col_normal: 0,
             col_focused: 0,
             col_urgent: 0,
-            col_bar_bg: 0,
-            col_bar_fg: 0,
-            col_bar_sel: 0,
-            col_bar_occ: 0,
             tag_names: vec!["1", "2", "3", "4", "5", "6", "7", "8", "9"],
             keybinds: vec![],
             rules: vec![],
@@ -41,40 +35,8 @@ mod unit_tests {
         engine
             .state
             .monitors
-            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 22, true, 9));
+            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 9));
         engine
-    }
-
-    #[test]
-    fn test_toggle_bar_hides_and_shows() {
-        let mut engine = setup_engine();
-        assert!(
-            engine.state.monitors[0].show_bar,
-            "bar should start visible"
-        );
-
-        // Action 1: Hide the bar
-        let cmds_hide = engine.dispatch(Action::ToggleBar);
-        assert!(
-            !engine.state.monitors[0].show_bar,
-            "bar not hidden in state"
-        );
-        assert!(
-            cmds_hide
-                .iter()
-                .any(|cmd| matches!(cmd, Effect::UpdateBar(_))),
-            "missing command to tell backend to redraw the bar"
-        );
-
-        // Action 2: Show the bar again
-        let cmds_show = engine.dispatch(Action::ToggleBar);
-        assert!(engine.state.monitors[0].show_bar, "bar was not shown again");
-        assert!(
-            cmds_show
-                .iter()
-                .any(|cmd| matches!(cmd, Effect::UpdateBar(_))),
-            "missing redraw command on the second pass"
-        );
     }
 
     #[test]

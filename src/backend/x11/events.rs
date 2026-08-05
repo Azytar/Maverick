@@ -156,14 +156,6 @@ impl WindowManager {
                 // Collect all managed windows before replacing the monitor vec.
                 let old_clients: Vec<Window> = self.engine.state.clients.keys().copied().collect();
 
-                // Free old bar resources before replacing monitors
-                for mon in &self.engine.state.monitors {
-                    if let (Some(bw), Some(gc)) = (mon.bar_win, mon.bar_gc) {
-                        let _ = self.conn.free_gc(gc);
-                        let _ = self.conn.destroy_window(bw);
-                    }
-                }
-
                 if len_changed {
                     // Replace monitors with fresh ones (empty workspaces).
                     self.engine.state.monitors = new_mons;
@@ -223,12 +215,6 @@ impl WindowManager {
                     }
                 }
 
-                // Recreate bar_wins with the new geometry.
-                #[cfg(feature = "internal-bar")]
-                for mon_idx in 0..self.engine.state.monitors.len() {
-                    self.create_bar_window(mon_idx)?;
-                }
-
                 // Update EWMH properties for external taskbars
                 self.update_ewmh_desktops()?;
                 self.update_workarea()?;
@@ -265,23 +251,15 @@ impl WindowManager {
 
         if self.engine.state.clients.contains_key(&e.window) {
             let win = e.window;
-            let bar_relevant;
             if e.atom == self.atoms.net_wm_name || e.atom == u32::from(AtomEnum::WM_NAME) {
                 self.refresh_title(win)?;
-                bar_relevant = true;
             } else if e.atom == u32::from(AtomEnum::WM_HINTS) {
                 self.refresh_hints(win)?;
-                bar_relevant = true;
-            } else {
-                // Other property changes (size hints, ICCCM state, etc.) don't
-                // affect the bar — skip the redraw to avoid thrashing during
-                // Firefox page loads, GTK tooltip updates, etc.
-                bar_relevant = false;
             }
-            if bar_relevant {
-                let mi = self.engine.state.clients.get(&win).map_or(0, |c| c.monitor);
-                self.draw_bar(mi);
-            }
+            // Other property changes (size hints, ICCCM state, etc.) need no
+            // action here — `publish_state()` in the event loop diffs the JSON
+            // snapshot and pushes updates to IPC subscribers (external bars,
+            // maverickctl) exactly when something visible changed.
         }
         Ok(())
     }
@@ -335,13 +313,6 @@ impl WindowManager {
                 if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
                     c.flags.set(WinFlags::URGENT);
                 }
-                let mi = self
-                    .engine
-                    .state
-                    .clients
-                    .get(&e.window)
-                    .map_or(0, |c| c.monitor);
-                self.draw_bar(mi);
             }
         } else if e.type_ == self.atoms.net_current_desktop {
             let ws = e.data.as_data32()[0] as usize;
@@ -394,18 +365,6 @@ impl WindowManager {
             if let Some(cw) = self.find_client(e.event) {
                 if self.engine.state.monitors[self.engine.state.sel_mon].focused != Some(cw) {
                     self.focus(Some(cw))?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn on_expose(&mut self, e: ExposeEvent) -> Result<(), Box<dyn std::error::Error>> {
-        if e.count == 0 {
-            for mi in 0..self.engine.state.monitors.len() {
-                if self.engine.state.monitors[mi].bar_win == Some(e.window) {
-                    self.draw_bar(mi);
-                    break;
                 }
             }
         }

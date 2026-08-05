@@ -36,7 +36,7 @@
 - 🧩 Floating + fullscreen window support.
 - 🧱 External dock/bar support (Waybar, Polybar, …) via EWMH struts.
 - 🔌 `maverickctl` control socket — list/state/dispatch/restart/reload/quit any running instance.
-- 📐 Highly configurable (gaps, borders, bar, split bias).
+- 📐 Highly configurable (gaps, borders, split bias).
 - 🔧 Declarative window rules.
 - 🚀 Autostart programs.
 - 📋 EWMH compliant.
@@ -63,13 +63,6 @@ cargo build --release --workspace
 (`--workspace` is needed because the root `Cargo.toml` is itself the
 `maverick` package — without it, Cargo only builds `maverick` and
 skips the `maverick-sys`/`maverick-dialog` binaries.)
-
-Building without the internal status bar (if you drive Waybar/Polybar
-instead — see [Technical Details](#-technical-details)):
-
-```bash
-cargo build --release --workspace --no-default-features
-```
 
 ### Add to PATH
 
@@ -217,8 +210,6 @@ cargo build --release
 ```rust
 border_w:      2,      // border width in pixels
 gaps:          6,      // gap between windows and screen edges (px)
-bar_height:    22,     // status bar height in pixels
-top_bar:       true,   // bar at top (false = bottom)
 n_tags:        9,      // number of workspaces
 default_col_w: 700,    // default column width when created (px)
 split_bias:    0.6,    // focused-row size bonus in a split column (0.0–1.0)
@@ -237,10 +228,6 @@ Default palette: Catppuccin Mocha. All colors are 24-bit hex `0xRRGGBB`:
 col_normal:  0x45475a,  // unfocused window border   (Surface1)
 col_focused: 0x89b4fa,  // focused window border      (Blue)
 col_urgent:  0xf38ba8,  // urgent window border       (Red)
-col_bar_bg:  0x1e1e2e,  // bar background             (Base)
-col_bar_fg:  0xcdd6f4,  // bar foreground / text      (Text)
-col_bar_sel: 0x89b4fa,  // selected workspace badge   (Blue)
-col_bar_occ: 0xa6e3a1,  // occupied workspace dot     (Green)
 
 ```
 
@@ -267,6 +254,25 @@ autostart: vec![
 The compositor starts **before** the WM so every window gets compositing from its first frame. Autostart programs launch after both compositor and WM are ready. `startup_sound` accepts a path to a `.wav` or `.ogg` file; it tries `pw-play → paplay → canberra-gtk-play → mpv → aplay` in order.
 
 > The shipped default `autostart` also launches `/usr/lib/xdg-desktop-portal` and `/usr/lib/xdg-desktop-portal-gtk` — without them, GTK/portal-based file pickers (browser upload dialogs, etc.) never appear.
+
+### Using an external bar
+
+maverick ships **no status bar** — drawing one isn't the WM's job. Use
+polybar, waybar, eww, or similar; the WM reserves screen space for any dock
+that publishes `_NET_WM_STRUT_PARTIAL`/`_NET_WM_STRUT`, so tiled windows never
+overlap it (see `backend/x11/struts.rs`). Launch your bar from `autostart`:
+
+```rust
+autostart: vec![
+    vec!["polybar".into(), "main".into()],
+    // …
+],
+```
+
+For the status text, maverick reads the root window's `WM_NAME` (set with
+`xsetroot -name "…"` or `xsetroot -name "$(date)"`) and exposes it through
+`maverickctl state` / `maverickctl subscribe`, so a bar or script can read it
+without scraping X properties itself.
 
 ---
 
@@ -306,15 +312,13 @@ maverick minimizes abstraction layers by avoiding unnecessary dependencies:
 * **One dispatch seam** — `Engine::dispatch(Action) -> Vec<Effect>` is the *only* path from a keybind or IPC command to state mutation. `Effect` is a semantic vocabulary (`ArrangeMonitor`, `FocusWindow`, `SetFullscreen`, …); the X11 backend's `execute()` is the only place that turns those into protocol calls. A future non-X11 backend would implement `execute()` against the same effects without the core changing.
 * **Fullscreen/maximize as presentation, not a state-machine block** — `core/present.rs` rewrites only the *focused* window's rect (fullscreen → whole screen, maximize → workarea, both keeping precedence over plain layout) and re-arranges on every focus transition, instead of blocking input while a window is fullscreen.
 * **Instance control plane** — `maverick-sys` gives every running instance a PID/display/tty identity and a Unix-socket protocol (`ping`/`identify`/`state`/`dispatch`/`restart`/`reload`/`subscribe`/`quit`). `maverickctl` talks to it: `list`, `state`, `msg <action>`, `subscribe`, `quit[--confirm]`, `quit-all`, `restart`, `reload`, `prune`. Handles several instances on different displays/ttys.
-* **Raw X11 bar rendering** — Status bar drawn with `image_text8` and `poly_fill_rectangle`, no external font libraries. Behind the `internal-bar` Cargo feature (on by default); build with `--no-default-features` to rely on Waybar/Polybar instead.
-* **External dock/bar struts** — Docks are detected via `_NET_WM_WINDOW_TYPE_DOCK`/`_DESKTOP` (never by process name) and reserve space by reading `_NET_WM_STRUT_PARTIAL`/legacy `_NET_WM_STRUT`, tracked per-monitor and released on destroy/unmap.
+* **External dock/bar struts** — Docks are detected via `_NET_WM_WINDOW_TYPE_DOCK`/`_DESKTOP` (never by process name) and reserve space by reading `_NET_WM_STRUT_PARTIAL`/legacy `_NET_WM_STRUT`, tracked per-monitor and released on destroy/unmap. maverick itself ships no status bar — drive Waybar/Polybar/eww and let the WM reserve space for it.
 * **`HashMap` client map** — O(1) window lookups by XID.
-* **Bar batching** — Queue is drained before each `flush()` to avoid O(N) redraws.
 * **O(N) column layout** — Row heights precomputed in a single forward pass.
 * **RandR monitor detection** — Correct workarea accounting for each monitor.
 * **EWMH support** — Including `_NET_WM_STATE`, `_NET_WM_DESKTOP`, `_NET_ACTIVE_WINDOW`, etc.
 * **`exec`-based restart** — Replaces the process in-place, preventing X11 grab race conditions.
-* **`override_redirect` isolation** — Bars and overlays remain invisible to the WM.
+* **`override_redirect` isolation** — External bars and overlays remain invisible to the WM.
 * **Float centering guard** — Skips centering for fullscreen apps (≥90% workarea coverage).
 
 ---
@@ -337,7 +341,6 @@ Maverick/                    # Cargo workspace
 │   │   └── tests.rs                   unit tests
 │   └── backend/                 X11 backend — the only place that speaks the protocol
 │       ├── atoms.rs               EWMH / ICCCM atom cache
-│       ├── bar.rs                  Bar struct: font load + draw() + tag_at_x()
 │       └── x11/                     the running WindowManager, split by concern
 │           ├── mod.rs                 WindowManager, event loop, RandR
 │           ├── manage.rs                window discovery, property reads, client setup
@@ -348,7 +351,6 @@ Maverick/                    # Cargo workspace
 │           ├── pointer.rs                    drag-to-move/resize, click focus
 │           ├── render.rs                      geometry application, focus, restack
 │           ├── struts.rs                       external dock reservation
-│           └── bar.rs                           internal bar window lifecycle (feature-gated)
 ├── maverick-sys/             # libc FFI + instance identity/control-socket/hub/discover
 │   └── src/
 │       ├── identity.rs         per-instance PID/display/tty "ficha"

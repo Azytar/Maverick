@@ -51,7 +51,6 @@ impl WindowManager {
             self.stack_dirty = false;
             self.restack(mon_idx)?;
         }
-        self.draw_bar(mon_idx);
         Ok(())
     }
 

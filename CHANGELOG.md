@@ -16,8 +16,28 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Column→Grid→Column. Only two layout modes ship: **Column** (the
   niri-style scrollable layout, stable) and **Grid**.
 
+- **Internal bar removed.** Drawing a status bar isn't the window manager's
+  job — it duplicated what polybar/waybar/eww already do well, and its removal
+  drops the plain X11 core-font rendering path (`open_font`/`query_font`/
+  `image_text8`/`to_latin1`) entirely. Removed `src/backend/bar.rs` and
+  `src/backend/x11/bar.rs`, the `internal-bar` Cargo feature, the `Bar` struct,
+  `Action::ToggleBar` (+ its `Super+B` keybind and `toggle-bar` IPC verb), the
+  `Effect::UpdateBar`/`SyncBarVisibility`/`RecalcWorkarea` variants, and the
+  `Cfg`/`Monitor` bar fields (`bar_height`, `top_bar`, `col_bar_*`,
+  `internal_bar_height`, `show_bar`, `bar_win`, `bar_gc`). maverick still
+  reserves screen space correctly for any external bar via
+  `_NET_WM_STRUT_PARTIAL` (`backend/x11/struts.rs`, untouched); root `WM_NAME`
+  is still read into `state.status` and exposed over IPC for external bars.
+  See README for a polybar example.
+
 ### Changed
 
+- **`cargo build --release` no longer ships a status bar.** The
+  `internal-bar` feature (previously on by default) is gone, so a default
+  build now expects an external bar (polybar/waybar/eww) launched from
+  `autostart`, relying on the WM's strut reservation. This is a breaking
+  change for anyone who relied on the built-in bar — point your `autostart`
+  at an external bar (see README).
 - **Default config genericized for distribution.** `config.rs`'s
   `load_config()` carried a maintainer's personal machine setup —
   a hardcoded Dvorak `setxkbmap` autostart entry, a wallpaper

@@ -4,8 +4,6 @@ use crate::types::{Action, Dir, LayoutKind};
 pub struct Cfg {
     pub border_w: u32,
     pub gaps: u32,
-    pub bar_height: u32,
-    pub top_bar: bool,
     pub n_tags: usize,
     pub default_col_w: u32, // default width of a new column
     pub split_bias: f32,    // how much extra height focused row gets (0.0-1.0)
@@ -16,10 +14,6 @@ pub struct Cfg {
     pub col_normal: u32, // 0xRRGGBB
     pub col_focused: u32,
     pub col_urgent: u32,
-    pub col_bar_bg: u32,
-    pub col_bar_fg: u32,
-    pub col_bar_sel: u32, // selected workspace highlight
-    pub col_bar_occ: u32, // occupied workspace dot
 
     pub tag_names: Vec<&'static str>,
     pub keybinds: Vec<(u16, u32, Action)>,
@@ -47,8 +41,6 @@ impl Default for Cfg {
         Cfg {
             border_w: 2,
             gaps: 6,
-            bar_height: 22,
-            top_bar: false,
             n_tags: 9,
             default_col_w: 700,
             split_bias: 0.6,
@@ -57,10 +49,6 @@ impl Default for Cfg {
             col_normal: 0x45475a,
             col_focused: 0x89b4fa,
             col_urgent: 0xf38ba8,
-            col_bar_bg: 0x1e1e2e,
-            col_bar_fg: 0xcdd6f4,
-            col_bar_sel: 0x89b4fa,
-            col_bar_occ: 0xa6e3a1,
             tag_names: ["1", "2", "3", "4", "5", "6", "7", "8", "9"].to_vec(),
             keybinds: vec![],
             rules: vec![],
@@ -128,7 +116,6 @@ pub fn load_config() -> Cfg {
         (shs, k!(b'c'), Action::Kill), // Mod4+Shift+C — close focused window
         (shs, XK_SPACE, Action::ToggleFloat),
         (shs, k!(b'f'), Action::ToggleFullscreen),
-        (sup, k!(b'b'), Action::ToggleBar),
         // ── focus navigation ──
         (sup, k!(b'h'), Action::FocusDir(Dir::Left)),
         (sup, k!(b'l'), Action::FocusDir(Dir::Right)),
@@ -187,8 +174,6 @@ pub fn load_config() -> Cfg {
     Cfg {
         border_w: 2,
         gaps: 6,
-        bar_height: 22,
-        top_bar: true,
         n_tags: 9,
         default_col_w: 700,
         split_bias: 0.6,
@@ -199,10 +184,6 @@ pub fn load_config() -> Cfg {
         col_normal: 0x45475a,  // Surface1
         col_focused: 0x89b4fa, // Blue
         col_urgent: 0xf38ba8,  // Red
-        col_bar_bg: 0x1e1e2e,  // Base
-        col_bar_fg: 0xcdd6f4,  // Text
-        col_bar_sel: 0x89b4fa, // Blue (selected ws)
-        col_bar_occ: 0xa6e3a1, // Green (occupied ws)
 
         tag_names: ["1", "2", "3", "4", "5", "6", "7", "8", "9"].to_vec(),
 
@@ -289,6 +270,10 @@ pub fn load_config() -> Cfg {
             // dialogs) silently fail to open.
             vec!["/usr/lib/xdg-desktop-portal-gtk".into()],
             vec!["/usr/lib/xdg-desktop-portal".into()],
+            // Launch an external status bar here. maverick reserves screen
+            // space for it automatically via _NET_WM_STRUT_PARTIAL (see
+            // backend/x11/struts.rs), so windows never overlap it. Example:
+            // vec!["polybar".into(), "main".into()],
             // Set your own wallpaper here, e.g.:
             // vec!["feh".into(), "--bg-fill".into(), "/path/to/wallpaper.png".into()],
         ],

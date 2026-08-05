@@ -304,9 +304,9 @@ impl Client {
 //
 // The layout only ever sees the resulting `workarea` (screen − ReservedArea) and
 // knows nothing about *what* reserved the space. This is deliberately
-// backend-agnostic: on X11 the regions come from the internal bar plus each
-// external dock's `_NET_WM_STRUT[_PARTIAL]`; a future Wayland backend would fill
-// the same regions from layer-shell exclusive zones.
+// backend-agnostic: on X11 the regions come from each external dock's
+// `_NET_WM_STRUT[_PARTIAL]`; a future Wayland backend would fill the same
+// regions from layer-shell exclusive zones.
 
 /// Which screen edge a reservation pushes in from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,19 +317,14 @@ pub enum Edge {
     Right,
 }
 
-/// A single trackable reservation. `owner` identifies the source: the internal
-/// bar uses `ReservedRegion::INTERNAL_BAR`, external docks use their window id.
+/// A single trackable reservation. `owner` identifies the source: external
+/// docks use their window id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReservedRegion {
     pub owner: WindowId,
     pub edge: Edge,
     /// Thickness in px pushed in from `edge`.
     pub thickness: u32,
-}
-
-impl ReservedRegion {
-    /// Sentinel owner id for the internal bar (real X11 window ids are never 0).
-    pub const INTERNAL_BAR: WindowId = 0;
 }
 
 /// Collapsed per-edge reservation totals derived from a set of regions.
@@ -343,7 +338,7 @@ pub struct ReservedArea {
 
 impl ReservedArea {
     /// Collapse trackable regions into per-edge totals. Multiple reservations on
-    /// the same edge stack (e.g. internal bar + a top dock).
+    /// the same edge stack (e.g. two docks both reserving the top).
     pub fn from_regions(regions: &[ReservedRegion]) -> Self {
         let mut a = ReservedArea::default();
         for r in regions {
@@ -370,18 +365,10 @@ impl ReservedArea {
 pub struct Monitor {
     pub screen: Rect,
     pub workarea: Rect, // screen minus reserved (derived)
-    /// Individual trackable reservations (internal bar + external docks).
+    /// Individual trackable reservations (one per external dock).
     pub reserved_regions: Vec<ReservedRegion>,
     /// Collapsed per-edge totals, derived from `reserved_regions`.
     pub reserved: ReservedArea,
-    /// The internal bar's own thickness in px. Authoritative and independent of
-    /// `workarea` — do NOT derive it from `screen.h - workarea.h`, because that
-    /// difference also includes external docks.
-    pub internal_bar_height: u32,
-    pub bar_win: Option<WindowId>,
-    pub bar_gc: Option<u32>, // GC id
-    pub show_bar: bool,
-    pub top_bar: bool,
     pub workspaces: Vec<Workspace>,
     pub active_ws: usize,
     pub focused: Option<WindowId>,
@@ -389,43 +376,20 @@ pub struct Monitor {
 }
 
 impl Monitor {
-    pub fn new(screen: Rect, bar_height: u32, top_bar: bool, n_tags: usize) -> Self {
+    pub fn new(screen: Rect, n_tags: usize) -> Self {
         let workspaces = (0..n_tags).map(|i| Workspace::new(i as u32)).collect();
         let mut m = Self {
             screen,
             workarea: screen,
             reserved_regions: Vec::new(),
             reserved: ReservedArea::default(),
-            internal_bar_height: bar_height,
-            bar_win: None,
-            bar_gc: None,
-            show_bar: true,
-            top_bar,
             workspaces,
             active_ws: 0,
             focused: None,
             focus_stack: Vec::with_capacity(16),
         };
-        m.sync_internal_bar_region();
         m.recalc_geometry();
         m
-    }
-
-    pub fn bar_y(&self) -> i32 {
-        if self.top_bar {
-            self.screen.y
-        } else {
-            self.screen.y + self.screen.h as i32 - self.bar_height() as i32
-        }
-    }
-
-    /// Height of the INTERNAL bar only (0 when hidden). Never includes docks.
-    pub fn bar_height(&self) -> u32 {
-        if self.show_bar {
-            self.internal_bar_height
-        } else {
-            0
-        }
     }
 
     pub fn ws(&self) -> &Workspace {
@@ -464,24 +428,6 @@ impl Monitor {
         removed
     }
 
-    /// Keep the internal bar's own region in sync with `show_bar`/`top_bar`.
-    fn sync_internal_bar_region(&mut self) {
-        self.reserved_regions
-            .retain(|r| r.owner != ReservedRegion::INTERNAL_BAR);
-        if self.show_bar && self.internal_bar_height > 0 {
-            let edge = if self.top_bar {
-                Edge::Top
-            } else {
-                Edge::Bottom
-            };
-            self.reserved_regions.push(ReservedRegion {
-                owner: ReservedRegion::INTERNAL_BAR,
-                edge,
-                thickness: self.internal_bar_height,
-            });
-        }
-    }
-
     /// Recompute `reserved` and `workarea` from `reserved_regions`.
     pub fn recalc_geometry(&mut self) {
         self.reserved = ReservedArea::from_regions(&self.reserved_regions);
@@ -491,13 +437,6 @@ impl Monitor {
         let w = self.screen.w.saturating_sub(r.left + r.right);
         let h = self.screen.h.saturating_sub(r.top + r.bottom);
         self.workarea = Rect::new(x, y, w, h);
-    }
-
-    /// Toggle the internal bar and recompute geometry. `_bar_h` kept for call-site
-    /// compatibility; the authoritative height lives in `internal_bar_height`.
-    pub fn recalc_workarea(&mut self, _bar_h: u32) {
-        self.sync_internal_bar_region();
-        self.recalc_geometry();
     }
 }
 
@@ -546,7 +485,6 @@ pub enum Action {
     MoveDir(Dir),
     ToggleFloat,
     ToggleFullscreen,
-    ToggleBar,
     SetLayout(LayoutKind),
     CycleLayout,
     GrowCol(i32),    // pixels to grow/shrink column width
@@ -746,13 +684,14 @@ impl State {
 mod reservation_tests {
     use super::*;
 
-    fn mon(bar_h: u32, top: bool) -> Monitor {
-        Monitor::new(Rect::new(0, 0, 1920, 1080), bar_h, top, 9)
+    fn mon() -> Monitor {
+        Monitor::new(Rect::new(0, 0, 1920, 1080), 9)
     }
 
     #[test]
-    fn internal_top_bar_reserves_top_only() {
-        let m = mon(22, true);
+    fn top_dock_reserves_top_only() {
+        let mut m = mon();
+        m.set_reserved_region(0x1001, Edge::Top, 22);
         assert_eq!(
             m.reserved,
             ReservedArea {
@@ -761,12 +700,12 @@ mod reservation_tests {
             }
         );
         assert_eq!(m.workarea, Rect::new(0, 22, 1920, 1058));
-        assert_eq!(m.bar_height(), 22);
     }
 
     #[test]
-    fn internal_bottom_bar_reserves_bottom_only() {
-        let m = mon(30, false);
+    fn bottom_dock_reserves_bottom_only() {
+        let mut m = mon();
+        m.set_reserved_region(0x1001, Edge::Bottom, 30);
         assert_eq!(
             m.reserved,
             ReservedArea {
@@ -778,20 +717,21 @@ mod reservation_tests {
     }
 
     #[test]
-    fn internal_and_external_stack_on_same_edge() {
-        // Internal top bar (22) + an external top dock (40) both reserve the top.
-        let mut m = mon(22, true);
-        m.set_reserved_region(0x1001, Edge::Top, 40);
+    fn two_docks_stack_on_same_edge() {
+        // Two top docks (22 + 40) both reserve the top edge.
+        let mut m = mon();
+        m.set_reserved_region(0x1001, Edge::Top, 22);
+        m.set_reserved_region(0x1002, Edge::Top, 40);
         assert_eq!(m.reserved.top, 62);
         assert_eq!(m.workarea, Rect::new(0, 62, 1920, 1018));
     }
 
     #[test]
     fn removing_external_dock_restores_workarea() {
-        let mut m = mon(22, true);
+        let mut m = mon();
         let before = m.workarea;
         m.set_reserved_region(0x1001, Edge::Bottom, 40);
-        assert_eq!(m.workarea, Rect::new(0, 22, 1920, 1018));
+        assert_eq!(m.workarea, Rect::new(0, 0, 1920, 1040));
         assert!(m.remove_reserved_region(0x1001));
         assert_eq!(m.workarea, before);
         // Removing a non-existent owner is a no-op.
@@ -799,35 +739,16 @@ mod reservation_tests {
     }
 
     #[test]
-    fn bar_height_is_authoritative_not_derived() {
-        // Even with a big external dock, bar_height() reports ONLY the internal
-        // bar's own height — never screen.h - workarea.h.
-        let mut m = mon(22, true);
-        m.set_reserved_region(0x1001, Edge::Bottom, 300);
-        assert_eq!(m.bar_height(), 22);
-        assert_eq!(m.screen.h - m.workarea.h, 322);
-    }
-
-    #[test]
     fn left_and_right_docks_shrink_width() {
-        let mut m = mon(0, true); // no internal bar
+        let mut m = mon();
         m.set_reserved_region(0x1, Edge::Left, 50);
         m.set_reserved_region(0x2, Edge::Right, 60);
         assert_eq!(m.workarea, Rect::new(50, 0, 1810, 1080));
     }
 
     #[test]
-    fn hiding_internal_bar_frees_its_reservation() {
-        let mut m = mon(22, true);
-        m.show_bar = false;
-        m.recalc_workarea(22);
-        assert_eq!(m.reserved.top, 0);
-        assert_eq!(m.workarea, m.screen);
-    }
-
-    #[test]
     fn zero_thickness_region_is_removal() {
-        let mut m = mon(0, true);
+        let mut m = mon();
         m.set_reserved_region(0x1, Edge::Top, 40);
         assert_eq!(m.reserved.top, 40);
         m.set_reserved_region(0x1, Edge::Top, 0);

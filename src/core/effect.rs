@@ -49,12 +49,6 @@ pub enum Effect {
         win: WindowId,
         on: bool,
     },
-    /// Recompute a monitor's reserved space / workarea (bar shown/hidden, docks).
-    RecalcWorkarea(usize),
-    /// Repaint the internal bar for a monitor.
-    UpdateBar(usize),
-    /// Sync the internal bar window's mapped state to the monitor's `show_bar`.
-    SyncBarVisibility(usize),
     /// Refresh EWMH desktop properties (_`NET_NUMBER_OF_DESKTOPS`, current, etc.).
     UpdateEwmhDesktops,
     /// Refresh _`NET_CLIENT_LIST`.

@@ -1,5 +1,5 @@
 // maverick/src/backend/x11/mod.rs
-// Window manager core — niri-style columnar layout, real bar, clean coords.
+// Window manager core — niri-style columnar layout, clean coords.
 
 use std::collections::BTreeMap;
 
@@ -12,8 +12,6 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::COPY_DEPTH_FROM_PARENT;
 
 use crate::backend::atoms::Atoms;
-#[cfg(feature = "internal-bar")]
-use crate::backend::bar::Bar;
 use crate::config::Cfg;
 use crate::core::layout::{arrange, ideal_scroll, Placements};
 use crate::core::present::present;
@@ -22,7 +20,6 @@ use crate::log;
 use crate::types::*;
 
 mod actions;
-mod bar;
 mod events;
 mod ewmh;
 mod input;
@@ -38,8 +35,6 @@ pub struct WindowManager {
     root: Window,
     atoms: Atoms,
     pub engine: Engine,
-    #[cfg(feature = "internal-bar")]
-    bar: Bar,
     check_win: Window,
     numlock: u16,
     keymap: BTreeMap<(u16, u32), crate::types::Action>,
@@ -47,9 +42,6 @@ pub struct WindowManager {
     raw_kpk: usize,
     raw_min: u8,
     drag: Option<DragState>,
-    /// Bitmask of monitors whose bar needs a repaint (bit i = monitor i).
-    /// Set by `mark_bar()`; consumed by `flush_bars()` once per event-loop iteration.
-    bar_dirty: u64,
     /// P5: Deferred _`NET_CLIENT_LIST` update. Set on manage/unmanage, flushed in event loop.
     client_list_dirty: bool,
     /// P9: Deferred restack — only restack when floats/fullscreen change.
@@ -92,7 +84,6 @@ impl WindowManager {
             Event::ConfigureRequest(e) => self.on_configure_request(e)?,
             Event::DestroyNotify(e) => self.on_destroy(e)?,
             Event::EnterNotify(e) => self.on_enter(e)?,
-            Event::Expose(e) => self.on_expose(e)?,
             Event::FocusIn(e) => self.on_focus_in(e)?,
             Event::KeyPress(e) => self.on_key(e)?,
             Event::MappingNotify(e) => self.on_mapping(e)?,
@@ -132,14 +123,6 @@ impl WindowManager {
             .delete_property(self.root, self.atoms.net_client_list);
         let _ = self.conn.destroy_window(self.check_win);
 
-        for mon in &self.engine.state.monitors {
-            if let (Some(bw), Some(gc)) = (mon.bar_win, mon.bar_gc) {
-                let _ = self.conn.free_gc(gc);
-                let _ = self.conn.destroy_window(bw);
-            }
-        }
-        #[cfg(feature = "internal-bar")]
-        let _ = self.conn.close_font(self.bar.font_id);
         self.conn.flush()?;
 
         // Tear down the control socket + identity ficha so external tools stop
@@ -172,10 +155,10 @@ impl WindowManager {
         }
 
         // ── flush phase ─────────────────────────────────────────────────────────
-        // Draw any bars that were marked dirty by the previous event batch.
-        // This runs BEFORE blocking on the next event, so all X11 output
-        // from both event dispatch and bar drawing is flushed in one shot.
-        self.flush_bars()?;
+        // Drain the deferred _NET_CLIENT_LIST update (if any manage/unmanage
+        // marked it dirty) before blocking on the next event, so all X11
+        // output from the previous event batch is flushed in one shot.
+        self.flush_client_list()?;
         self.conn.flush()?;
 
         // ── wait phase ─────────────────────────────────────────────────────────
@@ -197,7 +180,7 @@ impl WindowManager {
         self.drain_control()?;
         self.publish_state();
 
-        // Loop back → flush_bars() redraws bar exactly once for the whole batch.
+        // Loop back → flush_client_list() rewrites _NET_CLIENT_LIST at most once per batch.
         Ok(())
     }
     pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -230,9 +213,6 @@ impl WindowManager {
         let atoms = Atoms::new(&conn)?;
         check_no_other_wm(&conn, root)?;
 
-        #[cfg(feature = "internal-bar")]
-        let bar = Bar::load(&conn)?;
-
         let monitors = detect_monitors(&conn, screen, &cfg)?;
         let mut engine = Engine::new(cfg);
         engine.state.monitors = monitors;
@@ -264,8 +244,6 @@ impl WindowManager {
             root,
             atoms,
             engine,
-            #[cfg(feature = "internal-bar")]
-            bar,
             check_win,
             numlock,
             keymap,
@@ -273,7 +251,6 @@ impl WindowManager {
             raw_kpk,
             raw_min,
             drag: None,
-            bar_dirty: 0,
             client_list_dirty: false,
             stack_dirty: false,
             hide_ws_set: std::collections::HashSet::with_capacity(32),
@@ -290,19 +267,13 @@ impl WindowManager {
             docks: std::collections::HashMap::new(),
         };
 
-        // Create bar windows (only when the internal bar feature is enabled).
         let _ = (depth, visual);
-        #[cfg(feature = "internal-bar")]
-        for mon_idx in 0..wm.engine.state.monitors.len() {
-            wm.create_bar_window(mon_idx)?;
-        }
 
         wm.setup_root()?;
         wm.scan_windows()?;
 
         for i in 0..wm.engine.state.monitors.len() {
             wm.arrange(i)?;
-            wm.draw_bar(i);
         }
 
         wm.conn.flush()?;
@@ -358,8 +329,6 @@ fn detect_monitors(
     cfg: &Cfg,
 ) -> Result<Vec<Monitor>, Box<dyn std::error::Error>> {
     use x11rb::protocol::randr::ConnectionExt as _;
-    let bh = cfg.bar_height;
-    let top = cfg.top_bar;
     let nt = cfg.n_tags;
 
     if let Ok(reply) = conn.randr_get_monitors(screen.root, true)?.reply() {
@@ -369,7 +338,7 @@ fn detect_monitors(
                 .iter()
                 .map(|m| {
                     let r = Rect::new(m.x as i32, m.y as i32, m.width as u32, m.height as u32);
-                    Monitor::new(r, bh, top, nt)
+                    Monitor::new(r, nt)
                 })
                 .collect());
         }
@@ -380,7 +349,7 @@ fn detect_monitors(
         screen.width_in_pixels as u32,
         screen.height_in_pixels as u32,
     );
-    Ok(vec![Monitor::new(r, bh, top, nt)])
+    Ok(vec![Monitor::new(r, nt)])
 }
 
 fn build_keymap(cfg: &Cfg) -> BTreeMap<(u16, u32), Action> {

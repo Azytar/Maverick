@@ -50,22 +50,6 @@ impl WindowManager {
                 let _ = self.conn.unmap_window(win);
             }
             Effect::SetFullscreen { win, on } => self.set_fullscreen(win, on)?,
-            Effect::RecalcWorkarea(mi) => {
-                if mi < self.engine.state.monitors.len() {
-                    let bh = self.engine.cfg.bar_height;
-                    self.engine.state.monitors[mi].recalc_workarea(bh);
-                }
-            }
-            Effect::UpdateBar(mi) => self.draw_bar(mi),
-            Effect::SyncBarVisibility(mi) => {
-                if let Some(bw) = self.engine.state.monitors.get(mi).and_then(|m| m.bar_win) {
-                    if self.engine.state.monitors[mi].show_bar {
-                        let _ = self.conn.map_window(bw);
-                    } else {
-                        let _ = self.conn.unmap_window(bw);
-                    }
-                }
-            }
             Effect::UpdateEwmhDesktops => self.update_ewmh_desktops()?,
             Effect::UpdateClientList => self.update_client_list()?,
             Effect::SetCurrentDesktop(ws) => {

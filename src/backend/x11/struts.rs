@@ -95,7 +95,6 @@ impl WindowManager {
                 }
                 self.arrange(mi)?;
                 self.update_workarea()?;
-                self.mark_bar(mi);
             }
             _ => {
                 // No (longer any) strut — drop a previous reservation if present.
@@ -113,7 +112,6 @@ impl WindowManager {
                 self.engine.state.monitors[mi].remove_reserved_region(win);
                 self.arrange(mi)?;
                 self.update_workarea()?;
-                self.mark_bar(mi);
             }
         }
         Ok(())

@@ -37,7 +37,7 @@ Escrito íntegramente en Rust usando `x11rb 0.13` — sin Cairo, sin Pango, sin 
 - 🧩 Soporte de ventanas flotantes y pantalla completa.
 - 🧱 Soporte de docks/barras externas (Waybar, Polybar, …) vía struts EWMH.
 - 🔌 Socket de control `maverickctl` — list/state/dispatch/restart/reload/quit sobre cualquier instancia corriendo.
-- 📐 Gaps, bordes, barra y split bias configurables.
+- 📐 Gaps, bordes y split bias configurables.
 - 🔧 Reglas de ventanas declarativas.
 - 🚀 Autostart de programas.
 - 📋 Compatible con EWMH.
@@ -61,13 +61,6 @@ cargo build --release --workspace
 (`--workspace` es necesario porque el `Cargo.toml` raíz ES el paquete
 `maverick` — sin esa bandera, Cargo solo compila `maverick` y se salta
 los binarios de `maverick-sys`/`maverick-dialog`.)
-
-Compilar sin la barra de estado interna (si usas Waybar/Polybar — ver
-[Detalles Técnicos](#-detalles-técnicos)):
-
-```bash
-cargo build --release --workspace --no-default-features
-```
 
 ### Añadir al PATH
 
@@ -213,8 +206,6 @@ cargo build --release
 ```rust
 border_w:      2,      // ancho del borde en píxeles
 gaps:          6,      // espacio entre ventanas y bordes de pantalla (px)
-bar_height:    22,     // altura de la barra de estado (px)
-top_bar:       true,   // barra arriba (false = abajo)
 n_tags:        9,      // número de workspaces
 default_col_w: 700,    // ancho por defecto de una columna nueva (px)
 split_bias:    0.6,    // cuánta altura extra recibe la ventana enfocada en split
@@ -232,10 +223,6 @@ Paleta por defecto: Catppuccin Mocha. Todos los valores son hex `0xRRGGBB`.
 col_normal:  0x45475a,  // borde ventana sin foco    (Surface1)
 col_focused: 0x89b4fa,  // borde ventana con foco    (Blue)
 col_urgent:  0xf38ba8,  // borde ventana urgente     (Red)
-col_bar_bg:  0x1e1e2e,  // fondo de la barra         (Base)
-col_bar_fg:  0xcdd6f4,  // texto de la barra         (Text)
-col_bar_sel: 0x89b4fa,  // workspace seleccionado    (Blue)
-col_bar_occ: 0xa6e3a1,  // workspace ocupado         (Green)
 ```
 
 ### Nombres de workspaces
@@ -259,6 +246,26 @@ autostart: vec![
 El compositor se inicia **antes** que el WM para que todas las ventanas tengan compositing desde el primer fotograma. Los programas de autostart se lanzan después de que tanto el compositor como el WM estén listos. `startup_sound` acepta una ruta a un archivo `.wav` u `.ogg`; prueba `pw-play → paplay → canberra-gtk-play → mpv → aplay` en ese orden.
 
 > El `autostart` por defecto también lanza `/usr/lib/xdg-desktop-portal` y `/usr/lib/xdg-desktop-portal-gtk` — sin ellos, los selectores de archivos basados en GTK/portal (subir archivos en el navegador, etc.) nunca aparecen.
+
+### Usar una barra externa
+
+maverick **no incluye barra de estado** — dibujarla no es trabajo del WM. Usa
+polybar, waybar, eww o similar; el WM reserva espacio en pantalla para cualquier
+dock que publique `_NET_WM_STRUT_PARTIAL`/`_NET_WM_STRUT`, así que las ventanas
+en mosaico nunca se superponen a la barra (ver `backend/x11/struts.rs`). Lanza tu
+barra desde `autostart`:
+
+```rust
+autostart: vec![
+    vec!["polybar".into(), "main".into()],
+    // …
+],
+```
+
+Para el texto de estado, maverick lee el `WM_NAME` de la ventana raíz (definido
+con `xsetroot -name "…"` o `xsetroot -name "$(date)"`) y lo expone vía
+`maverickctl state` / `maverickctl subscribe`, así que una barra o script puede
+leerlo sin raspar propiedades X por su cuenta.
 
 ---
 
@@ -297,15 +304,13 @@ maverick evita capas de abstracción innecesarias siempre que es posible:
 - **Un único punto de despacho** — `Engine::dispatch(Action) -> Vec<Effect>` es el ÚNICO camino de un atajo o comando IPC hacia la mutación de estado. `Effect` es un vocabulario semántico (`ArrangeMonitor`, `FocusWindow`, `SetFullscreen`, …); `execute()` del backend X11 es el único lugar que convierte eso en llamadas al protocolo. Un futuro backend no-X11 implementaría `execute()` contra los mismos efectos sin tocar el núcleo.
 - **Fullscreen/maximizar como presentación, no como bloqueo de estado** — `core/present.rs` reescribe solo el rect de la ventana *enfocada* (fullscreen → pantalla completa, maximizar → área de trabajo, ambos con precedencia sobre el layout normal) y reorganiza en cada cambio de foco, en vez de bloquear la entrada mientras una ventana está en fullscreen.
 - **Plano de control de instancias** — `maverick-sys` le da a cada instancia corriendo una identidad de PID/display/tty y un protocolo por socket Unix (`ping`/`identify`/`state`/`dispatch`/`restart`/`reload`/`subscribe`/`quit`). `maverickctl` habla con él: `list`, `state`, `msg <acción>`, `subscribe`, `quit[--confirm]`, `quit-all`, `restart`, `reload`, `prune`. Soporta varias instancias en distintos displays/ttys.
-- **Renderizado de barra con X11 puro** — Barra de estado dibujada con `image_text8` y `poly_fill_rectangle`, sin librerías de fuentes externas. Detrás del feature de Cargo `internal-bar` (activo por defecto); compila con `--no-default-features` para depender de Waybar/Polybar en su lugar.
-- **Struts de docks/barras externas** — Los docks se detectan vía `_NET_WM_WINDOW_TYPE_DOCK`/`_DESKTOP` (nunca por nombre de proceso) y reservan espacio leyendo `_NET_WM_STRUT_PARTIAL`/`_NET_WM_STRUT` heredado, rastreados por monitor y liberados al destruirse/desmapearse.
+- **Struts de docks/barras externas** — Los docks se detectan vía `_NET_WM_WINDOW_TYPE_DOCK`/`_DESKTOP` (nunca por nombre de proceso) y reservan espacio leyendo `_NET_WM_STRUT_PARTIAL`/`_NET_WM_STRUT` heredado, rastreados por monitor y liberados al destruirse/desmapearse. maverick no incluye barra de estado — usa Waybar/Polybar/eww y deja que el WM reserve el espacio.
 - **Mapa de clientes `HashMap`** — búsquedas de ventana O(1) por XID.
-- **Batching en la barra** — la cola se vacía antes de cada `flush()` para evitar redibujados O(N).
 - **Layout de columnas O(N)** — las alturas de las filas se precalculan en una sola pasada.
 - **Detección de monitores RandR** — cálculo correcto del área de trabajo para la barra de cada monitor.
 - **Soporte EWMH** — `_NET_WM_STATE`, `_NET_WM_DESKTOP`, `_NET_ACTIVE_WINDOW`, etc.
 - **Reinicio basado en `exec`** — reemplaza el proceso en caliente, sin condición de carrera (race condition) al atrapar X11.
-- **Aislamiento `override_redirect`** — barras y overlays son invisibles para el propio WM.
+- **Aislamiento `override_redirect`** — las barras externas y los overlays son invisibles para el propio WM.
 - **Protección de centrado flotante** — evita que la heurística de centrado falle en herramientas de captura a pantalla completa (≥90% de cobertura del área = sin centrado).
 
 ---
@@ -328,7 +333,6 @@ Maverick/                    # workspace de Cargo
 │   │   └── tests.rs                       tests unitarios
 │   └── backend/                    backend X11 — el único lugar que habla el protocolo
 │       ├── atoms.rs                  caché de átomos EWMH / ICCCM
-│       ├── bar.rs                     struct Bar: carga de fuente + draw() + tag_at_x()
 │       └── x11/                        el WindowManager en ejecución, dividido por tema
 │           ├── mod.rs                    WindowManager, bucle de eventos, RandR
 │           ├── manage.rs                  descubrimiento de ventanas, lectura de propiedades
@@ -339,7 +343,6 @@ Maverick/                    # workspace de Cargo
 │           ├── pointer.rs                      arrastrar para mover/redimensionar, foco por clic
 │           ├── render.rs                        aplicación de geometría, foco, restack
 │           ├── struts.rs                         reserva de espacio para docks externos
-│           └── bar.rs                             ciclo de vida de la ventana de barra interna (feature)
 ├── maverick-sys/             # FFI libc + identidad de instancia/socket de control/hub/discover
 │   └── src/
 │       ├── identity.rs         "ficha" de PID/display/tty por instancia

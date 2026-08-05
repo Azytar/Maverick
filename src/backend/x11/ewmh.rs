@@ -94,6 +94,40 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Read the root window's `WM_NAME` into `state.status`. External bars
+    /// (polybar, waybar, …) and `maverickctl state`/`subscribe` consume this
+    /// through IPC; the WM no longer renders it itself. Kept when the internal
+    /// bar was removed so an external bar still has a status source without
+    /// having to parse `xsetroot` output.
+    pub(super) fn update_status(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let prop = self
+            .conn
+            .get_property(
+                false,
+                self.root,
+                AtomEnum::WM_NAME,
+                AtomEnum::STRING,
+                0,
+                256,
+            )?
+            .reply()?;
+        self.engine.state.status = String::from_utf8_lossy(&prop.value).into_owned();
+        Ok(())
+    }
+
+    /// Drain the deferred `_NET_CLIENT_LIST` update. Set on manage/unmanage and
+    /// flushed once per event-loop iteration (in `run_once`) so a burst of
+    /// window changes rewrites the property at most once. This used to live in
+    /// the bar module's `flush_bars`; it was preserved when the internal bar
+    /// was removed because it is EWMH bookkeeping, not bar drawing.
+    pub(super) fn flush_client_list(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.client_list_dirty {
+            self.client_list_dirty = false;
+            self.update_client_list()?;
+        }
+        Ok(())
+    }
+
     pub(super) fn set_wm_state(
         &self,
         win: Window,

@@ -21,24 +21,12 @@ impl Engine {
     pub fn dispatch(&mut self, action: Action) -> Vec<Effect> {
         let mut cmds = Vec::new();
         match action {
-            Action::ToggleBar => {
-                let mi = self.state.sel_mon;
-                if mi < self.state.monitors.len() {
-                    self.state.monitors[mi].show_bar ^= true;
-                    let bh = self.cfg.bar_height;
-                    self.state.monitors[mi].recalc_workarea(bh);
-                    cmds.push(Effect::SyncBarVisibility(mi));
-                    cmds.push(Effect::ArrangeMonitor(mi));
-                    cmds.push(Effect::UpdateBar(mi));
-                }
-            }
             Action::CycleLayout => {
                 let mi = self.state.sel_mon;
                 if mi < self.state.monitors.len() {
                     let ws_i = self.state.monitors[mi].active_ws;
                     self.state.monitors[mi].workspaces[ws_i].cycle_layout();
                     cmds.push(Effect::ArrangeMonitor(mi));
-                    cmds.push(Effect::UpdateBar(mi));
                 }
             }
             Action::SetLayout(lk) => {
@@ -47,7 +35,6 @@ impl Engine {
                     let ws_i = self.state.monitors[mi].active_ws;
                     self.state.monitors[mi].workspaces[ws_i].layout = lk;
                     cmds.push(Effect::ArrangeMonitor(mi));
-                    cmds.push(Effect::UpdateBar(mi));
                 }
             }
             Action::FocusDir(dir) => self.focus_dir(dir, &mut cmds),
@@ -281,7 +268,6 @@ impl Engine {
         cmds.push(Effect::SetCurrentDesktop(ws_idx));
         cmds.push(Effect::ArrangeMonitor(mi));
         cmds.push(Effect::FocusWindow(self.state.best_focus(mi)));
-        cmds.push(Effect::UpdateBar(mi));
     }
 
     /// Move the focused window to workspace `ws_idx` (same monitor).
@@ -324,7 +310,6 @@ impl Engine {
         cmds.push(Effect::SetWindowDesktop { win, ws: ws_idx });
         cmds.push(Effect::ArrangeMonitor(mi));
         cmds.push(Effect::FocusWindow(self.state.best_focus(mi)));
-        cmds.push(Effect::UpdateBar(mi));
     }
 
     /// Toggle floating for the focused window. Pure state move between the

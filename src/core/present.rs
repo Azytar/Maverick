@@ -5,11 +5,11 @@
 // There are two presentation modes today, both niri-style and tied to focus:
 //
 //   * FULLSCREEN — a fullscreen window that IS the monitor's focused window
-//     covers the whole `screen` (border 0), ignoring the bar and docks, and is
+//     covers the whole `screen` (border 0), ignoring reserved regions, and is
 //     raised above everything.
 //   * MAXIMIZED — a maximized focused window fills the `workarea` (screen minus
-//     bar/docks) keeping its border. It is raised like fullscreen but never
-//     paints over reserved regions.
+//     reserved regions) keeping its border. It is raised like fullscreen but
+//     never paints over reserved regions.
 //
 // A window in either mode that is NOT focused keeps its normal layout_rect — it
 // is just another tiled/floating window until it regains focus. Because the
@@ -63,7 +63,7 @@ mod tests {
 
     fn setup() -> (State, Cfg) {
         let mut state = State::new();
-        let mut mon = Monitor::new(Rect::new(0, 0, 800, 600), 0, true, 1);
+        let mut mon = Monitor::new(Rect::new(0, 0, 800, 600), 1);
         mon.workarea = Rect::new(0, 0, 800, 600);
         mon.workspaces[0].layout = LayoutKind::Column;
         state.monitors.push(mon);
@@ -133,7 +133,7 @@ mod tests {
         let (mut state, cfg) = setup();
         add(&mut state, 1);
         add(&mut state, 2);
-        // Reserve a 22px top bar so workarea != screen.
+        // Reserve a 22px top region so workarea != screen.
         state.monitors[0].workarea = Rect::new(0, 22, 800, 578);
         state
             .clients
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(rect, state.monitors[0].workarea);
         assert_ne!(
             rect, state.monitors[0].screen,
-            "maximized must respect the bar"
+            "maximized must respect reserved regions"
         );
     }
 

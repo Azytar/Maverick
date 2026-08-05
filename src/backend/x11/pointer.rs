@@ -22,34 +22,6 @@ impl WindowManager {
             return Ok(());
         }
 
-        // ── Bar click: switch workspace on the clicked monitor ───────────────
-        #[cfg(feature = "internal-bar")]
-        for mon_i in 0..self.engine.state.monitors.len() {
-            if self.engine.state.monitors[mon_i].bar_win == Some(e.event) {
-                if let Some(ws_i) = self.bar.tag_at_x(e.event_x, &self.engine.cfg.tag_names) {
-                    if ws_i < self.engine.state.monitors[mon_i].workspaces.len() {
-                        // Switch focus to clicked monitor if different.
-                        if mon_i != self.engine.state.sel_mon {
-                            if let Some(fw) =
-                                self.engine.state.monitors[self.engine.state.sel_mon].focused
-                            {
-                                let _ = self.unfocus(fw);
-                            }
-                            self.engine.state.sel_mon = mon_i;
-                        }
-                        self.engine.state.monitors[mon_i].active_ws = ws_i;
-                        let scroll =
-                            ideal_scroll(&self.engine.state.monitors[mon_i], &self.engine.cfg);
-                        self.engine.state.monitors[mon_i].workspaces[ws_i].scroll = scroll;
-                        self.arrange(mon_i)?;
-                        self.focus_best(mon_i)?;
-                    }
-                }
-                // Bar is override_redirect and has no passive grab — no allow_events needed.
-                return Ok(());
-            }
-        }
-
         let mi = self.engine.state.mon_at(e.root_x as i32, e.root_y as i32);
         if mi != self.engine.state.sel_mon {
             if let Some(fw) = self.engine.state.monitors[self.engine.state.sel_mon].focused {

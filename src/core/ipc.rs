@@ -51,7 +51,6 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
         s.push('{');
         s.push_str(&format!("\"index\":{mi},"));
         s.push_str(&format!("\"active_ws\":{},", mon.active_ws));
-        s.push_str(&format!("\"show_bar\":{},", mon.show_bar));
 
         // focused window + its title/class
         match mon.focused {
@@ -107,7 +106,7 @@ pub fn layout_name(l: LayoutKind) -> &'static str {
 /// Grammar (space-separated):
 ///   focus-left|right|up|down|next|prev
 ///   move-left|right|up|down|next|prev
-///   kill | toggle-float | toggle-fullscreen | toggle-bar
+///   kill | toggle-float | toggle-fullscreen
 ///   layout column|grid | cycle-layout
 ///   grow-col `<px>` | shrink-col `<px>`
 ///   new-column | collapse-column
@@ -138,7 +137,6 @@ pub fn parse_action(input: &str) -> Option<Action> {
         "kill" => Some(Action::Kill),
         "toggle-float" => Some(Action::ToggleFloat),
         "toggle-fullscreen" => Some(Action::ToggleFullscreen),
-        "toggle-bar" => Some(Action::ToggleBar),
 
         "layout" => match it.next()? {
             "column" => Some(Action::SetLayout(LayoutKind::Column)),
