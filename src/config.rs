@@ -146,7 +146,6 @@ pub fn load_config() -> Cfg {
         (sct, k!(b'j'), Action::CollapseColumn),
         // ── layout ──
         (sup, XK_SPACE, Action::CycleLayout),
-        (sup, k!(b'm'), Action::SetLayout(LayoutKind::Monocle)),
         (sup, k!(b'g'), Action::SetLayout(LayoutKind::Grid)),
         (sup, k!(b't'), Action::SetLayout(LayoutKind::Column)),
         // ── misc ──
@@ -285,29 +284,13 @@ pub fn load_config() -> Cfg {
         // benefits from compositing from its very first frame.
         // Each entry is a command + args: vec!["binary", "arg1", "arg2", ...]
         autostart: vec![
-            vec![
-                "setxkbmap".into(),
-                "us".into(),
-                "-variant".into(),
-                "dvorak".into(),
-            ],
             // Not on $PATH by convention — Arch installs these under /usr/lib.
             // Without them, GTK/portal-based file pickers (e.g. browser upload
             // dialogs) silently fail to open.
             vec!["/usr/lib/xdg-desktop-portal-gtk".into()],
             vec!["/usr/lib/xdg-desktop-portal".into()],
-            vec![
-                "rviv".into(),
-                "--bg".into(),
-                "/path/to/wallpaper.png".into(),
-            ],
-            vec![
-                "ferrous-dns".into(),
-                "--config".into(),
-                "/path/to/config.toml".into(),
-            ],
-            vec!["polybar".into()],
-            vec!["alacritty".into()],
+            // Set your own wallpaper here, e.g.:
+            // vec!["feh".into(), "--bg-fill".into(), "/path/to/wallpaper.png".into()],
         ],
     }
 }
