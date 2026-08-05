@@ -194,12 +194,34 @@ Ciclar entre los dos: `Super+Space`.
 
 ## 🔧 Configuración
 
-**Nota:** maverick se configura completamente en `src/config.rs`. **Debes recompilar el proyecto después de cualquier cambio para que se apliquen.**
+Maverick se configura en **`$XDG_CONFIG_HOME/maverick/config.toml`** (o
+`~/.config/maverick/config.toml` si `XDG_CONFIG_HOME` no está definida). El
+archivo es **completamente opcional** — si falta, maverick arranca con los
+valores por defecto compilados, sin quejarse. Los campos ausentes caen a esos
+valores, así que solo escribes lo que quieras cambiar.
+
+La carga es **a prueba de fallos por diseño**: un archivo que no se puede
+parsear (TOML inválido, tipos equivocados) se rechaza completo y se usan los
+valores compilados; una entrada individual con un nombre de clave desconocido
+o una acción mal escrita se descarta con una advertencia y el resto del
+archivo sigue cargando igual. Maverick nunca deja de arrancar por culpa de una
+config mala.
+
+Hay un ejemplo completo y comentado en [`examples/config.toml`](examples/config.toml):
 
 ```bash
-cargo build --release
-# Luego reinicia maverick
+mkdir -p ~/.config/maverick
+cp examples/config.toml ~/.config/maverick/config.toml
 ```
+
+Aplica cambios sin reiniciar:
+
+```bash
+maverickctl reload
+```
+
+Si prefieres quedarte con todo compilado, simplemente no crees el archivo —
+nada cambia respecto a antes.
 
 ### Opciones principales
 
@@ -228,22 +250,26 @@ col_urgent:  0xf38ba8,  // borde ventana urgente     (Red)
 ### Nombres de workspaces
 
 ```rust
-tag_names: ["1", "2", "3", "4", "5", "6", "7", "8", "9"].to_vec(),
+tag_names: (1..=9).map(|n| n.to_string()).collect(),
 ```
 
 ### Inicio (Startup)
 
 ```rust
-compositor: vec!["picom", "--vsync"],            // compositor lanzado antes del WM
-compositor_delay_ms: 180,                        // ms de espera tras lanzar el compositor
-startup_sound: None,                             // sonido opcional WAV/OGG al iniciar
 autostart: vec![
+    vec!["/usr/lib/xdg-desktop-portal-gtk"],
+    vec!["/usr/lib/xdg-desktop-portal"],
+    vec!["picom", "--vsync"],                    // compositor, si quieres uno
+    vec!["polybar", "main"],                     // barra externa
     vec!["feh", "--bg-fill", "/ruta/a/wallpaper.png"],
     vec!["alacritty"],
 ],
 ```
 
-El compositor se inicia **antes** que el WM para que todas las ventanas tengan compositing desde el primer fotograma. Los programas de autostart se lanzan después de que tanto el compositor como el WM estén listos. `startup_sound` acepta una ruta a un archivo `.wav` u `.ogg`; prueba `pw-play → paplay → canberra-gtk-play → mpv → aplay` en ese orden.
+maverick no orquesta ningún programa externo de forma especial — compositor,
+barra, wallpaper, portales, todo son entradas de `autostart`, lanzadas en
+cuanto el WM está listo. No hay lógica de orden/delay que configurar; si una
+herramienta necesita un momento antes de estar lista, eso es cosa suya.
 
 > El `autostart` por defecto también lanza `/usr/lib/xdg-desktop-portal` y `/usr/lib/xdg-desktop-portal-gtk` — sin ellos, los selectores de archivos basados en GTK/portal (subir archivos en el navegador, etc.) nunca aparecen.
 

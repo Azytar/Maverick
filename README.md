@@ -197,13 +197,62 @@ Cycle through all modes with `Super+Space`.
 
 ## 🔧 Configuration
 
-**Note:** maverick is configured entirely in `src/config.rs`. **You must recompile the project after making any changes to this file to apply them.**
+Maverick is configured in **`$XDG_CONFIG_HOME/maverick/config.toml`** (or
+`~/.config/maverick/config.toml` when `XDG_CONFIG_HOME` is unset). The file is
+**fully optional** — if it's missing, maverick runs on sensible compiled
+defaults with no complaint. Missing fields fall back to those defaults, so you
+only write what you want to override.
+
+Loading is **fail-safe by design**: a file that can't be parsed (invalid TOML,
+wrong types) is rejected whole and the compiled defaults are used, while a
+single entry with an unknown key name or a broken action string is dropped
+with a warning and the rest of the file still loads. Maverick never fails to
+start because of a bad config.
+
+There's a full, commented example at [`examples/config.toml`](examples/config.toml):
 
 ```bash
-cargo build --release
-# Then restart maverick
+mkdir -p ~/.config/maverick
+cp examples/config.toml ~/.config/maverick/config.toml
 ```
 
+```toml
+# ~/.config/maverick/config.toml
+
+[general]
+border_width = 2
+gaps = 6
+n_tags = 9
+
+[colors]
+normal  = 0x45475a
+focused = 0x89b4fa
+urgent  = 0xf38ba8
+
+[[keybindings]]
+key = "super+return"
+action = "spawn:alacritty"
+
+[[keybindings]]
+key = "super+shift+q"
+action = "kill"
+
+[[rules]]
+class = "mpv"
+float = true
+
+[autostart]
+commands = [["nm-applet"]]
+```
+
+Apply changes without restarting:
+
+```bash
+maverickctl reload
+```
+
+If you'd rather keep everything compiled in, just don't create the file —
+nothing changes from before.
 
 ### Core Options
 
@@ -234,24 +283,28 @@ col_urgent:  0xf38ba8,  // urgent window border       (Red)
 ### Workspace Names
 
 ```rust
-tag_names: ["1", "2", "3", "4", "5", "6", "7", "8", "9"].to_vec(),
+tag_names: (1..=9).map(|n| n.to_string()).collect(),
 
 ```
 
 ### Startup
 
 ```rust
-compositor: vec!["picom", "--vsync"],            // compositor launched before the WM
-compositor_delay_ms: 180,                        // ms to wait after compositor spawns
-startup_sound: None,                             // optional WAV/OGG chime on startup
 autostart: vec![
+    vec!["/usr/lib/xdg-desktop-portal-gtk"],
+    vec!["/usr/lib/xdg-desktop-portal"],
+    vec!["picom", "--vsync"],                    // compositor, if you want one
+    vec!["polybar", "main"],                     // external bar
     vec!["feh", "--bg-fill", "/path/to/wallpaper.png"],
     vec!["alacritty"],
 ],
 
 ```
 
-The compositor starts **before** the WM so every window gets compositing from its first frame. Autostart programs launch after both compositor and WM are ready. `startup_sound` accepts a path to a `.wav` or `.ogg` file; it tries `pw-play → paplay → canberra-gtk-play → mpv → aplay` in order.
+maverick doesn't orchestrate any external tool specially — compositor, bar,
+wallpaper, portals are all just autostart entries, launched once the WM is
+ready. There's no startup ordering/delay logic to configure; if a tool needs
+a moment before it's usable, that's on the tool itself.
 
 > The shipped default `autostart` also launches `/usr/lib/xdg-desktop-portal` and `/usr/lib/xdg-desktop-portal-gtk` — without them, GTK/portal-based file pickers (browser upload dialogs, etc.) never appear.
 

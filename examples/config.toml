@@ -1,0 +1,171 @@
+# Example Maverick configuration.
+#
+# Install it with:
+#   mkdir -p ~/.config/maverick
+#   cp examples/config.toml ~/.config/maverick/config.toml
+#
+# This file is entirely optional and every section/field is independent —
+# delete whatever you don't want to override and maverick falls back to its
+# compiled defaults for it. A file that fails to parse is rejected as a
+# whole (compiled defaults are used instead); an individual keybinding, rule,
+# or action that doesn't parse is skipped with a warning and everything else
+# in the file still applies. maverick never refuses to start over a bad
+# config.
+#
+# Apply changes without restarting:
+#   maverickctl reload
+
+[general]
+border_width      = 2      # focused/unfocused window border, in pixels
+gaps              = 6      # gap between windows and screen edges, in pixels
+n_tags            = 9      # number of workspaces (1-9, changing this needs a reload)
+default_col_width = 700    # width in pixels a newly created column starts at
+split_bias        = 0.6    # extra height the focused window gets within a column, 0.0-1.0
+focus_mouse       = false  # focus a window just by moving the mouse over it
+warp_cursor       = false  # snap the cursor to the center of the newly focused window
+
+# Custom workspace names, e.g. ["web", "code", "chat", "music"]. Must have
+# exactly `n_tags` entries or it's ignored. Leave commented for plain "1".."9".
+# tag_names = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+
+[colors]
+# Catppuccin Mocha by default. Hex as 0xRRGGBB.
+normal  = 0x45475a  # unfocused window border  (Surface1)
+focused = 0x89b4fa  # focused window border    (Blue)
+urgent  = 0xf38ba8  # urgent window border     (Red)
+
+# ── Keybindings ─────────────────────────────────────────────────────────────
+# key    = "mod[+mod...]+key", mods: super, shift, ctrl/control, alt/mod1.
+#          keys: any single letter/digit, return/enter, space, tab, f1-f12.
+# action = one of the strings below (argument after ":" where shown).
+#
+#   spawn:<cmd> [args...]      launch a program
+#   kill                       close the focused window
+#   focus:left|right|up|down   move focus within the layout
+#   move:left|right|up|down    move the focused window within the layout
+#   focus_mon:left|right|up|down|next|prev   focus another monitor
+#   move_mon:left|right|up|down|next|prev    move focused window to another monitor
+#   toggle_float                toggle the focused window floating
+#   toggle_fullscreen           toggle fullscreen
+#   layout:column|grid          switch layout
+#   cycle_layout                cycle through layouts
+#   new_column                  push the focused window into a new column
+#   collapse_column              merge the focused column into the previous one
+#   grow_col:<±pixels>          grow/shrink the focused column's width
+#   view:<1..n_tags>             switch to workspace N
+#   move_to_ws:<1..n_tags>       move the focused window to workspace N
+#   restart                     restart maverick in place
+#   quit                        quit immediately, no confirmation
+#
+# If none of your keybindings use a digit key, super+1..9 (switch workspace)
+# and super+shift+1..9 (move window to workspace) are generated automatically.
+# Define your own with a digit and the auto-generated ones are skipped.
+
+[[keybindings]]
+key = "super+return"
+action = "spawn:alacritty"
+
+[[keybindings]]
+key = "super+p"
+action = "spawn:rofi -show drun"
+
+[[keybindings]]
+key = "super+shift+q"
+action = "kill"
+
+# maverick-dialog gives you a yes/no confirmation before quitting for real —
+# see the "quit" binding in README's default keybind table for the pattern:
+[[keybindings]]
+key = "super+shift+e"
+action = "spawn:maverickctl quit --confirm"
+
+[[keybindings]]
+key = "super+shift+r"
+action = "restart"
+
+[[keybindings]]
+key = "super+h"
+action = "focus:left"
+
+[[keybindings]]
+key = "super+l"
+action = "focus:right"
+
+[[keybindings]]
+key = "super+shift+h"
+action = "move:left"
+
+[[keybindings]]
+key = "super+shift+l"
+action = "move:right"
+
+[[keybindings]]
+key = "super+shift+return"
+action = "new_column"
+
+[[keybindings]]
+key = "super+ctrl+h"
+action = "grow_col:-50"
+
+[[keybindings]]
+key = "super+ctrl+l"
+action = "grow_col:50"
+
+[[keybindings]]
+key = "super+space"
+action = "cycle_layout"
+
+[[keybindings]]
+key = "super+g"
+action = "layout:grid"
+
+[[keybindings]]
+key = "super+t"
+action = "layout:column"
+
+[[keybindings]]
+key = "super+shift+space"
+action = "toggle_float"
+
+[[keybindings]]
+key = "super+f"
+action = "toggle_fullscreen"
+
+[[keybindings]]
+key = "super+tab"
+action = "focus_mon:next"
+
+[[keybindings]]
+key = "super+shift+tab"
+action = "move_mon:next"
+
+# ── Window rules ────────────────────────────────────────────────────────────
+# class/title match case-insensitively as a substring; both are optional but
+# at least one should be set or the rule matches everything. workspace is
+# 1-indexed, same as in keybindings.
+
+[[rules]]
+class = "mpv"
+float = true
+
+[[rules]]
+class = "pinentry"
+float = true
+
+[[rules]]
+class = "firefox"
+workspace = 2
+
+# ── Autostart ───────────────────────────────────────────────────────────────
+# Every command runs once, right after the WM is ready. maverick doesn't
+# orchestrate any of these specially — compositor, bar, wallpaper, portals
+# are all just entries here.
+[autostart]
+commands = [
+    ["/usr/lib/xdg-desktop-portal-gtk"],
+    ["/usr/lib/xdg-desktop-portal"],
+    # ["picom", "--vsync"],
+    # ["polybar", "main"],
+    # ["feh", "--bg-fill", "/path/to/wallpaper.png"],
+    # ["nm-applet"],
+]

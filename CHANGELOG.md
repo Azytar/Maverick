@@ -5,8 +5,53 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Optional TOML configuration.** Maverick now reads
+  `$XDG_CONFIG_HOME/maverick/config.toml` (falling back to
+  `~/.config/maverick/config.toml`) layered over the compiled defaults, with
+  per-section overrides for `[general]`, `[colors]`, `[[keybindings]]`,
+  `[[rules]]` and `[autostart]`. Loading is fail-safe: a missing file is
+  ignored silently, one that fails to parse is rejected whole (falls back to
+  the compiled config), and an individual entry with an unknown key name or a
+  broken action string is dropped with a warning — a bad config can never
+  prevent the WM from starting. Keybinds you define that contain a digit disable the default
+  `super+1..9`/`super+shift+1..9` workspace auto-bindings for that digit;
+  everything else keeps auto-generating as before.
+- **Real configuration hot-reload.** `ControlCommand::Reload` (via
+  `maverickctl reload`) now re-reads the TOML from disk through the same
+  fail-safe loading path, swaps the engine config, regrabs the keymap and
+  re-arranges every monitor — no restart needed. A tag-count change
+  reconciles every monitor's workspace list (grows/truncates, clamping any
+  windows left on a removed workspace) before the redraw.
+
+### Fixed
+
+- **Floating windows never opened centered, and could land off-screen
+  entirely if created mid workspace-switch.** `manage()` was trusting the raw
+  X geometry captured when a window is created. Toolkits center dialogs
+  relative to their parent's *current on-screen* position — if the parent
+  happened to be off-screen at that exact instant (see
+  `hide_offscreen()` in `backend/x11/render.rs`, which parks windows on
+  hidden workspaces at a negative x rather than unmapping them), the new
+  dialog inherited that bogus position, got clamped to a workarea edge, and
+  effectively vanished. Portal-spawned file pickers (no real
+  `WM_TRANSIENT_FOR`) never had a sane position to begin with. Maverick now
+  computes floating-window position itself: centered on the transient
+  parent's real *stored* geometry when there is a parent, otherwise centered
+  in the assigned monitor's workarea — width/height from the original
+  request are kept, only position is recomputed.
+
 ### Removed
 
+- **Compositor orchestration removed from the WM's startup sequence, and
+  `startup_sound` dropped entirely.** `main.rs` no longer spawns a compositor
+  before `WindowManager::new()`, waits a fixed delay for it to attach, or
+  plays a startup chime — that was three phases of bespoke process-spawning
+  logic for something `autostart` already does for the bar, wallpaper, and
+  everything else. `Cfg::compositor`, `compositor_delay_ms`, and
+  `startup_sound` are gone; put your compositor in `autostart` like any other
+  program (see README).
 - **`Monocle` layout removed entirely.** It never left an experimental
   state and added a third code path to every layout-dispatching site
   for little benefit over `Grid`. Removed `LayoutKind::Monocle` and
