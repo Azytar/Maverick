@@ -50,6 +50,7 @@ mod config;
 pub mod core;
 mod log;
 mod types;
+mod userconfig;
 
 use std::process;
 
@@ -151,28 +152,7 @@ fn main() {
         cfg.autostart.len(),
     );
 
-    // ── Phase 1: compositor ───────────────────────────────────────────────────
-    // Picom starts BEFORE WindowManager::new() so every window receives
-    // compositing from its very first frame — no flash of uncomposited content.
-    let compositor_cmd = cfg.compositor.clone();
-    let compositor_delay = cfg.compositor_delay_ms;
-
-    if let Some((bin, args)) = compositor_cmd.split_first() {
-        match std::process::Command::new(bin)
-            .args(args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(_) => log::info!("compositor '{}' started", bin),
-            Err(e) => log::warn!("compositor '{}' failed: {}", bin, e),
-        }
-        if compositor_delay > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(compositor_delay));
-        }
-    }
-
-    // ── Phase 2: WM init ──────────────────────────────────────────────────────
+    // ── Phase 1: WM init ──────────────────────────────────────────────────────
     match backend::x11::WindowManager::new(cfg) {
         Ok(mut manager) => {
             // Hand over the control socket + instance name so cleanup() can
@@ -182,18 +162,11 @@ fn main() {
             if let Some(server) = control {
                 manager.set_control(server);
             }
-            // ── Phase 3: startup sound ────────────────────────────────────────
-            // Compositor is up, WM is ready — ideal moment for the startup chime.
-            let sound = manager.engine.cfg.startup_sound.clone();
-            let sound_default = "/usr/share/sounds/freedesktop/stereo/service-login.oga";
-            let sound_path = sound.as_deref().unwrap_or(sound_default);
-            if std::path::Path::new(sound_path).exists() {
-                play_sound(sound_path);
-            }
 
-            // ── Phase 4: autostart apps ───────────────────────────────────────
-            // All apps start after compositor + WM are ready, so they get
-            // compositing from frame 0 and the WM manages them from the start.
+            // ── Phase 2: autostart apps ───────────────────────────────────────
+            // Compositor, bar, wallpaper, portals, etc. all just go here —
+            // maverick doesn't orchestrate any of them specially. See the
+            // example entries in config.rs / config.toml.
             for cmd in &manager.engine.cfg.autostart.clone() {
                 if let Some((bin, args)) = cmd.split_first() {
                     if let Err(e) = std::process::Command::new(bin)
@@ -207,7 +180,7 @@ fn main() {
                 }
             }
 
-            // ── Phase 5: event loop ───────────────────────────────────────────
+            // ── Phase 3: event loop ───────────────────────────────────────────
             match manager.run() {
                 Ok(()) => {
                     let disconnected = manager.engine.state.running;
@@ -237,31 +210,6 @@ fn main() {
             process::exit(1);
         }
     }
-}
-
-/// Play a sound file asynchronously.
-/// Tries pw-play → paplay → canberra-gtk-play → mpv → aplay in order.
-fn play_sound(path: &str) {
-    let candidates: &[(&str, &[&str])] = &[
-        ("pw-play", &[path] as &[&str]),
-        ("paplay", &[path]),
-        ("canberra-gtk-play", &["-i", "service-login"]),
-        ("mpv", &["--no-video", path]),
-        ("aplay", &[path]),
-    ];
-    for (bin, args) in candidates {
-        let ok = std::process::Command::new(bin)
-            .args(*args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .is_ok();
-        if ok {
-            log::info!("startup sound: playing via {}", bin);
-            return;
-        }
-    }
-    log::warn!("startup sound: no audio player found");
 }
 
 // Detach + signal setup now live in the `maverick-sys` crate, which is the

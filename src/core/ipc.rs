@@ -3,13 +3,16 @@
 // parse action names sent via `dispatch`. No X11, no side effects — this is
 // the vocabulary the outside world (maverickctl, bars, scripts) speaks.
 
-// This is a small hand-rolled JSON serializer; `push_str(&format!(...))` is the
-// clearest idiom here and avoids a serde dependency (project keeps zero extra
-// deps for the core).
-#![allow(clippy::format_push_string)]
+// This is a small hand-rolled JSON serializer; `write!` onto the buffer avoids
+// serde and the per-field `String` temporaries that `format!` would allocate,
+// consistent with the project's zero-extra-deps stance. Writing to a `String`
+// is infallible (the `Write` impl for `String` never errors), so `.unwrap()`
+// here is safe and is suppressed with `clippy::unwrap_used`.
+#![allow(clippy::unwrap_used, clippy::map_unwrap_or)]
 
 use crate::config::Cfg;
 use crate::types::{Action, Dir, LayoutKind, State};
+use std::fmt::Write;
 
 /// Minimal JSON string escaper (no serde dependency, matching the rest of the
 /// project's zero-extra-deps stance). Escapes quotes, backslashes, and control
@@ -23,7 +26,9 @@ fn esc(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 => {
+                write!(out, "\\u{:04x}", c as u32).unwrap();
+            }
             c => out.push(c),
         }
     }
@@ -35,12 +40,13 @@ fn esc(s: &str) -> String {
 /// per-workspace occupancy/layout. Deterministic field order so consumers can
 /// diff snapshots cheaply.
 pub fn state_json(state: &State, cfg: &Cfg) -> String {
-    let mut s = String::with_capacity(512);
+    // Estimate capacity to avoid reallocations: ~512 base + ~1024 bytes/monitor.
+    let mut s = String::with_capacity(512 + state.monitors.len() * 1024);
     s.push('{');
 
-    s.push_str(&format!("\"sel_mon\":{},", state.sel_mon));
-    s.push_str(&format!("\"focus_serial\":{},", state.focus_serial));
-    s.push_str(&format!("\"status\":\"{}\",", esc(&state.status)));
+    write!(s, "\"sel_mon\":{},", state.sel_mon).unwrap();
+    write!(s, "\"focus_serial\":{},", state.focus_serial).unwrap();
+    write!(s, "\"status\":\"{}\",", esc(&state.status)).unwrap();
 
     // monitors
     s.push_str("\"monitors\":[");
@@ -49,16 +55,16 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
             s.push(',');
         }
         s.push('{');
-        s.push_str(&format!("\"index\":{mi},"));
-        s.push_str(&format!("\"active_ws\":{},", mon.active_ws));
+        write!(s, "\"index\":{mi},").unwrap();
+        write!(s, "\"active_ws\":{},", mon.active_ws).unwrap();
 
         // focused window + its title/class
         match mon.focused {
             Some(w) => {
-                s.push_str(&format!("\"focused\":{w},"));
+                write!(s, "\"focused\":{w},").unwrap();
                 if let Some(c) = state.clients.get(&w) {
-                    s.push_str(&format!("\"focused_title\":\"{}\",", esc(&c.name)));
-                    s.push_str(&format!("\"focused_class\":\"{}\",", esc(&c.class)));
+                    write!(s, "\"focused_title\":\"{}\",", esc(&c.name)).unwrap();
+                    write!(s, "\"focused_class\":\"{}\",", esc(&c.class)).unwrap();
                 } else {
                     s.push_str("\"focused_title\":\"\",\"focused_class\":\"\",");
                 }
@@ -72,16 +78,19 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
             if wi > 0 {
                 s.push(',');
             }
-            let name = cfg.tag_names.get(wi).copied().unwrap_or("?");
+            let name: &str = cfg.tag_names
+                .get(wi)
+                .map(String::as_str)
+                .unwrap_or("?");
             let n_wins: usize =
                 ws.columns.iter().map(|c| c.windows.len()).sum::<usize>() + ws.floats.len();
             s.push('{');
-            s.push_str(&format!("\"index\":{wi},"));
-            s.push_str(&format!("\"name\":\"{}\",", esc(name)));
-            s.push_str(&format!("\"active\":{},", wi == mon.active_ws));
-            s.push_str(&format!("\"occupied\":{},", !ws.is_empty()));
-            s.push_str(&format!("\"windows\":{n_wins},"));
-            s.push_str(&format!("\"layout\":\"{}\"", layout_name(ws.layout)));
+            write!(s, "\"index\":{wi},").unwrap();
+            write!(s, "\"name\":\"{}\",", esc(name)).unwrap();
+            write!(s, "\"active\":{},", wi == mon.active_ws).unwrap();
+            write!(s, "\"occupied\":{},", !ws.is_empty()).unwrap();
+            write!(s, "\"windows\":{n_wins},").unwrap();
+            write!(s, "\"layout\":\"{}\"", layout_name(ws.layout)).unwrap();
             s.push('}');
         }
         s.push(']');

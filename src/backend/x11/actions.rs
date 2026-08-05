@@ -143,14 +143,7 @@ impl WindowManager {
             match cmd {
                 maverick_sys::ControlCommand::Quit => self.engine.state.running = false,
                 maverick_sys::ControlCommand::Restart => self.restart(),
-                maverick_sys::ControlCommand::Reload => {
-                    // Config is compiled in; reload just re-grabs keys + re-arranges.
-                    self.keymap = build_keymap(&self.engine.cfg);
-                    self.grab_keys()?;
-                    for mi in 0..self.engine.state.monitors.len() {
-                        self.arrange(mi)?;
-                    }
-                }
+                maverick_sys::ControlCommand::Reload => self.reload_config()?,
                 maverick_sys::ControlCommand::Dispatch(line) => {
                     if let Some(action) = parse_action(&line) {
                         self.do_action(action)?;
@@ -160,6 +153,49 @@ impl WindowManager {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Re-read the user TOML (same fail-safe path used at startup) and swap it
+    /// in. A config that can't be read, parsed, or applied leaves the current
+    /// config untouched and only logs a warning — reload can never crash or
+    /// blank the WM. If the tag count changed, every monitor's workspace list
+    /// is reconciled (grown/truncated) before the new keymap is grabbed and
+    /// everything is re-arranged.
+    pub(super) fn reload_config(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(path) = crate::userconfig::config_path() else {
+            log::warn!("reload: no XDG config path available; keeping current config");
+            return Ok(());
+        };
+        let cfg = crate::userconfig::load_from_path(&path);
+
+        let tags_changed =
+            cfg.n_tags != self.engine.cfg.n_tags || cfg.tag_names != self.engine.cfg.tag_names;
+        if tags_changed {
+            for mon in &mut self.engine.state.monitors {
+                mon.reconcile_workspaces(cfg.n_tags);
+            }
+            let n_tags = cfg.n_tags;
+            for client in self.engine.state.clients.values_mut() {
+                if client.workspace >= n_tags {
+                    client.workspace = n_tags.saturating_sub(1);
+                }
+            }
+        }
+
+        self.engine.cfg = cfg;
+        self.keymap = build_keymap(&self.engine.cfg);
+        self.grab_keys()?;
+        for mi in 0..self.engine.state.monitors.len() {
+            self.arrange(mi)?;
+        }
+        log::info!(
+            "reload: {} tags, {} keybinds, {} rules, {} autostart",
+            self.engine.cfg.tag_names.len(),
+            self.engine.cfg.keybinds.len(),
+            self.engine.cfg.rules.len(),
+            self.engine.cfg.autostart.len(),
+        );
         Ok(())
     }
 

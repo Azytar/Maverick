@@ -15,22 +15,13 @@ pub struct Cfg {
     pub col_focused: u32,
     pub col_urgent: u32,
 
-    pub tag_names: Vec<&'static str>,
+    pub tag_names: Vec<String>,
     pub keybinds: Vec<(u16, u32, Action)>,
     pub rules: Vec<Rule>,
 
-    // ── Startup orchestration ─────────────────────────────────────────────────
-    /// Compositor command — launched BEFORE the WM initialises so every window
-    /// gets compositing from its very first rendered frame.
-    /// Empty = no compositor.
-    pub compositor: Vec<String>,
-    /// Milliseconds to wait after the compositor spawns.
-    /// Gives picom time to attach to the root before the WM starts tiling.
-    pub compositor_delay_ms: u64,
-    /// Optional WAV/OGG chime played once the WM is fully ready.
-    /// Tried via paplay → pw-play → aplay. None = silent startup.
-    pub startup_sound: Option<String>,
-    /// Programs launched after compositor + WM are both ready.
+    /// Programs launched once the WM is ready. Compositor, bar, wallpaper,
+    /// portals — maverick doesn't orchestrate any external tool specially,
+    /// they're all just autostart entries.
     pub autostart: Vec<Vec<String>>,
 }
 
@@ -49,12 +40,9 @@ impl Default for Cfg {
             col_normal: 0x45475a,
             col_focused: 0x89b4fa,
             col_urgent: 0xf38ba8,
-            tag_names: ["1", "2", "3", "4", "5", "6", "7", "8", "9"].to_vec(),
+            tag_names: (1..=9).map(|n| n.to_string()).collect(),
             keybinds: vec![],
             rules: vec![],
-            compositor: vec![],
-            compositor_delay_ms: 0,
-            startup_sound: None,
             autostart: vec![],
         }
     }
@@ -62,8 +50,8 @@ impl Default for Cfg {
 
 #[derive(Debug, Clone)]
 pub struct Rule {
-    pub class: Option<&'static str>,
-    pub title: Option<&'static str>,
+    pub class: Option<String>,
+    pub title: Option<String>,
     pub float: bool,
     pub ws: Option<usize>,
 }
@@ -73,14 +61,19 @@ impl Rule {
         let class_lower = class.to_lowercase();
         let title_lower = title.to_lowercase();
         self.class
+            .as_deref()
             .is_none_or(|c| class_lower.contains(&c.to_lowercase()))
             && self
                 .title
+                .as_deref()
                 .is_none_or(|t| title_lower.contains(&t.to_lowercase()))
     }
 }
 
-pub fn load_config() -> Cfg {
+/// Build the compiled baseline configuration — the exact same values Maverick
+/// has always shipped with. This is the fallback whenever no user TOML exists
+/// or it fails to load, and the starting point that a valid TOML overrides.
+pub fn compiled_config() -> Cfg {
     use x11rb::protocol::xproto::ModMask;
 
     let sup: u16 = ModMask::M4.into();
@@ -185,91 +178,67 @@ pub fn load_config() -> Cfg {
         col_focused: 0x89b4fa, // Blue
         col_urgent: 0xf38ba8,  // Red
 
-        tag_names: ["1", "2", "3", "4", "5", "6", "7", "8", "9"].to_vec(),
+        tag_names: (1..=9).map(|n| n.to_string()).collect(),
 
         keybinds,
 
         rules: vec![
             Rule {
-                class: Some("xdg-desktop-portal"),
+                class: Some("xdg-desktop-portal".into()),
                 title: None,
                 float: true,
                 ws: None,
             },
             Rule {
-                class: Some("gpick"),
+                class: Some("gpick".into()),
                 title: None,
                 float: true,
                 ws: None,
             },
             Rule {
-                class: Some("pinentry"),
+                class: Some("pinentry".into()),
                 title: None,
                 float: true,
                 ws: None,
             },
             Rule {
                 class: None,
-                title: Some("file upload"),
+                title: Some("file upload".into()),
                 float: true,
                 ws: None,
             },
             Rule {
                 class: None,
-                title: Some("open file"),
+                title: Some("open file".into()),
                 float: true,
                 ws: None,
             },
             Rule {
                 class: None,
-                title: Some("save file"),
+                title: Some("save file".into()),
                 float: true,
                 ws: None,
             },
             Rule {
                 class: None,
-                title: Some("qt file dialog"),
+                title: Some("qt file dialog".into()),
                 float: true,
                 ws: None,
             },
         ],
-
-        // ── Compositor ────────────────────────────────────────────────────────
-        // Picom launches BEFORE the WM so compositing is active from frame 0.
-        //   --vsync                  prevent screen tearing
-        //   --fade-*                 smooth open/close animations
-        //   --no-fading-openclose    apps appear instantly, only fade on close
-        //   --frame-opacity          border/frame opacity (windows stay opaque)
-        compositor: vec![
-            "picom".into(),
-            "--vsync".into(),
-            "--fade-in-step".into(),
-            "0.030".into(),
-            "--fade-out-step".into(),
-            "0.030".into(),
-            "--fade-delta".into(),
-            "8".into(),
-            "--no-fading-openclose".into(),
-            "--frame-opacity".into(),
-            "1.0".into(),
-        ],
-        // Give picom 180 ms to attach to the composite overlay before the WM
-        // starts managing windows.
-        compositor_delay_ms: 180,
-
-        // Set to Some("/path/to/sound.wav") to enable a startup chime.
-        startup_sound: None,
 
         // ── Autostart ─────────────────────────────────────────────────────────
-        // Programs launched AFTER compositor + WM are ready so every window
-        // benefits from compositing from its very first frame.
-        // Each entry is a command + args: vec!["binary", "arg1", "arg2", ...]
+        // Programs launched once the WM is ready. Each entry is a command +
+        // args: vec!["binary", "arg1", "arg2", ...]. maverick doesn't treat
+        // any of these specially — compositor included — it just spawns them.
         autostart: vec![
             // Not on $PATH by convention — Arch installs these under /usr/lib.
             // Without them, GTK/portal-based file pickers (e.g. browser upload
             // dialogs) silently fail to open.
             vec!["/usr/lib/xdg-desktop-portal-gtk".into()],
             vec!["/usr/lib/xdg-desktop-portal".into()],
+            // Compositor, e.g.:
+            // vec!["picom".into(), "--vsync".into()],
             // Launch an external status bar here. maverick reserves screen
             // space for it automatically via _NET_WM_STRUT_PARTIAL (see
             // backend/x11/struts.rs), so windows never overlap it. Example:
@@ -278,4 +247,12 @@ pub fn load_config() -> Cfg {
             // vec!["feh".into(), "--bg-fill".into(), "/path/to/wallpaper.png".into()],
         ],
     }
+}
+
+/// Build the runtime config: the compiled baseline, with an optional user
+/// TOML (`$XDG_CONFIG_HOME/maverick/config.toml`) layered on top. A missing or
+/// invalid TOML never prevents startup — see `userconfig` for the fail-safe
+/// loading rules.
+pub fn load_config() -> Cfg {
+    crate::userconfig::load_config()
 }

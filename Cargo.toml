@@ -21,6 +21,8 @@ path = "src/main.rs"
 [dependencies]
 maverick-sys = { path = "maverick-sys" }
 libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 x11rb = { version = "0.13", default-features = false, features = ["randr"] }
 
 [profile.release]

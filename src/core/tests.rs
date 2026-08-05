@@ -18,12 +18,9 @@ mod unit_tests {
             col_normal: 0,
             col_focused: 0,
             col_urgent: 0,
-            tag_names: vec!["1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            tag_names: (1..=9).map(|n| n.to_string()).collect(),
             keybinds: vec![],
             rules: vec![],
-            compositor: vec![],
-            compositor_delay_ms: 0,
-            startup_sound: None,
             autostart: vec![],
         }
     }

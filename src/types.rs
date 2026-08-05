@@ -438,6 +438,23 @@ impl Monitor {
         let h = self.screen.h.saturating_sub(r.top + r.bottom);
         self.workarea = Rect::new(x, y, w, h);
     }
+
+    /// Grow or shrink the workspace slots to match `n_tags`, preserving window
+    /// state for indices that survive. Growing appends fresh empty workspaces;
+    /// shrinking drops trailing slots (windows still assigned there are clamped
+    /// to the last surviving workspace by the caller). Keeps `active_ws` in range.
+    pub fn reconcile_workspaces(&mut self, n_tags: usize) {
+        while self.workspaces.len() < n_tags {
+            self.workspaces
+                .push(Workspace::new(self.workspaces.len() as u32));
+        }
+        if self.workspaces.len() > n_tags {
+            self.workspaces.truncate(n_tags);
+        }
+        if self.active_ws >= self.workspaces.len() {
+            self.active_ws = self.workspaces.len().saturating_sub(1);
+        }
+    }
 }
 
 // ─── Direction ────────────────────────────────────────────────────────────────
