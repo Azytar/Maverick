@@ -127,7 +127,6 @@ Ciclar entre los dos: `Super+Space`.
 | `Super+Shift+C`          | Cerrar ventana enfocada      |
 | `Super+Shift+Space`      | Alternar flotante            |
 | `Super+Shift+F`          | Alternar pantalla completa   |
-| `Super+B`                | Mostrar / ocultar barra      |
 
 ### Foco
 
@@ -167,8 +166,6 @@ Ciclar entre los dos: `Super+Space`.
 | `Super+1` … `Super+9`              | Ir al workspace 1–9              |
 | `Super+Shift+1` … `Super+Shift+9`  | Mover ventana al workspace 1–9   |
 
-> Los tags de la barra también son **clicables**.
-
 ### WM (Control del Gestor)
 
 | Atajo                    | Acción                            |
@@ -188,7 +185,6 @@ Ciclar entre los dos: `Super+Space`.
 | ----------------------------------- | -------------------------- |
 | `Super+Arrastrar botón izquierdo`   | Mover ventana flotante     |
 | `Super+Arrastrar botón derecho`     | Redimensionar ventana flotante |
-| Clic en el tag de la barra          | Ir a ese workspace         |
 
 ---
 
@@ -297,28 +293,28 @@ leerlo sin raspar propiedades X por su cuenta.
 
 ## 📋 Reglas de ventanas
 
-Las reglas asignan workspaces o fuerzan flotante automáticamente, por clase WM o título.
+Las reglas asignan workspaces o fuerzan flotante automáticamente, por clase WM o título. Se configuran con `[[rules]]` en `config.toml` (ver [Configuración](#-configuración)) o, para la base compilada, en `config.rs`:
 
 ```rust
 rules: vec![
-    Rule { class: Some("xdg-desktop-portal"), title: None,                    float: true,  ws: None },
-    Rule { class: Some("gpick"),              title: None,                    float: true,  ws: None },
-    Rule { class: Some("pinentry"),           title: None,                    float: true,  ws: None },
-    Rule { class: None, title: Some("file upload"),    float: true,  ws: None },
-    Rule { class: None, title: Some("open file"),      float: true,  ws: None },
-    Rule { class: None, title: Some("save file"),      float: true,  ws: None },
-    Rule { class: None, title: Some("qt file dialog"), float: true,  ws: None },
+    Rule { class: Some("xdg-desktop-portal".into()), title: None,                             float: true, ws: None },
+    Rule { class: Some("gpick".into()),              title: None,                             float: true, ws: None },
+    Rule { class: Some("pinentry".into()),           title: None,                             float: true, ws: None },
+    Rule { class: None, title: Some("file upload".into()),    float: true, ws: None },
+    Rule { class: None, title: Some("open file".into()),      float: true, ws: None },
+    Rule { class: None, title: Some("save file".into()),      float: true, ws: None },
+    Rule { class: None, title: Some("qt file dialog".into()), float: true, ws: None },
 ],
 ```
 
 **Campos de las reglas:**
 
-| Campo   | Tipo            | Descripción                                                |
-| ------- | --------------- | ---------------------------------------------------------- |
-| `class` | `Option<&str>`  | Coincide con `WM_CLASS` (subcadena, sin mayúsculas)        |
-| `title` | `Option<&str>`  | Coincide con el título de la ventana (subcadena, sin mayúsculas) |
-| `float` | `bool`          | Forzar modo flotante                                       |
-| `ws`    | `Option<usize>` | Enviar al workspace índice (0-based)                       |
+| Campo   | Tipo             | Descripción                                                |
+| ------- | ---------------- | ---------------------------------------------------------- |
+| `class` | `Option<String>` | Coincide con `WM_CLASS` (subcadena, sin mayúsculas)        |
+| `title` | `Option<String>` | Coincide con el título de la ventana (subcadena, sin mayúsculas) |
+| `float` | `bool`           | Forzar modo flotante                                       |
+| `ws`    | `Option<usize>`  | Enviar al workspace índice (0-based)                       |
 
 ---
 
@@ -329,7 +325,9 @@ maverick evita capas de abstracción innecesarias siempre que es posible:
 - **X11 / XLibre vía `x11rb 0.13`** — bindings del protocolo con tipado seguro, sin libx11. Solo el WM y `maverick-dialog` enlazan `x11rb`; el resto del workspace es `std` puro.
 - **Un único punto de despacho** — `Engine::dispatch(Action) -> Vec<Effect>` es el ÚNICO camino de un atajo o comando IPC hacia la mutación de estado. `Effect` es un vocabulario semántico (`ArrangeMonitor`, `FocusWindow`, `SetFullscreen`, …); `execute()` del backend X11 es el único lugar que convierte eso en llamadas al protocolo. Un futuro backend no-X11 implementaría `execute()` contra los mismos efectos sin tocar el núcleo.
 - **Fullscreen/maximizar como presentación, no como bloqueo de estado** — `core/present.rs` reescribe solo el rect de la ventana *enfocada* (fullscreen → pantalla completa, maximizar → área de trabajo, ambos con precedencia sobre el layout normal) y reorganiza en cada cambio de foco, en vez de bloquear la entrada mientras una ventana está en fullscreen.
+- **Posicionamiento propio de ventanas flotantes** — `manage()` nunca confía en la geometría X cruda que reporta una ventana nueva; las flotantes se centran sobre la geometría real guardada de su padre transient (o el área de trabajo del monitor asignado, para diálogos de portal sin padre real) y se recortan (clamp) dentro de ella. Solo el ancho/alto vienen de la solicitud original.
 - **Plano de control de instancias** — `maverick-sys` le da a cada instancia corriendo una identidad de PID/display/tty y un protocolo por socket Unix (`ping`/`identify`/`state`/`dispatch`/`restart`/`reload`/`subscribe`/`quit`). `maverickctl` habla con él: `list`, `state`, `msg <acción>`, `subscribe`, `quit[--confirm]`, `quit-all`, `restart`, `reload`, `prune`. Soporta varias instancias en distintos displays/ttys.
+- **Capa opcional de config TOML** — `userconfig.rs` parsea `config.toml` y lo combina campo a campo sobre `config::compiled_config()`; un archivo que no parsea se rechaza completo, una entrada individual mala se descarta con aviso. `maverickctl reload` lo relee en caliente, sin reiniciar.
 - **Struts de docks/barras externas** — Los docks se detectan vía `_NET_WM_WINDOW_TYPE_DOCK`/`_DESKTOP` (nunca por nombre de proceso) y reservan espacio leyendo `_NET_WM_STRUT_PARTIAL`/`_NET_WM_STRUT` heredado, rastreados por monitor y liberados al destruirse/desmapearse. maverick no incluye barra de estado — usa Waybar/Polybar/eww y deja que el WM reserve el espacio.
 - **Mapa de clientes `HashMap`** — búsquedas de ventana O(1) por XID.
 - **Layout de columnas O(N)** — las alturas de las filas se precalculan en una sola pasada.
@@ -337,7 +335,6 @@ maverick evita capas de abstracción innecesarias siempre que es posible:
 - **Soporte EWMH** — `_NET_WM_STATE`, `_NET_WM_DESKTOP`, `_NET_ACTIVE_WINDOW`, etc.
 - **Reinicio basado en `exec`** — reemplaza el proceso en caliente, sin condición de carrera (race condition) al atrapar X11.
 - **Aislamiento `override_redirect`** — las barras externas y los overlays son invisibles para el propio WM.
-- **Protección de centrado flotante** — evita que la heurística de centrado falle en herramientas de captura a pantalla completa (≥90% de cobertura del área = sin centrado).
 
 ---
 
@@ -347,7 +344,8 @@ maverick evita capas de abstracción innecesarias siempre que es posible:
 Maverick/                    # workspace de Cargo
 ├── src/                     # `maverick` — el binario del WM
 │   ├── main.rs                punto de entrada, señales, autostart, conexión al plano de control
-│   ├── config.rs               config compilada: Cfg, Rule, atajos, colores
+│   ├── config.rs               config base compilada: Cfg, Rule, atajos, colores
+│   ├── userconfig.rs            config.toml opcional: parseo, carga a prueba de fallos, merge
 │   ├── types.rs                  modelo de datos principal: State, Monitor, Workspace, Column, Client
 │   ├── log.rs                     logger ligero por stderr
 │   ├── core/                       capa de lógica pura — sin X11
@@ -364,7 +362,7 @@ Maverick/                    # workspace de Cargo
 │           ├── manage.rs                  descubrimiento de ventanas, lectura de propiedades
 │           ├── events.rs                   tabla de despacho de eventos X
 │           ├── ewmh.rs                      mantenimiento de propiedades EWMH
-│           ├── actions.rs                    do_action / execute (ejecuta los Effects del core)
+│           ├── actions.rs                    do_action / execute (ejecuta los Effects del core), reload
 │           ├── input.rs                       keymap, agarre de teclas
 │           ├── pointer.rs                      arrastrar para mover/redimensionar, foco por clic
 │           ├── render.rs                        aplicación de geometría, foco, restack
@@ -378,6 +376,8 @@ Maverick/                    # workspace de Cargo
 │       └── bin/maverickctl.rs       el CLI `maverickctl`
 ├── maverick-dialog/           # ventana X11 standalone de confirmación sí/no al salir
 │   └── src/main.rs
+├── examples/
+│   └── config.toml            ejemplo completo y comentado de config de usuario
 ├── CHANGELOG.md
 ├── Cargo.toml                 # raíz del workspace + el paquete `maverick`
 ├── Cargo.lock

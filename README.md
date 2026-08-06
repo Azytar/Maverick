@@ -130,7 +130,6 @@ Cycle through all modes with `Super+Space`.
 | `Super+Shift+C` | Kill focused window |
 | `Super+Shift+Space` | Toggle floating |
 | `Super+Shift+F` | Toggle fullscreen |
-| `Super+B` | Toggle bar visibility |
 
 ### Focus Navigation
 
@@ -170,8 +169,6 @@ Cycle through all modes with `Super+Space`.
 | `Super+1` … `Super+9` | Switch to workspace 1–9 |
 | `Super+Shift+1` … `Super+Shift+9` | Move focused window to workspace 1–9 |
 
-> Workspace tags are also **clickable** in the bar.
-
 ### WM Control
 
 | Shortcut | Action |
@@ -191,7 +188,6 @@ Cycle through all modes with `Super+Space`.
 | --- | --- |
 | `Super+Left-drag` | Move floating window |
 | `Super+Right-drag` | Resize floating window |
-| Click on bar tag | Switch to that workspace |
 
 ---
 
@@ -331,17 +327,17 @@ without scraping X properties itself.
 
 ## 📋 Window Rules
 
-Rules let you assign windows to specific workspaces or force them to float automatically, matched by WM_CLASS or title substring.
+Rules let you assign windows to specific workspaces or force them to float automatically, matched by WM_CLASS or title substring. Set them via `[[rules]]` in `config.toml` (see [Configuration](#-configuration)) or, for the compiled baseline, in `config.rs`:
 
 ```rust
 rules: vec![
-    Rule { class: Some("xdg-desktop-portal"), title: None,                    float: true,  ws: None },
-    Rule { class: Some("gpick"),              title: None,                    float: true,  ws: None },
-    Rule { class: Some("pinentry"),           title: None,                    float: true,  ws: None },
-    Rule { class: None, title: Some("file upload"),    float: true,  ws: None },
-    Rule { class: None, title: Some("open file"),      float: true,  ws: None },
-    Rule { class: None, title: Some("save file"),      float: true,  ws: None },
-    Rule { class: None, title: Some("qt file dialog"), float: true,  ws: None },
+    Rule { class: Some("xdg-desktop-portal".into()), title: None,                             float: true, ws: None },
+    Rule { class: Some("gpick".into()),              title: None,                             float: true, ws: None },
+    Rule { class: Some("pinentry".into()),           title: None,                             float: true, ws: None },
+    Rule { class: None, title: Some("file upload".into()),    float: true, ws: None },
+    Rule { class: None, title: Some("open file".into()),      float: true, ws: None },
+    Rule { class: None, title: Some("save file".into()),      float: true, ws: None },
+    Rule { class: None, title: Some("qt file dialog".into()), float: true, ws: None },
 ],
 
 ```
@@ -350,8 +346,8 @@ rules: vec![
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `class` | `Option<&str>` | Match against `WM_CLASS` (case-insensitive substring) |
-| `title` | `Option<&str>` | Match against window title (case-insensitive substring) |
+| `class` | `Option<String>` | Match against `WM_CLASS` (case-insensitive substring) |
+| `title` | `Option<String>` | Match against window title (case-insensitive substring) |
 | `float` | `bool` | Force floating mode |
 | `ws` | `Option<usize>` | Send to workspace index (0-based) |
 
@@ -364,7 +360,9 @@ maverick minimizes abstraction layers by avoiding unnecessary dependencies:
 * **X11 / XLibre via `x11rb 0.13`** — Type-safe protocol bindings, no libx11. Only the WM and `maverick-dialog` link `x11rb`; the rest of the workspace is pure `std`.
 * **One dispatch seam** — `Engine::dispatch(Action) -> Vec<Effect>` is the *only* path from a keybind or IPC command to state mutation. `Effect` is a semantic vocabulary (`ArrangeMonitor`, `FocusWindow`, `SetFullscreen`, …); the X11 backend's `execute()` is the only place that turns those into protocol calls. A future non-X11 backend would implement `execute()` against the same effects without the core changing.
 * **Fullscreen/maximize as presentation, not a state-machine block** — `core/present.rs` rewrites only the *focused* window's rect (fullscreen → whole screen, maximize → workarea, both keeping precedence over plain layout) and re-arranges on every focus transition, instead of blocking input while a window is fullscreen.
+* **Self-computed float placement** — `manage()` never trusts the raw X geometry a new window reports; floating windows are centered on the transient parent's real stored geometry (or the assigned monitor's workarea, for portal-spawned dialogs with no real parent) and clamped inside it. Only width/height come from the original request.
 * **Instance control plane** — `maverick-sys` gives every running instance a PID/display/tty identity and a Unix-socket protocol (`ping`/`identify`/`state`/`dispatch`/`restart`/`reload`/`subscribe`/`quit`). `maverickctl` talks to it: `list`, `state`, `msg <action>`, `subscribe`, `quit[--confirm]`, `quit-all`, `restart`, `reload`, `prune`. Handles several instances on different displays/ttys.
+* **Optional TOML config layer** — `userconfig.rs` parses `config.toml` and merges it over `config::compiled_config()` field-by-field; a file that fails to parse is rejected whole, a single bad entry is dropped with a warning. `maverickctl reload` re-reads it live, no restart.
 * **External dock/bar struts** — Docks are detected via `_NET_WM_WINDOW_TYPE_DOCK`/`_DESKTOP` (never by process name) and reserve space by reading `_NET_WM_STRUT_PARTIAL`/legacy `_NET_WM_STRUT`, tracked per-monitor and released on destroy/unmap. maverick itself ships no status bar — drive Waybar/Polybar/eww and let the WM reserve space for it.
 * **`HashMap` client map** — O(1) window lookups by XID.
 * **O(N) column layout** — Row heights precomputed in a single forward pass.
@@ -372,7 +370,6 @@ maverick minimizes abstraction layers by avoiding unnecessary dependencies:
 * **EWMH support** — Including `_NET_WM_STATE`, `_NET_WM_DESKTOP`, `_NET_ACTIVE_WINDOW`, etc.
 * **`exec`-based restart** — Replaces the process in-place, preventing X11 grab race conditions.
 * **`override_redirect` isolation** — External bars and overlays remain invisible to the WM.
-* **Float centering guard** — Skips centering for fullscreen apps (≥90% workarea coverage).
 
 ---
 
@@ -382,7 +379,8 @@ maverick minimizes abstraction layers by avoiding unnecessary dependencies:
 Maverick/                    # Cargo workspace
 ├── src/                     # `maverick` — the WM binary
 │   ├── main.rs               entry point, signals, autostart, control-plane wiring
-│   ├── config.rs              compiled-in config: Cfg, Rule, keybinds, colors
+│   ├── config.rs              compiled baseline config: Cfg, Rule, keybinds, colors
+│   ├── userconfig.rs           optional config.toml: parsing, fail-safe loading, merge
 │   ├── types.rs                core data model: State, Monitor, Workspace, Column, Client
 │   ├── log.rs                   lightweight stderr logger
 │   ├── core/                    pure logic layer — no X11
@@ -399,7 +397,7 @@ Maverick/                    # Cargo workspace
 │           ├── manage.rs                window discovery, property reads, client setup
 │           ├── events.rs                 X event dispatch table
 │           ├── ewmh.rs                    EWMH property maintenance
-│           ├── actions.rs                  do_action / execute (runs core's Effects)
+│           ├── actions.rs                  do_action / execute (runs core's Effects), reload
 │           ├── input.rs                     keymap, key grabs
 │           ├── pointer.rs                    drag-to-move/resize, click focus
 │           ├── render.rs                      geometry application, focus, restack
@@ -413,6 +411,8 @@ Maverick/                    # Cargo workspace
 │       └── bin/maverickctl.rs       the `maverickctl` CLI
 ├── maverick-dialog/           # standalone X11 yes/no quit-confirmation window
 │   └── src/main.rs
+├── examples/
+│   └── config.toml            full, commented sample user config
 ├── CHANGELOG.md
 ├── Cargo.toml                 # workspace root + the `maverick` package
 ├── Cargo.lock
