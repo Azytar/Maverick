@@ -3,7 +3,14 @@ use crate::types::{Action, Dir, LayoutKind};
 #[derive(Debug, Clone)]
 pub struct Cfg {
     pub border_w: u32,
-    pub gaps: u32,
+    /// Gap between windows within a column and between columns.
+    pub gaps_inner: u32,
+    /// Gap at the top/bottom screen edges (all 4 edges in Grid layout).
+    pub gaps_outer: u32,
+    /// Collapse gaps to 0 when a workspace has exactly one tiled window.
+    pub smart_gaps: bool,
+    /// Rounded corner radius in pixels, via X11 Shape. 0 disables.
+    pub corner_radius: u32,
     pub n_tags: usize,
     pub default_col_w: u32, // default width of a new column
     pub split_bias: f32,    // how much extra height focused row gets (0.0-1.0)
@@ -31,7 +38,10 @@ impl Default for Cfg {
     fn default() -> Self {
         Cfg {
             border_w: 2,
-            gaps: 6,
+            gaps_inner: 6,
+            gaps_outer: 6,
+            smart_gaps: false,
+            corner_radius: 0,
             n_tags: 9,
             default_col_w: 700,
             split_bias: 0.6,
@@ -48,28 +58,57 @@ impl Default for Cfg {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Rule {
     pub class: Option<String>,
+    /// `WM_CLASS` instance part (e.g. `firefox`, `xterm`). Matched like class.
+    pub instance: Option<String>,
+    /// `_NET_WM_WINDOW_TYPE` atom name to match (lowercase): `dialog`,
+    /// `utility`, `menu`, `toolbar`, `splash`, `desktop`, `dock`, `normal`.
+    /// An empty/absent value means "any type".
+    pub window_type: Option<String>,
     pub title: Option<String>,
     pub float: bool,
+    /// Sticky float: always visible on every workspace of its monitor.
+    pub sticky: bool,
     pub ws: Option<usize>,
+    /// Forced floating size, in pixels — first priority, then the WM centering.
+    pub size: Option<(u32, u32)>,
+    /// Forced floating position, relative to the monitor's workarea origin.
+    pub position: Option<(i32, i32)>,
+    /// 0.0-1.0. Written at manage time as `_NET_WM_WINDOW_OPACITY` (no-op
+    /// without a compositor). Applies to tiled and floating windows alike.
+    pub opacity: Option<f32>,
+    /// Override border width for this app — floating windows only;
+    /// tiled/column geometry keeps one uniform border across the layout.
+    pub border_w: Option<u32>,
 }
 
 impl Rule {
-    pub fn matches(&self, class: &str, title: &str) -> bool {
+    /// Everything-criteria match. Any `None` criterion is a wildcard; every
+    /// present one must be substring-occur in the client's data (all compared
+    /// case-insensitively, on both sides, like the original class/title rule).
+    pub fn matches(&self, class: &str, instance: &str, types: &[String], title: &str) -> bool {
         let class_lower = class.to_lowercase();
+        let instance_lower = instance.to_lowercase();
         let title_lower = title.to_lowercase();
         self.class
             .as_deref()
             .is_none_or(|c| class_lower.contains(&c.to_lowercase()))
+            && self
+                .instance
+                .as_deref()
+                .is_none_or(|i| instance_lower.contains(&i.to_lowercase()))
+            && self.window_type.as_deref().is_none_or(|t| {
+                let t = t.to_lowercase();
+                types.iter().any(|ty| ty == &t)
+            })
             && self
                 .title
                 .as_deref()
                 .is_none_or(|t| title_lower.contains(&t.to_lowercase()))
     }
 }
-
 /// Build the compiled baseline configuration — the exact same values Maverick
 /// has always shipped with. This is the fallback whenever no user TOML exists
 /// or it fails to load, and the starting point that a valid TOML overrides.
@@ -164,9 +203,12 @@ pub fn compiled_config() -> Cfg {
         keybinds.push((shs, ksym, Action::MoveToWs(ws)));
     }
 
-    Cfg {
+        Cfg {
         border_w: 2,
-        gaps: 6,
+        gaps_inner: 6,
+        gaps_outer: 6,
+        smart_gaps: false,
+        corner_radius: 0,
         n_tags: 9,
         default_col_w: 700,
         split_bias: 0.6,
@@ -182,48 +224,55 @@ pub fn compiled_config() -> Cfg {
 
         keybinds,
 
-        rules: vec![
+                rules: vec![
             Rule {
                 class: Some("xdg-desktop-portal".into()),
                 title: None,
                 float: true,
                 ws: None,
+                ..Default::default()
             },
             Rule {
                 class: Some("gpick".into()),
                 title: None,
                 float: true,
                 ws: None,
+                ..Default::default()
             },
             Rule {
                 class: Some("pinentry".into()),
                 title: None,
                 float: true,
                 ws: None,
+                ..Default::default()
             },
             Rule {
                 class: None,
                 title: Some("file upload".into()),
                 float: true,
                 ws: None,
+                ..Default::default()
             },
             Rule {
                 class: None,
                 title: Some("open file".into()),
                 float: true,
                 ws: None,
+                ..Default::default()
             },
             Rule {
                 class: None,
                 title: Some("save file".into()),
                 float: true,
                 ws: None,
+                ..Default::default()
             },
             Rule {
                 class: None,
                 title: Some("qt file dialog".into()),
                 float: true,
                 ws: None,
+                ..Default::default()
             },
         ],
 
@@ -255,4 +304,104 @@ pub fn compiled_config() -> Cfg {
 /// loading rules.
 pub fn load_config() -> Cfg {
     crate::userconfig::load_config()
+}
+
+/// Named color-theme presets for `[general].theme` in the TOML config.
+/// Returns `(normal, focused, urgent)` as `0xRRGGBB`.
+/// Returns `None` for an unknown theme name.
+pub fn theme_palette(name: &str) -> Option<(u32, u32, u32)> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "catppuccin-mocha" => (0x45475a, 0x89b4fa, 0xf38ba8),
+        "catppuccin-latte" => (0xd9d9e0, 0x1e90ff, 0xd30066),
+        "gruvbox" => (0xfbf1c7, 0x4c79a6, 0xea6962),
+        "nord" => (0x4c566a, 0x81a1c1, 0xa3be8c),
+        "dracula" => (0x282a36, 0xbd93f9, 0xff5555),
+        "everforest" => (0x3c434e, 0x7fbbb3, 0xdb7070),
+        "solarized" => (0x837c73, 0x268bd2, 0xdc322f),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::Rule;
+
+    /// Builder sugar for the tests: criterion helpers on a default Rule.
+    trait RuleEx {
+        fn class(self, c: &str) -> Self;
+        fn instance(self, i: &str) -> Self;
+        fn window_type(self, t: &str) -> Self;
+        fn title(self, t: &str) -> Self;
+    }
+    impl RuleEx for Rule {
+        fn class(mut self, c: &str) -> Self {
+            self.class = Some(c.to_string());
+            self
+        }
+        fn instance(mut self, i: &str) -> Self {
+            self.instance = Some(i.to_string());
+            self
+        }
+        fn window_type(mut self, t: &str) -> Self {
+            self.window_type = Some(t.to_string());
+            self
+        }
+        fn title(mut self, t: &str) -> Self {
+            self.title = Some(t.to_string());
+            self
+        }
+    }
+
+    fn base() -> Rule {
+        Rule::default()
+    }
+
+    #[test]
+    fn no_criteria_matches_anything() {
+        assert!(base().matches("Firefox", "", &["normal".into()], "My Blog"));
+        assert!(base().matches("", "", &[], ""));
+    }
+
+    #[test]
+    fn class_match_is_substring_case_insensitive() {
+        let r = base().class("fire");
+        assert!(r.matches("Firefox", "", &[], ""));
+        assert!(!r.matches("chrome", "", &[], ""));
+    }
+
+    #[test]
+    fn instance_match_uses_wm_class_instance_part() {
+        let r = base().instance("term");
+        assert!(r.matches("Alacritty", "xterm", &[], ""));
+        assert!(!r.matches("Alacritty", "foot", &[], ""));
+    }
+
+    #[test]
+    fn window_type_match_is_exact_and_lowercase() {
+        let dialog = "dialog".to_string();
+        let normal = "normal".to_string();
+        let r = base().window_type("dialog");
+        assert!(r.matches("x", "", &[dialog], ""));
+        assert!(!r.matches("x", "", &[normal], ""));
+        assert!(!r.matches("x", "", &[], ""));
+    }
+
+    #[test]
+    fn title_match_is_substring_case_insensitive() {
+        let r = base().title("find");
+        assert!(r.matches("x", "", &[], "Search & Find"));
+        assert!(!r.matches("x", "", &[], "Notepad"));
+    }
+
+    #[test]
+    fn all_criteria_must_hold_together() {
+        let r = base()
+            .class("fire")
+            .instance("navig")
+            .window_type("email")
+            .title("gmail");
+        assert!(r.matches("Firefox", "Navigator", &["email".to_string()], "Gmail"));
+        assert!(!r.matches("Firefox", "Navigator", &["normal".to_string()], "Gmail"));
+        assert!(!r.matches("Chrome", "Navigator", &["email".to_string()], "Gmail"));
+    }
 }
