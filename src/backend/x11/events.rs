@@ -48,6 +48,21 @@ impl WindowManager {
             }
             return Ok(());
         }
+        // A fullscreen/maximized window that unmapped is relinquishing the
+        // presentation overlay (quit/crash/withdraw). Purge it from the tree
+        // now — not later on DestroyNotify — so the overlay stack (`present`,
+        // `stack_overlay`) can never raise a stale WindowId and hit BadWindow.
+        // Tiled/floating windows keep the ICCCM behavior below (stay withdrawn
+        // until destroy or re-map).
+        let presented = self
+            .engine
+            .state
+            .clients
+            .get(&e.window)
+            .is_some_and(|c| c.is_fullscreen() || c.is_maximized());
+        if presented {
+            return self.unmanage(e.window, false);
+        }
         if e.response_type & 0x80 != 0 {
             let _ = self.set_wm_state(e.window, 0);
         } else {
@@ -112,6 +127,9 @@ impl WindowManager {
         if e.value_mask.contains(ConfigWindow::STACK_MODE) {
             aux = aux.stack_mode(e.stack_mode);
         }
+        if e.value_mask.contains(ConfigWindow::SIBLING) {
+            aux = aux.sibling(e.sibling);
+        }
         let _ = self.conn.configure_window(e.window, &aux);
 
         if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
@@ -136,92 +154,101 @@ impl WindowManager {
         e: ConfigureNotifyEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if e.window == self.root {
-            // Monitor change — re-detect topology and redistribute clients
-            let setup = self.conn.setup();
-            let screen = &setup.roots[self.screen_num];
-            let new_mons = detect_monitors(&self.conn, screen, &self.engine.cfg)?;
-            let len_changed = new_mons.len() != self.engine.state.monitors.len();
-            let geom_changed = !len_changed
-                && new_mons
-                    .iter()
-                    .zip(self.engine.state.monitors.iter())
-                    .any(|(a, b)| a.screen != b.screen || a.workarea != b.workarea);
-            if len_changed || geom_changed {
-                log::info!(
-                    "monitor topology changed ({} -> {})",
-                    self.engine.state.monitors.len(),
-                    new_mons.len()
-                );
+            self.handle_monitor_change()?;
+        }
+        Ok(())
+    }
 
-                // Collect all managed windows before replacing the monitor vec.
-                let old_clients: Vec<Window> = self.engine.state.clients.keys().copied().collect();
+    /// Re-detect the monitor topology and redistribute clients. Shared by the
+    /// root `ConfigureNotify` path (some servers report resolution changes
+    /// there) and the `RandR` notify handlers in `mod.rs` (both feed this path). It only acts when
+    /// the topology actually changed — same monitor count and geometry means
+    /// nothing to do, so repeated events cause no reflow.
+    pub(super) fn handle_monitor_change(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let setup = self.conn.setup();
+        let screen = &setup.roots[self.screen_num];
+        let new_mons = detect_monitors(&self.conn, screen, &self.engine.cfg)?;
+        let len_changed = new_mons.len() != self.engine.state.monitors.len();
+        let geom_changed = !len_changed
+            && new_mons
+                .iter()
+                .zip(self.engine.state.monitors.iter())
+                .any(|(a, b)| a.screen != b.screen || a.workarea != b.workarea);
+        if len_changed || geom_changed {
+            log::info!(
+                "monitor topology changed ({} -> {})",
+                self.engine.state.monitors.len(),
+                new_mons.len()
+            );
 
-                if len_changed {
-                    // Replace monitors with fresh ones (empty workspaces).
-                    self.engine.state.monitors = new_mons;
+            // Collect all managed windows before replacing the monitor vec.
+            let old_clients: Vec<Window> = self.engine.state.clients.keys().copied().collect();
 
-                    // Clamp sel_mon so no code tries to index a monitor that no longer exists.
-                    let n_mons = self.engine.state.monitors.len();
-                    self.engine.state.sel_mon =
-                        self.engine.state.sel_mon.min(n_mons.saturating_sub(1));
+            if len_changed {
+                // Replace monitors with fresh ones (empty workspaces).
+                self.engine.state.monitors = new_mons;
 
-                    // Re-assign every client to a valid monitor/workspace,
-                    // preserving the original assignment where possible.
-                    let dw = self.engine.cfg.default_col_w;
-                    for win in old_clients {
-                        if let Some(c) = self.engine.state.clients.get_mut(&win) {
-                            c.monitor = c.monitor.min(n_mons.saturating_sub(1));
-                            c.workspace = c.workspace.min(
-                                self.engine.state.monitors[c.monitor]
-                                    .workspaces
-                                    .len()
-                                    .saturating_sub(1),
-                            );
-                        }
-                        let is_float = self
-                            .engine
-                            .state
-                            .clients
-                            .get(&win)
-                            .is_some_and(crate::types::Client::is_float);
-                        let mi = self.engine.state.clients.get(&win).map_or(0, |c| c.monitor);
-                        let ws_i = self
-                            .engine
-                            .state
-                            .clients
-                            .get(&win)
-                            .map_or(0, |c| c.workspace);
-                        let workarea_w = self.engine.state.monitors[mi].workarea.w;
-                        if is_float {
-                            self.engine.state.monitors[mi].workspaces[ws_i]
-                                .floats
-                                .push(win);
-                        } else {
-                            self.engine.state.monitors[mi].workspaces[ws_i]
-                                .add_tiled(win, dw, workarea_w);
-                        }
+                // Clamp sel_mon so no code tries to index a monitor that no longer exists.
+                let n_mons = self.engine.state.monitors.len();
+                self.engine.state.sel_mon =
+                    self.engine.state.sel_mon.min(n_mons.saturating_sub(1));
+
+                // Re-assign every client to a valid monitor/workspace,
+                // preserving the original assignment where possible.
+                let dw = self.engine.cfg.default_col_w;
+                for win in old_clients {
+                    if let Some(c) = self.engine.state.clients.get_mut(&win) {
+                        c.monitor = c.monitor.min(n_mons.saturating_sub(1));
+                        c.workspace = c.workspace.min(
+                            self.engine.state.monitors[c.monitor]
+                                .workspaces
+                                .len()
+                                .saturating_sub(1),
+                        );
                     }
-                } else {
-                    // Geometry-only change: update screen/workarea in place,
-                    // preserving all workspace state and client assignments.
-                    for (new_mon, old_mon) in
-                        new_mons.iter().zip(self.engine.state.monitors.iter_mut())
-                    {
-                        old_mon.screen = new_mon.screen;
-                        old_mon.workarea = new_mon.workarea;
-                    }
-                    for i in 0..self.engine.state.monitors.len() {
-                        self.arrange(i)?;
+                    let is_float = self
+                        .engine
+                        .state
+                        .clients
+                        .get(&win)
+                        .is_some_and(crate::types::Client::is_float);
+                    let mi = self.engine.state.clients.get(&win).map_or(0, |c| c.monitor);
+                    let ws_i = self
+                        .engine
+                        .state
+                        .clients
+                        .get(&win)
+                        .map_or(0, |c| c.workspace);
+                    let workarea_w = self.engine.state.monitors[mi].workarea.w;
+                    if is_float {
+                        self.engine.state.monitors[mi].workspaces[ws_i]
+                            .floats
+                            .push(win);
+                    } else {
+                        self.engine.state.monitors[mi].workspaces[ws_i]
+                            .add_tiled(win, dw, workarea_w);
                     }
                 }
-
-                // Update EWMH properties for external taskbars
-                self.update_ewmh_desktops()?;
-                self.update_workarea()?;
-
+            } else {
+                // Geometry-only change: update screen/workarea in place,
+                // preserving all workspace state and client assignments.
+                for (new_mon, old_mon) in
+                    new_mons.iter().zip(self.engine.state.monitors.iter_mut())
+                {
+                    old_mon.screen = new_mon.screen;
+                    old_mon.workarea = new_mon.workarea;
+                }
                 for i in 0..self.engine.state.monitors.len() {
                     self.arrange(i)?;
                 }
+            }
+
+            // Update EWMH properties for external taskbars
+            self.update_ewmh_desktops()?;
+            self.update_workarea()?;
+
+            for i in 0..self.engine.state.monitors.len() {
+                self.arrange(i)?;
             }
         }
         Ok(())
@@ -330,6 +357,7 @@ impl WindowManager {
     }
 
     pub(super) fn on_key(&mut self, e: KeyPressEvent) -> Result<(), Box<dyn std::error::Error>> {
+        self.last_event_time = e.time;
         let ksym = self.keycode_to_keysym(e.detail, u16::from(e.state))?;
         let ksym = normalize_ksym(ksym);
         let mods = clean_mask(u16::from(e.state), self.numlock);
@@ -350,6 +378,13 @@ impl WindowManager {
             self.last_key_times.retain(|_, v| *v >= cutoff);
             self.last_key_times.insert(key, std::time::Instant::now());
             self.do_action(action)?;
+            // Keyboard navigation must not be instantly undone by an
+            // EnterNotify while the pointer is parked over another tile's
+            // edge. Ignore pointer-focus for a short window; the first real
+            // MotionNotify lifts the guard.
+            self.pointer_guard_until = Some(
+                std::time::Instant::now() + std::time::Duration::from_millis(50),
+            );
         }
         Ok(())
     }
@@ -361,20 +396,23 @@ impl WindowManager {
         if e.mode != NotifyMode::NORMAL || e.detail == NotifyDetail::INFERIOR {
             return Ok(());
         }
+        self.last_event_time = e.time;
         if self.engine.cfg.focus_mouse {
+            // Guard: a key navigation that just ran must not be undone by an
+            // EnterNotify caused by the pointer sitting over a tile edge (see
+            // on_key) — ignore pointer-focus until the user actually moves the
+            // pointer (MotionNotify clears `pointer_guard_until`).
+            if let Some(until) = self.pointer_guard_until {
+                if std::time::Instant::now() < until {
+                    return Ok(());
+                }
+            }
             if let Some(cw) = self.find_client(e.event) {
                 if self.engine.state.monitors[self.engine.state.sel_mon].focused != Some(cw) {
                     self.focus(Some(cw))?;
                 }
             }
         }
-        Ok(())
-    }
-
-    pub(super) fn on_focus_in(
-        &mut self,
-        _e: FocusInEvent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
 

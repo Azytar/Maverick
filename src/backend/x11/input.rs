@@ -81,6 +81,19 @@ impl WindowManager {
 
         self.update_ewmh_desktops()?;
         self.grab_keys()?;
+
+        // Subscribe to RandR change events so hotplug / resolution changes are
+        // handled even when the server does not deliver a root ConfigureNotify.
+        // Ask for the screen, crtc, output and output-property changes only —
+        // anything else (providers, leases) is irrelevant to us.
+        use x11rb::protocol::randr::{ConnectionExt as _, NotifyMask};
+        let rr_mask = NotifyMask::from(
+            u16::from(NotifyMask::SCREEN_CHANGE)
+                | u16::from(NotifyMask::CRTC_CHANGE)
+                | u16::from(NotifyMask::OUTPUT_CHANGE)
+                | u16::from(NotifyMask::OUTPUT_PROPERTY),
+        );
+        let _ = self.conn.randr_select_input(self.root, rr_mask);
         Ok(())
     }
 
