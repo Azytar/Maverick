@@ -1,6 +1,81 @@
 use super::*;
+use x11rb::protocol::shape;
+
+/// Approximate a rounded rectangle of size `w`×`h` with corner radius `r` as
+/// a list of X11 `Rectangle`s: one full-width middle band, plus one 1px-tall
+/// rectangle per row of each rounded corner (inset by the circle's chord at
+/// that row). This is the same technique window managers have used for
+/// XShape-based rounding for decades — O(r) rectangles, no external deps,
+/// no compositor required. `r` is clamped so it can never exceed half of
+/// either dimension.
+fn rounded_rectangles(w: i32, h: i32, r: i32) -> Vec<Rectangle> {
+    let r = r.clamp(0, w.min(h) / 2);
+    if r <= 0 || w <= 0 || h <= 0 {
+        return vec![Rectangle {
+            x: 0,
+            y: 0,
+            width: w.max(0) as u16,
+            height: h.max(0) as u16,
+        }];
+    }
+
+    let mut rects = Vec::with_capacity(2 * r as usize + 1);
+    rects.push(Rectangle {
+        x: 0,
+        y: r as i16,
+        width: w as u16,
+        height: (h - 2 * r).max(0) as u16,
+    });
+
+    for i in 0..r {
+        // Row i (0 = outermost) sits `dy` pixels from the corner circle's
+        // vertical center; the circle's horizontal chord at that row gives
+        // how far to inset from the edge.
+        let dy = r - i;
+        let chord = ((r * r - dy * dy).max(0) as f64).sqrt() as i32;
+        let inset = (r - chord).clamp(0, w / 2);
+        let width = (w - 2 * inset).max(0) as u16;
+        rects.push(Rectangle {
+            x: inset as i16,
+            y: i as i16,
+            width,
+            height: 1,
+        });
+        rects.push(Rectangle {
+            x: inset as i16,
+            y: (h - 1 - i) as i16,
+            width,
+            height: 1,
+        });
+    }
+    rects
+}
 
 impl WindowManager {
+    /// Apply (or clear) rounded corners on `win` via the Shape extension's
+    /// bounding-shape mask. Only called when `corner_radius > 0` — with the
+    /// default of `0` this codepath, and every X11 Shape request, never
+    /// runs, so there's zero cost for users who don't opt in.
+    pub(super) fn round_corners(&self, win: Window, outer_w: u32, outer_h: u32) {
+        let r = self.engine.cfg.corner_radius as i32;
+        let rects = rounded_rectangles(outer_w as i32, outer_h as i32, r);
+        // Fire-and-forget, same rationale as apply_geom's configure_window:
+        // this runs on every geometry change, a synchronous round-trip per
+        // window would be unacceptable. Servers without the Shape extension
+        // (essentially none — it's been near-universal since the 90s) just
+        // silently ignore the request.
+        let _ = shape::rectangles(
+            &self.conn,
+            shape::SO::SET,
+            shape::SK::BOUNDING,
+            ClipOrdering::UNSORTED,
+            win,
+            0,
+            0,
+            &rects,
+        );
+    }
+
     pub(super) fn arrange(&mut self, mon_idx: usize) -> Result<(), Box<dyn std::error::Error>> {
         self.arrange_full(mon_idx, true, true)
     }
@@ -26,12 +101,12 @@ impl WindowManager {
             &self.engine.state,
             mon_idx,
             &self.engine.cfg,
+            &self.layout_registry,
             &mut self.placements_buf,
         );
-        // Presentation layer: apply fullscreen (tied to focus) on top of the
-        // pure layout geometry. Returns the window to raise, if any.
+        // Presentation layer: apply the fullscreen/maximized overlay.
         let mut buf = std::mem::take(&mut self.placements_buf);
-        let raise = present(
+        present(
             &self.engine.state,
             &self.engine.state.monitors[mon_idx],
             &mut buf,
@@ -41,11 +116,9 @@ impl WindowManager {
         }
         buf.clear();
         self.placements_buf = buf;
-        if let Some(w) = raise {
-            let _ = self
-                .conn
-                .configure_window(w, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
-        }
+        // Overlay stacking: presented windows above tiles, popups of presented
+        // windows above the overlay, focused window on top (or peek).
+        self.stack_overlay(mon_idx);
 
         if do_restack && self.stack_dirty {
             self.stack_dirty = false;
@@ -69,6 +142,15 @@ impl WindowManager {
                 .iter()
                 .flat_map(|c| c.windows.iter().copied())
                 .chain(ws.floats.iter().copied()),
+        );
+        // Sticky floats stay visible on every workspace of this monitor.
+        self.hide_ws_set.extend(
+            self.engine
+                .state
+                .clients
+                .iter()
+                .filter(|(_, c)| c.monitor == mon_idx && c.is_sticky())
+                .map(|(w, _)| *w),
         );
         self.hide_mon_vec.extend(
             self.engine
@@ -105,37 +187,107 @@ impl WindowManager {
     }
 
     pub(super) fn restack(&self, mon_idx: usize) -> Result<(), Box<dyn std::error::Error>> {
+        self.stack_overlay(mon_idx);
+        Ok(())
+    }
+
+    /// Unify stacking for a monitor's active workspace:
+    ///
+    /// 1. floats above tiled windows (base float layer);
+    /// 2. the presentation overlay — every fullscreen/maximized window, in
+    ///    focus order (most recently focused last → on top). Unlike the old
+    ///    focus-only rule, all overlay windows stay presented while unfocused;
+    /// 3. the focused window if it is *not* part of the overlay ("peek"): it
+    ///    rises above the presented window so focus stays visible — but stays
+    ///    below step 4, because a presented window's owned popups belong above;
+    /// 4. floating popups/dialogs whose `WM_TRANSIENT_FOR` chain reaches a
+    ///    presented window — always above that overlay, so a menu or file
+    ///    dialog of a fullscreen app never hides behind it.
+    ///
+    /// Fire-and-forget `StackMode::ABOVE`: arrange/focus paths must not block.
+    fn stack_overlay(&self, mon_idx: usize) {
         let mon = &self.engine.state.monitors[mon_idx];
         let ws = mon.ws();
 
-        // 1. Raise floats above tiled
+        // 1. Base float layer.
         for &win in &ws.floats {
             if self.engine.state.clients.contains_key(&win) {
-                let _ = self
-                    .conn
-                    .configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+                self.raise(win);
+            }
+        }
+        // Sticky floats ride above every workspace's tiles by definition —
+        // include them in the base layer regardless of which workspace is
+        // active.
+        for (&win, c) in &self.engine.state.clients {
+            if c.monitor == mon_idx && c.is_sticky() {
+                self.raise(win);
             }
         }
 
-        // 2. Raise the focused window if it is fullscreen. Only the focused
-        //    fullscreen window is presented full-screen (see core::present), so
-        //    only it should be raised — raising every fullscreen window in the
-        //    stack could put a non-focused one on top of the focused one.
-        if let Some(fw) = mon.focused {
-            if self
-                .engine
-                .state
-                .clients
-                .get(&fw)
-                .is_some_and(|c| c.is_fullscreen() || c.is_maximized())
-            {
-                let _ = self
-                    .conn
-                    .configure_window(fw, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+        // 2. Presentation overlay, most-recently-focused last.
+        let mut presented: Vec<WindowId> = ws
+            .columns
+            .iter()
+            .flat_map(|c| c.windows.iter().copied())
+            .chain(ws.floats.iter().copied())
+            .filter(|win| {
+                self.engine
+                    .state
+                    .clients
+                    .get(win)
+                    .is_some_and(|c| c.is_fullscreen() || c.is_maximized())
+            })
+            .collect();
+        presented.sort_by_key(|win| {
+            mon.focus_stack
+                .iter()
+                .position(|&x| x == *win)
+                .unwrap_or(0)
+        });
+        for &win in &presented {
+            self.raise(win);
+        }
+
+        // 3. Peek: a focused plain tile is raised above the overlay so the user
+        //    sees where focus sits without resizing the presented window.
+        if !presented.is_empty() {
+            if let Some(fw) = mon.focused {
+                if !presented.contains(&fw) {
+                    self.raise(fw);
+                }
             }
         }
 
-        Ok(())
+        // 4. Owned popups of the overlay: a float whose transient-parent chain
+        //    reaches a presented window must sit above it.
+        for &win in &ws.floats {
+            if self.transient_of(win, &presented) {
+                self.raise(win);
+            }
+        }
+    }
+
+    /// True when `win`'s `transient_parent` chain reaches any window in `roots`.
+    /// Walks at most `MAX_TRANSIENT_DEPTH` links to survive popup-of-popup
+    /// ownership without risking cycles.
+    fn transient_of(&self, win: WindowId, roots: &[WindowId]) -> bool {
+        const MAX_TRANSIENT_DEPTH: usize = 4;
+        let mut cur = self
+            .engine
+            .state
+            .clients
+            .get(&win)
+            .and_then(|c| c.transient_parent);
+        for _ in 0..MAX_TRANSIENT_DEPTH {
+            let Some(p) = cur else {
+                return false;
+            };
+            if roots.contains(&p) {
+                return true;
+            }
+            cur = self.engine.state.clients.get(&p).and_then(|c| c.transient_parent);
+        }
+        false
     }
 
     pub(super) fn apply_geom(
@@ -185,28 +337,36 @@ impl WindowManager {
             c.geom = geom;
             c.border_w = bw;
         }
+
+        if self.engine.cfg.corner_radius > 0 {
+            self.round_corners(win, geom.w + 2 * bw, geom.h + 2 * bw);
+        }
+
         Ok(())
+    }
+
+    /// Raise `win` above all its siblings (`TopLevel`). Fire-and-forget: called
+    /// from arrange/focus paths where a synchronous RTT per window is not acceptable.
+    fn raise(&self, win: Window) {
+        let _ = self
+            .conn
+            .configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
     }
 
     pub(super) fn focus(&mut self, win: Option<Window>) -> Result<(), Box<dyn std::error::Error>> {
         let valid_win = win.filter(|w| self.engine.state.clients.contains_key(w));
 
-        // Presentation (core::present) draws a fullscreen window full-screen only
-        // while it is focused. So if the previously- or newly-focused window is
-        // fullscreen, the rendered geometry must be recomputed after the focus
-        // change. Capture that here and re-arrange at the end.
+        // The presentation overlay (core::present) is independent of focus, so
+        // a focus change never recomputes or re-sizes geometry. The only thing
+        // focus influences is stacking: a focused presented window rises above
+        // the other presented ones, and a focused plain tile "peeks" above the
+        // overlay (see focus() below).
         let prev_focused = self
             .engine
             .state
             .monitors
             .get(self.engine.state.sel_mon)
             .and_then(|m| m.focused);
-        let fs_transition = |s: &crate::types::State, w: Option<Window>| -> bool {
-            w.and_then(|w| s.clients.get(&w))
-                .is_some_and(|c| c.is_fullscreen() || c.is_maximized())
-        };
-        let needs_rearrange =
-            fs_transition(&self.engine.state, prev_focused) && prev_focused != valid_win;
 
         if let Some(w) = valid_win {
             // P6: Single lookup — extract everything we need
@@ -253,7 +413,7 @@ impl WindowManager {
                     .set_input_focus(InputFocus::POINTER_ROOT, w, x11rb::CURRENT_TIME);
             }
             if self.has_protocol(w, self.atoms.wm_take_focus)? {
-                self.send_proto(w, self.atoms.wm_take_focus)?;
+                self.send_proto(w, self.atoms.wm_take_focus, self.last_event_time)?;
             }
 
             // focused border color
@@ -268,15 +428,30 @@ impl WindowManager {
             self.grab_buttons(w, true)?;
 
             let serial = self.engine.state.next_serial();
-            if let Some(c) = self.engine.state.clients.get_mut(&w) {
+            let was_urgent = if let Some(c) = self.engine.state.clients.get_mut(&w) {
+                // Consume the urgency flag so its border color and the
+                // `_NET_WM_STATE` demands-attention atom don't stick once the
+                // window is actually focused.
+                let was = c.flags.has(WinFlags::URGENT);
+                if was {
+                    c.flags.clear(WinFlags::URGENT);
+                }
                 c.focus_serial = serial;
-                c.flags.clear(WinFlags::URGENT);
+                was
+            } else {
+                false
+            };
+            if was_urgent {
+                self.write_net_wm_state(w);
             }
 
             let mon = &mut self.engine.state.monitors[mon_i];
             mon.focused = Some(w);
             mon.focus_stack.retain(|&x| x != w);
             mon.focus_stack.push(w);
+
+            // Overlay stacking (presented / popups-of-presented / peek).
+            self.stack_overlay(mon_i);
 
             let _ = self.conn.change_property32(
                 PropMode::REPLACE,
@@ -322,14 +497,16 @@ impl WindowManager {
             );
         }
 
-        // Re-render if a fullscreen presentation transition happened: either the
-        // window we just left was fullscreen (must shrink back to layout) or the
-        // one we just focused is fullscreen (must grow to cover the screen).
-        let new_is_fs = fs_transition(&self.engine.state, valid_win);
-        if needs_rearrange || new_is_fs {
-            let mon_i = self.engine.state.sel_mon;
-            self.stack_dirty = true;
-            self.arrange(mon_i)?;
+        // Announce the transition on the typed EventBus. Every focus move —
+        // pointer clicks, button grabs, EnterNotify, manage/unmanage re-focus,
+        // commands — funnels through `focus`, so this is the single choke point.
+        // `Window` and `WindowId` are both `u32` aliases, so the values pass
+        // straight through to the core's id space.
+        if prev_focused != valid_win {
+            self.engine.notify(crate::core::event::Event::FocusChanged {
+                from: prev_focused,
+                to: valid_win,
+            });
         }
 
         Ok(())

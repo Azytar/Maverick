@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "maverick"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.82"
 authors = ["azytar"]
@@ -22,7 +22,7 @@ path = "src/main.rs"
 maverick-sys = { path = "maverick-sys" }
 maverick-toml = { path = "maverick-toml" }
 libc = "0.2"
-x11rb = { version = "0.13", default-features = false, features = ["randr"] }
+x11rb = { version = "0.13", default-features = false, features = ["randr", "shape"] }
 
 [profile.release]
 opt-level = 3
