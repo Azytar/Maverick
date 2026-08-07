@@ -3,9 +3,178 @@
 All notable changes to this project are documented here. Format loosely
 follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [0.18.3] — 2026-08-07
 
 ### Added
+
+- **`--replace` y adopción de ventanas previas (EWMH).** Nuevo flag
+  `maverick --replace`: si otro WM ya gestionó la pantalla, se intenta grabar
+  `SUBSTRUCTURE_REDIRECT` directamente; si otro WM la tiene, se localiza su
+  ventana `_NET_SUPPORTING_WM_CHECK` (EWMH 1.4 § WM Attributes) y se le envía
+  `WM_DELETE_WINDOW` (nunca SIGKILL), reintentando el grab hasta ceder. Al
+  arrancar sobre un WM previo, las ventanas existentes se adoptan
+  (`scan_windows`) y las que estaban flotando restauran su geometría.
+- **`_NET_CLIENT_LIST_STACKING`.** La root window publica el orden de
+  apilamiento real (tiles visibles → flotantes → el resto, por recencia de
+  foco) a través de `_NET_CLIENT_LIST_STACKING`, actualizada en cada
+  `flush_client_list`. `_NET_SUPPORTED` se amplió con
+  `_NET_WM_WINDOW_OPACITY`, `_NET_CLOSE_WINDOW` y
+  `_NET_WM_BYPASS_COMPOSITOR`.
+- **Persistencia de ventanas flotantes.** Las window properties propias
+  `_MAVERICK_FLOAT` / `_MAVERICK_GEOM` se escriben/limpian según el estado de
+  flotación (`sync_window_prefs`), devolviéndole a una ventana su geometría
+  flotante tras un reinicio o `--replace`.
+- **Reglas con criterios nuevos.** `[[rules]]` ahora acepta además de
+  `class`/`title`: `instance`, `window_type` (normal/desktop/dock/toolbar/
+  menu/utility/splash/dialog), y acciones `sticky` (implica flotante),
+  `size` y `position` (clamped a la workarea). Criterio coincidente por
+  substring case-insensitive; `ws` acepta alias numéricos y `request` para la
+  workspace actual.
+- **`maverick-msg` (CLI dwm-style).** Nuevo binario de control: cualquier
+  línea no administrativa se reenvía verbatim según el protocolo
+  (`maverick-msg focus-right`; `maverick-msg query tree`). Comparte el motor
+  CLI (`maverick-sys::ctl`) con `maverickctl`.
+- **`query` estructurado sobre el socket de control.** `maverickctl query
+  workspaces|tree|focused|state` consulta el estado vivo del WM (el hilo
+  WM responde por el canal de réplica): IDs/geometría/layout por workspace y
+  columna, y la ventana enfocada.
+- **Ratón en flotantes.** `Mod+drag` de una ventana flotante ahora cambia su
+  tamaño según el cuadrante del puntero (mitades superior/izquierda son
+  resize). Soltar una ventana flotante encima de una ya mosaicada la inserta
+  en la columna correspondiente (drop-to-tile); durante el drag se muestra un
+  borde de previsualización en la columna destino.
+
+### Fixed
+
+- **Guardia anti-carrera `EnterNotify`/teclado (focus-follows-mouse).** Al
+  navegar con el teclado se arma una ventana de 50 ms (`pointer_guard_until`);
+  cualquier `EnterNotify` generado por la posición del puntero dentro de esa
+  ventana se ignora, y solo el primer `MotionNotify` real levanta la guardia.
+  Navegar con `Mod+Arriba/Abajo` ya no "resbala" a la ventana vecina que
+  toca el cursor.
+- **`WM_TAKE_FOCUS` con timestamp ICCCM real.** `send_proto` ahora envía el
+  último timestamp de evento de entrada (`last_event_time`, registrado en
+  key/button/enter/motion) en lugar de `CurrentTime`; toolkits estrictos
+  (Swing, algunas builds de Emacs) aceptan el foco correctamente. Aplica
+  también al `WM_DELETE_WINDOW` de `kill()`.
+- **MapRequest con overlay fullscreen/maximizada activa (anti-focus-steal).**
+  Si el nuevo `MapRequest` es un diálogo `WM_TRANSIENT_FOR` de la ventana
+  presentada (p. ej. Ctrl+S de una app en fullscreen), toma foco y se eleva
+  sobre la overlay; cualquier otra ventana entra al árbol de mosaicos en
+  silencio: sin `focus()`, la overlay mantiene foco y stacking, y la ventana
+  nueva se marca `_NET_WM_STATE_DEMANDS_ATTENTION` (urgencia, borde resaltado)
+  que se consume al enfocarla.
+
+- **Capability Layer (`core::capability`).** API pública de **lectura** para
+  consumidores externos (barras, hooks, tests): `Engine::query()` ofrece
+  `focused_window()`, `active_workspace()`, `visible_windows()`,
+  `current_layout()`, `window(id)` → `WindowInfo`. Está desacoplada del
+  `State`/`Client` internos (los DTO públicos son estables) y es de solo
+  lectura — escribir sigue siendo únicamente vía `Engine::execute(Command)`.
+  Una barra pregunta, no manipula.
+
+- **EventBus tipado (`core::event`).** Implementa el modelo
+  `Command → Domain Event → Effect` de la auditoría. Cada comando declara el
+  evento de dominio que representa (`FocusChanged`, `WorkspaceChanged`,
+  `LayoutChanged`, `WindowMoved`, `GapsChanged`, etc.) pero jamás conoce a sus
+  consumidores. El `Engine` lo publica en un `EventBus` al que se suscriben
+  renderer, IPC, futuras barras, hooks y tests. Un consumidor nuevo se
+  suscribe y recibe cambios incrementales en lugar de sondear el estado.
+- **Transacciones (`Engine::execute_batch`).** N comandos se ejecutan como una
+  sola transacción: mutan `State`/`Cfg`, se publican los eventos de dominio al
+  final y **una única** `PublishIpcState` coalesce el batch — resuelve la
+  preocupación de "un macro publicando 50 veces".
+- **Popups de la overlay nunca quedan ocultos.** `Client` recuerda
+  `transient_parent` (`WM_TRANSIENT_FOR`, capturado en `manage()`), y el
+  stacking del renderer (`stack_overlay`) eleva los diálogos/popups cuya
+  cadena transiente alcanza una ventana fullscreen/maximizada **por encima de
+  la overlay** — un menú o el selector de archivos de una app en fullscreen ya
+  no se queda detrás de ella. El stacking quedó unificado en un único helper
+  usado por `arrange`, `restack` y `focus`.
+
+- **Sistema de comandos tipado.** Nuevo módulo `core::commands` que define
+  comandos puros (`FocusDirection`, `MoveWindowToMonitor`, `SetGaps`,
+  `ToggleFloat`, etc.). Cada comando es una transformación pura sobre
+  `State`/`Cfg` que devuelve los `Effect` y (opcionalmente) el evento de
+  dominio que representa, sin conocer X11. Se ejecutan vía
+  `Engine::execute()`. `Engine::dispatch(Action)` se mantiene — y se
+  re-documenta como el **mapeador canónico** del DSL wire (teclado, IPC,
+  TOML) hacia los comandos: `Action::MoveDir` delega en el comando
+  `MoveWindow` en lugar de construir effects a mano, eliminando la doble
+  implementación. Añadir una acción nueva tocará `types.rs` (variant),
+  `core/commands.rs` (comando), `core/engine.rs` (arm de dispatch) y los
+  parsers (`core/ipc.rs`, `userconfig.rs`) — no un solo archivo.
+
+- **Rounded corners, no compositor required.** New `general.corner_radius`
+  (default `0`, disabled) shapes every managed window's outer edges
+  (content + border) via the X11 Shape extension's bounding mask —
+  `x11rb`'s `shape` feature, no cairo/pango, no new runtime dependency.
+  Implemented as an O(radius) list of `Rectangle`s (one middle band plus one
+  1px row per corner pixel, inset by that row's circle chord), applied in
+  `apply_geom` only when `corner_radius > 0` — with the default, not a
+  single Shape request is ever sent. Composes fine with picom if you're
+  already running one for shadows/opacity/animations.
+- **Split inner/outer gaps, plus smart gaps.** `gaps` is now
+  `gaps_inner` (between windows/columns) and `gaps_outer` (screen edges),
+  configurable independently; the legacy `general.gaps` TOML key still sets
+  both at once. New `general.smart_gaps` collapses gaps to `0` when a
+  workspace has exactly one tiled window (border width is untouched).
+  Column layout only applies `gaps_outer` on the vertical axis, since it
+  scrolls horizontally and has no fixed left/right screen edge; Grid, which
+  doesn't scroll, applies it on all four sides.
+- **Named color-theme presets.** `general.theme` in the TOML config
+  (`catppuccin-mocha`, `catppuccin-latte`, `gruvbox`, `nord`, `dracula`,
+  `everforest`, `solarized`) fills `col_normal`/`col_focused`/`col_urgent`
+  from `config::theme_palette`. Applied before `[colors]` in the merge
+  order, so an explicit `[colors]` entry always wins field-by-field over
+  the theme — pick a preset and tweak just one color if you want.
+- **Per-app cosmetic rule overrides.** `Rule` gained `opacity: Option<f32>`
+  (written once at manage time as `_NET_WM_WINDOW_OPACITY`, a no-op without
+  a compositor, applies to tiled and floating windows alike) and
+  `border_w: Option<u32>` (overrides border width for that app —
+  **floating windows only**; tiled/column geometry keeps one uniform
+  border width across the whole layout since the column-width/row-height
+  formulas in `core/layout.rs` assume a single shared value per column).
+  Both are settable per-rule in `config.toml` (`opacity`, `border_width`/
+  `border_w`).
+- **Pluggable layout trait + LayoutRegistry.** The monolithic
+  `match layout { Column => ..., Grid => ... }` in `core::layout::arrange`
+  is gone. Layouts implement the `Layout` trait (`name`, `arrange`) and
+  register themselves in `LayoutRegistry`, which `LayoutKind` maps into.
+  `LayoutKind` derives `Hash` for the registry's `HashMap`. Adding a layout
+  still needs a `LayoutKind` variant + parser and a short name in
+  `ipc::layout_name()`, but the arrangement logic itself is now a single
+  trait implementation instead of a growing match.
+
+### Changed
+
+- `Cfg::gaps` → `Cfg::gaps_inner` + `Cfg::gaps_outer` (breaking for anyone
+  constructing `Cfg` directly instead of going through `config.toml` or
+  `compiled_config()`).
+- `Rule` now derives `Default`; existing struct literals need
+  `..Default::default()` to pick up the new `opacity`/`border_w` fields.
+- Floating-window border width in `core/layout.rs` is read from the
+  client's own `border_w` (so `Rule::border_w` overrides take effect)
+  instead of always using the global `Cfg::border_w`. Tiled windows are
+  unaffected — they still use the uniform `Cfg::border_w`.
+
+- **Presentation overlay desacoplada del foco (`core::present`).** El
+  fullscreen/maximized es ahora una capa *persistente* por espacio de
+  trabajo: una ventana presentada cubre pantalla (`fullscreen`, borde 0) o
+  workarea (`maximized`, borde 0) **mientras sus flags estén activos**, tenga
+  o no el foco. `focus()` ya no recalcula geometría al mover el foco: un
+  cambio de foco genera **cero** `ConfigureWindow` sobre la ventana
+  presentada (lag X11 y resizes en cascada eliminados). Los tiles de debajo
+  se siguen calculando igual (layout puro sin reflow por foco), así que al
+  salir de la overlay se vuelve exactamente adonde se estaba. Nuevo
+  comportamiento *peek*: al enfocar un mosaico normal con una overlay activa,
+  éste se eleva por encima de la ventana presentada — sin redimensionar a
+  nadie — para que se vea dónde está el foco.
+- **Filas uniformes por columna (`core/layout`).** Se elimina el `split_bias`
+  del reparto vertical: todas las ventanas de una columna comparten la misma
+  altura y el foco se marca solo con borde/color. Subir/Bajar entre mosaicos
+  ya **no reflowa** (antes cada movimiento redimensionaba todas las filas de
+  la columna enfocada, la causa del lag al navegar).
 
 - **Optional TOML configuration.** Maverick now reads
   `$XDG_CONFIG_HOME/maverick/config.toml` (falling back to
@@ -24,6 +193,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   re-arranges every monitor — no restart needed. A tag-count change
   reconciles every monitor's workspace list (grows/truncates, clamping any
   windows left on a removed workspace) before the redraw.
+- **The typed EventBus now drives the `subscribe` wire.** `maverickctl
+  subscribe` `focus`/`workspace` lines are produced by a `HubEventSink`
+  subscribed to the typed `EventBus`, so pointer-driven focus changes and
+  window manage/unmanage announce themselves there too. `publish_state` no
+  longer string-diffs a hand-built protocol; it only publishes the JSON
+  snapshot when it actually changed. All focus changes funnel through the
+  backend's single `focus()` choke point, which publishes `FocusChanged`
+  (and `manage()`/`unmanage()` publish window mapped/unmapped).
 
 ### Fixed
 
@@ -42,7 +219,74 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   in the assigned monitor's workarea — width/height from the original
   request are kept, only position is recomputed.
 
+- **RandR monitor hot-plug could go unnoticed.** Some X servers only deliver
+  RandR events, not the root `ConfigureNotify` Maverick was relying on, so a
+  plugged/unplugged monitor left stale geometry until a full restart. Maverick
+  now calls `RandrSelectInput` on the root and handles `RandrNotify` /
+  `RandrScreenChangeNotify` through the same topology re-detect path
+  (guarded by an "actually changed" check, so no needless reflows).
+- **`ConfigureRequest` dropped `above_sibling`.** Restack requests that
+  position a window above a specific sibling (used by docks and some
+  compositor helpers) were ignored — only `STACK_MODE` was honored. The
+  `SIBLING` value-mask bit is now passed through to `configure_window`.
+- **El marco de una ventana maximizada sobresalía de la pantalla.** La
+  presentación `maximized` conservaba el borde del cliente: como X11 dibuja
+  el borde *fuera* del rect `(x,y,w,h)` (semántica de `xproto`), una ventana
+  con borde `b > 0` invadía los píxeles reservados/adyacentes del monitor.
+  El overlay `maximized` ahora aplica borde 0 sobre la `workarea`, igual que
+  `fullscreen` — nunca sobresale y respeta las regiones reservadas.
+- **Una ventana de la overlay desmapeada dejaba su stack sucio.** Si una
+  ventana fullscreen/maximized se cerraba, crasheaba o se desmapeaba sin
+  estar enfocada, su `WindowId` seguía en la lista de clientes hasta el
+  `DestroyNotify`; cualquier `restack`/`arrange` podía proyectarla o elevarla
+  como si existiera. `on_unmap` ahora purga al instante (con `unmanage`) a
+  toda ventana presentada que se desmapea — las tiles/floats conservan el
+  comportamiento ICCCM (se mantienen retiradas hasta destroy/re-map). El
+  riesgo `BadWindow` desaparece.
+- **El fallback de foco ignoraba la overlay.** Si cerrabas un mosaico en modo
+  *peek* (focus sobre un tile mientras un fullscreen cubre la pantalla), el
+  foco caía sobre un mosaico invisible bajo la overlay. `best_focus` ahora
+  prefiere la ventana fullscreen/maximizada más reciente del workspace antes
+  que la columna/stack — al cerrar el mosaic peek, el foco vuelve a la
+  ventana presentada.
+- **Directiva para compositores externos (`_NET_WM_BYPASS_COMPOSITOR`).**
+  Al entrar en fullscreen se escribe `_NET_WM_BYPASS_COMPOSITOR = 2` ("bypass
+  mientras esté en fullscreen") y se borra al salir. Picom & co. dejan de
+  redirigir/aplicar sombras a vídeo o juegos en fullscreen → menos lag de
+  entrada y más FPS.
+
 ### Removed
+
+- **`serde` + `toml` dependencies; new zero-dependency `maverick-toml` crate.**
+  The config parser is now a local strict TOML-subset crate (`maverick-toml`)
+  with **zero external dependencies**, replacing `serde 1.0.229` and
+  `toml 0.8.23` (and their transitive `winnow 0.7.15`, `indexmap 2.14.0`,
+  `serde_spanned`, `toml_datetime`, `toml_edit`). `src/userconfig.rs` was
+  rewritten to consume its event iterator (`Section` / `ArraySection` /
+  `KeyValue`) instead of `serde` derives, preserving the same fail-safe
+  contract (syntax error → whole file rejected → compiled defaults; semantic
+  errors dropped per-entry with a warning) and all value aliases (`border_w`/
+  `border_width`, `col_normal`/`normal`, `type`/`window_type`,
+  `ws`/`workspace`, `commands`/`apps`/`programs`, …). Supported syntax:
+  `[section]`/`[[tables]]`, plain key = `value`, ints (negative), `0x…` hex,
+  floats, booleans, basic strings `"…"`, flat string/int lists and nested
+  `autostart`-style grids; single-quoted strings, dotted keys and exports are
+  rejected. **Binary shrinks ~21%** on the same release profile (stripped):
+  the config-parsing layer measured in isolation drops from 614.8 KB
+  (serde+toml) to 357.1 KB (maverick-toml), and the stripped `maverick` binary
+  with identical functionality measured 934,160 B.
+
+- **Dead code and dead atoms.** `Client::is_dialog`, `Client::tags`/
+  `TagMask`, the empty `on_focus_in` stub, `Layout::handle_action`, the
+  never-emitted `Effect` variants (`ArrangeAll`, `MapWindow`, `UnmapWindow`,
+  `UpdateEwmhDesktops`, `UpdateClientList`), and ~40 atoms that were interned
+  and advertised but never read are gone. `_NET_SUPPORTED` now lists only the
+  atoms the WM actually acts on, and the `#[allow(dead_code)]` escapes hatch
+  is removed.
+- **Duplicate string-escape logic.** Two private `json_escape`/`unquote`
+  copies (CLI and core IPC) are replaced by `maverick_sys::json` — including
+  a real `\uXXXX`-aware `json_unescape` that the previous implementation
+  mishandled.
 
 - **Compositor orchestration removed from the WM's startup sequence, and
   `startup_sound` dropped entirely.** `main.rs` no longer spawns a compositor

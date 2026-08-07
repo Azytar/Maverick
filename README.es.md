@@ -196,10 +196,10 @@ archivo es **completamente opcional** — si falta, maverick arranca con los
 valores por defecto compilados, sin quejarse. Los campos ausentes caen a esos
 valores, así que solo escribes lo que quieras cambiar.
 
-La carga es **a prueba de fallos por diseño**: un archivo que no se puede
-parsear (TOML inválido, tipos equivocados) se rechaza completo y se usan los
-valores compilados; una entrada individual con un nombre de clave desconocido
-o una acción mal escrita se descarta con una advertencia y el resto del
+La carga es **a prueba de fallos por diseño**: un archivo con sintaxis
+inválida se rechaza completo y se usan los valores compilados; un valor o
+entrada individual — tipo equivocado, clave desconocida o acción mal escrita —
+se descarta con una advertencia y el resto del
 archivo sigue cargando igual. Maverick nunca deja de arrancar por culpa de una
 config mala.
 

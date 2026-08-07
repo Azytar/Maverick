@@ -199,11 +199,10 @@ Maverick is configured in **`$XDG_CONFIG_HOME/maverick/config.toml`** (or
 defaults with no complaint. Missing fields fall back to those defaults, so you
 only write what you want to override.
 
-Loading is **fail-safe by design**: a file that can't be parsed (invalid TOML,
-wrong types) is rejected whole and the compiled defaults are used, while a
-single entry with an unknown key name or a broken action string is dropped
-with a warning and the rest of the file still loads. Maverick never fails to
-start because of a bad config.
+Loading is **fail-safe by design**: a file with invalid syntax is rejected
+whole and the compiled defaults are used, while a wrong-typed value, unknown
+key name or broken action string is dropped with a warning and the rest of
+the file still loads. Maverick never fails to start because of a bad config.
 
 There's a full, commented example at [`examples/config.toml`](examples/config.toml):
 

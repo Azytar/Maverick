@@ -12,24 +12,41 @@
 # in the file still applies. maverick never refuses to start over a bad
 # config.
 #
+# The parser is maverick's own strict TOML subset: plain keys, basic "…"
+# strings, ints (including negative and 0x… hex), floats, booleans, flat
+# lists, and the nested [autostart] command lists. Single-quoted '…'
+# strings, dotted keys and [table] exports are not supported and reject the
+# whole file — write keys bare, quote strings with double quotes, and use
+# 0x… hex only for colors.
+#
 # Apply changes without restarting:
 #   maverickctl reload
 
 [general]
 border_width      = 2      # focused/unfocused window border, in pixels
-gaps              = 6      # gap between windows and screen edges, in pixels
+gaps              = 6      # legacy alias — sets both gaps_inner and gaps_outer
+# gaps_inner        = 6      # gap between windows within a column and between columns
+# gaps_outer        = 6      # gap at the top/bottom screen edges (all 4 edges in Grid layout)
+# smart_gaps        = false  # collapse gaps to 0 when a workspace has exactly one tiled window
+# corner_radius     = 0      # rounded corners in pixels, via X11 Shape — 0 disables it entirely
 n_tags            = 9      # number of workspaces (1-9, changing this needs a reload)
 default_col_width = 700    # width in pixels a newly created column starts at
 split_bias        = 0.6    # extra height the focused window gets within a column, 0.0-1.0
 focus_mouse       = false  # focus a window just by moving the mouse over it
 warp_cursor       = false  # snap the cursor to the center of the newly focused window
 
+# Named color-scheme preset, applied before [colors] below (so an explicit
+# [colors] entry always wins over whatever the theme sets). One of:
+# catppuccin-mocha (default), catppuccin-latte, gruvbox, nord, dracula,
+# everforest, solarized.
+# theme = "nord"
+
 # Custom workspace names, e.g. ["web", "code", "chat", "music"]. Must have
 # exactly `n_tags` entries or it's ignored. Leave commented for plain "1".."9".
 # tag_names = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 
 [colors]
-# Catppuccin Mocha by default. Hex as 0xRRGGBB.
+# Catppuccin Mocha by default. Hex as 0xRRGGBB. Overrides any [general].theme.
 normal  = 0x45475a  # unfocused window border  (Surface1)
 focused = 0x89b4fa  # focused window border    (Blue)
 urgent  = 0xf38ba8  # urgent window border     (Red)
@@ -142,11 +159,16 @@ action = "move_mon:next"
 # ── Window rules ────────────────────────────────────────────────────────────
 # class/title match case-insensitively as a substring; both are optional but
 # at least one should be set or the rule matches everything. workspace is
-# 1-indexed, same as in keybindings.
+# 1-indexed, same as in keybindings. opacity/border_width are optional
+# cosmetic overrides: opacity (0.0-1.0) is a compositor hint (_NET_WM_WINDOW_
+# OPACITY) — a no-op unless you're running picom or similar. border_width
+# only takes effect while the window is floating (see README's Window Rules
+# section for why tiled windows don't support a per-app border).
 
 [[rules]]
 class = "mpv"
 float = true
+opacity = 0.95
 
 [[rules]]
 class = "pinentry"
