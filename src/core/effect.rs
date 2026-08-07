@@ -22,8 +22,6 @@ use crate::types::{Rect, WindowId};
 pub enum Effect {
     /// Recompute + apply the layout geometry for one monitor.
     ArrangeMonitor(usize),
-    /// Arrange every monitor (e.g. after a global change).
-    ArrangeAll,
     /// Mark a monitor's stacking order dirty (float/fullscreen changed), so the
     /// next arrange restacks. Emit before `ArrangeMonitor` when z-order changed.
     MarkRestack(usize),
@@ -42,17 +40,15 @@ pub enum Effect {
     },
     /// Ask the window to close (`WM_DELETE_WINDOW`, else kill).
     KillWindow(WindowId),
-    MapWindow(WindowId),
-    UnmapWindow(WindowId),
     /// Set the fullscreen presentation state for a window, then re-present.
     SetFullscreen {
         win: WindowId,
         on: bool,
     },
-    /// Refresh EWMH desktop properties (_`NET_NUMBER_OF_DESKTOPS`, current, etc.).
-    UpdateEwmhDesktops,
-    /// Refresh _`NET_CLIENT_LIST`.
-    UpdateClientList,
+    /// Persist the window's private float/geometry atoms (used across WM
+    /// restart / `--replace`). A SEMANTIC effect so the backend keeps its
+    /// persistence format its own business.
+    SyncWindowPrefs(WindowId),
     /// Set _`NET_CURRENT_DESKTOP` on the root window.
     SetCurrentDesktop(usize),
     /// Set _`NET_WM_DESKTOP` on a window.

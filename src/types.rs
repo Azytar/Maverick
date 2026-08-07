@@ -3,8 +3,6 @@
 
 use std::collections::HashMap;
 
-pub type TagMask = u32;
-
 /// Backend-agnostic window identifier used throughout the core domain model.
 ///
 /// This is a plain `u32`, not an alias for x11rb's `Window` — the core must not
@@ -59,6 +57,9 @@ impl WinFlags {
     pub const NO_FOCUS: u8 = 1 << 3;
     pub const FIXED: u8 = 1 << 4;
     pub const MAXIMIZED: u8 = 1 << 5;
+    /// Sticky: a float that stays visible on every workspace of its monitor
+    /// (never hidden by `hide_offscreen`). Set via a window rule.
+    pub const STICKY: u8 = 1 << 6;
 
     #[inline]
     pub fn set(&mut self, f: u8) {
@@ -239,13 +240,22 @@ pub struct Client {
     pub saved_geom: Rect,
     pub border_w: u32,
     pub old_border_w: u32,
-    pub tags: TagMask,
+    /// Window opacity as 0.0-1.0, from the best matching rule. Written to the
+    /// X11 property `_NET_WM_WINDOW_OPACITY` at manage/rearrange time. `None`
+    /// means "use the global default" (fully opaque).
+    pub opacity: Option<f32>,
     pub flags: WinFlags,
     pub hints: SizeHints,
     pub monitor: usize,
     pub workspace: usize, // index into Monitor::workspaces
+    /// The window this one is transient for (`WM_TRANSIENT_FOR`), when it was a
+    /// known client at manage time. Used by the renderer to keep popups/dialogs
+    /// of a fullscreen or maximized window above the presentation overlay.
+    pub transient_parent: Option<WindowId>,
+    /// `_NET_WM_WINDOW_TYPE` values this window declared, as lowercase atom
+    /// names (`"dialog"`, `"utility"`, `"toolbar"`, …). Used by window rules.
+    pub window_types: Vec<String>,
     pub focus_serial: u64,
-    pub is_dialog: bool,
     pub is_unmanaged: bool,
     pub wants_input: bool,
     pub wm_hidden: bool,
@@ -262,13 +272,14 @@ impl Client {
             saved_geom: Rect::default(),
             border_w: 2,
             old_border_w: 2,
-            tags: 1 << ws,
+            opacity: None,
             flags: WinFlags::default(),
             hints: SizeHints::default(),
             monitor: mon,
             workspace: ws,
+            transient_parent: None,
+            window_types: Vec::new(),
             focus_serial: 0,
-            is_dialog: false,
             is_unmanaged: false,
             wants_input: true,
             wm_hidden: false,
@@ -290,6 +301,10 @@ impl Client {
     #[inline]
     pub fn no_focus(&self) -> bool {
         self.flags.has(WinFlags::NO_FOCUS)
+    }
+    #[inline]
+    pub fn is_sticky(&self) -> bool {
+        self.flags.has(WinFlags::STICKY)
     }
 }
 
@@ -471,7 +486,7 @@ pub enum Dir {
 
 // ─── Layout kind ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayoutKind {
     Column, // niri-style: one or more windows per column, columns side by side
     Grid,   // equal grid
@@ -512,7 +527,10 @@ pub enum Action {
     FocusMon(Dir),
     MoveMon(Dir),
     Restart,
-    /// Quit immediately (sets running = false). No confirmation dialog.
+    /// Quit immediately (sets `running = false`). No confirmation dialog.
+    /// This is not bound to a default key — the Mod4+Shift+Q default shells
+    /// out to `maverickctl quit --confirm` — so in practice it is reachable
+    /// via IPC (`dispatch quit`) or the TOML config only.
     Quit,
 }
 
@@ -550,14 +568,28 @@ impl State {
         &mut self.monitors[i]
     }
 
-    /// Pick the best window to focus on `mon_idx`'s active workspace: the
-    /// column-focused window, else the most-recently focused window in the
-    /// focus stack that still lives on that workspace. Pure (no X11).
+    /// Pick the best window to focus on `mon_idx`'s active workspace. Pure (no X11).
+    ///
+    /// Order of preference:
+    ///   1. a fullscreen/maximized (presentation-overlay) window on the
+    ///      workspace, most-recently-focused first — so that closing a tile in
+    ///      *peek* mode returns focus to the overlay window instead of leaving
+    ///      the user on an invisible tile underneath;
+    ///   2. the column-focused window;
+    ///   3. the most-recently focused window in the focus stack.
     pub fn best_focus(&self, mon_idx: usize) -> Option<WindowId> {
         let mon = self.monitors.get(mon_idx)?;
         let ws_idx = mon.active_ws;
         if ws_idx >= mon.workspaces.len() {
             return None;
+        }
+        let overlay = mon.focus_stack.iter().rev().find(|&&w| {
+            self.clients
+                .get(&w)
+                .is_some_and(|c| c.workspace == ws_idx && (c.is_fullscreen() || c.is_maximized()))
+        });
+        if let Some(&w) = overlay {
+            return Some(w);
         }
         let col_win = mon.workspaces[ws_idx].focused_win();
         let from_stack = mon
