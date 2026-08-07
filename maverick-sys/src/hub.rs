@@ -24,7 +24,8 @@ use std::sync::{Arc, Mutex};
 /// A command requested by an external tool, to be executed by the WM on its
 /// own thread. `Dispatch` carries an action name that the WM maps to its
 /// internal `Action` vocabulary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// NOTE: not `Eq`/`PartialEq` — `Query` carries a `Sender` reply channel.
+#[derive(Debug, Clone)]
 pub enum ControlCommand {
     /// Ask the WM to quit cleanly.
     Quit,
@@ -34,6 +35,10 @@ pub enum ControlCommand {
     Reload,
     /// Execute a named action, e.g. `focus-left`, `cycle-layout`, `view 3`.
     Dispatch(String),
+    /// A structured read-only query ("workspaces", "tree", "focused", …).
+    /// The WM answers by sending the result JSON through `reply`; the server
+    /// thread blocks on the channel until it arrives.
+    Query { topic: String, reply: Sender<String> },
 }
 
 /// Shared hub cloned into both the server thread and the WM thread.

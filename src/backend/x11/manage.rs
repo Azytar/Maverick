@@ -149,6 +149,9 @@ impl WindowManager {
                         .map(std::iter::Iterator::collect)
                         .unwrap_or_default();
                     for a in atoms {
+                        if let Some(n) = self.window_type_name(a) {
+                            client.window_types.push(n.to_string());
+                        }
                         if a == self.atoms.net_wm_window_type_desktop
                             || a == self.atoms.net_wm_window_type_dock
                         {
@@ -161,7 +164,6 @@ impl WindowManager {
                             || a == self.atoms.net_wm_window_type_splash
                         {
                             client.flags.set(WinFlags::FLOAT);
-                            client.is_dialog = true;
                         }
                     }
                 }
@@ -192,7 +194,6 @@ impl WindowManager {
                         }
                         if a == self.atoms.net_wm_state_modal {
                             client.flags.set(WinFlags::FLOAT);
-                            client.is_dialog = true;
                         }
                     }
                 }
@@ -273,12 +274,39 @@ impl WindowManager {
                 client.workspace = pc.workspace;
                 client.monitor = pc.monitor;
                 client.flags.set(WinFlags::FLOAT);
+                client.transient_parent = Some(parent);
                 transient_parent_geom = Some(pc.geom);
             }
         }
 
+        // Restore float/geometry persisted by a previous Maverick instance
+        // (a `--replace` or in-place restart). Applies only when the atom says
+        // the window was floating — tiled windows are re-tiled by our engine.
+        let restored_geom = {
+            let (was_float, geom) = self.read_float_prefs(win);
+            if was_float {
+                client.flags.set(WinFlags::FLOAT);
+            }
+            geom
+        };
+
         self.apply_rules(&mut client);
         self.detect_portal(&mut client);
+
+        // Apply per-rule opacity, if any. _NET_WM_WINDOW_OPACITY is a 32-bit
+        // cardinal in the range 0 (transparent) – 0xFFFFFFFF (opaque). A
+        // compositor (picom, etc.) reads this property; without one it's a
+        // no-op, which is why we never reject a rule that sets it.
+        if let Some(op) = client.opacity {
+            let alpha = (op.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
+            let _ = self.conn.change_property32(
+                PropMode::REPLACE,
+                win,
+                self.atoms.net_wm_window_opacity,
+                AtomEnum::CARDINAL,
+                &[alpha],
+            );
+        }
 
         // Center floating windows ourselves rather than trusting the raw X
         // geometry captured above (`geom`/`geom_r`): toolkits position dialogs
@@ -315,6 +343,16 @@ impl WindowManager {
                 client.geom = target;
             }
             client.saved_geom = client.geom;
+        }
+
+        // Rule geometry (forced size/position) overrides the auto-centering.
+        self.apply_rule_geometry(&mut client);
+
+        // A restored (persisted) geometry wins over every heuristic — it is
+        // the user's explicit floating position from before the restart.
+        if let Some(g) = restored_geom {
+            client.geom = g;
+            client.saved_geom = g;
         }
 
         // configure border
@@ -368,6 +406,15 @@ impl WindowManager {
 
         self.client_list_dirty = true;
 
+        // Persist float status + geometry so a restart leaves exactly this.
+        self.sync_window_prefs(win);
+
+        // Announce the new client on the typed EventBus (the sink narrates it
+        // to `subscribe` clients). `Window` and `WindowId` share the u32 id
+        // space, so no conversion is needed at this edge.
+        self.engine
+            .notify(crate::core::event::Event::WindowMapped(win));
+
         // Inform EWMH-aware taskbars (polybar, eww, etc.) which desktop this window is on.
         let _ = self.conn.change_property32(
             PropMode::REPLACE,
@@ -385,6 +432,49 @@ impl WindowManager {
             self.engine.state.monitors[mon_i].workspaces[ws_i].scroll = scroll;
         }
         self.arrange(mon_i)?;
+
+        // Presentation-aware focus policy (EWMH focus stealing): a new window
+        // must never yank input away from a live fullscreen/maximized overlay.
+        //  - Dialog owned by a presented window (WM_TRANSIENT_FOR reaches it,
+        //    e.g. Ctrl+S file picker of a fullscreen app) → focus it; the
+        //    overlay stack raises it above its parent.
+        //  - Any other window → added to the tiling tree *silently*: no focus
+        //    change, overlay keeps input and stays on top; the new window is
+        //    flagged urgent (`_NET_WM_STATE_DEMANDS_ATTENTION` + border color)
+        //    so bars/taskbars can highlight it.
+        let (overlay_present, owned_dialog) = {
+            let m = &self.engine.state.monitors[mon_i];
+            if ws_i >= m.workspaces.len() {
+                (false, false)
+            } else {
+                let ws = &m.workspaces[ws_i];
+                let mut presented: std::collections::HashSet<WindowId> =
+                    ws.columns.iter().flat_map(|c| c.windows.iter().copied()).collect();
+                presented.extend(ws.floats.iter().copied());
+                presented.retain(|w| {
+                    self.engine
+                        .state
+                        .clients
+                        .get(w)
+                        .is_some_and(|c| c.is_fullscreen() || c.is_maximized())
+                });
+                let owned = self
+                    .engine
+                    .state
+                    .clients
+                    .get(&win)
+                    .and_then(|c| c.transient_parent)
+                    .is_some_and(|p| presented.contains(&p));
+                (!presented.is_empty(), owned)
+            }
+        };
+        if overlay_present && !owned_dialog {
+            if let Some(c) = self.engine.state.clients.get_mut(&win) {
+                c.flags.set(WinFlags::URGENT);
+            }
+            self.write_net_wm_state(win);
+            return Ok(());
+        }
         self.focus(Some(win))?;
 
         Ok(())
@@ -400,6 +490,10 @@ impl WindowManager {
             Some(c) => c,
             None => return Ok(()),
         };
+
+        // Announce the departure on the typed EventBus.
+        self.engine
+            .notify(crate::core::event::Event::WindowUnmapped(win));
 
         if !destroyed {
             let _ = self.conn.configure_window(
@@ -428,9 +522,15 @@ impl WindowManager {
 
     pub(super) fn apply_rules(&self, c: &mut Client) {
         for rule in &self.engine.cfg.rules {
-            if rule.matches(&c.class, &c.name) {
+            if rule.matches(&c.class, &c.instance, &c.window_types, &c.name) {
                 if rule.float {
                     c.flags.set(WinFlags::FLOAT);
+                }
+                if rule.sticky {
+                    // Sticky always implies floating: a sticky tile would fight
+                    // the tiling geometry of every workspace.
+                    c.flags.set(WinFlags::FLOAT);
+                    c.flags.set(WinFlags::STICKY);
                 }
                 if let Some(ws) = rule.ws {
                     let mi = c.monitor;
@@ -440,7 +540,130 @@ impl WindowManager {
                         c.workspace = ws;
                     }
                 }
+                if let Some(bw) = rule.border_w {
+                    c.border_w = bw;
+                }
+                if let Some(op) = rule.opacity {
+                    c.opacity = Some(op.clamp(0.0, 1.0));
+                }
             }
+        }
+    }
+
+    /// Apply rule-driven geometry (forced size/position) to a floating client.
+    /// Run *after* the auto-centering pass so a rule position wins over the
+    /// "center on parent/workarea" heuristic, and the size is clamped into the
+    /// monitor's workarea instead of being trusted blindly.
+    pub(super) fn apply_rule_geometry(&self, c: &mut Client) {
+        if !c.is_float() {
+            return;
+        }
+        for rule in &self.engine.cfg.rules {
+            if !rule.matches(&c.class, &c.instance, &c.window_types, &c.name) {
+                continue;
+            }
+            let wa = self
+                .engine
+                .state
+                .monitors
+                .get(c.monitor)
+                .map_or(Rect::new(0, 0, 800, 600), |m| m.workarea);
+            if let Some((w, h)) = rule.size {
+                c.geom.w = w;
+                c.geom.h = h;
+            }
+            if let Some((x, y)) = rule.position {
+                c.geom.x = wa.x + x;
+                c.geom.y = wa.y + y;
+            }
+            // Clamp fully inside the workarea (allow full-workarea sizes).
+            let max_x = (wa.x + wa.w as i32 - c.geom.w as i32).max(wa.x);
+            let max_y = (wa.y + wa.h as i32 - c.geom.h as i32).max(wa.y);
+            c.geom.x = c.geom.x.clamp(wa.x, max_x);
+            c.geom.y = c.geom.y.clamp(wa.y, max_y);
+            c.geom.w = c.geom.w.min(wa.w);
+            c.geom.h = c.geom.h.min(wa.h);
+            c.saved_geom = c.geom;
+        }
+    }
+
+    /// Map a `_NET_WM_WINDOW_TYPE` atom to its lowercase name (for window
+    /// rules), or `None` for the undocumented types we don't advertise.
+    pub(super) fn window_type_name(&self, atom: u32) -> Option<&'static str> {
+        let a = &self.atoms;
+        if atom == a.net_wm_window_type_desktop {
+            Some("desktop")
+        } else if atom == a.net_wm_window_type_dock {
+            Some("dock")
+        } else if atom == a.net_wm_window_type_toolbar {
+            Some("toolbar")
+        } else if atom == a.net_wm_window_type_menu {
+            Some("menu")
+        } else if atom == a.net_wm_window_type_utility {
+            Some("utility")
+        } else if atom == a.net_wm_window_type_splash {
+            Some("splash")
+        } else if atom == a.net_wm_window_type_dialog {
+            Some("dialog")
+        } else {
+            None
+        }
+    }
+
+    /// Read Maverick's private float-persistence atoms. Returns `(was_float,
+    /// restored_geometry)`. `was_float` is 0/absent when the window was tiled.
+    fn read_float_prefs(&self, win: Window) -> (bool, Option<Rect>) {
+        let was_float = self
+            .conn
+            .get_property(false, win, self.atoms.maverick_float, AtomEnum::CARDINAL, 0, 1)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .and_then(|p| p.value32().map(|mut v| v.next().unwrap_or(0) == 1))
+            .unwrap_or(false);
+        if !was_float {
+            return (false, None);
+        }
+        let geom = self
+            .conn
+            .get_property(false, win, self.atoms.maverick_geom, AtomEnum::CARDINAL, 0, 4)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .and_then(|p| p.value32().map(std::iter::Iterator::collect::<Vec<u32>>))
+            .filter(|v| v.len() == 4)
+            .map(|v| Rect::new(v[0] as i32, v[1] as i32, v[2], v[3]));
+        (true, geom)
+    }
+
+    /// Write (or clear) the private persistence atoms for `win` to mirror its
+    /// current float state and floating geometry. Fire-and-forget: two
+    /// property requests on manage/toggle paths.
+    pub(super) fn sync_window_prefs(&self, win: Window) {
+        let Some(c) = self.engine.state.clients.get(&win) else {
+            return;
+        };
+        if c.is_float() && !c.is_unmanaged {
+            let _ = self.conn.change_property32(
+                PropMode::REPLACE,
+                win,
+                self.atoms.maverick_float,
+                AtomEnum::CARDINAL,
+                &[1],
+            );
+            let _ = self.conn.change_property32(
+                PropMode::REPLACE,
+                win,
+                self.atoms.maverick_geom,
+                AtomEnum::CARDINAL,
+                &[
+                    c.geom.x.max(0) as u32,
+                    c.geom.y.max(0) as u32,
+                    c.geom.w,
+                    c.geom.h,
+                ],
+            );
+        } else {
+            let _ = self.conn.delete_property(win, self.atoms.maverick_float);
+            let _ = self.conn.delete_property(win, self.atoms.maverick_geom);
         }
     }
 
@@ -572,6 +795,25 @@ impl WindowManager {
             }
             self.stack_dirty = true;
         }
+        // Tell an external compositor (picom, etc.) to skip its effect pass on
+        // this window while it is fullscreen. Value 2 = "bypass whenever the
+        // window is fullscreen" (compositors read `_NET_WM_STATE`), so FX resume
+        // the moment the window leaves fullscreen. Without this, a fullscreen
+        // video/game still gets redirected + per-frame shadow work in picom →
+        // input lag and frame drops.
+        if fs {
+            let _ = self.conn.change_property32(
+                PropMode::REPLACE,
+                win,
+                self.atoms.net_wm_bypass_compositor,
+                AtomEnum::CARDINAL,
+                &[2],
+            );
+        } else {
+            let _ = self
+                .conn
+                .delete_property(win, self.atoms.net_wm_bypass_compositor);
+        }
         self.write_net_wm_state(win);
         let mi = self.engine.state.clients.get(&win).map_or(0, |c| c.monitor);
         self.arrange(mi)?;
@@ -636,9 +878,10 @@ impl WindowManager {
     }
 
     /// Rewrite `_NET_WM_STATE` for `win` from the client's current flags, so
-    /// every active EWMH state (fullscreen, maximized, …) is advertised
-    /// consistently. Setting a single state must not clobber the others.
-    fn write_net_wm_state(&self, win: Window) {
+    /// every active EWMH state (fullscreen, maximized, demands-attention, …) is
+    /// advertised consistently. Setting a single state must not clobber the
+    /// others.
+    pub(super) fn write_net_wm_state(&self, win: Window) {
         let Some(c) = self.engine.state.clients.get(&win) else {
             return;
         };
@@ -657,6 +900,7 @@ impl WindowManager {
             a != self.atoms.net_wm_state_fullscreen
                 && a != self.atoms.net_wm_state_maximized_vert
                 && a != self.atoms.net_wm_state_maximized_horiz
+                && a != self.atoms.net_wm_state_demands_attention
         });
         if c.is_fullscreen() {
             state_atoms.push(self.atoms.net_wm_state_fullscreen);
@@ -664,6 +908,9 @@ impl WindowManager {
         if c.is_maximized() {
             state_atoms.push(self.atoms.net_wm_state_maximized_vert);
             state_atoms.push(self.atoms.net_wm_state_maximized_horiz);
+        }
+        if c.flags.has(WinFlags::URGENT) {
+            state_atoms.push(self.atoms.net_wm_state_demands_attention);
         }
         let _ = self.conn.change_property32(
             PropMode::REPLACE,

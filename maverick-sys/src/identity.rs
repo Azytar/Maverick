@@ -26,6 +26,8 @@ pub const RELOAD_CMD: &str = "reload";
 pub const SUBSCRIBE_CMD: &str = "subscribe";
 /// `dispatch <action>` — prefix; the remainder is the action name.
 pub const DISPATCH_CMD: &str = "dispatch";
+/// `query <topic>` — asks the WM to answer a structured JSON query.
+pub const QUERY_CMD: &str = "query";
 
 /// A live or discovered Maverick instance.
 #[derive(Debug, Clone, PartialEq, Eq)]

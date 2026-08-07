@@ -94,6 +94,59 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Rewrite `_NET_CLIENT_LIST_STACKING` — the client list in bottom-to-top
+    /// stack order, consumed by taskbars, Alt+Tab switchers (rofi -windowdmenu,
+    /// i3lock-style UIs) and EWMH clients that `XmuClientWindow`-walk the stack.
+    /// Not perfectly the raw X Z-order (Maverick re-stacks programmatically in
+    /// `stack_overlay`), but a faithful, deterministic model of it: tiled then
+    /// floats per workspace, then anything left over in most-recently-focused
+    /// order on top.
+    pub(super) fn update_client_list_stacking(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let state = &self.engine.state;
+        let mut out: Vec<u32> = Vec::with_capacity(state.clients.len());
+        let mut seen = std::collections::HashSet::with_capacity(state.clients.len());
+        for mon in &state.monitors {
+            for ws in &mon.workspaces {
+                for col in &ws.columns {
+                    for &w in &col.windows {
+                        if seen.insert(w) {
+                            out.push(w);
+                        }
+                    }
+                }
+                for &w in &ws.floats {
+                    if seen.insert(w) {
+                        out.push(w);
+                    }
+                }
+            }
+        }
+        // Any client not represented in the tiling tree (hidden/inactive-wo
+        // state, hotplug leftovers) goes on top in focus-recency order.
+        for mon in &state.monitors {
+            for &w in mon.focus_stack.iter().rev() {
+                if seen.insert(w) {
+                    out.push(w);
+                }
+            }
+        }
+        for &w in state.clients.keys() {
+            if seen.insert(w) {
+                out.push(w);
+            }
+        }
+        self.conn
+            .change_property32(
+                PropMode::REPLACE,
+                self.root,
+                self.atoms.net_client_list_stacking,
+                AtomEnum::WINDOW,
+                &out,
+            )?
+            .check()?;
+        Ok(())
+    }
+
     /// Read the root window's `WM_NAME` into `state.status`. External bars
     /// (polybar, waybar, …) and `maverickctl state`/`subscribe` consume this
     /// through IPC; the WM no longer renders it itself. Kept when the internal
@@ -124,6 +177,7 @@ impl WindowManager {
         if self.client_list_dirty {
             self.client_list_dirty = false;
             self.update_client_list()?;
+            self.update_client_list_stacking()?;
         }
         Ok(())
     }
@@ -164,14 +218,21 @@ impl WindowManager {
         &self,
         win: Window,
         proto: u32,
+        time: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // ICCCM 4.1.4: `WM_TAKE_FOCUS` must carry a real server timestamp
+        // (the latest key/button event) rather than `CurrentTime`; some strict
+        // toolkits (Java Swing, some Emacs builds) discard CurrentTime-based
+        // focus messages. Fall back to `CurrentTime` only when no input event
+        // has been recorded yet.
+        let time = if time != 0 { time } else { x11rb::CURRENT_TIME };
         let ev = ClientMessageEvent {
             response_type: CLIENT_MESSAGE_EVENT,
             format: 32,
             sequence: 0,
             window: win,
             type_: self.atoms.wm_protocols,
-            data: ClientMessageData::from([proto, x11rb::CURRENT_TIME, 0, 0, 0]),
+            data: ClientMessageData::from([proto, time, 0, 0, 0]),
         };
         let _ = self.conn.send_event(false, win, EventMask::NO_EVENT, ev);
         Ok(())

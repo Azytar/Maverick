@@ -22,6 +22,7 @@ use crate::types::*;
 mod actions;
 mod events;
 mod ewmh;
+mod hubevents;
 mod input;
 mod manage;
 mod pointer;
@@ -35,6 +36,7 @@ pub struct WindowManager {
     root: Window,
     atoms: Atoms,
     pub engine: Engine,
+    layout_registry: crate::core::layout::LayoutRegistry,
     check_win: Window,
     numlock: u16,
     keymap: BTreeMap<(u16, u32), crate::types::Action>,
@@ -63,15 +65,24 @@ pub struct WindowManager {
     /// Last state snapshot published to the hub — avoids re-publishing identical
     /// JSON on every loop iteration.
     last_state_json: String,
-    /// Last (focused window, `active_ws`, `sel_mon`) published, used to emit
-    /// granular focus/workspace events to `subscribe` clients.
-    last_focus: Option<Window>,
-    last_active_ws: usize,
-    last_sel_mon: usize,
     /// External dock windows we currently reserve space for, mapped to the
     /// monitor index whose `reserved_regions` hold their reservation. Used to
     /// remove the reservation exactly when the dock is destroyed/unmapped.
     docks: std::collections::HashMap<Window, usize>,
+    /// When set, `EnterNotify`-driven focus (focus-follows-mouse) is ignored.
+    /// Armed right after keyboard navigation and other programmatic focus
+    /// changes so the pointer — parked over a tile edge — can't instantly undo
+    /// the key-driven switch. Cleared by the first real `MotionNotify`.
+    pointer_guard_until: Option<std::time::Instant>,
+    /// Server time of the most recent input event (key/button/enter). Used to
+    /// stamp ICCCM `WM_TAKE_FOCUS` messages with a real timestamp instead of
+    /// `CurrentTime`, which a few strict toolkits (some Java/Emacs builds)
+    /// refuse to act on.
+    last_event_time: u32,
+    /// Tiled window currently highlighted by the drag-to-tile preview (its
+    /// border is painted `col_focused`). Reverted when the pointer moves away
+    /// or the drag ends.
+    drag_target: Option<Window>,
 }
 
 impl WindowManager {
@@ -84,13 +95,19 @@ impl WindowManager {
             Event::ConfigureRequest(e) => self.on_configure_request(e)?,
             Event::DestroyNotify(e) => self.on_destroy(e)?,
             Event::EnterNotify(e) => self.on_enter(e)?,
-            Event::FocusIn(e) => self.on_focus_in(e)?,
             Event::KeyPress(e) => self.on_key(e)?,
             Event::MappingNotify(e) => self.on_mapping(e)?,
             Event::MapRequest(e) => self.on_map_request(e)?,
             Event::MotionNotify(e) => self.on_motion(e)?,
             Event::PropertyNotify(e) => self.on_property(e)?,
             Event::UnmapNotify(e) => self.on_unmap(e)?,
+            // RandR change events (config/grab selected in `setup_root`): both
+            // the 1.5 `NotifyEvent` (crtc/output changes) and the classic
+            // `ScreenChangeNotifyEvent` funnel into the same re-detect handler as
+            // a root ConfigureNotify would.
+            Event::RandrNotify(_) | Event::RandrScreenChangeNotify(_) => {
+                self.handle_monitor_change()?
+            }
             _ => {}
         }
         Ok(())
@@ -196,7 +213,7 @@ impl WindowManager {
         }
         Ok(())
     }
-    pub fn new(cfg: Cfg) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(cfg: Cfg, replace: bool) -> Result<Self, Box<dyn std::error::Error>> {
         let (conn, screen_num) = RustConnection::connect(None)?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
@@ -211,7 +228,16 @@ impl WindowManager {
         );
 
         let atoms = Atoms::new(&conn)?;
-        check_no_other_wm(&conn, root)?;
+        if replace {
+            if !claim_screen_replacing(&conn, root, &atoms)? {
+                return Err(
+                    "another WM is running and did not yield the screen (use --replace only when one is present)".into(),
+                );
+            }
+            log::info!("maverick: replaced the previous WM (--replace)");
+        } else {
+            check_no_other_wm(&conn, root)?;
+        }
 
         let monitors = detect_monitors(&conn, screen, &cfg)?;
         let mut engine = Engine::new(cfg);
@@ -244,6 +270,7 @@ impl WindowManager {
             root,
             atoms,
             engine,
+            layout_registry: crate::core::layout::LayoutRegistry::new(),
             check_win,
             numlock,
             keymap,
@@ -261,10 +288,10 @@ impl WindowManager {
             instance_name: String::new(),
             hub: None,
             last_state_json: String::new(),
-            last_focus: None,
-            last_active_ws: 0,
-            last_sel_mon: 0,
             docks: std::collections::HashMap::new(),
+            pointer_guard_until: None,
+            last_event_time: 0,
+            drag_target: None,
         };
 
         let _ = (depth, visual);
@@ -321,6 +348,75 @@ fn check_no_other_wm(
     .map_err(|_| "another WM is already running")?;
     conn.flush()?;
     Ok(())
+}
+
+fn grab_substructure(conn: &RustConnection, root: Window) -> bool {
+    match conn.change_window_attributes(
+        root,
+        &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_REDIRECT),
+    ) {
+        Ok(cookie) => cookie.check().is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// `--replace` handover dance (dwm-style): try to grab
+/// `SUBSTRUCTURE_REDIRECT` directly; if another WM holds it, find its
+/// `_NET_SUPPORTING_WM_CHECK` window (EWMH 1.4 §WM Attributes) and politely
+/// send it `WM_DELETE_WINDOW`, then retry the grab until it succeeds or the
+/// timeout expires. The previous WM is never `SIGKILL`ed — it takes whatever
+/// path its own `WM_DELETE` handler chooses, which is always a clean exit for
+/// real WMs.
+fn claim_screen_replacing(
+    conn: &RustConnection,
+    root: Window,
+    atoms: &Atoms,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use x11rb::protocol::xproto::{ClientMessageData, ClientMessageEvent};
+
+    if grab_substructure(conn, root) {
+        return Ok(true);
+    }
+    log::info!("another WM owns the screen; asking it to leave");
+    const ATTEMPTS: usize = 20;
+    const SLEEP_MS: u64 = 150;
+    for _ in 0..ATTEMPTS {
+        if let Ok(cookie) = conn.get_property(
+            false,
+            root,
+            atoms.net_supporting_wm_check,
+            AtomEnum::WINDOW,
+            0,
+            1,
+        ) {
+            if let Ok(reply) = cookie.reply() {
+                if let Some(win) = reply.value32().and_then(|mut v| v.next()) {
+                    if win != 0 && win != x11rb::NONE {
+                        let ev = ClientMessageEvent {
+                            response_type: CLIENT_MESSAGE_EVENT,
+                            format: 32,
+                            sequence: 0,
+                            window: win,
+                            type_: atoms.wm_protocols,
+                            data: ClientMessageData::from([
+                                atoms.wm_delete_window,
+                                x11rb::CURRENT_TIME,
+                                0,
+                                0,
+                                0,
+                            ]),
+                        };
+                        let _ = conn.send_event(false, win, EventMask::NO_EVENT, ev);
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+        if grab_substructure(conn, root) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn detect_monitors(

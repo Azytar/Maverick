@@ -58,8 +58,9 @@ fn main() {
     log::init();
     log::info!("maverick v{} starting", env!("CARGO_PKG_VERSION"));
 
-    // Parse args (any order). Only --name is added; -v/-h stay.
+    // Parse args (any order). Only --name/--replace are added; -v/-h stay.
     let mut instance_name = maverick_sys::DEFAULT_NAME.to_string();
+    let mut replace = false;
     let mut show_help = false;
     let mut show_version = false;
     let mut bad_arg: Option<String> = None;
@@ -69,6 +70,7 @@ fn main() {
         match a.as_str() {
             "-v" | "--version" => show_version = true,
             "-h" | "--help" => show_help = true,
+            "--replace" | "-r" => replace = true,
             "--name" => {
                 if let Some(n) = args.next() {
                     instance_name = n
@@ -93,8 +95,9 @@ fn main() {
         process::exit(0);
     }
     if show_help {
-        println!("Usage: maverick [--name <id>] [-v] [-h]");
+        println!("Usage: maverick [--name <id>] [--replace] [-v] [-h]");
         println!("  --name <id>      Instance name for control/identification");
+        println!("  --replace        Replace an already-running WM (adopts your windows)");
         println!("  -v, --version    Print version and exit");
         println!("  -h, --help       Show this help");
         println!();
@@ -153,7 +156,7 @@ fn main() {
     );
 
     // ── Phase 1: WM init ──────────────────────────────────────────────────────
-    match backend::x11::WindowManager::new(cfg) {
+    match backend::x11::WindowManager::new(cfg, replace) {
         Ok(mut manager) => {
             // Hand over the control socket + instance name so cleanup() can
             // tear them down and remove the identity ficha on exit.
@@ -167,7 +170,7 @@ fn main() {
             // Compositor, bar, wallpaper, portals, etc. all just go here —
             // maverick doesn't orchestrate any of them specially. See the
             // example entries in config.rs / config.toml.
-            for cmd in &manager.engine.cfg.autostart.clone() {
+            for cmd in &manager.engine.cfg.autostart {
                 if let Some((bin, args)) = cmd.split_first() {
                     if let Err(e) = std::process::Command::new(bin)
                         .args(args)

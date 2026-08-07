@@ -27,13 +27,11 @@ impl WindowManager {
     pub(super) fn execute(&mut self, eff: Effect) -> Result<(), Box<dyn std::error::Error>> {
         match eff {
             Effect::ArrangeMonitor(mi) => self.arrange(mi)?,
-            Effect::ArrangeAll => {
-                for mi in 0..self.engine.state.monitors.len() {
-                    self.arrange(mi)?;
-                }
-            }
             Effect::MarkRestack(_mi) => {
                 self.stack_dirty = true;
+                // Focus-driven raises reorder the stack: refresh the
+                // `_NET_CLIENT_LIST_STACKING` property in the same flush.
+                self.client_list_dirty = true;
             }
             Effect::FocusWindow(win) => self.focus(win)?,
             Effect::Unfocus(win) => self.unfocus(win)?,
@@ -43,15 +41,8 @@ impl WindowManager {
                 border_w,
             } => self.apply_geom(win, geom, border_w)?,
             Effect::KillWindow(win) => self.kill(win)?,
-            Effect::MapWindow(win) => {
-                let _ = self.conn.map_window(win);
-            }
-            Effect::UnmapWindow(win) => {
-                let _ = self.conn.unmap_window(win);
-            }
             Effect::SetFullscreen { win, on } => self.set_fullscreen(win, on)?,
-            Effect::UpdateEwmhDesktops => self.update_ewmh_desktops()?,
-            Effect::UpdateClientList => self.update_client_list()?,
+            Effect::SyncWindowPrefs(win) => self.sync_window_prefs(win),
             Effect::SetCurrentDesktop(ws) => {
                 let _ = self.conn.change_property32(
                     PropMode::REPLACE,
@@ -110,7 +101,7 @@ impl WindowManager {
 
     pub(super) fn kill(&self, win: Window) -> Result<(), Box<dyn std::error::Error>> {
         if self.has_protocol(win, self.atoms.wm_delete_window)? {
-            self.send_proto(win, self.atoms.wm_delete_window)?;
+            self.send_proto(win, self.atoms.wm_delete_window, self.last_event_time)?;
         } else {
             let _ = self.conn.kill_client(win);
         }
@@ -127,8 +118,12 @@ impl WindowManager {
         self.instance_name = name;
     }
 
-    /// Attach the control hub bridging the socket thread and the WM loop.
+    /// Attach the control hub bridging the socket thread and the WM loop, and
+    /// subscribe the `HubEventSink` to the typed `EventBus` so domain events
+    /// render onto the `subscribe` wire protocol.
     pub fn set_hub(&mut self, hub: maverick_sys::ControlHub) {
+        self.engine
+            .subscribe(Box::new(super::hubevents::HubEventSink::new(hub.clone())));
         self.hub = Some(hub);
     }
 
@@ -150,6 +145,18 @@ impl WindowManager {
                     } else {
                         log::warn!("control: unknown dispatch action '{line}'");
                     }
+                }
+                maverick_sys::ControlCommand::Query { topic, reply } => {
+                    // Answer structured queries from live state; the client is
+                    // blocked on the channel until the reply lands. State is
+                    // only touched here (the WM thread), which is exactly why
+                    // querying has to happen through this queue.
+                    let json = crate::core::ipc::query_json(
+                        &self.engine.state,
+                        &self.engine.cfg,
+                        &topic,
+                    );
+                    let _ = reply.send(json);
                 }
             }
         }
@@ -199,8 +206,11 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Publish a fresh state snapshot to the hub (only when it changed), and emit
-    /// granular focus/workspace events to `subscribe` clients on transitions.
+    /// Publish a fresh JSON state snapshot to the hub, but only when it changed.
+    ///
+    /// Granular `focus`/`workspace` lines for `subscribe` clients are no longer
+    /// derived here: they come from the typed `EventBus` via `HubEventSink`, so a
+    /// single source of truth describes every transition.
     pub(super) fn publish_state(&mut self) {
         let hub = match &self.hub {
             Some(h) => h.clone(),
@@ -210,30 +220,6 @@ impl WindowManager {
         if json != self.last_state_json {
             hub.publish_state(json.clone());
             self.last_state_json = json;
-        }
-
-        let sel_mon = self.engine.state.sel_mon;
-        let focused = self
-            .engine
-            .state
-            .monitors
-            .get(sel_mon)
-            .and_then(|m| m.focused);
-        let active_ws = self
-            .engine
-            .state
-            .monitors
-            .get(sel_mon)
-            .map_or(0, |m| m.active_ws);
-
-        if focused != self.last_focus {
-            hub.emit(format!("focus {}", focused.unwrap_or(0)));
-            self.last_focus = focused;
-        }
-        if active_ws != self.last_active_ws || sel_mon != self.last_sel_mon {
-            hub.emit(format!("workspace {active_ws} {sel_mon}"));
-            self.last_active_ws = active_ws;
-            self.last_sel_mon = sel_mon;
         }
     }
 }

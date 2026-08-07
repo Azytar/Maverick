@@ -11,29 +11,8 @@
 #![allow(clippy::unwrap_used, clippy::map_unwrap_or)]
 
 use crate::config::Cfg;
-use crate::types::{Action, Dir, LayoutKind, State};
+use crate::types::{Action, Dir, LayoutKind, State, WindowId};
 use std::fmt::Write;
-
-/// Minimal JSON string escaper (no serde dependency, matching the rest of the
-/// project's zero-extra-deps stance). Escapes quotes, backslashes, and control
-/// characters that would break a JSON document.
-fn esc(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                write!(out, "\\u{:04x}", c as u32).unwrap();
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
 
 /// Serialize the live WM `State` into a compact JSON snapshot for external
 /// tools. Includes per-monitor active workspace, focused window + title, and
@@ -46,7 +25,12 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
 
     write!(s, "\"sel_mon\":{},", state.sel_mon).unwrap();
     write!(s, "\"focus_serial\":{},", state.focus_serial).unwrap();
-    write!(s, "\"status\":\"{}\",", esc(&state.status)).unwrap();
+    write!(
+        s,
+        "\"status\":\"{}\",",
+        maverick_sys::json::json_escape(&state.status)
+    )
+    .unwrap();
 
     // monitors
     s.push_str("\"monitors\":[");
@@ -63,8 +47,13 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
             Some(w) => {
                 write!(s, "\"focused\":{w},").unwrap();
                 if let Some(c) = state.clients.get(&w) {
-                    write!(s, "\"focused_title\":\"{}\",", esc(&c.name)).unwrap();
-                    write!(s, "\"focused_class\":\"{}\",", esc(&c.class)).unwrap();
+                    write!(s, "\"focused_title\":\"{}\",", maverick_sys::json::json_escape(&c.name)).unwrap();
+                    write!(
+                        s,
+                        "\"focused_class\":\"{}\",",
+                        maverick_sys::json::json_escape(&c.class)
+                    )
+                    .unwrap();
                 } else {
                     s.push_str("\"focused_title\":\"\",\"focused_class\":\"\",");
                 }
@@ -86,7 +75,7 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
                 ws.columns.iter().map(|c| c.windows.len()).sum::<usize>() + ws.floats.len();
             s.push('{');
             write!(s, "\"index\":{wi},").unwrap();
-            write!(s, "\"name\":\"{}\",", esc(name)).unwrap();
+            write!(s, "\"name\":\"{}\",", maverick_sys::json::json_escape(name)).unwrap();
             write!(s, "\"active\":{},", wi == mon.active_ws).unwrap();
             write!(s, "\"occupied\":{},", !ws.is_empty()).unwrap();
             write!(s, "\"windows\":{n_wins},").unwrap();
@@ -108,6 +97,190 @@ pub fn layout_name(l: LayoutKind) -> &'static str {
         LayoutKind::Column => "column",
         LayoutKind::Grid => "grid",
     }
+}
+
+/// Answer a structured `query` request from the control socket (`maverick-msg
+/// -j query …`). Pure — no X11, no side effects. Returns a JSON document, or
+/// `error unknown-query: <topic>` for topics it doesn't know.
+pub fn query_json(state: &State, cfg: &Cfg, topic: &str) -> String {
+    match topic {
+        "state" => state_json(state, cfg),
+        "workspaces" => workspaces_json(state, cfg),
+        "tree" => tree_json(state),
+        "focused" => focused_json(state),
+        _ => format!("error unknown-query: {topic}"),
+    }
+}
+
+/// `query workspaces` — one entry per workspace per monitor: identity, layout,
+/// occupancy and the exact window ids it holds (bars feed on this without
+/// parsing the whole state snapshot).
+fn workspaces_json(state: &State, cfg: &Cfg) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(256 + state.monitors.len() * 512);
+    s.push('{');
+    write!(s, "\"sel_mon\":{},", state.sel_mon).unwrap();
+    s.push_str("\"monitors\":[");
+    for (mi, mon) in state.monitors.iter().enumerate() {
+        if mi > 0 {
+            s.push(',');
+        }
+        s.push('{');
+        write!(s, "\"index\":{mi},").unwrap();
+        write!(s, "\"active_ws\":{},", mon.active_ws).unwrap();
+        s.push_str("\"workspaces\":[");
+        for (wi, ws) in mon.workspaces.iter().enumerate() {
+            if wi > 0 {
+                s.push(',');
+            }
+            let name: &str = cfg
+                .tag_names
+                .get(wi)
+                .map(String::as_str)
+                .unwrap_or("?");
+            s.push('{');
+            write!(s, "\"index\":{wi},").unwrap();
+            write!(s, "\"name\":\"{}\",", maverick_sys::json::json_escape(name)).unwrap();
+            write!(s, "\"active\":{},", wi == mon.active_ws).unwrap();
+            write!(s, "\"occupied\":{},", !ws.is_empty()).unwrap();
+            write!(s, "\"layout\":\"{}\",", layout_name(ws.layout)).unwrap();
+            s.push_str("\"windows\":[");
+            let mut first = true;
+            for w in ws
+                .columns
+                .iter()
+                .flat_map(|c| c.windows.iter().copied())
+                .chain(ws.floats.iter().copied())
+            {
+                if !first {
+                    s.push(',');
+                }
+                write!(s, "{w}").unwrap();
+                first = false;
+            }
+            s.push_str("]}");
+        }
+        s.push_str("]}");
+    }
+    s.push_str("]}");
+    s
+}
+
+/// Serialize one window entry for the tree query.
+fn window_obj(s: &mut String, id: WindowId, state: &State) {
+    use std::fmt::Write;
+    let c = state.clients.get(&id);
+    let (class, instance, title) = c
+        .map(|c| (c.class.as_str(), c.instance.as_str(), c.name.as_str()))
+        .unwrap_or(("", "", ""));
+    write!(s, "{{\"id\":{id},").unwrap();
+    write!(s, "\"class\":\"{}\",", maverick_sys::json::json_escape(class)).unwrap();
+    write!(
+        s,
+        "\"instance\":\"{}\",",
+        maverick_sys::json::json_escape(instance)
+    )
+    .unwrap();
+    write!(s, "\"title\":\"{}\",", maverick_sys::json::json_escape(title)).unwrap();
+    if let Some(c) = c {
+        write!(s, "\"monitor\":{},", c.monitor).unwrap();
+        write!(s, "\"workspace\":{},", c.workspace).unwrap();
+        write!(s, "\"float\":{},", c.is_float()).unwrap();
+        write!(s, "\"fullscreen\":{},", c.is_fullscreen()).unwrap();
+        write!(s, "\"maximized\":{},", c.is_maximized()).unwrap();
+        write!(s, "\"sticky\":{},", c.is_sticky()).unwrap();
+        write!(
+            s,
+            "\"geom\":[{},{},{},{}]",
+            c.geom.x, c.geom.y, c.geom.w, c.geom.h
+        )
+        .unwrap();
+    }
+    s.push('}');
+}
+
+/// `query tree` — the full in-memory tiling tree: monitors → workspaces →
+/// columns → windows (with their live geometry and state). Feeds custom
+/// taskbars/Alt+Tab UIs that need the actual hierarchy, not just counts.
+fn tree_json(state: &State) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(512 + state.monitors.len() * 1024);
+    s.push('{');
+    write!(s, "\"sel_mon\":{},", state.sel_mon).unwrap();
+    s.push_str("\"monitors\":[");
+    for (mi, mon) in state.monitors.iter().enumerate() {
+        if mi > 0 {
+            s.push(',');
+        }
+        s.push('{');
+        write!(s, "\"index\":{mi},").unwrap();
+        write!(s, "\"active_ws\":{},", mon.active_ws).unwrap();
+        s.push_str("\"workspaces\":[");
+        for (wi, ws) in mon.workspaces.iter().enumerate() {
+            if wi > 0 {
+                s.push(',');
+            }
+            s.push('{');
+            write!(s, "\"index\":{wi},").unwrap();
+            write!(s, "\"layout\":\"{}\",", layout_name(ws.layout)).unwrap();
+            write!(s, "\"scroll\":{},", ws.scroll).unwrap();
+            s.push_str("\"columns\":[");
+            for (ci, col) in ws.columns.iter().enumerate() {
+                if ci > 0 {
+                    s.push(',');
+                }
+                s.push('{');
+                write!(s, "\"width\":{},", col.width).unwrap();
+                write!(s, "\"focused\":{},", col.focused).unwrap();
+                s.push_str("\"windows\":[");
+                for (i, w) in col.windows.iter().enumerate() {
+                    if i > 0 {
+                        s.push(',');
+                    }
+                    window_obj(&mut s, *w, state);
+                }
+                s.push_str("]}");
+            }
+            s.push_str("],\"floats\":[");
+            for (i, w) in ws.floats.iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                window_obj(&mut s, *w, state);
+            }
+            s.push_str("]}");
+        }
+        s.push_str("]}");
+    }
+    s.push_str("]}");
+    s
+}
+
+/// `query focused` — the focused window of the selected monitor (or null).
+fn focused_json(state: &State) -> String {
+    use std::fmt::Write;
+    let mon = state
+        .monitors
+        .get(state.sel_mon.min(state.monitors.len().saturating_sub(1)));
+    let mut s = String::with_capacity(160);
+    match mon.and_then(|m| m.focused) {
+        Some(w) => {
+            let c = state.clients.get(&w);
+            let (class, title) = c
+                .map(|c| (c.class.as_str(), c.name.as_str()))
+                .unwrap_or(("", ""));
+            write!(s, "{{\"window\":{w},").unwrap();
+            write!(s, "\"class\":\"{}\",", maverick_sys::json::json_escape(class)).unwrap();
+            write!(s, "\"title\":\"{}\",", maverick_sys::json::json_escape(title)).unwrap();
+            let (fl, fs, mx, st) = c
+                .map(|c| (c.is_float(), c.is_fullscreen(), c.is_maximized(), c.is_sticky()))
+                .unwrap_or((false, false, false, false));
+            write!(s, "\"float\":{fl},\"fullscreen\":{fs},\"maximized\":{mx},\"sticky\":{st}").unwrap();
+            s.push('}');
+        }
+        None => s.push_str("{\"window\":null}"),
+    }
+    s
 }
 
 /// Parse an action name from `dispatch <action>` into an `Action`.

@@ -12,3 +12,10 @@ keywords = ["window-manager", "ipc", "ffi"]
 
 [dependencies]
 libc = "0.2"
+
+# `maverick-msg` is an explicit bin so both control tools build from the
+# shared CLI engine (`maverick-sys::ctl`); `maverickctl` is auto-discovered
+# from src/bin/.
+[[bin]]
+name = "maverick-msg"
+path = "src/bin/maverick-msg.rs"
