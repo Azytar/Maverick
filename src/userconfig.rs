@@ -1,91 +1,95 @@
 //! Safe, optional TOML configuration layered over Maverick's compiled defaults.
 //!
-//! Syntax/deserialization failures reject the whole file. Semantic failures are
-//! isolated to the offending value or list entry and never abort WM startup.
+//! Parses the file with `maverick-toml`, a strict, zero-dependency TOML-subset
+//! parser (replacing `toml` + `serde`). Syntax failures reject the whole file
+//! — the WM starts with compiled defaults and logs the offending line.
+//! Semantic failures are isolated to the offending value or list entry and
+//! never abort WM startup.
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use maverick_toml::{parse, Event, ParseError, Value};
 use x11rb::protocol::xproto::ModMask;
 
 use crate::config::{compiled_config, Cfg, Rule};
 use crate::log;
 use crate::types::{Action, Dir, LayoutKind};
 
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-pub struct UserConfig {
-    #[serde(default)]
+#[derive(Debug, Default)]
+struct UserConfig {
     general: Option<GeneralCfg>,
-    #[serde(default)]
     colors: Option<ColorsCfg>,
-    #[serde(default)]
     keybindings: Vec<KeybindEntry>,
-    #[serde(default)]
     rules: Vec<RuleEntry>,
-    #[serde(default)]
     autostart: Option<AutostartCfg>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-pub struct GeneralCfg {
-    #[serde(default, alias = "border_w")]
+#[derive(Debug, Default)]
+struct GeneralCfg {
     border_width: Option<u32>,
-    #[serde(default)]
+    /// Legacy alias: sets both `gaps_inner` and `gaps_outer` at once.
     gaps: Option<u32>,
-    #[serde(default)]
+    gaps_inner: Option<u32>,
+    gaps_outer: Option<u32>,
+    smart_gaps: Option<bool>,
+    corner_radius: Option<u32>,
+    /// Named color-scheme preset (see `config::theme_palette`). Applied
+    /// before `[colors]`, so an explicit `[colors]` entry always wins over
+    /// whatever the theme sets.
+    theme: Option<String>,
     n_tags: Option<usize>,
-    #[serde(default, alias = "default_col_w")]
     default_col_width: Option<u32>,
-    #[serde(default)]
     split_bias: Option<f32>,
-    #[serde(default)]
     focus_mouse: Option<bool>,
-    #[serde(default)]
     warp_cursor: Option<bool>,
-    #[serde(default)]
     tag_names: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-pub struct ColorsCfg {
-    #[serde(default, alias = "col_normal")]
+#[derive(Debug, Default)]
+struct ColorsCfg {
     normal: Option<u32>,
-    #[serde(default, alias = "col_focused")]
     focused: Option<u32>,
-    #[serde(default, alias = "col_urgent")]
     urgent: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-pub struct KeybindEntry {
-    #[serde(default)]
+#[derive(Debug, Default)]
+struct KeybindEntry {
     key: String,
-    #[serde(default)]
     action: String,
 }
 
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-pub struct RuleEntry {
-    #[serde(default)]
+#[derive(Debug, Default)]
+struct RuleEntry {
     class: Option<String>,
-    #[serde(default)]
+    instance: Option<String>,
+    window_type: Option<String>,
     title: Option<String>,
-    #[serde(default)]
     float: bool,
-    #[serde(default, alias = "ws")]
+    sticky: bool,
     workspace: Option<usize>,
+    /// `[width, height]` in pixels for forced floating size.
+    size: Option<[u32; 2]>,
+    /// `[x, y]` relative to the monitor workarea origin, for forced position.
+    position: Option<[i32; 2]>,
+    /// 0.0-1.0. Out-of-range values are clamped by `manage::apply_rules` at
+    /// use time, not rejected here — an opacity typo shouldn't discard an
+    /// otherwise-valid rule.
+    opacity: Option<f32>,
+    border_width: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-pub struct AutostartCfg {
-    #[serde(default, alias = "apps", alias = "programs")]
+#[derive(Debug, Default)]
+struct AutostartCfg {
     commands: Vec<Vec<String>>,
+}
+
+/// The current top-level table the event stream is inside. `Plain` tables are
+/// `[general]`-style singletons; `Rows` tables are `[[keybindings]]`/`[[rules]]`
+/// arrays whose keys append to the most recent entry.
+#[derive(Debug, Clone, Copy)]
+enum Cur<'a> {
+    Plain(&'a str),
+    Row(&'a str),
 }
 
 /// Return Maverick's XDG config path without requiring it to exist.
@@ -120,12 +124,14 @@ pub fn load_from_path(path: &Path) -> Cfg {
         }
     };
 
-    let user = match toml::from_str::<UserConfig>(&source) {
+    let user = match parse_user(&source) {
         Ok(user) => user,
         Err(e) => {
             log::warn!(
-                "config: invalid TOML in '{}': {e}; using compiled defaults",
-                path.display()
+                "config: invalid TOML in '{}' (line {}, {}); using compiled defaults",
+                path.display(),
+                e.line,
+                e.kind
             );
             return baseline;
         }
@@ -133,6 +139,205 @@ pub fn load_from_path(path: &Path) -> Cfg {
 
     merge_config(baseline, user)
 }
+
+/// Consume the strict TOML-subset event stream and build the user model.
+/// A `ParseError` here means the whole file is rejected by the caller.
+fn parse_user(source: &str) -> Result<UserConfig, ParseError> {
+    let mut user = UserConfig::default();
+    let mut cur: Option<Cur<'_>> = None;
+
+    for event in parse(source) {
+        let event = event?;
+        match event {
+            Event::Section(name) => cur = Some(Cur::Plain(name)),
+            Event::ArraySection(name) => {
+                match name {
+                    "keybindings" => user.keybindings.push(KeybindEntry::default()),
+                    "rules" => user.rules.push(RuleEntry::default()),
+                    _ => {}
+                }
+                cur = Some(Cur::Row(name));
+            }
+            Event::KeyValue(key, value) => match cur {
+                Some(Cur::Plain("general")) => {
+                    let g = user.general.get_or_insert_with(GeneralCfg::default);
+                    apply_general_key(g, key, &value);
+                }
+                Some(Cur::Plain("colors")) => {
+                    let c = user.colors.get_or_insert_with(ColorsCfg::default);
+                    apply_color_key(c, key, &value);
+                }
+                Some(Cur::Plain("autostart")) => {
+                    if matches!(key, "commands" | "apps" | "programs") {
+                        user.autostart.get_or_insert_with(AutostartCfg::default);
+                        if let Some(grid) = grid_strings(&value) {
+                            user.autostart.as_mut().unwrap().commands = grid;
+                        } else {
+                            log::warn!("config: [autostart].{key} must be a list of string lists; ignoring it");
+                        }
+                    }
+                }
+                Some(Cur::Row("keybindings")) => {
+                    if let Some(row) = user.keybindings.last_mut() {
+                        apply_keybind_key(row, key, &value);
+                    }
+                }
+                Some(Cur::Row("rules")) => {
+                    if let Some(row) = user.rules.last_mut() {
+                        apply_rule_key(row, key, &value);
+                    }
+                }
+                // Unknown sections and rows are ignored entirely — future
+                // config keys must never break older WMs.
+                _ => {}
+            },
+        }
+    }
+    Ok(user)
+}
+
+/// Map one `[general]` key onto the model. Aliases from the old serde schema
+/// are resolved here; a value of the wrong type is skipped with a warning
+/// (semantic isolation, like bad keybindings) instead of rejecting the file.
+fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>) {
+    match key {
+        "border_width" | "border_w" => set_u32(&mut g.border_width, key, value),
+        "gaps" => set_u32(&mut g.gaps, key, value),
+        "gaps_inner" => set_u32(&mut g.gaps_inner, key, value),
+        "gaps_outer" => set_u32(&mut g.gaps_outer, key, value),
+        "smart_gaps" => set_bool(&mut g.smart_gaps, key, value),
+        "corner_radius" => set_u32(&mut g.corner_radius, key, value),
+        "theme" => set_string(&mut g.theme, key, value),
+        "n_tags" => set_usize(&mut g.n_tags, key, value),
+        "default_col_width" | "default_col_w" => set_u32(&mut g.default_col_width, key, value),
+        "split_bias" => set_f32(&mut g.split_bias, key, value),
+        "focus_mouse" => set_bool(&mut g.focus_mouse, key, value),
+        "warp_cursor" => set_bool(&mut g.warp_cursor, key, value),
+        "tag_names" => {
+            if let Some(list) = value.as_str_list() {
+                g.tag_names = Some(list.iter().map(|s| s.as_ref().to_string()).collect());
+            } else {
+                warn_bad(key);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Map one `[colors]` key onto the model.
+fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>) {
+    match key {
+        "normal" | "col_normal" => set_u32(&mut c.normal, key, value),
+        "focused" | "col_focused" => set_u32(&mut c.focused, key, value),
+        "urgent" | "col_urgent" => set_u32(&mut c.urgent, key, value),
+        _ => {}
+    }
+}
+
+/// Map one `[[keybindings]]` key onto the current row.
+fn apply_keybind_key(row: &mut KeybindEntry, key: &str, value: &Value<'_>) {
+    match key {
+        "key" => row.key = value.as_str().map_or_else(String::new, str::to_string),
+        "action" => row.action = value.as_str().map_or_else(String::new, str::to_string),
+        _ => {}
+    }
+}
+
+/// Map one `[[rules]]` key onto the current row.
+fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>) {
+    match key {
+        "class" => set_string(&mut row.class, key, value),
+        "instance" => set_string(&mut row.instance, key, value),
+        "window_type" | "type" => set_string(&mut row.window_type, key, value),
+        "title" => set_string(&mut row.title, key, value),
+        "float" => row.float = value.as_bool().unwrap_or(false),
+        "sticky" => row.sticky = value.as_bool().unwrap_or(false),
+        "workspace" | "ws" => set_usize(&mut row.workspace, key, value),
+        "size" => {
+            if let Some([w, h]) = int_pair(value) {
+                row.size = Some([w as u32, h as u32]);
+            } else {
+                warn_bad(key);
+            }
+        }
+        "position" => {
+            if let Some([x, y]) = int_pair(value) {
+                row.position = Some([x as i32, y as i32]);
+            } else {
+                warn_bad(key);
+            }
+        }
+        "opacity" => set_f32(&mut row.opacity, key, value),
+        "border_width" | "border_w" => set_u32(&mut row.border_width, key, value),
+        _ => {}
+    }
+}
+
+// ── typed value helpers ────────────────────────────────────────────────────
+
+/// Parse a two-element integer array, e.g. `size`/`position`.
+fn int_pair(value: &Value<'_>) -> Option<[i64; 2]> {
+    let list = value.as_int_list()?;
+    Some([*list.first()?, *list.get(1)?])
+}
+
+fn grid_strings(value: &Value<'_>) -> Option<Vec<Vec<String>>> {
+    Some(
+        value
+            .as_grid()?
+            .iter()
+            .map(|row| row.iter().map(|s| s.as_ref().to_string()).collect())
+            .collect(),
+    )
+}
+
+/// Assign `key`'s `u32` value into `slot`, warning when the value has the
+/// wrong type (the key is then left untouched).
+fn set_u32(slot: &mut Option<u32>, key: &str, value: &Value<'_>) {
+    if let Some(v) = value.as_u32() {
+        *slot = Some(v);
+    } else {
+        warn_bad(key);
+    }
+}
+
+fn set_bool(slot: &mut Option<bool>, key: &str, value: &Value<'_>) {
+    if let Some(v) = value.as_bool() {
+        *slot = Some(v);
+    } else {
+        warn_bad(key);
+    }
+}
+
+fn set_string(slot: &mut Option<String>, key: &str, value: &Value<'_>) {
+    if let Some(v) = value.as_str() {
+        *slot = Some(v.to_string());
+    } else {
+        warn_bad(key);
+    }
+}
+
+fn set_f32(slot: &mut Option<f32>, key: &str, value: &Value<'_>) {
+    if let Some(v) = value.as_f64() {
+        *slot = Some(v as f32);
+    } else {
+        warn_bad(key);
+    }
+}
+
+fn set_usize(slot: &mut Option<usize>, key: &str, value: &Value<'_>) {
+    if let Some(v) = value.as_u32() {
+        *slot = Some(v as usize);
+    } else {
+        warn_bad(key);
+    }
+}
+
+fn warn_bad(key: &str) {
+    log::warn!("config: value for '{key}' has an unexpected type; ignoring it");
+}
+
+// ── merge ──────────────────────────────────────────────────────────────────
 
 fn merge_config(mut cfg: Cfg, user: UserConfig) -> Cfg {
     if let Some(general) = user.general {
@@ -172,7 +377,32 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg) {
         cfg.border_w = v;
     }
     if let Some(v) = general.gaps {
-        cfg.gaps = v;
+        cfg.gaps_inner = v;
+        cfg.gaps_outer = v;
+    }
+    if let Some(v) = general.gaps_inner {
+        cfg.gaps_inner = v;
+    }
+    if let Some(v) = general.gaps_outer {
+        cfg.gaps_outer = v;
+    }
+    if let Some(v) = general.smart_gaps {
+        cfg.smart_gaps = v;
+    }
+    if let Some(v) = general.corner_radius {
+        cfg.corner_radius = v;
+    }
+    if let Some(name) = &general.theme {
+        match crate::config::theme_palette(name) {
+            Some((normal, focused, urgent)) => {
+                cfg.col_normal = normal;
+                cfg.col_focused = focused;
+                cfg.col_urgent = urgent;
+            }
+            None => {
+                log::warn!("config: general.theme '{name}' is not a known preset; ignoring it");
+            }
+        }
     }
     if let Some(v) = general.n_tags {
         if (1..=9).contains(&v) {
@@ -235,13 +465,34 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize) -> Vec<Rule> {
         .enumerate()
         .filter_map(|(index, entry)| {
             if entry.class.as_deref().is_none_or(str::is_empty)
+                && entry.instance.as_deref().is_none_or(str::is_empty)
+                && entry.window_type.as_deref().is_none_or(str::is_empty)
                 && entry.title.as_deref().is_none_or(str::is_empty)
             {
                 log::warn!(
-                    "config: discarded rule #{}: class and title are both empty",
+                    "config: discarded rule #{}: class, instance, window_type and title are all empty",
                     index + 1
                 );
                 return None;
+            }
+            if let Some(wt) = entry.window_type.as_deref() {
+                const KNOWN_TYPES: [&str; 8] = [
+                    "normal",
+                    "desktop",
+                    "dock",
+                    "toolbar",
+                    "menu",
+                    "utility",
+                    "splash",
+                    "dialog",
+                ];
+                if !KNOWN_TYPES.contains(&wt.to_ascii_lowercase().as_str()) {
+                    log::warn!(
+                        "config: discarded rule #{}: unknown window_type '{wt}'",
+                        index + 1
+                    );
+                    return None;
+                }
             }
             let ws = match entry.workspace {
                 Some(ws) if ws == 0 || ws > n_tags => {
@@ -256,9 +507,19 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize) -> Vec<Rule> {
             };
             Some(Rule {
                 class: entry.class.filter(|s| !s.is_empty()),
+                instance: entry.instance.filter(|s| !s.is_empty()),
+                window_type: entry
+                    .window_type
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_ascii_lowercase()),
                 title: entry.title.filter(|s| !s.is_empty()),
                 float: entry.float,
+                sticky: entry.sticky,
                 ws,
+                size: entry.size.map(|[w, h]| (w, h)),
+                position: entry.position.map(|[x, y]| (x, y)),
+                opacity: entry.opacity,
+                border_w: entry.border_width,
             })
         })
         .collect()
@@ -432,6 +693,12 @@ fn parse_workspace(input: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
+    /// Parse a TOML string straight into the user model (replaces the old
+    /// `toml::from_str` in tests — same fail-fast on syntax errors).
+    fn parse_string(source: &str) -> UserConfig {
+        parse_user(source).expect("valid TOML")
+    }
+
     fn write_temp(contents: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "maverick-config-{}-{}.toml",
@@ -458,7 +725,8 @@ mod tests {
         let path = write_temp("[general\ngaps = nope");
         let cfg = load_from_path(&path);
         let baseline = compiled_config();
-        assert_eq!(cfg.gaps, baseline.gaps);
+        assert_eq!(cfg.gaps_inner, baseline.gaps_inner);
+        assert_eq!(cfg.gaps_outer, baseline.gaps_outer);
         assert_eq!(cfg.keybinds.len(), baseline.keybinds.len());
         assert_eq!(cfg.rules.len(), baseline.rules.len());
         let _ = std::fs::remove_file(path);
@@ -481,7 +749,8 @@ action = "kill"
 "#,
         );
         let cfg = load_from_path(&path);
-        assert_eq!(cfg.gaps, 17);
+        assert_eq!(cfg.gaps_inner, 17);
+        assert_eq!(cfg.gaps_outer, 17);
         assert!(cfg
             .keybinds
             .iter()
@@ -492,14 +761,13 @@ action = "kill"
 
     #[test]
     fn numeric_user_binding_suppresses_generated_numeric_bindings() {
-        let user: UserConfig = toml::from_str(
+        let user = parse_string(
             r#"
 [[keybindings]]
 key = "super+1"
 action = "view:2"
 "#,
-        )
-        .expect("valid TOML");
+        );
         let cfg = merge_config(compiled_config(), user);
         assert_eq!(cfg.keybinds.len(), 1);
         assert!(matches!(cfg.keybinds[0].2, Action::View(1)));
@@ -524,7 +792,7 @@ action = "view:2"
 
     #[test]
     fn list_sections_replace_compiled_lists() {
-        let user: UserConfig = toml::from_str(
+        let user = parse_string(
             r#"
 [[rules]]
 class = "Firefox"
@@ -533,11 +801,115 @@ float = true
 [autostart]
 commands = [["example", "--flag"]]
 "#,
-        )
-        .expect("valid TOML");
+        );
         let cfg = merge_config(compiled_config(), user);
         assert_eq!(cfg.rules.len(), 1);
         assert_eq!(cfg.rules[0].class.as_deref(), Some("Firefox"));
         assert_eq!(cfg.autostart, vec![vec!["example", "--flag"]]);
+    }
+
+    #[test]
+    fn theme_preset_fills_colors_but_explicit_colors_win() {
+        let user = parse_string(
+            r#"
+[general]
+theme = "nord"
+"#,
+        );
+        let cfg = merge_config(compiled_config(), user);
+        let (normal, focused, urgent) = crate::config::theme_palette("nord").unwrap();
+        assert_eq!(cfg.col_normal, normal);
+        assert_eq!(cfg.col_focused, focused);
+        assert_eq!(cfg.col_urgent, urgent);
+
+        // [colors] applied after [general], so it overrides the theme.
+        let user = parse_string(
+            r#"
+[general]
+theme = "nord"
+
+[colors]
+focused = 0x00ff00
+"#,
+        );
+        let cfg = merge_config(compiled_config(), user);
+        assert_eq!(cfg.col_focused, 0x00ff00);
+        assert_eq!(cfg.col_normal, normal); // untouched field still from the theme
+    }
+
+    #[test]
+    fn unknown_theme_name_is_ignored() {
+        let baseline = compiled_config();
+        let user = parse_string(
+            r#"
+[general]
+theme = "not-a-real-theme"
+"#,
+        );
+        let cfg = merge_config(compiled_config(), user);
+        assert_eq!(cfg.col_normal, baseline.col_normal);
+        assert_eq!(cfg.col_focused, baseline.col_focused);
+    }
+
+    #[test]
+    fn gaps_legacy_alias_sets_both_inner_and_outer() {
+        let user = parse_string(
+            r"
+[general]
+gaps = 20
+",
+        );
+        let cfg = merge_config(compiled_config(), user);
+        assert_eq!(cfg.gaps_inner, 20);
+        assert_eq!(cfg.gaps_outer, 20);
+    }
+
+    #[test]
+    fn gaps_inner_outer_can_be_set_independently() {
+        let user = parse_string(
+            r"
+[general]
+gaps_inner = 4
+gaps_outer = 12
+smart_gaps = true
+corner_radius = 10
+",
+        );
+        let cfg = merge_config(compiled_config(), user);
+        assert_eq!(cfg.gaps_inner, 4);
+        assert_eq!(cfg.gaps_outer, 12);
+        assert!(cfg.smart_gaps);
+        assert_eq!(cfg.corner_radius, 10);
+    }
+
+    #[test]
+    fn rule_opacity_and_border_width_are_parsed() {
+        let user = parse_string(
+            r#"
+[[rules]]
+class = "mpv"
+float = true
+opacity = 0.9
+border_width = 0
+"#,
+        );
+        let cfg = merge_config(compiled_config(), user);
+        assert_eq!(cfg.rules.len(), 1);
+        assert_eq!(cfg.rules[0].opacity, Some(0.9));
+        assert_eq!(cfg.rules[0].border_w, Some(0));
+    }
+
+    #[test]
+    fn rule_hex_and_decimal_colors_are_equivalent() {
+        let user = parse_string(
+            r"
+[colors]
+normal = 0x112233
+focused = 1122867
+",
+        );
+        let cfg = merge_config(compiled_config(), user);
+        assert_eq!(cfg.col_normal, 0x112233);
+        assert_eq!(cfg.col_focused, 1122867);
     }
 }
