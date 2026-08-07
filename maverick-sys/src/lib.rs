@@ -240,6 +240,7 @@ pub mod control;
 pub mod discover;
 pub mod hub;
 pub mod identity;
+pub mod json;
 
 // Re-export the most common items at the crate root for convenience.
 pub use control::ControlServer;

@@ -312,34 +312,16 @@ where
     Ok(())
 }
 
-/// JSON-escape a string for inline use (same rules as identity::serde_free_json).
-fn json_esc(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Convenience: build the identity JSON for `info` (mirrors `identity::write_meta`).
 pub fn identity_json(info: &InstanceInfo) -> String {
+    use crate::json::json_quote;
     format!(
         r#"{{"name":{},"pid":{},"display":{},"tty_nr":{},"exe":{},"started_at":{},"alive":{}}}"#,
-        json_esc(&info.name),
+        json_quote(&info.name),
         info.pid,
-        json_esc(&info.display),
+        json_quote(&info.display),
         info.tty_nr,
-        json_esc(&info.exe),
+        json_quote(&info.exe),
         info.started_at,
         info.alive,
     )

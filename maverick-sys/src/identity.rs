@@ -171,32 +171,14 @@ pub fn cleanup_meta(name: &str) {
 /// Minimal JSON serializer (no serde dependency) — Maverick ships zero extra
 /// deps. Escapes the few fields that could contain special chars.
 fn serde_free_json(info: &InstanceInfo) -> io::Result<String> {
-    let esc = |s: &str| -> String {
-        let mut out = String::with_capacity(s.len() + 2);
-        out.push('"');
-        for c in s.chars() {
-            match c {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if (c as u32) < 0x20 => {
-                    out.push_str(&format!("\\u{:04x}", c as u32));
-                }
-                _ => out.push(c),
-            }
-        }
-        out.push('"');
-        out
-    };
+    use crate::json::json_quote;
     Ok(format!(
         "{{\"name\":{n},\"pid\":{p},\"display\":{d},\"tty_nr\":{t},\"exe\":{e},\"started_at\":{s},\"alive\":{a}}}",
-        n = esc(&info.name),
+        n = json_quote(&info.name),
         p = info.pid,
-        d = esc(&info.display),
+        d = json_quote(&info.display),
         t = info.tty_nr,
-        e = esc(&info.exe),
+        e = json_quote(&info.exe),
         s = info.started_at,
         a = info.alive,
     ))
@@ -298,28 +280,7 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
 }
 
 fn unquote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let trimmed = s.trim().trim_matches('"');
-    let mut chars = trimmed.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('"') => out.push('"'),
-                Some('\\') => out.push('\\'),
-                Some('n') => out.push('\n'),
-                Some('r') => out.push('\r'),
-                Some('t') => out.push('\t'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
-                }
-                None => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    crate::json::json_unescape(s.trim().trim_matches('"'))
 }
 
 /// Build the `InstanceInfo` for the current process under `name`.
