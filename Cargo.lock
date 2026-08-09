@@ -58,6 +58,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "maverick-installer"
+version = "0.4.0"
+
+[[package]]
 name = "maverick-sys"
 version = "0.4.0"
 dependencies = [

@@ -1,5 +1,6 @@
 [workspace]
 members = ["maverick-sys", "maverick-dialog", "maverick-toml", "maverick-installer"]
+exclude = []
 resolver = "2"
 
 [package]

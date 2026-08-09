@@ -36,7 +36,7 @@
 - 🧩 Floating + fullscreen window support.
 - 🧱 External dock/bar support (Waybar, Polybar, …) via EWMH struts.
 - 🔌 `maverickctl` control socket — list/state/dispatch/restart/reload/quit any running instance.
-- 📐 Highly configurable (column width, gaps, borders, colors, workspace binds).
+- 📐 Highly configurable (gaps, borders, split bias).
 - 🔧 Declarative window rules.
 - 🚀 Autostart programs.
 - 📋 EWMH compliant.
@@ -48,56 +48,7 @@
 
 ## 🚀 Installation
 
-### Dependencies
-
-Maverick has no runtime library dependencies beyond a working X server —
-no cairo, no pango, no Xft. What you need is:
-
-| Requirement | Why | Typical package |
-| --- | --- | --- |
-| An X11 server | Maverick is X11-only, no Wayland | `xorg-server` (Arch), or [XLibre](https://github.com/X11Libre/xserver) |
-| `cargo` / Rust toolchain | Both the installer and a manual build compile the workspace with it | `rustup` (MSRV 1.82) or your distro's `rustc`/`cargo` package |
-| A terminal, launcher, bar, wallpaper setter, notification daemon, etc. | Not bundled — Maverick starts them via `autostart`, same as any WM | `alacritty`/`rofi`/`polybar`/`feh`/`dunst` or your own picks |
-| `xdg-desktop-portal` + `xdg-desktop-portal-gtk` (recommended) | GTK/Electron apps' file pickers | ships in the default `autostart` |
-
-### Option A: `maverick-installer.bin` (recommended for most people)
-
-A prebuilt installer binary ships at the repo root, so you don't need to
-build the installer itself — but it still needs `cargo`/`rustc` on the
-system to build Maverick, same as a manual build. Clone, run the binary,
-done:
-
-```bash
-git clone https://github.com/azytar/Maverick.git
-cd Maverick
-sudo ./maverick-installer.bin
-```
-
-What it does:
-
-1. Detects your CPU (via `CPUID`) and reports it.
-2. Picks an install target: `/usr/local/bin` under `sudo`/root, or
-   `~/.local/bin` if run as a regular user.
-3. Builds the workspace with `cargo build --release -C target-cpu=native`
-   (using the [`mold`](https://github.com/rui314/mold) linker
-   automatically if it's on `PATH`, for a faster link step).
-4. Copies `maverick`, `maverickctl`, `maverick-msg`, and `maverick-dialog`
-   into the install target.
-5. Checks that the install target is on `$PATH` and installs
-   `maverick.desktop` for display managers (see below) when run as root.
-
-Bilingual output (Spanish/English, auto-detected from `$LANG`). Re-run it
-any time to rebuild and reinstall after pulling updates.
-
-If you'd rather not run a prebuilt binary, build it yourself first —
-it's a normal workspace member:
-
-```bash
-cargo build --release -p maverick-installer
-sudo ./target/release/maverick-installer
-```
-
-### Option B: build from source manually
+### Build from source
 
 Maverick is a Cargo workspace with three binaries: `maverick` (the WM
 itself), `maverickctl` (control CLI), and `maverick-dialog` (the quit
@@ -141,28 +92,6 @@ Comment=Columnar tiling WM
 Exec=maverick
 Type=XSession
 
-```
-
----
-
-## 🖥 Command-line Options
-
-`maverick` accepts a small set of flags (in any order):
-
-| Flag | Description |
-| --- | --- |
-| `--config <path>` | Load the config TOML from `<path>` instead of `$XDG_CONFIG_HOME/maverick/config.toml`. The same path is reused on `maverickctl reload`, so a custom config survives a hot restart. |
-| `--check-config [path]` | Parse the config (the `--config` path if given, otherwise the default location) and exit. Exit code `0` = clean (no warnings/errors), `1` = warnings or errors were reported. Never starts the WM — handy for CI/lint gates. |
-| `--replace` / `-r` | Replace an already-running WM, adopting its windows. |
-| `--name <id>` | Instance name used for control/identification (so `maverickctl` targets the right instance). |
-| `-v` / `--version` | Print version and exit. |
-| `-h` / `--help` | Print usage and exit. |
-
-Validate a config before starting:
-
-```bash
-maverick --check-config ~/.config/maverick/config.toml
-maverick --config ~/.config/maverick/config.toml
 ```
 
 ---
@@ -463,7 +392,6 @@ Maverick/                    # Cargo workspace
 │   │   ├── present.rs               fullscreen/maximize presentation layer
 │   │   ├── layout.rs                 arrange_columns / arrange_grid
 │   │   ├── ipc.rs                     state_json / parse_action for the control socket
-│   │   ├── action.rs                 unified Action name/parse vocabulary (TOML + IPC)
 │   │   └── tests.rs                   unit tests
 │   └── backend/                 X11 backend — the only place that speaks the protocol
 │       ├── atoms.rs               EWMH / ICCCM atom cache
@@ -486,11 +414,8 @@ Maverick/                    # Cargo workspace
 │       └── bin/maverickctl.rs       the `maverickctl` CLI
 ├── maverick-dialog/           # standalone X11 yes/no quit-confirmation window
 │   └── src/main.rs
-├── config/
+├── examples/
 │   └── config.toml            full, commented sample user config
-├── maverick-installer/         # optional installer, workspace member
-├── maverick-installer.bin      # prebuilt installer binary — sudo ./maverick-installer.bin
-│   └── src/main.rs
 ├── CHANGELOG.md
 ├── Cargo.toml                 # workspace root + the `maverick` package
 ├── Cargo.lock

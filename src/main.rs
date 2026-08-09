@@ -245,10 +245,6 @@ fn main() {
             }
 
             // ── Phase 3: event loop ───────────────────────────────────────────
-            // Start the loop: `running` is initialised to `false` (State::new)
-            // so the WM would otherwise exit immediately without ever servicing
-            // a single X11 event. Flip it on before handing control to run().
-            manager.engine.state.running = true;
             match manager.run() {
                 Ok(()) => {
                     let disconnected = manager.engine.state.running;
