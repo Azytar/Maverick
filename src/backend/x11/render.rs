@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::layout::fs_ctx;
 use x11rb::protocol::shape;
 
 /// Approximate a rounded rectangle of size `w`×`h` with corner radius `r` as
@@ -51,14 +52,39 @@ fn rounded_rectangles(w: i32, h: i32, r: i32) -> Vec<Rectangle> {
     rects
 }
 
+/// Clamp a floating window's geometry so the whole frame (content + the border
+/// on both sides) fits inside `wa`.
+///
+/// Size is clamped *before* position on purpose: with a float wider or taller
+/// than the workarea the naive `max_x = wa.x + wa.w - g.w - 2*bw` goes below
+/// `wa.x`, so clamping the position alone parks the window at a negative
+/// coordinate while its size still overflows the screen. Clamping the size
+/// first keeps `min <= max` and guarantees the result is inside `wa`.
+fn clamp_float_to_workarea(mut g: Rect, wa: Rect, bw: u32) -> Rect {
+    let frame = 2 * bw as i32;
+    let max_w = (wa.w as i32 - frame).max(1) as u32;
+    let max_h = (wa.h as i32 - frame).max(1) as u32;
+    g.w = g.w.min(max_w);
+    g.h = g.h.min(max_h);
+    let max_x = (wa.x + wa.w as i32 - g.w as i32 - frame).max(wa.x);
+    let max_y = (wa.y + wa.h as i32 - g.h as i32 - frame).max(wa.y);
+    g.x = g.x.clamp(wa.x, max_x);
+    g.y = g.y.clamp(wa.y, max_y);
+    g
+}
+
 impl WindowManager {
     /// Apply (or clear) rounded corners on `win` via the Shape extension's
     /// bounding-shape mask. Only called when `corner_radius > 0` — with the
     /// default of `0` this codepath, and every X11 Shape request, never
-    /// runs, so there's zero cost for users who don't opt in.
-    pub(super) fn round_corners(&self, win: Window, outer_w: u32, outer_h: u32) {
-        let r = self.engine.cfg.corner_radius as i32;
-        let rects = rounded_rectangles(outer_w as i32, outer_h as i32, r);
+    /// runs, so there's zero cost for users who don't opt in. `radius` is
+    /// the *effective* radius for this call — callers pass `0` to force a
+    /// square mask (e.g. fullscreen, which must stay edge-to-edge like niri:
+    /// rounding an overlay that touches the screen border just clips the
+    /// content under a curved corner instead of producing a real rounded
+    /// look, since there's no desktop showing behind it to round into).
+    pub(super) fn round_corners(&self, win: Window, outer_w: u32, outer_h: u32, radius: i32) {
+        let rects = rounded_rectangles(outer_w as i32, outer_h as i32, radius);
         // Fire-and-forget, same rationale as apply_geom's configure_window:
         // this runs on every geometry change, a synchronous round-trip per
         // window would be unacceptable. Servers without the Shape extension
@@ -77,16 +103,64 @@ impl WindowManager {
     }
 
     pub(super) fn arrange(&mut self, mon_idx: usize) -> Result<(), Box<dyn std::error::Error>> {
-        self.arrange_full(mon_idx, true, true)
+        self.arrange_full(mon_idx, true)
     }
 
-    /// P8/P11: arrange with optional `hide_offscreen` and restack.
-    /// Lightweight arrange skips both — safe when only focus/row heights change.
+    /// Reposition floating windows to stay within the workarea after a monitor
+    /// geometry change. Clamps each float's size *and* position so its whole
+    /// frame remains inside the new workarea — including floats that are larger
+    /// than the workarea itself (see `clamp_float_to_workarea`).
+    pub(super) fn reposition_floats(
+        &mut self,
+        mon_idx: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if mon_idx >= self.engine.state.monitors.len() {
+            return Ok(());
+        }
+        let wa = self.engine.state.monitors[mon_idx].workarea;
+        
+        // Collect all floats that need repositioning to avoid borrow conflicts
+        let mut to_reposition: Vec<(WindowId, Rect, u32)> = Vec::new();
+        
+        // Regular floats in workspaces
+        for ws in &self.engine.state.monitors[mon_idx].workspaces {
+            for &win in &ws.floats {
+                if let Some(client) = self.engine.state.clients.get(&win) {
+                    let bw = client.border_w;
+                    let g = clamp_float_to_workarea(client.geom, wa, bw);
+                    if g != client.geom {
+                        to_reposition.push((win, g, bw));
+                    }
+                }
+            }
+        }
+        
+        // Sticky floats that belong to this monitor
+        for (&win, client) in &self.engine.state.clients {
+            if client.monitor == mon_idx && client.is_sticky() && client.is_float() {
+                let bw = client.border_w;
+                let g = clamp_float_to_workarea(client.geom, wa, bw);
+                if g != client.geom {
+                    to_reposition.push((win, g, bw));
+                }
+            }
+        }
+        
+        // Apply all repositionings
+        for (win, g, bw) in to_reposition {
+            self.apply_geom(win, g, bw)?;
+        }
+        
+        Ok(())
+    }
+
+    /// P8/P11: arrange with optional `hide_offscreen`. Stacking is always
+    /// refreshed (cheap, and done inside here) so a separate restack step is
+    /// unnecessary.
     pub(super) fn arrange_full(
         &mut self,
         mon_idx: usize,
         do_hide: bool,
-        do_restack: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if mon_idx >= self.engine.state.monitors.len() {
             return Ok(());
@@ -119,11 +193,6 @@ impl WindowManager {
         // Overlay stacking: presented windows above tiles, popups of presented
         // windows above the overlay, focused window on top (or peek).
         self.stack_overlay(mon_idx);
-
-        if do_restack && self.stack_dirty {
-            self.stack_dirty = false;
-            self.restack(mon_idx)?;
-        }
         Ok(())
     }
 
@@ -143,6 +212,21 @@ impl WindowManager {
                 .flat_map(|c| c.windows.iter().copied())
                 .chain(ws.floats.iter().copied()),
         );
+        // A fullscreen window in the Column layout is a normal ribbon
+        // participant: its column's *siblings* must be hidden (off-screen)
+        // while it is fullscreen, so they don't peek out beside it. The
+        // fullscreen window itself stays in the set (it scrolls with the
+        // camera). Use the same `fs_ctx` the layout uses so the rule matches.
+        let fs = fs_ctx(&self.engine.state.clients, ws, mon.screen);
+        if let Some(fsc) = fs.col {
+            if let Some(col) = ws.columns.get(fsc) {
+                for &w in &col.windows {
+                    if fs.win != Some(w) {
+                        self.hide_ws_set.remove(&w);
+                    }
+                }
+            }
+        }
         // Sticky floats stay visible on every workspace of this monitor.
         self.hide_ws_set.extend(
             self.engine
@@ -186,33 +270,50 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn restack(&self, mon_idx: usize) -> Result<(), Box<dyn std::error::Error>> {
-        self.stack_overlay(mon_idx);
-        Ok(())
-    }
-
     /// Unify stacking for a monitor's active workspace:
     ///
     /// 1. floats above tiled windows (base float layer);
-    /// 2. the presentation overlay — every fullscreen/maximized window, in
-    ///    focus order (most recently focused last → on top). Unlike the old
-    ///    focus-only rule, all overlay windows stay presented while unfocused;
-    /// 3. the focused window if it is *not* part of the overlay ("peek"): it
-    ///    rises above the presented window so focus stays visible — but stays
-    ///    below step 4, because a presented window's owned popups belong above;
-    /// 4. floating popups/dialogs whose `WM_TRANSIENT_FOR` chain reaches a
-    ///    presented window — always above that overlay, so a menu or file
-    ///    dialog of a fullscreen app never hides behind it.
+    /// 2. the presentation overlay — in `Grid`, every fullscreen window; in any
+    ///    layout a `FullscreenPolicy::True` fullscreen window (games: exclusive,
+    ///    outside the ribbon) and a maximized window while focused —
+    ///    most-recently-focused last → on top. In the `Column` layout an
+    ///    ordinary fullscreen window is NOT an overlay (it scrolls with the
+    ///    ribbon), so it is excluded here;
     ///
-    /// Fire-and-forget `StackMode::ABOVE`: arrange/focus paths must not block.
-    fn stack_overlay(&self, mon_idx: usize) {
+    /// "fullscreen covering" (case 2-bis): when the focused window of a `Column`
+    ///    workspace is fullscreen, the camera is settled and we are not in
+    ///    Overview, the fullscreen tile is raised above *everything* (including
+    ///    the dock/bar). The moment any of those conditions breaks it drops back
+    ///    to a normal tile and the dock is re-raised so the bar returns on top
+    ///    (only on that transition, so floats — which ride above the dock in the
+    ///    base layer — are never pushed below it);
+    /// 3. the focused window if it is a *floating* dialog/popup ("peek"): it
+    ///    rises above the presented window so a focused popup stays visible.
+    ///    A focused *tiled* window never peeks: h/l still moves focus freely
+    ///    underneath a fullscreen window exactly like it should;
+    /// 4. floating popups/dialogs whose `WM_TRANSIENT_FOR` chain reaches a
+    ///    presented window — always above that overlay.
+    ///
+    /// Fire-and-forget `StackMode::ABOVE` (or `BELOW` for the covering→off
+    /// transition): arrange/focus paths must not block.
+    ///
+    /// To avoid a `raise()` storm during the camera animation (arrange runs on
+    /// every monitor every frame), the desired top-to-bottom order is computed
+    /// into `order` and compared with the cached `last_stack_order[mon_idx]`;
+    /// `raise` is only re-issued when the order actually changed (bug C6).
+    fn stack_overlay(&mut self, mon_idx: usize) {
         let mon = &self.engine.state.monitors[mon_idx];
         let ws = mon.ws();
+
+        // Derived fullscreen descriptor, shared with `core::layout`.
+        let fs = fs_ctx(&self.engine.state.clients, ws, mon.screen);
+
+        let mut order: Vec<WindowId> = Vec::new();
 
         // 1. Base float layer.
         for &win in &ws.floats {
             if self.engine.state.clients.contains_key(&win) {
-                self.raise(win);
+                order.push(win);
             }
         }
         // Sticky floats ride above every workspace's tiles by definition —
@@ -220,22 +321,32 @@ impl WindowManager {
         // active.
         for (&win, c) in &self.engine.state.clients {
             if c.monitor == mon_idx && c.is_sticky() {
-                self.raise(win);
+                order.push(win);
             }
         }
 
-        // 2. Presentation overlay, most-recently-focused last.
+        // 2. Presentation overlay. In the Column layout a fullscreen window is a
+        //    ribbon participant, not an overlay, so it is excluded here; only
+        //    Grid fullscreen, `FullscreenPolicy::True` fullscreen (exclusive in
+        //    any layout, and already excluded from `fs_ctx`) and focused
+        //    maximized count.
         let mut presented: Vec<WindowId> = ws
             .columns
             .iter()
             .flat_map(|c| c.windows.iter().copied())
             .chain(ws.floats.iter().copied())
             .filter(|win| {
-                self.engine
-                    .state
-                    .clients
-                    .get(win)
-                    .is_some_and(|c| c.is_fullscreen() || c.is_maximized())
+            let focused = mon.focused;
+            self.engine
+                .state
+                .clients
+                .get(win)
+                .is_some_and(|c| {
+                    (c.is_fullscreen()
+                        && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen()))
+                        || ((c.is_maximized_v() || c.is_maximized_h())
+                            && focused == Some(*win))
+                })
             })
             .collect();
         presented.sort_by_key(|win| {
@@ -244,16 +355,25 @@ impl WindowManager {
                 .position(|&x| x == *win)
                 .unwrap_or(0)
         });
-        for &win in &presented {
-            self.raise(win);
-        }
+        order.extend(presented.iter().copied());
 
-        // 3. Peek: a focused plain tile is raised above the overlay so the user
-        //    sees where focus sits without resizing the presented window.
+        // 3. Peek: a focused *floating* window (dialog/popup) is raised above
+        //    the overlay so the user sees where focus sits. Deliberately
+        //    excludes tiled columns: h/l still moves focus underneath a
+        //    fullscreen window exactly like it should (never blocked), but a
+        //    plain tile must not visually climb above a fullscreen window just
+        //    because it now has focus.
         if !presented.is_empty() {
             if let Some(fw) = mon.focused {
-                if !presented.contains(&fw) {
-                    self.raise(fw);
+                if !presented.contains(&fw)
+                    && self
+                        .engine
+                        .state
+                        .clients
+                        .get(&fw)
+                        .is_some_and(Client::is_float)
+                {
+                    order.push(fw);
                 }
             }
         }
@@ -262,9 +382,59 @@ impl WindowManager {
         //    reaches a presented window must sit above it.
         for &win in &ws.floats {
             if self.transient_of(win, &presented) {
-                self.raise(win);
+                order.push(win);
             }
         }
+
+        if self.last_stack_order.get(&mon_idx).is_none_or(|prev| *prev != order) {
+            for &win in &order {
+                self.raise(win);
+            }
+            self.last_stack_order.insert(mon_idx, order);
+        }
+
+        // 2-bis. Fullscreen covering. The focused fullscreen tile of a Column
+        //    workspace, while the camera is settled and not in Overview, is
+        //    raised above everything (incl. the dock). Otherwise it is a normal
+        //    tile: when coverage ends we drop it to the bottom of the stack so
+        //    the neighbouring tile (and the bar) paint over it, and re-raise the
+        //    dock so the bar returns on top. Both only happen on the
+        //    covering→not-covering transition, to avoid a `raise()` storm.
+        let covering = ws.layout == LayoutKind::Column
+            && !ws.overview
+            && fs.win.is_some_and(|w| mon.focused == Some(w))
+            && (ws.camera.position - ws.camera.target).abs() < 0.5
+            && ws.camera.velocity.abs() < 0.01
+            && (ws.zoom - ws.zoom_target).abs() < 0.001;
+
+        if covering {
+            if let Some(w) = fs.win {
+                // Last in `order` → raised above the dock and every tile.
+                self.raise(w);
+                self.last_stack_order
+                    .entry(mon_idx)
+                    .or_default()
+                    .push(w);
+            }
+        } else if fs.win.is_some_and(|w| mon.focused == Some(w) || self.engine.state.clients.get(&w).is_some_and(Client::is_fullscreen)) {
+            // Coverage just ended (or the fullscreen tile scrolled away): drop
+            // it to the bottom so the neighbour tile and bar paint over it.
+            let prev_covering = self.fs_covering.get(&mon_idx).copied().unwrap_or(false);
+            if prev_covering {
+                if let Some(w) = fs.win {
+                    let _ = self
+                        .conn
+                        .configure_window(w, &ConfigureWindowAux::new().stack_mode(StackMode::BELOW));
+                }
+                // Return the dock/bar above the (now bottom) fullscreen tile.
+                for (&dock, &dock_mon) in &self.docks {
+                    if dock_mon == mon_idx {
+                        self.raise(dock);
+                    }
+                }
+            }
+        }
+        self.fs_covering.insert(mon_idx, covering);
     }
 
     /// True when `win`'s `transient_parent` chain reaches any window in `roots`.
@@ -300,9 +470,15 @@ impl WindowManager {
             Some(c) => c,
             None => return Ok(()),
         };
-        if geom == client.geom && bw == client.border_w {
+        // A pending state transition (fullscreen/maximized on or off) forces the
+        // reconfigure even when the rect is unchanged — see
+        // `Client::geometry_dirty`. Otherwise identical geometry is skipped,
+        // which is what keeps `arrange` from spamming the server every frame.
+        if !client.geometry_dirty && geom == client.geom && bw == client.border_w {
             return Ok(());
         }
+        // Captured before the mutable borrow below flips geom/border_w.
+        let is_fullscreen = client.is_fullscreen();
 
         let _ = self.conn.configure_window(
             win,
@@ -336,10 +512,19 @@ impl WindowManager {
         if let Some(c) = self.engine.state.clients.get_mut(&win) {
             c.geom = geom;
             c.border_w = bw;
+            c.geometry_dirty = false;
         }
 
         if self.engine.cfg.corner_radius > 0 {
-            self.round_corners(win, geom.w + 2 * bw, geom.h + 2 * bw);
+            // Fullscreen is always square, niri-style — border-0 and edge-to-
+            // edge, so a rounded mask has no desktop behind it to reveal and
+            // just chops the content under a curved clip instead.
+            let r = if is_fullscreen {
+                0
+            } else {
+                self.engine.cfg.corner_radius as i32
+            };
+            self.round_corners(win, geom.w + 2 * bw, geom.h + 2 * bw, r);
         }
 
         Ok(())
@@ -524,5 +709,71 @@ impl WindowManager {
     pub(super) fn focus_best(&mut self, mon_idx: usize) -> Result<(), Box<dyn std::error::Error>> {
         let candidate = self.engine.state.best_focus(mon_idx);
         self.focus(candidate)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 22px-tall bar reserved at the top, so `workarea != screen` and the
+    /// vertical clamp has a non-zero origin to respect.
+    fn workarea() -> Rect {
+        Rect::new(0, 22, 1920, 1058)
+    }
+
+    fn fits(g: Rect, wa: Rect, bw: u32) -> bool {
+        let frame = 2 * bw as i32;
+        g.x >= wa.x
+            && g.y >= wa.y
+            && g.x + g.w as i32 + frame <= wa.x + wa.w as i32
+            && g.y + g.h as i32 + frame <= wa.y + wa.h as i32
+    }
+
+    #[test]
+    fn float_inside_workarea_is_untouched() {
+        let wa = workarea();
+        let g = Rect::new(100, 200, 640, 480);
+        assert_eq!(clamp_float_to_workarea(g, wa, 2), g);
+    }
+
+    #[test]
+    fn float_past_the_edges_is_pulled_back() {
+        let wa = workarea();
+        let bw = 2;
+        let g = clamp_float_to_workarea(Rect::new(5000, 5000, 640, 480), wa, bw);
+        assert!(fits(g, wa, bw), "off-screen float must be pulled inside: {g:?}");
+        assert_eq!(g.w, 640, "a float that fits keeps its size");
+        assert_eq!(g.h, 480);
+
+        let g = clamp_float_to_workarea(Rect::new(-500, -500, 640, 480), wa, bw);
+        assert_eq!((g.x, g.y), (wa.x, wa.y));
+    }
+
+    #[test]
+    fn float_larger_than_workarea_is_resized_and_stays_inside() {
+        // The regression: with only x/y clamped, `max_x` lands below `min_x` for
+        // an oversized float, so it was parked at a negative coordinate while
+        // still overflowing the screen.
+        let wa = workarea();
+        let bw = 2;
+        let g = clamp_float_to_workarea(Rect::new(0, 0, 5000, 5000), wa, bw);
+        assert!(
+            fits(g, wa, bw),
+            "an oversized float must be shrunk into the workarea, got {g:?}"
+        );
+        assert_eq!((g.x, g.y), (wa.x, wa.y));
+        assert_eq!(g.w, wa.w - 2 * bw);
+        assert_eq!(g.h, wa.h - 2 * bw);
+    }
+
+    #[test]
+    fn zero_sized_workarea_never_produces_a_zero_dimension() {
+        // Defensive: a degenerate workarea (mid-hotplug) must not yield a
+        // width/height of 0, which X11 rejects with a BadValue.
+        let wa = Rect::new(0, 0, 1, 1);
+        let g = clamp_float_to_workarea(Rect::new(10, 10, 800, 600), wa, 4);
+        assert!(g.w >= 1 && g.h >= 1);
+        assert_eq!((g.x, g.y), (wa.x, wa.y));
     }
 }

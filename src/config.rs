@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::types::{Action, Dir, LayoutKind};
 
 #[derive(Debug, Clone)]
@@ -12,10 +14,21 @@ pub struct Cfg {
     /// Rounded corner radius in pixels, via X11 Shape. 0 disables.
     pub corner_radius: u32,
     pub n_tags: usize,
-    pub default_col_w: u32, // default width of a new column
-    pub split_bias: f32,    // how much extra height focused row gets (0.0-1.0)
+    /// Width of a freshly created column, as a fraction (0.1–1.0) of the
+    /// workarea. Replaces the old `default_col_w` (pixels) and `split_bias`
+    /// (fraction) keys, which are now deprecated aliases (B3, T5).
+    pub column_width: f32,
     pub focus_mouse: bool,
     pub warp_cursor: bool,
+    /// Accordion factor: extra fraction (0.0-0.9) the focused column expands
+    /// when dynamic focus expansion is active (Phase 4). 0.0 disables it, so
+    /// no column resizes just because focus moved — only `GrowColumn`/
+    /// `ShrinkColumn` change a column's width. Default is 0.0: the boost
+    /// made the *previously* focused neighbor visibly shrink back down on
+    /// every focus change, which reads as jitter more than polish.
+    pub accordion_boost: f32,
+    /// Minimum zoom factor for the Overview film-strip (Phase 2).
+    pub overview_zoom_min: f32,
 
     // Catppuccin Mocha
     pub col_normal: u32, // 0xRRGGBB
@@ -43,10 +56,11 @@ impl Default for Cfg {
             smart_gaps: false,
             corner_radius: 0,
             n_tags: 9,
-            default_col_w: 700,
-            split_bias: 0.6,
+            column_width: 0.6,
             focus_mouse: false,
             warp_cursor: false,
+            accordion_boost: 0.0,
+            overview_zoom_min: 0.25,
             col_normal: 0x45475a,
             col_focused: 0x89b4fa,
             col_urgent: 0xf38ba8,
@@ -82,6 +96,29 @@ pub struct Rule {
     /// Override border width for this app — floating windows only;
     /// tiled/column geometry keeps one uniform border across the layout.
     pub border_w: Option<u32>,
+    /// Apple/macOS-style: ignore whatever `_NET_WM_STATE_MAXIMIZED_*` /
+    /// `_NET_WM_STATE_FULLSCREEN` the window requests at map time and force
+    /// it to open as a normal tile instead. GTK apps (Firefox chief among
+    /// them) are the classic offender — they remember being maximized from
+    /// the last session and demand it back on every launch, which on a
+    /// tiling WM just means "fill the workarea, no gaps, no matter what
+    /// you tiled last." Apple's `WindowServer` never lets an app dictate its
+    /// own launch geometry like that; this rule does the same.
+    pub ignore_initial_state: bool,
+    /// Refuse this app's *own* fullscreen requests at runtime. An EWMH
+    /// `_NET_WM_STATE_FULLSCREEN` client message — what a browser's F11 sends —
+    /// is dropped; the window stays tiled. `Mod4+F` is unaffected and still
+    /// gives a normal tiled fullscreen, because that is the user asking, not
+    /// the app. Where `ignore_initial_state` only fires once at map time, this
+    /// holds for the whole life of the window.
+    pub deny_fullscreen: bool,
+    /// Give this app real, exclusive fullscreen: an overlay covering the whole
+    /// screen in any layout, outside the scrolling ribbon, with
+    /// `_NET_WM_BYPASS_COMPOSITOR` set so the compositor stops redirecting it.
+    /// For games and video players that manage their own vsync — Maverick does
+    /// not touch frame pacing, it just stays out of the way. Wins over
+    /// `deny_fullscreen` if both are set.
+    pub true_fullscreen: bool,
 }
 
 impl Rule {
@@ -124,6 +161,10 @@ pub fn compiled_config() -> Cfg {
     const XK_SPACE: u32 = 0x0020;
     const XK_F5: u32 = 0xffc2;
     const XK_TAB: u32 = 0xff09;
+    const XK_EQUAL: u32 = 0x003d;
+    const XK_MINUS: u32 = 0x002d;
+    const XK_BRACKETRIGHT: u32 = 0x005d;
+    const XK_BRACKETLEFT: u32 = 0x005b;
     // letter keysyms: lowercase ascii
     macro_rules! k {
         ($c:literal) => {
@@ -131,7 +172,7 @@ pub fn compiled_config() -> Cfg {
         };
     }
 
-    let mut keybinds: Vec<(u16, u32, Action)> = vec![
+    let keybinds: Vec<(u16, u32, Action)> = vec![
         // ── spawn ──
         (sup, XK_RETURN, Action::Spawn(vec!["alacritty".into()])),
         (
@@ -148,6 +189,7 @@ pub fn compiled_config() -> Cfg {
         (shs, k!(b'c'), Action::Kill), // Mod4+Shift+C — close focused window
         (shs, XK_SPACE, Action::ToggleFloat),
         (shs, k!(b'f'), Action::ToggleFullscreen),
+        (shs, k!(b'm'), Action::ToggleMaximize),
         // ── focus navigation ──
         (sup, k!(b'h'), Action::FocusDir(Dir::Left)),
         (sup, k!(b'l'), Action::FocusDir(Dir::Right)),
@@ -184,44 +226,19 @@ pub fn compiled_config() -> Cfg {
         (sup, XK_F5, Action::Restart),
         (sup, XK_TAB, Action::FocusMon(Dir::Next)),
         (shs, XK_TAB, Action::MoveMon(Dir::Next)),
+        // ── Overview (semantic-zoom film-strip) ──
+        (sup, k!(b'o'), Action::ToggleOverview),
+        (sup, k!(b'n'), Action::OverviewNav(Dir::Right)),
+        (shs, k!(b'o'), Action::OverviewNav(Dir::Left)),
+        (sup, k!(b'e'), Action::OverviewEnter),
+        // ── Viewport (zoom-in inspection + page-snap scrolling) ──
+        (sup, XK_EQUAL, Action::ViewportZoom(0.2)), // Mod4+=  zoom viewport in
+        (sup, XK_MINUS, Action::ViewportZoom(-0.2)), // Mod4+-  zoom viewport out (back to Normal at 1.0)
+        (sup, XK_BRACKETRIGHT, Action::PageSnap(Dir::Right)), // Mod4+]  scroll one page right
+        (sup, XK_BRACKETLEFT, Action::PageSnap(Dir::Left)),    // Mod4+[  scroll one page left
     ];
-
-    // ── workspace keybinds: Super+1..9 view, Super+Shift+1..9 move ──
-    let ws_keys: [(u32, usize); 9] = [
-        (k!(b'1'), 0),
-        (k!(b'2'), 1),
-        (k!(b'3'), 2),
-        (k!(b'4'), 3),
-        (k!(b'5'), 4),
-        (k!(b'6'), 5),
-        (k!(b'7'), 6),
-        (k!(b'8'), 7),
-        (k!(b'9'), 8),
-    ];
-    for (ksym, ws) in ws_keys {
-        keybinds.push((sup, ksym, Action::View(ws)));
-        keybinds.push((shs, ksym, Action::MoveToWs(ws)));
-    }
 
         Cfg {
-        border_w: 2,
-        gaps_inner: 6,
-        gaps_outer: 6,
-        smart_gaps: false,
-        corner_radius: 0,
-        n_tags: 9,
-        default_col_w: 700,
-        split_bias: 0.6,
-        focus_mouse: false,
-        warp_cursor: false,
-
-        // Catppuccin Mocha palette
-        col_normal: 0x45475a,  // Surface1
-        col_focused: 0x89b4fa, // Blue
-        col_urgent: 0xf38ba8,  // Red
-
-        tag_names: (1..=9).map(|n| n.to_string()).collect(),
-
         keybinds,
 
                 rules: vec![
@@ -243,6 +260,28 @@ pub fn compiled_config() -> Cfg {
                 class: Some("pinentry".into()),
                 title: None,
                 float: true,
+                ws: None,
+                ..Default::default()
+            },
+            // GTK's classic tantrum: Firefox (and most of the GTK stack)
+            // remembers being maximized/fullscreen from the last session and
+            // demands that state right back at map time — on a tiling WM
+            // that just means "fill the workarea, no gaps, whatever else is
+            // there." Apple's WindowServer never lets an app dictate its own
+            // launch geometry like that, so neither do we: force it to open
+            // tiled like everything else. Add more `class`es here (or via
+            // `[[rules]] ignore_initial_state = true` in config.toml) for
+            // other repeat offenders.
+            //
+            // `deny_fullscreen` is the runtime half of the same idea: F11 (an
+            // EWMH `_NET_WM_STATE_FULLSCREEN` client message) is refused, so
+            // Firefox cannot yank itself out of the ribbon on its own. The
+            // user's `Mod4+F` still works and gives a normal tiled fullscreen
+            // — the rule rejects the app's opinion, not yours.
+            Rule {
+                class: Some("firefox".into()),
+                ignore_initial_state: true,
+                deny_fullscreen: true,
                 ws: None,
                 ..Default::default()
             },
@@ -295,15 +334,16 @@ pub fn compiled_config() -> Cfg {
             // Set your own wallpaper here, e.g.:
             // vec!["feh".into(), "--bg-fill".into(), "/path/to/wallpaper.png".into()],
         ],
+        ..Default::default()
     }
 }
 
 /// Build the runtime config: the compiled baseline, with an optional user
-/// TOML (`$XDG_CONFIG_HOME/maverick/config.toml`) layered on top. A missing or
-/// invalid TOML never prevents startup — see `userconfig` for the fail-safe
-/// loading rules.
-pub fn load_config() -> Cfg {
-    crate::userconfig::load_config()
+/// TOML layered on top. `path` overrides the default XDG location (used by the
+/// `--config` CLI flag). A missing or invalid TOML never prevents startup —
+/// see `userconfig` for the fail-safe loading rules.
+pub fn load_config(path: Option<&Path>) -> Cfg {
+    crate::userconfig::load_config(path)
 }
 
 /// Named color-theme presets for `[general].theme` in the TOML config.
@@ -403,5 +443,18 @@ mod rule_tests {
         assert!(r.matches("Firefox", "Navigator", &["email".to_string()], "Gmail"));
         assert!(!r.matches("Firefox", "Navigator", &["normal".to_string()], "Gmail"));
         assert!(!r.matches("Chrome", "Navigator", &["email".to_string()], "Gmail"));
+    }
+
+    #[test]
+    fn compiled_config_ignores_firefox_initial_state() {
+        let firefox_rule = super::compiled_config()
+            .rules
+            .into_iter()
+            .find(|r| r.class.as_deref() == Some("firefox"));
+        assert!(
+            firefox_rule.is_some_and(|r| r.ignore_initial_state),
+            "compiled default rules must force Firefox to ignore its own \
+             requested maximized/fullscreen state at map time",
+        );
     }
 }

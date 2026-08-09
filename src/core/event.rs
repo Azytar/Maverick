@@ -47,6 +47,8 @@ pub enum Event {
     FloatToggled(WindowId),
     /// A window's fullscreen state flipped.
     FullscreenToggled { win: WindowId, on: bool },
+    /// A window's maximized state flipped.
+    MaximizeToggled { win: WindowId, on: bool },
     /// The inner/outer gaps changed globally.
     GapsChanged,
     /// The default border width changed globally.

@@ -42,6 +42,21 @@ impl WindowManager {
         &mut self,
         e: UnmapNotifyEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Drop the duplicate `UnmapNotify` the X server delivers to the root
+        // (SubstructureNotify) for an unmap the WM itself performed. Only the
+        // variant targeted at the window itself (`e.event == e.window`)
+        // reflects a real client unmap; the root-targeted one is just our own
+        // reflection and must never unmanage.
+        if e.event == self.root {
+            if let Some(n) = self.ignore_unmaps.get_mut(&e.window) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    self.ignore_unmaps.remove(&e.window);
+                }
+            }
+            return Ok(());
+        }
+
         if !self.engine.state.clients.contains_key(&e.window) {
             if self.docks.contains_key(&e.window) {
                 self.remove_dock(e.window)?;
@@ -52,32 +67,22 @@ impl WindowManager {
         // presentation overlay (quit/crash/withdraw). Purge it from the tree
         // now — not later on DestroyNotify — so the overlay stack (`present`,
         // `stack_overlay`) can never raise a stale WindowId and hit BadWindow.
-        // Tiled/floating windows keep the ICCCM behavior below (stay withdrawn
-        // until destroy or re-map).
+        // For normal (tiled/floating) windows, we also unmanage on unmap to
+        // prevent "dead" unmapped windows leaving holes in the layout. The
+        // destroyed=false path restores border + WM_STATE + ungrab, then
+        // re-arranges and focuses the next best window.
         let presented = self
             .engine
             .state
             .clients
             .get(&e.window)
-            .is_some_and(|c| c.is_fullscreen() || c.is_maximized());
+            .is_some_and(|c| c.is_fullscreen() || c.is_maximized_v() || c.is_maximized_h());
         if presented {
             return self.unmanage(e.window, false);
         }
-        if e.response_type & 0x80 != 0 {
-            let _ = self.set_wm_state(e.window, 0);
-        } else {
-            let _ = self.set_wm_state(e.window, 0);
-            let mi = self
-                .engine
-                .state
-                .clients
-                .get(&e.window)
-                .map_or(0, |c| c.monitor);
-            if self.engine.state.monitors.get(mi).and_then(|m| m.focused) == Some(e.window) {
-                self.focus_best(mi)?;
-            }
-        }
-        Ok(())
+        // Treat normal window unmap the same as presented: unmanage with
+        // destroyed=false. This handles ICCCM Withdrawn state properly.
+        self.unmanage(e.window, false)
     }
 
     pub(super) fn on_configure_request(
@@ -185,49 +190,112 @@ impl WindowManager {
             let old_clients: Vec<Window> = self.engine.state.clients.keys().copied().collect();
 
             if len_changed {
-                // Replace monitors with fresh ones (empty workspaces).
-                self.engine.state.monitors = new_mons;
+                // Preserve the layout of monitors whose screen rect did not
+                // change, and only re-home the windows that belonged to monitors
+                // which have disappeared (hotplug / unplug). Replacing every
+                // monitor wholesale used to wipe the tile/float layout of all
+                // surviving monitors (N4).
+                let old = std::mem::take(&mut self.engine.state.monitors);
+                let old_sel = self.engine.state.sel_mon;
 
-                // Clamp sel_mon so no code tries to index a monitor that no longer exists.
-                let n_mons = self.engine.state.monitors.len();
+                // Fresh monitors from the new topology.
+                let mut result = new_mons;
+
+                // Match each old monitor to a surviving new monitor by identical
+                // screen rect. Monitors that keep their rect across a hotplug
+                // keep their contents; the rest fall through to the orphan
+                // re-homing below.
+                let mut matched_new = vec![false; result.len()];
+                let mut old_to_new: Vec<Option<usize>> = vec![None; old.len()];
+                for oi in 0..old.len() {
+                    let mut found = None;
+                    for ni in 0..result.len() {
+                        if !matched_new[ni] && result[ni].screen == old[oi].screen {
+                            found = Some(ni);
+                            break;
+                        }
+                    }
+                    if let Some(ni) = found {
+                        matched_new[ni] = true;
+                        old_to_new[oi] = Some(ni);
+                    }
+                }
+
+                // Copy each preserved monitor's workspaces/clients across, but
+                // adopt the new screen and reconcile the tag count.
+                for oi in 0..old.len() {
+                    if let Some(ni) = old_to_new[oi] {
+                        let mut preserved = old[oi].clone();
+                        preserved.screen = result[ni].screen;
+                        preserved.recalc_geometry();
+                        preserved.reconcile_workspaces(result[ni].workspaces.len());
+                        result[ni] = preserved;
+                    }
+                }
+
+                // Install the new monitor vec, then remap every surviving
+                // client's monitor index to its matched new index.
+                self.engine.state.monitors = result;
+                for c in self.engine.state.clients.values_mut() {
+                    let idx = c.monitor;
+                    if let Some(Some(ni)) = old_to_new.get(idx).copied() {
+                        c.monitor = ni;
+                    }
+                }
+
+                // Map the previously selected monitor to its new index, or clamp.
                 self.engine.state.sel_mon =
-                    self.engine.state.sel_mon.min(n_mons.saturating_sub(1));
+                    match old_to_new.get(old_sel).copied().flatten() {
+                        Some(ni) => ni,
+                        None => self
+                            .engine
+                            .state
+                            .sel_mon
+                            .min(self.engine.state.monitors.len().saturating_sub(1)),
+                    };
 
-                // Re-assign every client to a valid monitor/workspace,
-                // preserving the original assignment where possible.
-                let dw = self.engine.cfg.default_col_w;
-                for win in old_clients {
-                    if let Some(c) = self.engine.state.clients.get_mut(&win) {
-                        c.monitor = c.monitor.min(n_mons.saturating_sub(1));
-                        c.workspace = c.workspace.min(
-                            self.engine.state.monitors[c.monitor]
-                                .workspaces
-                                .len()
-                                .saturating_sub(1),
-                        );
+                // Re-home orphan windows (those on a monitor that disappeared):
+                // land them on the first surviving monitor, clamped to its tag
+                // count. Windows already on preserved monitors are untouched.
+                for win in &old_clients {
+                    let orphan = match self.engine.state.clients.get(win) {
+                        Some(c) => old_to_new.get(c.monitor).copied().flatten().is_none(),
+                        None => false,
+                    };
+                    if !orphan {
+                        continue;
                     }
                     let is_float = self
                         .engine
                         .state
                         .clients
-                        .get(&win)
+                        .get(win)
                         .is_some_and(crate::types::Client::is_float);
-                    let mi = self.engine.state.clients.get(&win).map_or(0, |c| c.monitor);
-                    let ws_i = self
-                        .engine
-                        .state
-                        .clients
-                        .get(&win)
-                        .map_or(0, |c| c.workspace);
-                    let workarea_w = self.engine.state.monitors[mi].workarea.w;
-                    if is_float {
-                        self.engine.state.monitors[mi].workspaces[ws_i]
-                            .floats
-                            .push(win);
-                    } else {
-                        self.engine.state.monitors[mi].workspaces[ws_i]
-                            .add_tiled(win, dw, workarea_w);
+                    let target = (0..old_to_new.len())
+                        .find_map(|oi| old_to_new[oi])
+                        .unwrap_or(0);
+                    if let Some(c) = self.engine.state.clients.get_mut(win) {
+                        c.monitor = target;
+                        let n_ws = self.engine.state.monitors[target]
+                            .workspaces
+                            .len();
+                        c.workspace = c.workspace.min(n_ws.saturating_sub(1));
+                        let ws_i = c.workspace;
+                        if is_float {
+                            self.engine.state.monitors[target].workspaces[ws_i]
+                                .floats
+                                .push(*win);
+                        } else {
+                            self.engine.state.monitors[target].workspaces[ws_i]
+                                .add_tiled(*win, self.engine.cfg.column_width);
+                        }
                     }
+                }
+
+                // Re-clamp floats and re-lay every monitor's tree.
+                for i in 0..self.engine.state.monitors.len() {
+                    self.reposition_floats(i)?;
+                    self.arrange(i)?;
                 }
             } else {
                 // Geometry-only change: update screen/workarea in place,
@@ -238,18 +306,19 @@ impl WindowManager {
                     old_mon.screen = new_mon.screen;
                     old_mon.workarea = new_mon.workarea;
                 }
+                // Reposition floating windows to stay within the new workarea.
                 for i in 0..self.engine.state.monitors.len() {
+                    self.reposition_floats(i)?;
                     self.arrange(i)?;
                 }
             }
 
-            // Update EWMH properties for external taskbars
-            self.update_ewmh_desktops()?;
+            // Update EWMH properties for external taskbars. Only the
+            // count/names change here — `_NET_CURRENT_DESKTOP` is published by
+            // `ViewWorkspace` via `Effect::SetCurrentDesktop` and must NOT be
+            // reset to 0 on every monitor topology change (N1).
+            self.update_ewmh_desktop_count()?;
             self.update_workarea()?;
-
-            for i in 0..self.engine.state.monitors.len() {
-                self.arrange(i)?;
-            }
         }
         Ok(())
     }
@@ -302,38 +371,73 @@ impl WindowManager {
             let a2 = data[2];
             let fs_atom = self.atoms.net_wm_state_fullscreen;
             if a1 == fs_atom || a2 == fs_atom {
-                let cur = self
+                // A `_NET_WM_STATE_FULLSCREEN` client message is the *app*
+                // asking — a browser's F11 is indistinguishable from any other
+                // EWMH request and arrives right here. `FullscreenPolicy::Deny`
+                // refuses exactly this path; the user's own `Mod4+F` comes in
+                // via `Effect::SetFullscreen` and is never filtered.
+                let denied = self
                     .engine
                     .state
                     .clients
                     .get(&e.window)
-                    .is_some_and(crate::types::Client::is_fullscreen);
-                let new_fs = match action {
-                    0 => false,
-                    1 => true,
-                    _ => !cur,
-                };
-                if new_fs != cur {
-                    self.set_fullscreen(e.window, new_fs)?;
+                    .is_some_and(crate::types::Client::denies_fullscreen);
+                if denied {
+                    log::debug!(
+                        "denied client fullscreen request for {} (deny_fullscreen rule)",
+                        e.window
+                    );
+                    // Rewrite `_NET_WM_STATE` from our flags so the client sees
+                    // its request did not take, instead of assuming it did.
+                    self.write_net_wm_state(e.window);
+                } else {
+                    let cur = self
+                        .engine
+                        .state
+                        .clients
+                        .get(&e.window)
+                        .is_some_and(crate::types::Client::is_fullscreen);
+                    let new_fs = match action {
+                        0 => false,
+                        1 => true,
+                        _ => !cur,
+                    };
+                    if new_fs != cur {
+                        self.set_fullscreen(e.window, new_fs)?;
+                    }
                 }
             }
             let max_v = self.atoms.net_wm_state_maximized_vert;
             let max_h = self.atoms.net_wm_state_maximized_horiz;
-            if a1 == max_v || a2 == max_v || a1 == max_h || a2 == max_h {
-                let cur = self
+            let wants_v = a1 == max_v || a2 == max_v;
+            let wants_h = a1 == max_h || a2 == max_h;
+            if wants_v || wants_h {
+                // `_NET_WM_STATE_MAXIMIZED_VERT` and `_..._HORZ` are two
+                // independent states and a single client message can name one
+                // or both. Resolve each requested axis on its own and leave the
+                // other untouched (`None`), so a vertical-only maximize stops
+                // being silently promoted to a full one.
+                let (cur_v, cur_h) = self
                     .engine
                     .state
                     .clients
                     .get(&e.window)
-                    .is_some_and(crate::types::Client::is_maximized);
-                let new_max = match action {
-                    0 => false,
-                    1 => true,
-                    _ => !cur,
+                    .map_or((false, false), |c| (c.is_maximized_v(), c.is_maximized_h()));
+                let resolve = |requested: bool, cur: bool| {
+                    if !requested {
+                        return None;
+                    }
+                    Some(match action {
+                        0 => false,
+                        1 => true,
+                        _ => !cur,
+                    })
                 };
-                if new_max != cur {
-                    self.set_maximized(e.window, new_max)?;
-                }
+                self.set_maximized(
+                    e.window,
+                    resolve(wants_v, cur_v),
+                    resolve(wants_h, cur_h),
+                )?;
             }
             let urg = self.atoms.net_wm_state_demands_attention;
             if a1 == urg || a2 == urg {
@@ -358,11 +462,23 @@ impl WindowManager {
 
     pub(super) fn on_key(&mut self, e: KeyPressEvent) -> Result<(), Box<dyn std::error::Error>> {
         self.last_event_time = e.time;
-        let ksym = self.keycode_to_keysym(e.detail, u16::from(e.state))?;
-        let ksym = normalize_ksym(ksym);
         let mods = clean_mask(u16::from(e.state), self.numlock);
+        // Primary lookup uses the column-0 keysym (B6). Shift/Lock travel only in
+        // `mods`, so `Mod4+Shift+bracketleft` resolves to the bound keysym.
+        let ksym = normalize_ksym(self.keycode_to_keysym(e.detail, u16::from(e.state))?);
         let key = (mods, ksym);
-        if let Some(action) = self.keymap.get(&key).cloned() {
+        let action = if let Some(a) = self.keymap.get(&key).cloned() {
+            Some(a)
+        } else {
+            // Fallback to the shifted/locked column: anyone who relied on the
+            // old shifted-only resolution still works (B6).
+            let shift = u16::from(e.state) & u16::from(ModMask::SHIFT) != 0;
+            let lock = u16::from(e.state) & u16::from(ModMask::LOCK) != 0;
+            let col = usize::from(shift ^ lock).min(self.raw_kpk.saturating_sub(1));
+            let ksym_shifted = normalize_ksym(self.keysym_at_col(e.detail, col));
+            self.keymap.get(&(mods, ksym_shifted)).cloned()
+        };
+        if let Some(action) = action {
             let min_interval = match action {
                 Action::Spawn(_) => std::time::Duration::from_millis(200),
                 _ => std::time::Duration::from_millis(60),

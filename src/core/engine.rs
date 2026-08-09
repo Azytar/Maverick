@@ -1,5 +1,5 @@
 use crate::config::Cfg;
-use crate::core::commands::{CollapseColumn, CycleLayout, FocusDirection, FocusMonitor, GrowColumn, KillWindow, MoveToWorkspace, MoveWindow, MoveWindowToMonitor, NewColumn, Quit, Restart, SetLayout, Spawn, ToggleFloat, ToggleFullscreen, ViewWorkspace, Command};
+use crate::core::commands::{CollapseColumn, CycleLayout, FocusDirection, FocusMonitor, GrowColumn, KillWindow, MoveToWorkspace, MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav, PageSnap, Quit, Restart, SetLayout, Spawn, ToggleFloat, ToggleFullscreen, ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom, Command};
 use crate::core::effect::Effect;
 use crate::core::event::{Event, EventBus, EventHandler};
 use crate::types::*;
@@ -138,6 +138,19 @@ impl Engine {
                     vec![]
                 }
             }
+            Action::ToggleMaximize => {
+                let mi = self.state.sel_mon;
+                if let Some(win) = self.state.monitors.get(mi).and_then(|m| m.focused) {
+                    self.execute(ToggleMaximize(Some(win)))
+                } else {
+                    vec![]
+                }
+            }
+            Action::ToggleOverview => self.execute(ToggleOverview),
+            Action::OverviewNav(dir) => self.execute(OverviewNav(dir)),
+            Action::OverviewEnter => self.execute(OverviewEnter),
+            Action::ViewportZoom(delta) => self.execute(ViewportZoom(delta)),
+            Action::PageSnap(dir) => self.execute(PageSnap(dir)),
         }
     }
 }

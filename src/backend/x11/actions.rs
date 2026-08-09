@@ -42,6 +42,7 @@ impl WindowManager {
             } => self.apply_geom(win, geom, border_w)?,
             Effect::KillWindow(win) => self.kill(win)?,
             Effect::SetFullscreen { win, on } => self.set_fullscreen(win, on)?,
+            Effect::SetMaximized { win, vert, horiz } => self.set_maximized(win, vert, horiz)?,
             Effect::SyncWindowPrefs(win) => self.sync_window_prefs(win),
             Effect::SetCurrentDesktop(ws) => {
                 let _ = self.conn.change_property32(
@@ -170,22 +171,32 @@ impl WindowManager {
     /// is reconciled (grown/truncated) before the new keymap is grabbed and
     /// everything is re-arranged.
     pub(super) fn reload_config(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(path) = crate::userconfig::config_path() else {
-            log::warn!("reload: no XDG config path available; keeping current config");
+        // Re-read the same file we booted from: the `--config` override (stored
+        // on `self.config_path`) must survive a reload, not be replaced by the
+        // XDG default. Fall back to the XDG path only when no override was set.
+        let Some(path) = self
+            .config_path
+            .clone()
+            .or_else(crate::userconfig::config_path)
+        else {
+            log::warn!("reload: no config path available; keeping current config");
             return Ok(());
         };
-        let cfg = crate::userconfig::load_from_path(&path);
+        let (cfg, diag) = crate::userconfig::load_from_path(&path);
+        crate::userconfig::dump_diagnostics(&diag);
 
         let tags_changed =
             cfg.n_tags != self.engine.cfg.n_tags || cfg.tag_names != self.engine.cfg.tag_names;
+        let mut clamped_wins = Vec::new();
         if tags_changed {
             for mon in &mut self.engine.state.monitors {
                 mon.reconcile_workspaces(cfg.n_tags);
             }
             let n_tags = cfg.n_tags;
-            for client in self.engine.state.clients.values_mut() {
+            for (&win, client) in &mut self.engine.state.clients {
                 if client.workspace >= n_tags {
                     client.workspace = n_tags.saturating_sub(1);
+                    clamped_wins.push(win);
                 }
             }
         }
@@ -193,6 +204,31 @@ impl WindowManager {
         self.engine.cfg = cfg;
         self.keymap = build_keymap(&self.engine.cfg);
         self.grab_keys()?;
+
+        // Republish EWMH desktop state for external bars/taskbars. Only the
+        // count/names need a refresh here — `_NET_CURRENT_DESKTOP` must NOT be
+        // reset (it would yank the active tag back to 0 on every reload).
+        // Any client whose workspace was clamped also needs its `_NET_WM_DESKTOP`
+        // re-emitted so the new desktop index is reflected.
+        if tags_changed {
+            self.update_ewmh_desktop_count()?;
+            for win in clamped_wins {
+                let ws = self
+                    .engine
+                    .state
+                    .clients
+                    .get(&win)
+                    .map_or(0, |c| c.workspace);
+                let _ = self.conn.change_property32(
+                    PropMode::REPLACE,
+                    win,
+                    self.atoms.net_wm_desktop,
+                    AtomEnum::CARDINAL,
+                    &[ws as u32],
+                );
+            }
+        }
+
         for mi in 0..self.engine.state.monitors.len() {
             self.arrange(mi)?;
         }

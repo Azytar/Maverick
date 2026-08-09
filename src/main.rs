@@ -63,14 +63,37 @@ fn main() {
     let mut replace = false;
     let mut show_help = false;
     let mut show_version = false;
+    let mut config_path: Option<String> = None;
+    // `--check-config` with an optional path argument. `Some(Some(p))` means the
+    // flag was given with an explicit path; `Some(None)` means the flag was
+    // given bare (use the configured/default path); `None` means the flag was
+    // not passed at all.
+    let mut check_config: Option<Option<String>> = None;
     let mut bad_arg: Option<String> = None;
 
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
             "-v" | "--version" => show_version = true,
             "-h" | "--help" => show_help = true,
             "--replace" | "-r" => replace = true,
+            "--config" => {
+                if let Some(p) = args.next() {
+                    config_path = Some(p)
+                } else {
+                    bad_arg = Some("--config requires a value".into());
+                    break;
+                }
+            }
+            "--check-config" => {
+                // Optional path: consume the next token only if it is not
+                // another flag.
+                let path = match args.peek() {
+                    Some(next) if !next.starts_with("--") => args.next(),
+                    _ => None,
+                };
+                check_config = Some(path);
+            }
             "--name" => {
                 if let Some(n) = args.next() {
                     instance_name = n
@@ -90,19 +113,57 @@ fn main() {
         eprintln!("maverick: {msg}");
         process::exit(1);
     }
+
+    // `--check-config` validates a config file and exits with status 0 when it
+    // parses cleanly (no warnings or errors) and 1 otherwise. It never starts
+    // the WM (B10: config is never fatal, but a CI/lint gate can still fail).
+    if let Some(check) = check_config {
+        let path: std::path::PathBuf = match check {
+            Some(p) => std::path::PathBuf::from(p),
+            None => config_path
+                .clone()
+                .map(std::path::PathBuf::from)
+                .or_else(crate::userconfig::config_path)
+                .unwrap_or_else(|| {
+                    eprintln!("maverick: --check-config: no config file found");
+                    process::exit(1);
+                }),
+        };
+        let (cfg, diag) = crate::userconfig::load_from_path(&path);
+        crate::userconfig::dump_diagnostics(&diag);
+        println!(
+            "maverick: config check {}: {} warning(s), {} error(s), {} keybind(s)",
+            path.display(),
+            diag.warnings.len(),
+            diag.errors.len(),
+            cfg.keybinds.len()
+        );
+        if diag.is_clean() {
+            println!("maverick: config OK");
+            process::exit(0);
+        } else {
+            process::exit(1);
+        }
+    }
+
     if show_version {
         println!("maverick {}", env!("CARGO_PKG_VERSION"));
         process::exit(0);
     }
     if show_help {
-        println!("Usage: maverick [--name <id>] [--replace] [-v] [-h]");
-        println!("  --name <id>      Instance name for control/identification");
-        println!("  --replace        Replace an already-running WM (adopts your windows)");
-        println!("  -v, --version    Print version and exit");
-        println!("  -h, --help       Show this help");
+        println!("Usage: maverick [--name <id>] [--replace] [--config <path>] [--check-config [path]] [-v] [-h]");
+        println!("  --name <id>          Instance name for control/identification");
+        println!("  --replace            Replace an already-running WM (adopts your windows)");
+        println!("  --config <path>      Load the config TOML from <path> instead of");
+        println!("                        $XDG_CONFIG_HOME/maverick/config.toml");
+        println!("  --check-config [path] Validate the config TOML and exit (0 = clean,");
+        println!("                        1 = warnings/errors). Starts no WM.");
+        println!("  -v, --version        Print version and exit");
+        println!("  -h, --help           Show this help");
         println!();
-        println!("Configuration is compiled into the binary (src/config.rs).");
-        println!("Start from .xinitrc: exec maverick");
+        println!("Configuration: a config.toml is read from $XDG_CONFIG_HOME/maverick/");
+        println!("(or the path given to --config). When no file exists, compiled-in");
+        println!("defaults are used. Start from .xinitrc: exec maverick");
         process::exit(0);
     }
 
@@ -146,7 +207,7 @@ fn main() {
         log::warn!("failed to write PID file: {e}");
     }
 
-    let cfg = config::load_config();
+    let cfg = config::load_config(config_path.as_deref().map(std::path::Path::new));
     log::info!(
         "config: {} tags, {} keybinds, {} rules, {} autostart",
         cfg.tag_names.len(),
@@ -156,7 +217,7 @@ fn main() {
     );
 
     // ── Phase 1: WM init ──────────────────────────────────────────────────────
-    match backend::x11::WindowManager::new(cfg, replace) {
+    match backend::x11::WindowManager::new(cfg, replace, config_path.clone().map(std::path::PathBuf::from)) {
         Ok(mut manager) => {
             // Hand over the control socket + instance name so cleanup() can
             // tear them down and remove the identity ficha on exit.
@@ -184,6 +245,10 @@ fn main() {
             }
 
             // ── Phase 3: event loop ───────────────────────────────────────────
+            // Start the loop: `running` is initialised to `false` (State::new)
+            // so the WM would otherwise exit immediately without ever servicing
+            // a single X11 event. Flip it on before handing control to run().
+            manager.engine.state.running = true;
             match manager.run() {
                 Ok(()) => {
                     let disconnected = manager.engine.state.running;

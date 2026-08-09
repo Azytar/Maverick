@@ -2,7 +2,8 @@
 // Window manager core — niri-style columnar layout, clean coords.
 
 use std::collections::BTreeMap;
-
+use std::path::PathBuf;
+use std::time::Instant;
 use x11rb::connection::Connection;
 use x11rb::errors::ConnectionError;
 use x11rb::protocol::xproto::*;
@@ -59,6 +60,12 @@ pub struct WindowManager {
     control: Option<maverick_sys::ControlServer>,
     /// Instance name passed via --name (for identity/control).
     instance_name: String,
+    /// Config file path that was loaded at boot (the --config override when
+    /// given, otherwise the resolved XDG path, or `None` when the compiled
+    /// defaults were used). `reload_config` re-reads this exact file (B10/T7):
+    /// the override must survive a reload, not be silently replaced by the
+    /// XDG default.
+    config_path: Option<PathBuf>,
     /// Bridge to the control-socket thread: drains dispatched commands, publishes
     /// state snapshots, and emits events for `subscribe` clients.
     hub: Option<maverick_sys::ControlHub>,
@@ -83,6 +90,27 @@ pub struct WindowManager {
     /// border is painted `col_focused`). Reverted when the pointer moves away
     /// or the drag ends.
     drag_target: Option<Window>,
+    /// Timestamp of the previous animation frame, for `dt` in `tick_animations`.
+    last_frame: Instant,
+    /// True while any camera/zoom/accordion spring is still moving; drives the
+    /// frame-clock timeout (high rate while animating, idle 100ms otherwise).
+    animating: bool,
+    /// Count of unmap operations the WM itself initiated. X11 delivers the WM
+    /// its own `UnmapNotify` back (`SubstructureNotify` on root), and without
+    /// this counter `on_unmap` would treat that self-unmap as the client
+    /// withdrawing and unmanage the window — permanently deleting it (see bug
+    /// C1). Incremented before every `unmap_window` the WM performs;
+    /// consumed in `on_unmap`.
+    ignore_unmaps: std::collections::HashMap<Window, u32>,
+    /// Per-monitor cached stacking order (top-to-bottom) so `stack_overlay`
+    /// only re-issues `raise()` when the order actually changed, instead of
+    /// re-raising every float/popup on every animation frame (bug C6).
+    last_stack_order: std::collections::HashMap<usize, Vec<WindowId>>,
+    /// Per-monitor record of whether the focused fullscreen window was
+    /// "covering" (raised above the dock) on the previous frame, so the dock
+    /// is only re-raised on the covering→not-covering transition — not every
+    /// frame (which would push floats below the bar, a regression).
+    fs_covering: std::collections::HashMap<usize, bool>,
 }
 
 impl WindowManager {
@@ -178,11 +206,33 @@ impl WindowManager {
         self.flush_client_list()?;
         self.conn.flush()?;
 
+        // ── animation phase ──────────────────────────────────────────────────
+        // Advance camera (and future zoom/accordion) springs. While anything is
+        // still moving we keep ticking at a high frame rate; otherwise we fall
+        // back to the idle 100ms wake so control-socket commands are still
+        // drained promptly.
+        let now = Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32().clamp(0.0, 0.05);
+        self.last_frame = now;
+        self.animating = self.engine.state.tick_animations(dt);
+        if self.animating {
+            for i in 0..self.engine.state.monitors.len() {
+                let _ = self.arrange(i);
+            }
+        }
+
         // ── wait phase ─────────────────────────────────────────────────────────
-        // Block on the X socket but wake every 100ms so control-socket commands
+        // Block on the X socket but wake periodically so control-socket commands
         // (dispatch/quit/restart) are drained even when no X events arrive.
+        // While animating we wake at ~60Hz (16ms) to line up with a typical
+        // monitor's refresh: waking faster than the screen can show (the old
+        // 8ms/~125Hz poll) just pushes multiple ConfigureWindow updates into a
+        // single refresh, and since raw X11 has no vsync/double-buffering here,
+        // that shows up as tearing on the moving edge. This is a plain rate
+        // cap, not real vblank sync — it just stops over-driving the updates.
         let fd = self.conn.stream().as_raw_fd();
-        maverick_sys::wait_readable(fd, std::time::Duration::from_millis(100));
+        let timeout_ms = if self.animating { 16 } else { 100 };
+        maverick_sys::wait_readable(fd, std::time::Duration::from_millis(timeout_ms));
 
         // ── drain phase ─────────────────────────────────────────────────────────
         // Non-blocking: process every event already in the socket buffer.
@@ -213,7 +263,11 @@ impl WindowManager {
         }
         Ok(())
     }
-    pub fn new(cfg: Cfg, replace: bool) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        cfg: Cfg,
+        replace: bool,
+        config_path: Option<PathBuf>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let (conn, screen_num) = RustConnection::connect(None)?;
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
@@ -286,12 +340,18 @@ impl WindowManager {
             last_key_times: std::collections::BTreeMap::new(),
             control: None,
             instance_name: String::new(),
+            config_path,
             hub: None,
             last_state_json: String::new(),
             docks: std::collections::HashMap::new(),
             pointer_guard_until: None,
             last_event_time: 0,
             drag_target: None,
+            last_frame: std::time::Instant::now(),
+            animating: false,
+            ignore_unmaps: std::collections::HashMap::new(),
+            last_stack_order: std::collections::HashMap::new(),
+            fs_covering: std::collections::HashMap::new(),
         };
 
         let _ = (depth, visual);
@@ -449,10 +509,13 @@ fn detect_monitors(
 }
 
 fn build_keymap(cfg: &Cfg) -> BTreeMap<(u16, u32), Action> {
-    cfg.keybinds
-        .iter()
-        .map(|(m, k, a)| ((*m, *k), a.clone()))
-        .collect()
+    let mut map = BTreeMap::new();
+    for (m, k, a) in &cfg.keybinds {
+        // First wins: a later duplicate `(mods, keysym)` does not overwrite the
+        // earlier one (B7). Mirrors the conflict policy in `parse_keybindings`.
+        map.entry((*m, *k)).or_insert_with(|| a.clone());
+    }
+    map
 }
 
 /// Result of a pipelined keyboard+modifier state fetch.

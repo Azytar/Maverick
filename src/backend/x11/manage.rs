@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::layout::fs_ctx;
 
 impl WindowManager {
     pub(super) fn scan_windows(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -187,10 +188,11 @@ impl WindowManager {
                         if a == self.atoms.net_wm_state_fullscreen {
                             client.flags.set(WinFlags::FULLSCREEN);
                         }
-                        if a == self.atoms.net_wm_state_maximized_vert
-                            || a == self.atoms.net_wm_state_maximized_horiz
-                        {
-                            client.flags.set(WinFlags::MAXIMIZED);
+                        if a == self.atoms.net_wm_state_maximized_vert {
+                            client.flags.set(WinFlags::MAXIMIZED_V);
+                        }
+                        if a == self.atoms.net_wm_state_maximized_horiz {
+                            client.flags.set(WinFlags::MAXIMIZED_H);
                         }
                         if a == self.atoms.net_wm_state_modal {
                             client.flags.set(WinFlags::FLOAT);
@@ -270,12 +272,23 @@ impl WindowManager {
         // (see hide_offscreen() in render.rs).
         let mut transient_parent_geom: Option<Rect> = None;
         if let Some(parent) = self.transient_for(win)? {
+            // Always record the intended parent, even if it isn't managed yet —
+            // a popup (KakaoTalk / Telegram / file pickers) can map *before* its
+            // owner. We relink the child once the parent appears
+            // (`relink_pending_transients`), inheriting the right
+            // monitor/workspace instead of stranding it on the focused one.
+            client.transient_parent = Some(parent);
             if let Some(pc) = self.engine.state.clients.get(&parent) {
                 client.workspace = pc.workspace;
                 client.monitor = pc.monitor;
                 client.flags.set(WinFlags::FLOAT);
-                client.transient_parent = Some(parent);
                 transient_parent_geom = Some(pc.geom);
+            } else {
+                // Parent not managed yet. Defer, but still treat the child as a
+                // float — a transient popup is always a float, and we don't want
+                // it inserted into a ribbon column in the meantime.
+                client.flags.set(WinFlags::FLOAT);
+                self.engine.state.pending_transients.push(win);
             }
         }
 
@@ -398,9 +411,28 @@ impl WindowManager {
                     .push(win);
                 self.stack_dirty = true;
             } else {
-                let dw = self.engine.cfg.default_col_w;
-                let workarea_w = self.engine.state.monitors[mon_i].workarea.w;
-                self.engine.state.monitors[mon_i].workspaces[ws_i].add_tiled(win, dw, workarea_w);
+                // Capture emptiness BEFORE adding so we know whether to snap.
+                let was_empty = self.engine.state.monitors[mon_i].workspaces[ws_i].is_empty();
+                self.engine.state.monitors[mon_i].workspaces[ws_i]
+                    .add_tiled(win, self.engine.cfg.column_width);
+                let wa = self.engine.state.monitors[mon_i].workarea;
+                let fs = fs_ctx(
+                    &self.engine.state.clients,
+                    &self.engine.state.monitors[mon_i].workspaces[ws_i],
+                    self.engine.state.monitors[mon_i].screen,
+                );
+                let scroll = ideal_scroll(
+                    &self.engine.state.monitors[mon_i].workspaces[ws_i],
+                    &self.engine.cfg,
+                    wa,
+                    fs,
+                );
+                let cam = &mut self.engine.state.monitors[mon_i].workspaces[ws_i].camera;
+                if was_empty {
+                    cam.snap(scroll)
+                } else {
+                    cam.target = scroll
+                }
             }
         }
 
@@ -426,11 +458,11 @@ impl WindowManager {
 
         let _ = self.conn.map_window(win);
 
-        // scroll & arrange
-        {
-            let scroll = ideal_scroll(&self.engine.state.monitors[mon_i], &self.engine.cfg);
-            self.engine.state.monitors[mon_i].workspaces[ws_i].scroll = scroll;
-        }
+        // The camera is already positioned just above (the `was_empty ? snap :
+        // target` branch keeps the focused column visible without teleporting
+        // when other windows already exist, so the open-window scroll animates
+        // via the spring). A second unconditional `snap` here would kill that
+        // animation, so arrange directly (bug C5).
         self.arrange(mon_i)?;
 
         // Presentation-aware focus policy (EWMH focus stealing): a new window
@@ -456,7 +488,11 @@ impl WindowManager {
                         .state
                         .clients
                         .get(w)
-                        .is_some_and(|c| c.is_fullscreen() || c.is_maximized())
+                        .is_some_and(|c| {
+                            c.is_fullscreen()
+                                || c.is_maximized_v()
+                                || c.is_maximized_h()
+                        })
                 });
                 let owned = self
                     .engine
@@ -476,6 +512,12 @@ impl WindowManager {
             return Ok(());
         }
         self.focus(Some(win))?;
+
+        // A popup (KakaoTalk / Telegram / file picker) may have mapped *before*
+        // the window we just managed — its owner. Relink any deferred transients
+        // whose parent is now present so they land on the right monitor/workspace
+        // instead of stranding on whatever was focused at their map time.
+        self.relink_pending_transients()?;
 
         Ok(())
     }
@@ -509,10 +551,27 @@ impl WindowManager {
 
         // 2. Avoid panic if the monitor no longer exists after a hotplug.
         if mon_i < self.engine.state.monitors.len() {
-            let scroll = ideal_scroll(&self.engine.state.monitors[mon_i], &self.engine.cfg);
             let ws_i = client.workspace;
             if ws_i < self.engine.state.monitors[mon_i].workspaces.len() {
-                self.engine.state.monitors[mon_i].workspaces[ws_i].scroll = scroll;
+                let wa = self.engine.state.monitors[mon_i].workarea;
+                let fs = fs_ctx(
+                    &self.engine.state.clients,
+                    &self.engine.state.monitors[mon_i].workspaces[ws_i],
+                    self.engine.state.monitors[mon_i].screen,
+                );
+                let scroll = ideal_scroll(
+                    &self.engine.state.monitors[mon_i].workspaces[ws_i],
+                    &self.engine.cfg,
+                    wa,
+                    fs,
+                );
+                let now_empty = self.engine.state.monitors[mon_i].workspaces[ws_i].is_empty();
+                let cam = &mut self.engine.state.monitors[mon_i].workspaces[ws_i].camera;
+                if now_empty {
+                    cam.snap(0.0)
+                } else {
+                    cam.target = scroll
+                }
             }
             let _ = self.arrange(mon_i);
             let _ = self.focus_best(mon_i);
@@ -532,6 +591,41 @@ impl WindowManager {
                     c.flags.set(WinFlags::FLOAT);
                     c.flags.set(WinFlags::STICKY);
                 }
+                if rule.ignore_initial_state {
+                    // Undo whatever `_NET_WM_STATE_MAXIMIZED_*`/`_FULLSCREEN`
+                    // manage() already set from the window's own map-time
+                    // request (see the property-parsing pass above, which
+                    // runs before apply_rules). The window falls back to a
+                    // normal tile like every other new client.
+                    c.flags.clear(WinFlags::MAXIMIZED_V);
+                    c.flags.clear(WinFlags::MAXIMIZED_H);
+                    c.flags.clear(WinFlags::FULLSCREEN);
+                    // `c` isn't in `state.clients` yet at this point in
+                    // manage() (added further down), so `write_net_wm_state`
+                    // — which reads flags back out of `state.clients` — can't
+                    // be used here. Strip the atoms directly instead, so the
+                    // window's own `_NET_WM_STATE` matches the tile we're
+                    // about to give it rather than still claiming maximized.
+                    let mut atoms: Vec<u32> = self
+                        .conn
+                        .get_property(false, c.window, self.atoms.net_wm_state, AtomEnum::ATOM, 0, 32)
+                        .ok()
+                        .and_then(|ck| ck.reply().ok())
+                        .map(|r| r.value32().map(Iterator::collect::<Vec<u32>>).unwrap_or_default())
+                        .unwrap_or_default();
+                    atoms.retain(|&a| {
+                        a != self.atoms.net_wm_state_fullscreen
+                            && a != self.atoms.net_wm_state_maximized_vert
+                            && a != self.atoms.net_wm_state_maximized_horiz
+                    });
+                    let _ = self.conn.change_property32(
+                        PropMode::REPLACE,
+                        c.window,
+                        self.atoms.net_wm_state,
+                        AtomEnum::ATOM,
+                        &atoms,
+                    );
+                }
                 if let Some(ws) = rule.ws {
                     let mi = c.monitor;
                     if mi < self.engine.state.monitors.len()
@@ -539,6 +633,19 @@ impl WindowManager {
                     {
                         c.workspace = ws;
                     }
+                }
+                // Fullscreen *policy* (what to do with future requests), as
+                // opposed to `ignore_initial_state`, which only strips the
+                // state the window asked for at map time. `true_fullscreen`
+                // wins over `deny_fullscreen`: asking for a real exclusive
+                // fullscreen and also refusing fullscreen is contradictory, and
+                // the permissive-but-explicit reading is the useful one.
+                if rule.true_fullscreen {
+                    c.fullscreen_policy = FullscreenPolicy::True;
+                } else if rule.deny_fullscreen
+                    && c.fullscreen_policy != FullscreenPolicy::True
+                {
+                    c.fullscreen_policy = FullscreenPolicy::Deny;
                 }
                 if let Some(bw) = rule.border_w {
                     c.border_w = bw;
@@ -717,6 +824,80 @@ impl WindowManager {
             .filter(|&w| w != 0 && w != self.root))
     }
 
+    /// Re-home every deferred transient whose `WM_TRANSIENT_FOR` parent is now
+    /// managed. Called at the end of `manage` (so managing the parent triggers
+    /// it) and is idempotent across calls. Each relinked child inherits the
+    /// parent's monitor + workspace, is re-floated, re-centered on the parent,
+    /// and re-painted; children still waiting stay in the queue.
+    fn relink_pending_transients(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let pending = std::mem::take(&mut self.engine.state.pending_transients);
+        let mut still_waiting = Vec::new();
+        let mut touched_mons = std::collections::HashSet::new();
+        for child in pending {
+            let parent = match self.engine.state.clients.get(&child) {
+                Some(c) => match c.transient_parent {
+                    Some(p) => p,
+                    None => continue,
+                },
+                None => continue,
+            };
+            let Some(pc) = self.engine.state.clients.get(&parent) else {
+                // Parent still not here — keep waiting.
+                still_waiting.push(child);
+                continue;
+            };
+            let (pmon, pws, pgeom) = (pc.monitor, pc.workspace, pc.geom);
+            if let Some(c) = self.engine.state.clients.get_mut(&child) {
+                let from = c.monitor;
+                // Detach from the monitor/workspace where it wrongly landed.
+                if from < self.engine.state.monitors.len()
+                    && c.workspace < self.engine.state.monitors[from].workspaces.len()
+                {
+                    let ws = &mut self.engine.state.monitors[from].workspaces[c.workspace];
+                    ws.floats.retain(|&w| w != child);
+                    self.engine.state.monitors[from]
+                        .focus_stack
+                        .retain(|&w| w != child);
+                }
+                c.monitor = pmon;
+                c.workspace = pws;
+                c.flags.set(WinFlags::FLOAT);
+                // Center on the parent's *stored* geometry (see the transient
+                // note in `manage`): the parent may currently be hidden off-
+                // screen during a workspace switch, and we never read its live
+                // X position for exactly that reason.
+                let cg = c.geom;
+                c.geom = Rect::new(
+                    pgeom.x + ((pgeom.w as i32).saturating_sub(cg.w as i32)) / 2,
+                    pgeom.y + ((pgeom.h as i32).saturating_sub(cg.h as i32)) / 2,
+                    cg.w,
+                    cg.h,
+                );
+                c.saved_geom = c.geom;
+                c.geometry_dirty = true;
+                if pmon < self.engine.state.monitors.len()
+                    && pws < self.engine.state.monitors[pmon].workspaces.len()
+                {
+                    self.engine.state.monitors[pmon].workspaces[pws]
+                        .floats
+                        .push(child);
+                    self.engine.state.monitors[pmon]
+                        .focus_stack
+                        .push(child);
+                }
+                touched_mons.insert(from);
+                touched_mons.insert(pmon);
+            }
+        }
+        self.engine.state.pending_transients = still_waiting;
+        for m in touched_mons {
+            if m < self.engine.state.monitors.len() {
+                self.arrange(m)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn refresh_title(&mut self, win: Window) -> Result<(), Box<dyn std::error::Error>> {
         // Inline read without cloning the entire Client
         let name = read_title_value(&self.conn, win, &self.atoms)?;
@@ -770,29 +951,57 @@ impl WindowManager {
         win: Window,
         fs: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if self
+            .engine
+            .state
+            .clients
+            .get(&win)
+            .is_none_or(|c| fs == c.is_fullscreen())
+        {
+            return Ok(());
+        }
+        // Topology first: a *tiled* fullscreen is a column of the ribbon, so a
+        // float entering fullscreen has to join the tiling before the flag goes
+        // on (and go back to being a float when it comes off). This is the same
+        // pure helper `ToggleFullscreen` uses and it is idempotent, so the
+        // keyboard path (which already ran it) is unaffected — but the EWMH
+        // client-message path, which used to skip it entirely and leave the
+        // float laid out from a zeroed `geom`, is now fixed (bug C1/A1).
+        crate::core::commands::apply_fullscreen_topology(
+            &mut self.engine.state,
+            &self.engine.cfg,
+            win,
+            fs,
+        );
+
         if let Some(c) = self.engine.state.clients.get_mut(&win) {
-            if fs == c.is_fullscreen() {
-                return Ok(());
-            }
             if fs {
                 c.flags.set(WinFlags::FULLSCREEN);
-                c.saved_geom = c.geom;
+                // A window promoted out of the float set already had its float
+                // rect snapshotted by `apply_fullscreen_topology`; `geom` is now
+                // (or is about to become) the tile rect, so overwriting
+                // `saved_geom` here would forget where the float lived.
+                if !c.flags.has(WinFlags::FS_WAS_FLOAT) {
+                    c.saved_geom = c.geom;
+                }
                 c.old_border_w = c.border_w;
                 c.border_w = 0;
-                // Force geom to a sentinel so apply_geom doesn't skip the X11 call
-                c.geom = Rect::default();
             } else {
                 c.flags.clear(WinFlags::FULLSCREEN);
                 c.border_w = c.old_border_w;
                 // Floats are laid out from `client.geom`, so restore the saved
-                // pre-fullscreen rect (else they collapse to the zero sentinel).
-                // Tiled windows are re-laid by arrange, so the sentinel is fine.
+                // pre-fullscreen rect. Tiled windows are re-laid by `arrange`,
+                // which overwrites `geom` wholesale, so they need nothing here.
                 if c.is_float() {
                     c.geom = c.saved_geom;
-                } else {
-                    c.geom = Rect::default();
                 }
             }
+            // The border width always changes across this transition, but the
+            // *rect* may not (e.g. a tile that already filled the screen), and
+            // `apply_geom` skips windows whose geometry is unchanged. Mark the
+            // client dirty so the reconfigure is emitted regardless — this is
+            // what the old `geom = Rect::default()` sentinel was really for.
+            c.geometry_dirty = true;
             self.stack_dirty = true;
         }
         // Tell an external compositor (picom, etc.) to skip its effect pass on
@@ -816,59 +1025,104 @@ impl WindowManager {
         }
         self.write_net_wm_state(win);
         let mi = self.engine.state.clients.get(&win).map_or(0, |c| c.monitor);
-        self.arrange(mi)?;
-        // Raise fullscreen windows above everything else
-        if self
+        let ws_i = self.engine.state.clients.get(&win).map_or(0, |c| c.workspace);
+        // `FullscreenPolicy::True` is an exclusive overlay outside the ribbon
+        // (`core::present`), and is excluded from `fs_ctx`, so recentering the
+        // ribbon camera for it would just scroll the now-hidden tiling around an
+        // invisible fullscreen — skip it.
+        let true_fs = self
             .engine
             .state
             .clients
             .get(&win)
-            .is_some_and(crate::types::Client::is_fullscreen)
-        {
-            let _ = self
-                .conn
-                .configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+            .is_some_and(Client::is_true_fullscreen);
+        if !true_fs {
+            // Recenter the camera now that the FULLSCREEN flag is set (the core
+            // command cannot do this because it must not pre-set the flag). This
+            // makes the fullscreen column align its left edge to `screen.x`,
+            // which matters with asymmetric struts (a side dock would otherwise
+            // leave an offset).
+            let wa = self.engine.state.monitors[mi].workarea;
+            let fs = fs_ctx(
+                &self.engine.state.clients,
+                &self.engine.state.monitors[mi].workspaces[ws_i],
+                self.engine.state.monitors[mi].screen,
+            );
+            let scroll = ideal_scroll(
+                &self.engine.state.monitors[mi].workspaces[ws_i],
+                &self.engine.cfg,
+                wa,
+                fs,
+            );
+            self.engine.state.monitors[mi].workspaces[ws_i].camera.target = scroll;
         }
+        // Stacking is no longer decided here — `stack_overlay` (run inside
+        // `arrange`) now owns raising/covering based on focus + camera stillness.
+        self.arrange(mi)?;
         Ok(())
     }
 
-    /// Toggle the maximized presentation state of `win`. Mirrors
-    /// `set_fullscreen`, but a maximized window fills the monitor's `workarea`
-    /// (bar/docks respected) and keeps its border — the geometry itself is
+    /// Toggle the maximized presentation state of `win`, per axis.
+    ///
+    /// `vert`/`horiz` are `None` for "leave this axis alone" — EWMH clients
+    /// routinely request only one of `_NET_WM_STATE_MAXIMIZED_VERT` /
+    /// `_..._HORZ`, and folding both into a single boolean silently promoted a
+    /// vertical maximize into a full one. Mirrors `set_fullscreen`, but a
+    /// maximized window fills the monitor's `workarea` (bar/docks respected) on
+    /// the requested axes and keeps its border — the geometry itself is
     /// produced by `core::present`, so here we only manage flags + EWMH + raise.
     pub(super) fn set_maximized(
         &mut self,
         win: Window,
-        max: bool,
+        vert: Option<bool>,
+        horiz: Option<bool>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(c) = self.engine.state.clients.get_mut(&win) {
-            if max == c.is_maximized() {
+            let was_max = c.is_maximized();
+            let want_v = vert.unwrap_or_else(|| c.is_maximized_v());
+            let want_h = horiz.unwrap_or_else(|| c.is_maximized_h());
+            if want_v == c.is_maximized_v() && want_h == c.is_maximized_h() {
                 return Ok(());
             }
-            if max {
-                c.flags.set(WinFlags::MAXIMIZED);
-                c.saved_geom = c.geom;
-                // Sentinel so apply_geom doesn't skip the X11 call.
-                c.geom = Rect::default();
+            if want_v {
+                c.flags.set(WinFlags::MAXIMIZED_V);
             } else {
-                c.flags.clear(WinFlags::MAXIMIZED);
-                if c.is_float() {
-                    c.geom = c.saved_geom;
-                } else {
-                    c.geom = Rect::default();
-                }
+                c.flags.clear(WinFlags::MAXIMIZED_V);
             }
+            if want_h {
+                c.flags.set(WinFlags::MAXIMIZED_H);
+            } else {
+                c.flags.clear(WinFlags::MAXIMIZED_H);
+            }
+            if !was_max {
+                // Entering the overlay from a normal tile/float: remember where
+                // the window was so leaving it can restore a float exactly.
+                c.saved_geom = c.geom;
+            } else if !c.is_maximized() && c.is_float() {
+                c.geom = c.saved_geom;
+            }
+            // Same rationale as `set_fullscreen`: the presented rect can equal
+            // the tile rect, and `apply_geom` skips unchanged geometry, so the
+            // transition has to be announced explicitly instead of via a zeroed
+            // `geom` sentinel.
+            c.geometry_dirty = true;
             self.stack_dirty = true;
         }
         self.write_net_wm_state(win);
         let mi = self.engine.state.clients.get(&win).map_or(0, |c| c.monitor);
         self.arrange(mi)?;
+        // A maximized window is only raised when it is the focused window —
+        // mirroring the focus-dependent overlay rule in `core::present`
+        // (unfocused maximized windows keep their normal tile slot and must
+        // not be stacked above other tiles). Fullscreen is always raised
+        // because it always renders as an overlay (N2).
         if self
             .engine
             .state
             .clients
             .get(&win)
-            .is_some_and(crate::types::Client::is_maximized)
+            .is_some_and(|c| c.is_maximized_v() || c.is_maximized_h())
+            && self.engine.state.monitors[mi].focused == Some(win)
         {
             let _ = self
                 .conn
@@ -905,8 +1159,10 @@ impl WindowManager {
         if c.is_fullscreen() {
             state_atoms.push(self.atoms.net_wm_state_fullscreen);
         }
-        if c.is_maximized() {
+        if c.is_maximized_v() {
             state_atoms.push(self.atoms.net_wm_state_maximized_vert);
+        }
+        if c.is_maximized_h() {
             state_atoms.push(self.atoms.net_wm_state_maximized_horiz);
         }
         if c.flags.has(WinFlags::URGENT) {

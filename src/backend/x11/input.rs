@@ -155,6 +155,12 @@ impl WindowManager {
             ModMask::ANY,
         );
 
+        // keyboard_mode MUST be ASYNC here too, for the same reason as the
+        // catch-all grab above: on_button_press never calls allow_events with
+        // a keyboard mode, so a SYNC keyboard grab here freezes the keyboard
+        // (all shortcuts, including focus-move and spawn keybinds) the moment
+        // the user does a Mod+drag (move/resize) on any window, and it never
+        // gets released.
         let sup: u16 = ModMask::M4.into();
         for extra in mod_variants(self.numlock) {
             let m = (sup | extra).into();
@@ -164,7 +170,7 @@ impl WindowManager {
                     win,
                     motion,
                     GrabMode::ASYNC,
-                    GrabMode::SYNC,
+                    GrabMode::ASYNC,
                     x11rb::NONE,
                     x11rb::NONE,
                     btn,
@@ -178,22 +184,31 @@ impl WindowManager {
     pub(super) fn keycode_to_keysym(
         &self,
         code: u8,
-        state: u16,
+        _state: u16,
     ) -> Result<u32, Box<dyn std::error::Error>> {
+        // B6: resolve the key by its column-0 keysym and let the Shift/Lock
+        // modifiers travel only in the keymap's modifier mask. A shifted symbol
+        // such as `Mod4+Shift+bracketleft` now resolves to the same entry a user
+        // binds by name (`Mod4+Shift+bracketleft`) instead of mismatching it.
+        Ok(self.keysym_at_col(code, 0))
+    }
+
+    /// Raw keysym lookup at a given keycode column (0 = unshifted). Used both for
+    /// the column-0 primary lookup and the `on_key` fallback to the shifted
+    /// column, so legacy behaviour (where the shifted keysym was the only one
+    /// considered) still works when nothing matches column 0.
+    pub(crate) fn keysym_at_col(&self, code: u8, col: usize) -> u32 {
         if self.raw_kpk == 0 {
-            return Ok(0);
+            return 0;
         }
         if code < self.raw_min {
-            return Ok(0);
+            return 0;
         }
         let idx_base = (code - self.raw_min) as usize * self.raw_kpk;
         if idx_base >= self.raw_keymap.len() {
-            return Ok(0);
+            return 0;
         }
-        let shift = state & u16::from(ModMask::SHIFT) != 0;
-        let lock = state & u16::from(ModMask::LOCK) != 0;
-        let col = usize::from(shift ^ lock);
         let col = col.min(self.raw_kpk.saturating_sub(1));
-        Ok(self.raw_keymap.get(idx_base + col).copied().unwrap_or(0))
+        self.raw_keymap.get(idx_base + col).copied().unwrap_or(0)
     }
 }

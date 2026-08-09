@@ -21,10 +21,18 @@ impl WindowManager {
         &mut self,
         e: ButtonPressEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Scroll buttons (4=up,5=down,6=left,7=right) — early return.
-        // Without this, every scroll tick goes through the full handler: find_client RTT,
-        // focus change, drag intent, allow_events → C1 crash, erratic focus.
+        // Scroll buttons (4=up,5=down,6=left,7=right). With no modifier they are
+        // just delivered to the application (REPLAY_POINTER). With Mod4 held they
+        // scroll the camera of the scroll (niri-style) ribbon layout left/right
+        // (and, in Overview, also vertically) — the characteristic interaction of
+        // this WM that was previously unreachable (bug C9).
         if e.detail >= 4 {
+            let sup: u16 = ModMask::M4.into();
+            let clean = clean_mask(u16::from(e.state), self.numlock);
+            if clean == sup {
+                self.scroll_camera_with_wheel(e.detail, e.root_x as i32, e.root_y as i32)?;
+                return Ok(());
+            }
             self.conn.allow_events(Allow::REPLAY_POINTER, e.time)?;
             return Ok(());
         }
@@ -50,7 +58,8 @@ impl WindowManager {
             if let Some(cw) = client_win {
                 if self.engine.state.monitors[mi].focused != Some(cw) {
                     self.focus(Some(cw))?;
-                    self.restack(mi)?;
+                    // `focus` already refreshes the overlay stacking, so a
+                    // separate restack is redundant.
                 }
             } else if e.event == self.root {
                 self.focus(None)?;
@@ -159,14 +168,11 @@ impl WindowManager {
                             .position(|col| col.windows.contains(&target))
                     };
                     if let Some(ci) = col_idx {
-                        {
-                            let ws = &mut self.engine.state.monitors[mi].workspaces[ws_i];
-                            // Remove from its current place (floats or a column).
-                            ws.remove_window(win);
-                            let cws = &mut ws.columns[ci];
-                            // Insert at the row whose windows sit above the
-                            // pointer (count of windows with center above ry).
-                            let insert_pos = cws
+                        // Insert at the row whose windows sit above the pointer
+                        // (count of windows with center above ry).
+                        let insert_pos = {
+                            let ws = &self.engine.state.monitors[mi].workspaces[ws_i];
+                            ws.columns[ci]
                                 .windows
                                 .iter()
                                 .take_while(|&&w| {
@@ -176,9 +182,14 @@ impl WindowManager {
                                         .get(&w)
                                         .is_some_and(|c| c.geom.y + c.geom.h as i32 / 2 < ry)
                                 })
-                                .count();
-                            cws.windows.insert(insert_pos, win);
-                            ws.focus.column_idx = ci;
+                                .count()
+                        };
+                        {
+                            let ws = &mut self.engine.state.monitors[mi].workspaces[ws_i];
+                            // Remove from its current place (floats or a column),
+                            // then drop into the target column as its focused row.
+                            ws.remove_window(win);
+                            ws.drop_into_column(ci, win, insert_pos);
                         }
                         if let Some(c) = self.engine.state.clients.get_mut(&win) {
                             c.flags.clear(WinFlags::FLOAT);
@@ -318,7 +329,9 @@ pub(super) fn on_motion(
                 let Some(c) = state.clients.get(&w) else {
                     continue;
                 };
-                if c.is_fullscreen() || c.is_maximized() {
+                if c.is_fullscreen()
+                    || ((c.is_maximized_v() || c.is_maximized_h()) && mon.focused == Some(w))
+                {
                     continue;
                 }
                 let g = &c.geom;
@@ -351,6 +364,72 @@ pub(super) fn on_motion(
                     .border_pixel(self.engine.cfg.col_focused),
             );
             self.drag_target = Some(t);
+        }
+    }
+
+    /// Mod4 + scroll wheel: drive the column-ribbon camera. We don't free-scroll
+    /// the raw camera (that would leave it between columns, breaking the
+    /// accordion target); instead we step the *focused
+    /// column* one slot per notch, which recenters the camera via `ideal_scroll`
+    /// — exactly like `OverviewNav`, just continuous. Mod4+wheel is the
+    /// characteristic interaction of a scroll WM that was previously unreachable
+    /// (bug C9).
+    fn scroll_camera_with_wheel(
+        &mut self,
+        detail: u8,
+        px: i32,
+        py: i32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = match detail {
+            7 | 5 => Dir::Right, // wheel right / down → next column
+            _ => Dir::Left,     // wheel left / up → previous column (and any other)
+        };
+        // Reuse the existing focus-movement command so behaviour (row carry,
+        // camera recenter, events) stays identical to the keybinding path.
+        let effects = self.engine.dispatch(crate::types::Action::FocusDir(dir));
+        self.run_effects(effects)?;
+        // Keep the column under the pointer focused so the gesture and the
+        // keyboard agree on what is selected.
+        self.focus_column_at(px, py);
+        Ok(())
+    }
+
+    /// Focus the tiled column whose screen rect contains `(px, py)` on `mon`,
+    /// used by wheel-scroll so focus tracks the gesture. No-op if the point is
+    /// not over any tiled column (floats/empty space don't steal focus this way).
+    fn focus_column_at(&mut self, px: i32, py: i32) {
+        let mi = self.engine.state.mon_at(px, py);
+        if mi >= self.engine.state.monitors.len() {
+            return;
+        }
+        let (ws_i, wa) = {
+            let m = &self.engine.state.monitors[mi];
+            (m.active_ws, m.workarea)
+        };
+        let extents = crate::core::layout::column_screen_extents(
+            &self.engine.state.monitors[mi].workspaces[ws_i],
+            &self.engine.cfg,
+            wa,
+            crate::core::layout::fs_ctx(
+                &self.engine.state.clients,
+                &self.engine.state.monitors[mi].workspaces[ws_i],
+                self.engine.state.monitors[mi].screen,
+            ),
+        );
+        let vis_l = wa.x as f32;
+        let vis_r = (wa.x + wa.w as i32) as f32;
+        let col = extents.iter().position(|&(l, r)| {
+            let l = l.max(vis_l);
+            let r = r.min(vis_r);
+            r > l && (px as f32) >= l && (px as f32) <= r
+        });
+        if let Some(ci) = col {
+            self.engine.state.monitors[mi].workspaces[ws_i].focus.column_idx = ci;
+            if let Some(w) = self.engine.state.monitors[mi].workspaces[ws_i].columns[ci]
+                .focused_win()
+            {
+                let _ = self.focus(Some(w));
+            }
         }
     }
 }

@@ -45,6 +45,17 @@ pub enum Effect {
         win: WindowId,
         on: bool,
     },
+    /// Set the maximized (workarea-filling) presentation state for a window,
+    /// then re-present. Only presented while the window is focused (peek).
+    ///
+    /// The two EWMH axes (`_NET_WM_STATE_MAXIMIZED_VERT` / `_..._HORZ`) are
+    /// independent: `None` means "leave that axis as it is", which is what a
+    /// client message naming only one of them asks for.
+    SetMaximized {
+        win: WindowId,
+        vert: Option<bool>,
+        horiz: Option<bool>,
+    },
     /// Persist the window's private float/geometry atoms (used across WM
     /// restart / `--replace`). A SEMANTIC effect so the backend keeps its
     /// persistence format its own business.
