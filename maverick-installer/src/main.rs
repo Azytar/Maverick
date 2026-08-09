@@ -265,6 +265,8 @@ fn compile_workspace(lang: Lang) -> Result<(), String> {
         .arg("build")
         .arg("--release")
         .arg("--workspace")
+        .arg("--exclude")
+        .arg("maverick-installer")
         .env("RUSTFLAGS", rustflags)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
