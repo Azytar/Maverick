@@ -36,7 +36,7 @@
 - 🧩 Floating + fullscreen window support.
 - 🧱 External dock/bar support (Waybar, Polybar, …) via EWMH struts.
 - 🔌 `maverickctl` control socket — list/state/dispatch/restart/reload/quit any running instance.
-- 📐 Highly configurable (gaps, borders, split bias).
+- 📐 Highly configurable (column width, gaps, borders, colors, workspace binds).
 - 🔧 Declarative window rules.
 - 🚀 Autostart programs.
 - 📋 EWMH compliant.
@@ -92,6 +92,28 @@ Comment=Columnar tiling WM
 Exec=maverick
 Type=XSession
 
+```
+
+---
+
+## 🖥 Command-line Options
+
+`maverick` accepts a small set of flags (in any order):
+
+| Flag | Description |
+| --- | --- |
+| `--config <path>` | Load the config TOML from `<path>` instead of `$XDG_CONFIG_HOME/maverick/config.toml`. The same path is reused on `maverickctl reload`, so a custom config survives a hot restart. |
+| `--check-config [path]` | Parse the config (the `--config` path if given, otherwise the default location) and exit. Exit code `0` = clean (no warnings/errors), `1` = warnings or errors were reported. Never starts the WM — handy for CI/lint gates. |
+| `--replace` / `-r` | Replace an already-running WM, adopting its windows. |
+| `--name <id>` | Instance name used for control/identification (so `maverickctl` targets the right instance). |
+| `-v` / `--version` | Print version and exit. |
+| `-h` / `--help` | Print usage and exit. |
+
+Validate a config before starting:
+
+```bash
+maverick --check-config ~/.config/maverick/config.toml
+maverick --config ~/.config/maverick/config.toml
 ```
 
 ---
@@ -392,6 +414,7 @@ Maverick/                    # Cargo workspace
 │   │   ├── present.rs               fullscreen/maximize presentation layer
 │   │   ├── layout.rs                 arrange_columns / arrange_grid
 │   │   ├── ipc.rs                     state_json / parse_action for the control socket
+│   │   ├── action.rs                 unified Action name/parse vocabulary (TOML + IPC)
 │   │   └── tests.rs                   unit tests
 │   └── backend/                 X11 backend — the only place that speaks the protocol
 │       ├── atoms.rs               EWMH / ICCCM atom cache
@@ -414,8 +437,10 @@ Maverick/                    # Cargo workspace
 │       └── bin/maverickctl.rs       the `maverickctl` CLI
 ├── maverick-dialog/           # standalone X11 yes/no quit-confirmation window
 │   └── src/main.rs
-├── examples/
+├── config/
 │   └── config.toml            full, commented sample user config
+├── maverick-installer/         # optional installer (workspace member)
+│   └── src/main.rs
 ├── CHANGELOG.md
 ├── Cargo.toml                 # workspace root + the `maverick` package
 ├── Cargo.lock
