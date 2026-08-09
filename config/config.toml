@@ -1,0 +1,271 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Maverick — example configuration
+#
+# Drop this at ~/.config/maverick/config.toml (or pass --config <path>).
+# Every key is OPTIONAL: anything you omit falls back to the compiled-in
+# defaults. If you define a section it is *merged* (it overrides only the
+# fields you set); if you define [[keybindings]] or [[rules]] they REPLACE the
+# compiled lists entirely.
+#
+# Numeric workspace binds (Super+1..9 → view, Super+Shift+1..9 → move) are
+# generated automatically unless `auto_workspace_binds = false`. If you define a
+# `[[keybindings]]` entry on a digit key, that slot is claimed by your binding
+# and the remaining auto-generated binds are kept (no full suppression).
+#
+# Key names accepted in TOML: a–z, 0–9, F1–F12, Return/Enter, Space, Tab,
+# bracketleft/right, equal, minus, plus, comma, period, slash, and any XF86
+# name (e.g. XF86AudioRaiseVolume, XF86MonBrightnessUp). A raw keysym may be
+# given as a `0x<hex>` escape (e.g. `Mod4+0x21` for Exclam). Modifiers:
+# Super/Mod4, Shift, Control/Ctrl, Alt/Mod1.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[general]
+# Border width in pixels. 0 disables borders.
+border_width = 2
+
+# Gaps (pixels). `gaps` sets both at once; the two below override it.
+gaps_inner = 6          # between adjacent tiles
+gaps_outer = 6          # between tiles and the screen edge
+# Collapse to a single gap when only one window is visible on a workspace.
+smart_gaps = false
+
+# Pixel corner radius applied to tiled windows (0 = square corners).
+corner_radius = 0
+
+# Number of workspaces (tags). 1..=9 are bound to Mod4+1..9 by default.
+n_tags = 9
+
+# Width of a freshly created column, as a fraction (0.1–1.0) of the workarea
+# width. Replaces the old `default_col_width` (pixels) and `split_bias`
+# (fraction) keys, which are now deprecated aliases.
+column_width = 0.6
+
+# Accordion focus-expansion factor (0.0–0.9): extra fraction the focused column
+# grows when dynamic focus expansion is active. 0.0 disables it (default), so a
+# column only resizes via GrowColumn/ShrinkColumn.
+accordion_boost = 0.0
+
+# Minimum zoom factor for the Overview film-strip (0.05–1.0).
+overview_zoom_min = 0.25
+
+# Auto-generate the Super+1..9 / Super+Shift+1..9 workspace binds. Set to false
+# to manage all workspace switching yourself (default true).
+auto_workspace_binds = true
+
+# Focus follows the mouse pointer.
+focus_mouse = false
+# Warp the cursor to the center of the newly focused window.
+warp_cursor = false
+
+# Workspace names (cosmetic; length should match n_tags).
+tag_names = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+
+# Color theme preset (overridden by the [colors] section below if present).
+# One of: nord, dracula, gruvbox, everforest, solarized,
+#         catppuccin-mocha, catppuccin-latte
+theme = "catppuccin-mocha"
+
+[colors]
+# Colors are 0xRRGGBB. Both hex and decimal are accepted by the parser.
+#   normal  = border of ordinary tiled windows
+#   focused = border of the focused window
+#   urgent  = border of windows flagged urgent / demanding attention
+normal  = 0x45475a        # catppuccin-mocha surface
+focused = 0x89b4fa        # catppuccin-mocha blue
+urgent  = 0xf38ba8        # catppuccin-mocha red
+
+# ── Keybindings ──────────────────────────────────────────────────────────────
+# Each entry is one [[keybindings]] table with `key` and `action`.
+# Action grammar (colon separates the verb from its argument):
+#   spawn:<command and args>      kill
+#   toggle_float                  toggle_fullscreen
+#   toggle_maximize               cycle_layout
+#   focus:<left|right|up|down|next|prev>
+#   move:<left|right|up|down|next|prev>
+#   focus_mon:<dir>  move_mon:<dir>
+#   layout:<column|grid>
+#   grow_col:<px>                 new_column        collapse_column
+#   view:<n>        move_to_ws:<n>
+#   viewport_zoom[:<factor>]      page_snap:<left|right|up|down>
+#   toggle_overview  overview_nav:<dir>  overview_enter
+#   restart  quit
+
+[[keybindings]]
+key = "Mod4+Return"
+action = "spawn:alacritty"
+
+[[keybindings]]
+key = "Mod4+Shift+p"
+action = "spawn:rofi -show run"
+
+[[keybindings]]
+key = "Mod4+p"
+action = "spawn:rofi -show drun"
+
+[[keybindings]]
+key = "Mod4+Shift+c"
+action = "kill"
+
+[[keybindings]]
+key = "Mod4+Shift+space"
+action = "toggle_float"
+
+[[keybindings]]
+key = "Mod4+Shift+f"
+action = "toggle_fullscreen"
+
+[[keybindings]]
+key = "Mod4+Shift+m"
+action = "toggle_maximize"
+
+# Focus / move within the ribbon (vim-style)
+[[keybindings]]
+key = "Mod4+h"
+action = "focus:left"
+[[keybindings]]
+key = "Mod4+l"
+action = "focus:right"
+[[keybindings]]
+key = "Mod4+j"
+action = "focus:down"
+[[keybindings]]
+key = "Mod4+k"
+action = "focus:up"
+[[keybindings]]
+key = "Mod4+Shift+h"
+action = "move:left"
+[[keybindings]]
+key = "Mod4+Shift+l"
+action = "move:right"
+[[keybindings]]
+key = "Mod4+Shift+j"
+action = "move:down"
+[[keybindings]]
+key = "Mod4+Shift+k"
+action = "move:up"
+
+# Column operations
+[[keybindings]]
+key = "Mod4+Shift+Return"
+action = "new_column"
+[[keybindings]]
+key = "Mod4+Control+h"
+action = "grow_col:-50"
+[[keybindings]]
+key = "Mod4+Control+l"
+action = "grow_col:50"
+[[keybindings]]
+key = "Mod4+Control+j"
+action = "collapse_column"
+
+# Layout switching
+[[keybindings]]
+key = "Mod4+space"
+action = "cycle_layout"
+[[keybindings]]
+key = "Mod4+g"
+action = "layout:grid"
+[[keybindings]]
+key = "Mod4+t"
+action = "layout:column"
+
+# Session
+[[keybindings]]
+key = "Mod4+Shift+q"
+action = "spawn:maverickctl quit --confirm"
+[[keybindings]]
+key = "Mod4+Shift+r"
+action = "restart"
+[[keybindings]]
+key = "Mod4+F5"
+action = "restart"
+
+# Monitor navigation
+[[keybindings]]
+key = "Mod4+Tab"
+action = "focus_mon:next"
+[[keybindings]]
+key = "Mod4+Shift+Tab"
+action = "move_mon:next"
+
+# Overview (semantic-zoom film-strip)
+[[keybindings]]
+key = "Mod4+o"
+action = "toggle_overview"
+[[keybindings]]
+key = "Mod4+n"
+action = "overview_nav:right"
+[[keybindings]]
+key = "Mod4+Shift+o"
+action = "overview_nav:left"
+[[keybindings]]
+key = "Mod4+e"
+action = "overview_enter"
+
+# Viewport zoom / page-snap. These can be bound by their real symbol names
+# (Mod4+equal, Mod4+minus, Mod4+bracketright, Mod4+bracketleft) or an XF86
+# name; the letter bindings below are just convenient alternatives.
+[[keybindings]]
+key = "Mod4+z"
+action = "viewport_zoom:0.2"     # zoom the ribbon in (alpha > 1)
+[[keybindings]]
+key = "Mod4+Shift+z"
+action = "viewport_zoom:-0.2"    # zoom out; reaching 1.0 returns to Normal
+[[keybindings]]
+key = "Mod4+b"
+action = "page_snap:right"       # scroll the camera one screen-width right
+[[keybindings]]
+key = "Mod4+v"
+action = "page_snap:left"         # …and left
+
+# ── Rules ────────────────────────────────────────────────────────────────────
+# Match windows by class / instance / window_type / title (substring,
+# case-insensitive). Multiple criteria in one rule are ANDed.
+
+# Firefox: refuse its own runtime fullscreen request (the F11/EWMH one) but
+# keep Mod4+Shift+f working (that path is never filtered).
+[[rules]]
+class = "firefox"
+deny_fullscreen = true
+ignore_initial_state = true
+
+# A game that should get a real, exclusive fullscreen overlay (bypasses the
+# compositor, lives outside the scrolling ribbon, in any layout).
+[[rules]]
+class = "steam"
+true_fullscreen = true
+
+# A floating video player.
+[[rules]]
+class = "mpv"
+float = true
+
+# Transient popups/dialogs float by default.
+[[rules]]
+window_type = "dialog"
+float = true
+
+# Pin an app to a specific workspace (1-based; 8 = workspace 8).
+[[rules]]
+class = "spotify"
+workspace = 8
+
+# Force a fixed size and position for a launcher/calculator.
+[[rules]]
+class = "calculator"
+size = [400, 600]
+position = [100, 100]
+
+# Sticky + floating utility that follows you across workspaces.
+[[rules]]
+class = "scratchpad"
+sticky = true
+
+# ── Autostart ────────────────────────────────────────────────────────────────
+# A grid (list of string lists); each inner list is one command + its args.
+[autostart]
+commands = [
+  ["picom"],
+  ["xrandr", "--dpi", "96"],
+  ["nm-applet"],
+]
