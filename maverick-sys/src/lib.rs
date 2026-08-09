@@ -173,13 +173,23 @@ fn install_raw(sig: libc::c_int, action: usize, flags: libc::c_int) {
 /// Detach from the launching terminal so the WM outlives the shell that
 /// started it (standard daemon/WM behavior). Returns nothing; failures are
 /// non-fatal (best-effort detach).
+///
+/// B13 (sin confirmar): this used to call `setsid()` unconditionally before
+/// checking `isatty`. Under `startx`, Maverick is a child of the same login
+/// session that owns the VT/seat Xorg is running on. Forcing a brand new
+/// POSIX session here was observed correlating with Xorg losing its DRM
+/// master mid-startup (`EnterVT failed`, `Failed to enable any CRTC`) right
+/// as Maverick's autostart phase kicked in — a different Maverick build
+/// (refactor line, no `setsid()` here) did not reproduce it on the same
+/// hardware/Xorg/kernel. We no longer create a new session at all: Maverick
+/// doesn't need one (it isn't forking away from its parent), and staying in
+/// the launching session avoids touching seat/session assignment that Xorg
+/// depends on. We keep the stdin/stdout redirect so a display-manager-less
+/// `startx` launch doesn't hang the shell that started it.
 pub fn detach_from_terminal() {
     unsafe {
-        // New session/process group with no controlling terminal.
-        // Ignore failure (EPERM if already session leader) — isatty will tell us.
-        let _ = libc::setsid();
-
-        // Already detached (e.g. launched by a display manager)?
+        // Already detached (e.g. launched by a display manager, or stdin is
+        // not a real terminal)? Nothing to do.
         if libc::isatty(libc::STDIN_FILENO) == 0 {
             return;
         }
