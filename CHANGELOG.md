@@ -772,21 +772,25 @@ independently re-verified against a real build on this machine.
   `categories`, and `keywords` for better crate-index presentation.
 - **Doc-comment fixes** — `image_text8`, `draw()`, and code samples in
   docstrings now use proper backtick quoting.
-- **CI workflow added (`.github/workflows/ci.yml`).** Two jobs: the main
-  WM workspace (clippy `-D warnings` + `cargo test --workspace`), and a
-  separate job for `maverick-installer`, which is intentionally excluded
-  from the main workspace (`Cargo.toml`'s `exclude`) so its build/lint
-  gate can't slow down or bitrot the WM's own CI.
 - **Xephyr integration test harness (`tests/xephyr-suite.sh`).** A manual
-  / CI script that spins up a throwaway nested X server (Xephyr), launches
+  script that spins up a throwaway nested X server (Xephyr), launches
   Maverick on it, and drives real clients (xterm, firefox, mpv, a GL game)
   to verify fullscreen/transient/viewport behavior end-to-end via
   `xprop`/`xwininfo`/`xev`. Needs a real nested X server, so it doesn't run
-  under `cargo test` in CI by default; every assertion reads live X
-  properties, nothing is faked.
-- **Optional `maverick-installer` binary.** A standalone install helper,
-  excluded from the main Cargo workspace (see `Cargo.toml` and the CI
-  note above) so it never slows down the WM's own build/test loop.
+  under `cargo test`; every assertion reads live X properties, nothing is
+  faked.
+- **`maverick-installer` binary, plus a prebuilt `maverick-installer.bin`
+  at the repo root.** A standalone install helper (regular workspace
+  member) that detects the CPU via `CPUID`, builds the workspace with
+  `cargo build --release -C target-cpu=native` (using `mold` automatically
+  when available), installs `maverick`/`maverickctl`/`maverick-msg`/
+  `maverick-dialog` to `/usr/local/bin` (root) or `~/.local/bin`
+  (non-root), checks `$PATH`, and installs `maverick.desktop` for display
+  managers. Bilingual (ES/EN, `$LANG`-detected) output. The prebuilt
+  binary lets a fresh clone go from zero to installed with a single
+  `sudo ./maverick-installer.bin` — no manual `cargo` invocation needed,
+  though a Rust toolchain still has to be present for it to build against.
+  See README for the full dependency list and both install paths.
 
 CHANGELOG entries above marked **(unconfirmed)** or **(audit)** carry
 over the original session's caveat notation and remain to be re-verified

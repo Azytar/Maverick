@@ -48,7 +48,59 @@ Rust. Presenta un diseño de columnas desplazables horizontalmente inspirado en
 
 ## 🚀 Instalación
 
-### Compilar desde las fuentes
+### Dependencias
+
+Maverick no tiene dependencias de bibliotecas en tiempo de ejecución más
+allá de un servidor X funcional — nada de cairo, pango ni Xft. Lo que
+necesitas es:
+
+| Requisito | Para qué | Paquete típico |
+| --- | --- | --- |
+| Un servidor X11 | Maverick es solo X11, sin Wayland | `xorg-server` (Arch), o [XLibre](https://github.com/X11Libre/xserver) |
+| `cargo` / toolchain de Rust | Tanto el instalador como una compilación manual lo usan para compilar el workspace | `rustup` (MSRV 1.82) o el paquete `rustc`/`cargo` de tu distro |
+| Terminal, lanzador, barra, fondo de pantalla, demonio de notificaciones, etc. | No vienen incluidos — Maverick los arranca vía `autostart`, como cualquier WM | `alacritty`/`rofi`/`polybar`/`feh`/`dunst` o los que prefieras |
+| `xdg-desktop-portal` + `xdg-desktop-portal-gtk` (recomendado) | Selectores de archivo de apps GTK/Electron | vienen en el `autostart` por defecto |
+
+### Opción A: `maverick-installer.bin` (recomendado para la mayoría)
+
+En la raíz del repo viene un binario instalador precompilado, así que no
+hace falta compilar el instalador en sí — pero igual necesita
+`cargo`/`rustc` en el sistema para compilar Maverick, igual que una
+compilación manual. Clona, ejecuta el binario, listo:
+
+```bash
+git clone https://github.com/azytar/Maverick.git
+cd Maverick
+sudo ./maverick-installer.bin
+```
+
+Qué hace:
+
+1. Detecta tu CPU (vía `CPUID`) y la reporta.
+2. Elige un destino de instalación: `/usr/local/bin` bajo `sudo`/root, o
+   `~/.local/bin` si se ejecuta como usuario normal.
+3. Compila el workspace con `cargo build --release -C target-cpu=native`
+   (usando el enlazador [`mold`](https://github.com/rui314/mold)
+   automáticamente si está en el `PATH`, para un enlazado más rápido).
+4. Copia `maverick`, `maverickctl`, `maverick-msg` y `maverick-dialog` al
+   destino de instalación.
+5. Verifica que el destino esté en el `$PATH` e instala
+   `maverick.desktop` para gestores de sesión (ver abajo) si se ejecuta
+   como root.
+
+Salida bilingüe (español/inglés, detectada automáticamente desde `$LANG`).
+Puedes volver a ejecutarlo cuando quieras para recompilar y reinstalar
+tras actualizar.
+
+Si prefieres no ejecutar un binario precompilado, compílalo tú mismo
+primero — es un miembro normal del workspace:
+
+```bash
+cargo build --release -p maverick-installer
+sudo ./target/release/maverick-installer
+```
+
+### Opción B: compilar desde las fuentes manualmente
 
 Maverick es un workspace de Cargo con varios binarios: `maverick` (el propio
 gestor), `maverickctl` (CLI de control) y `maverick-dialog` (el diálogo de
@@ -446,7 +498,8 @@ Maverick/                    # Cargo workspace
 │       └── bin/maverickctl.rs       la CLI `maverickctl`
 ├── maverick-dialog/           # ventana X11 autónoma de confirmación de salida
 │   └── src/main.rs
-├── maverick-installer/         # instalador opcional (excluido del workspace principal, con su propio job de CI)
+├── maverick-installer/         # instalador opcional, miembro del workspace
+├── maverick-installer.bin      # binario del instalador precompilado — sudo ./maverick-installer.bin
 │   └── src/main.rs
 ├── config/
 │   └── config.toml            ejemplo de configuración de usuario completo y comentado

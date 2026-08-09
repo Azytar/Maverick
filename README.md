@@ -48,7 +48,56 @@
 
 ## 🚀 Installation
 
-### Build from source
+### Dependencies
+
+Maverick has no runtime library dependencies beyond a working X server —
+no cairo, no pango, no Xft. What you need is:
+
+| Requirement | Why | Typical package |
+| --- | --- | --- |
+| An X11 server | Maverick is X11-only, no Wayland | `xorg-server` (Arch), or [XLibre](https://github.com/X11Libre/xserver) |
+| `cargo` / Rust toolchain | Both the installer and a manual build compile the workspace with it | `rustup` (MSRV 1.82) or your distro's `rustc`/`cargo` package |
+| A terminal, launcher, bar, wallpaper setter, notification daemon, etc. | Not bundled — Maverick starts them via `autostart`, same as any WM | `alacritty`/`rofi`/`polybar`/`feh`/`dunst` or your own picks |
+| `xdg-desktop-portal` + `xdg-desktop-portal-gtk` (recommended) | GTK/Electron apps' file pickers | ships in the default `autostart` |
+
+### Option A: `maverick-installer.bin` (recommended for most people)
+
+A prebuilt installer binary ships at the repo root, so you don't need to
+build the installer itself — but it still needs `cargo`/`rustc` on the
+system to build Maverick, same as a manual build. Clone, run the binary,
+done:
+
+```bash
+git clone https://github.com/azytar/Maverick.git
+cd Maverick
+sudo ./maverick-installer.bin
+```
+
+What it does:
+
+1. Detects your CPU (via `CPUID`) and reports it.
+2. Picks an install target: `/usr/local/bin` under `sudo`/root, or
+   `~/.local/bin` if run as a regular user.
+3. Builds the workspace with `cargo build --release -C target-cpu=native`
+   (using the [`mold`](https://github.com/rui314/mold) linker
+   automatically if it's on `PATH`, for a faster link step).
+4. Copies `maverick`, `maverickctl`, `maverick-msg`, and `maverick-dialog`
+   into the install target.
+5. Checks that the install target is on `$PATH` and installs
+   `maverick.desktop` for display managers (see below) when run as root.
+
+Bilingual output (Spanish/English, auto-detected from `$LANG`). Re-run it
+any time to rebuild and reinstall after pulling updates.
+
+If you'd rather not run a prebuilt binary, build it yourself first —
+it's a normal workspace member:
+
+```bash
+cargo build --release -p maverick-installer
+sudo ./target/release/maverick-installer
+```
+
+### Option B: build from source manually
 
 Maverick is a Cargo workspace with three binaries: `maverick` (the WM
 itself), `maverickctl` (control CLI), and `maverick-dialog` (the quit
@@ -439,7 +488,8 @@ Maverick/                    # Cargo workspace
 │   └── src/main.rs
 ├── config/
 │   └── config.toml            full, commented sample user config
-├── maverick-installer/         # optional installer (excluded from the main workspace, own CI job)
+├── maverick-installer/         # optional installer, workspace member
+├── maverick-installer.bin      # prebuilt installer binary — sudo ./maverick-installer.bin
 │   └── src/main.rs
 ├── CHANGELOG.md
 ├── Cargo.toml                 # workspace root + the `maverick` package
