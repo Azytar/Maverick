@@ -400,8 +400,10 @@ mod tests {
         // Give the connection threads a moment to enqueue.
         std::thread::sleep(std::time::Duration::from_millis(50));
         let cmds = hub.drain_commands();
-        assert!(cmds.contains(&ControlCommand::Dispatch("focus-left".into())));
-        assert!(cmds.contains(&ControlCommand::Quit));
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, ControlCommand::Dispatch(a) if a == "focus-left")));
+        assert!(cmds.iter().any(|c| matches!(c, ControlCommand::Quit)));
 
         // socket file is removed on shutdown
         server.shutdown();

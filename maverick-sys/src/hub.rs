@@ -24,7 +24,9 @@ use std::sync::{Arc, Mutex};
 /// A command requested by an external tool, to be executed by the WM on its
 /// own thread. `Dispatch` carries an action name that the WM maps to its
 /// internal `Action` vocabulary.
-// NOTE: not `Eq`/`PartialEq` — `Query` carries a `Sender` reply channel.
+// NOTE: not `Eq`/`PartialEq` — `Query` carries a `Sender` reply channel, which
+// has no meaningful equality. Callers (and tests) that need to recognise a
+// queued command match on it with `matches!` instead.
 #[derive(Debug, Clone)]
 pub enum ControlCommand {
     /// Ask the WM to quit cleanly.
@@ -179,8 +181,12 @@ mod tests {
         assert!(hub.push_command(ControlCommand::Dispatch("focus-left".into())));
         let cmds = hub.drain_commands();
         assert_eq!(cmds.len(), 2);
-        assert_eq!(cmds[0], ControlCommand::Quit);
-        assert_eq!(cmds[1], ControlCommand::Dispatch("focus-left".into()));
+        assert!(matches!(cmds[0], ControlCommand::Quit));
+        assert!(
+            matches!(&cmds[1], ControlCommand::Dispatch(a) if a == "focus-left"),
+            "second command must be the queued dispatch, got {:?}",
+            cmds[1]
+        );
         // Draining again yields nothing.
         assert!(hub.drain_commands().is_empty());
     }
@@ -212,6 +218,8 @@ mod tests {
         let b = a.clone();
         a.push_command(ControlCommand::Reload);
         // Drained from the other clone -> same underlying queue.
-        assert_eq!(b.drain_commands(), vec![ControlCommand::Reload]);
+        let cmds = b.drain_commands();
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], ControlCommand::Reload));
     }
 }
