@@ -17,8 +17,6 @@ use maverick_gl::{XConn, XDisplay};
 use crate::backend::atoms::Atoms;
 use crate::config::Cfg;
 use crate::core::layout::{arrange, ideal_scroll, Placements, RibbonScratch};
-#[cfg(test)]
-use crate::core::present::present;
 use crate::core::{parse_action, state_json, Effect, Engine};
 use crate::log;
 use crate::types::*;

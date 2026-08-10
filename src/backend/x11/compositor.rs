@@ -50,8 +50,6 @@ use x11rb::protocol::xproto::*;
 
 use crate::config::Cfg;
 use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements, RibbonScratch};
-#[cfg(test)]
-use crate::core::present::present;
 use crate::core::present::present_into;
 use crate::types::{Rect, State, WindowId};
 
@@ -1209,3 +1207,101 @@ mod stack_tests {
         assert_eq!(stack, vec![A]);
     }
 }
+
+/// Schedule + benchmark harness for the per-frame projection path.
+///
+/// This is the *measure* half of the "idle must be near-free / 0 allocs per
+/// frame" rule from the compositor plan. It does not touch X or GL (the path
+/// under test — `live_placements` = `layout::arrange` → `present_into` — is a
+/// pure function of `State`), so it runs in CI and on a laptop alike, and it
+/// catches two regressions the unit tests would miss: a per-frame allocation
+/// sneaking back in, and the projection cost drifting past a single frame
+/// budget at realistic window counts.
+#[cfg(test)]
+mod bench {
+    use super::live_placements;
+    use crate::config::Cfg;
+    use crate::core::framebench::CountAllocs;
+    use crate::core::layout::{LayoutRegistry, Placements, RibbonScratch};
+    use crate::types::{Client, Column, Focus, Monitor, Rect, State, WindowId};
+
+    /// Build a one-monitor state with `n` single-window columns on a 1920x1080
+    /// monitor, camera mid-animation (the only state in which this path runs).
+    fn ribbon(n: u32) -> State {
+        let mut state = State::new();
+        state.monitors.push(Monitor::new(Rect::new(0, 0, 1920, 1080), 1));
+        for i in 0..n {
+            let win = (i + 1) as WindowId;
+            let mut c = Client::new(win, 0, 0);
+            c.geom = Rect::new(0, 0, 400, 900);
+            state.add_client(c);
+            state.monitors[0].workspaces[0].columns.push(Column {
+                windows: vec![win],
+                focused: 0,
+                weight: 0.25,
+                boost: 0.0,
+            });
+        }
+        state.monitors[0].workspaces[0].focus = Focus { column_idx: 0 };
+        state.monitors[0].focused = Some(1);
+        state.monitors[0].workspaces[0].camera.position = 137.0;
+        state.monitors[0].workspaces[0].camera.target = 900.0;
+        state
+    }
+
+    /// Time the steady-state projection over `iters` frames, averaged. Also
+    /// returns allocations per frame, measured with the per-thread counter.
+    fn measure(state: &State, iters: u32) -> (f64, u64) {
+        let cfg = Cfg::default();
+        let registry = LayoutRegistry::new();
+        let mut out: Placements = Placements::new();
+        let mut raise: Vec<WindowId> = Vec::new();
+        let mut scratch = RibbonScratch::default();
+
+        // Warm up so every reused buffer is at steady-state capacity.
+        for _ in 0..16 {
+            live_placements(state, 0, &cfg, &registry, &mut out, &mut raise, &mut scratch);
+        }
+        // Two rounds: one timed, one counted (the counter only runs while armed).
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            live_placements(state, 0, &cfg, &registry, &mut out, &mut raise, &mut scratch);
+        }
+        let elapsed = t0.elapsed().as_nanos() as f64 / iters as f64;
+
+        let counter = CountAllocs::start();
+        for _ in 0..iters {
+            live_placements(state, 0, &cfg, &registry, &mut out, &mut raise, &mut scratch);
+        }
+        let allocs = counter.finish().div_ceil(iters as u64);
+        (elapsed, allocs)
+    }
+
+    #[test]
+    fn projection_is_allocation_free_and_within_frame_budget() {
+        let mut results = Vec::new();
+        // 60 Hz frame budget is 16.6 ms; the *projection* is a fraction of that.
+        // We assert a generous bound so the test is stable on slow CI boxes but
+        // still catches a real regression (e.g. the O(N^2) transform lookup
+        // coming back, or a per-frame allocation reappearing).
+        for &n in &[1u32, 50, 200, 1000] {
+            let state = ribbon(n);
+            let (ns, allocs) = measure(&state, 200);
+            results.push((n, ns, allocs));
+            assert_eq!(
+                allocs, 0,
+                "{n} windows: {allocs} alloc(s)/frame — the projection must reuse its buffers"
+            );
+            assert!(
+                ns < 4_000_000.0,
+                "{n} windows: {ns:.0} ns/frame exceeds 4 ms budget"
+            );
+        }
+        // Print a small table so `cargo test` output is the schedule/benchmark.
+        eprintln!("projection bench (ns/frame, 0 allocs expected):");
+        for (n, ns, _a) in &results {
+            eprintln!("  N={n:>5}  {:.1} ns/frame", ns);
+        }
+    }
+}
+
