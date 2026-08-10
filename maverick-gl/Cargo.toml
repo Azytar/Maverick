@@ -1,0 +1,21 @@
+[package]
+name = "maverick-gl"
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.82"
+authors = ["azytar"]
+description = "Hand-written Xlib/GLX/OpenGL FFI and the GPU renderer Maverick's compositor uses"
+license = "GPL-3.0"
+repository = "https://github.com/azytar/Maverick"
+categories = ["os::unix-apis", "rendering"]
+keywords = ["window-manager", "x11", "glx", "opengl", "compositor"]
+
+[dependencies]
+libc = "0.2"
+# `allow-unsafe-code` is what unlocks `x11rb::xcb_ffi::XCBConnection`, the
+# connection type that can wrap the `xcb_connection_t*` owned by an Xlib
+# `Display*` — the single connection shared by the WM (XCB requests) and GLX
+# (Xlib requests). No other x11rb feature is needed here.
+x11rb = { version = "0.13", default-features = false, features = [
+    "allow-unsafe-code",
+] }

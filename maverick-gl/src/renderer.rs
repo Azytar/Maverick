@@ -103,6 +103,15 @@ pub struct Texture {
 }
 
 impl Texture {
+    /// The texture's cached min/mag filter (set by `draw`/`draw_raw`). Exposed so
+    /// callers that submit a quad via a raw id (the compositor's explicit scene
+    /// path) can carry the value out without borrowing the `Texture`.
+    pub fn filter(&self) -> GLint {
+        self.filter
+    }
+}
+
+impl Texture {
     #[inline]
     pub fn is_bound(&self) -> bool {
         self.bound
@@ -790,6 +799,36 @@ impl Renderer {
             (gl.glUniform1f)(self.u_flip, if tex.flip { 1.0 } else { 0.0 });
             (gl.glDrawArrays)(GL_TRIANGLES, 0, 6);
         }
+    }
+
+    /// Draw a quad given a raw texture id, the texture's cached filter, and the
+    /// previously-bound texture id (for bind-cache elision). Used by the
+    /// compositor's explicit-scene path, where the `Texture` itself stays owned
+    /// by `CompWin` (so the filter cache and flip flag are read there and passed
+    /// in), and only the `GLuint` travels in the `DrawItem`.
+    pub fn draw_raw(&mut self, tex: GLuint, filter: GLint, prev_tex: GLuint, q: &Quad) -> GLuint {
+        let gl = &self.gl;
+        let bound = if prev_tex != tex {
+            unsafe { (gl.glBindTexture)(GL_TEXTURE_2D, tex) };
+            tex
+        } else {
+            prev_tex
+        };
+        unsafe {
+            // `filter` is the texture's cached value, so this is just the
+            // one-time (or changing) state upload — no per-draw re-validation
+            // beyond what the caller already decided.
+            (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+            (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+            (gl.glUniform4f)(self.u_dst, q.dst[0], q.dst[1], q.dst[2], q.dst[3]);
+            (gl.glUniform4f)(self.u_src, q.src[0], q.src[1], q.src[2], q.src[3]);
+            (gl.glUniform2f)(self.u_size, q.size[0], q.size[1]);
+            (gl.glUniform1f)(self.u_radius, q.radius);
+            (gl.glUniform1f)(self.u_opacity, q.opacity);
+            (gl.glUniform1f)(self.u_flip, 0.0);
+            (gl.glDrawArrays)(GL_TRIANGLES, 0, 6);
+        }
+        bound
     }
 
     /// Present the frame. With swap interval 1 this blocks until the vertical

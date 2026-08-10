@@ -38,7 +38,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
-use maverick_gl::{Quad as GlQuad, Renderer, Texture, VisualFormat, XConn, XDisplay};
+use maverick_gl::{gl::*, Quad as GlQuad, Renderer, Texture, VisualFormat, XConn, XDisplay};
 
 use crate::log;
 use x11rb::connection::Connection;
@@ -121,6 +121,43 @@ impl CompWin {
             transform_gen: 0,
         }
     }
+
+    /// Whether `r` is entirely outside the `[0,0,w,h]` viewport (plus a small
+    /// margin so partially-visible windows — including ones with a shadow or a
+    /// translucent halo — are never clipped). Used to skip the GPU draw for the
+    /// dozens of ribbon windows that are scrolled fully off either edge of the
+    /// monitor; those still cost a `HashMap` lookup, but no `glDrawArrays`,
+    /// texture bind or quad upload. Windows mid-scroll (camera animation) keep
+    /// being drawn the instant any part enters the margin.
+    fn offscreen(r: Rect, w: u32, h: u32) -> bool {
+        const M: i32 = 64; // px of grace around the screen edge
+        r.x + r.w as i32 <= -M
+            || r.y + r.h as i32 <= -M
+            || r.x >= w as i32 + M
+            || r.y >= h as i32 + M
+    }
+}
+
+/// One window to draw this frame, fully resolved: where, at what opacity, with
+/// which texture, and whether the texture needs linear filtering. Built by
+/// `compute_scene` into a reused buffer so the per-frame path allocates nothing,
+/// and kept between frames so a later phase can diff successive scenes
+/// (occlusion / partial redraw) without rebuilding geometry from scratch.
+///
+/// This is the compositor's *own* view of what is visible — distinct from the
+/// WM's `Placements` (only the geometry source) and from `stack` (which still
+/// includes off-screen windows).
+struct DrawItem {
+    // Carried so later phases (damage, partial redraw, debug overlays) can
+    // attribute each submitted quad back to its window. Not read by `render`
+    // yet, hence `allow`.
+    #[allow(dead_code)]
+    win: Window,
+    quad: GlQuad,
+    tex: GLuint,
+    /// The texture's cached filter (`GL_LINEAR`/`GL_NEAREST`), carried out of
+    /// `CompWin` so the draw path need not borrow the `Texture` back.
+    filter: GLint,
 }
 
 pub struct Compositor {
@@ -171,6 +208,14 @@ pub struct Compositor {
     /// never manages. `QueryTree` seeds it at startup and repairs it if an
     /// incremental update is ever impossible.
     stack: Vec<Window>,
+    /// The explicit scene: the list of draw items (one per on-screen window)
+    /// produced for the most recent frame. Built by `compute_scene` into this
+    /// reused buffer so the per-frame path allocates nothing, and kept between
+    /// frames so a later phase can diff it (occlusion / partial redraw) without
+    /// rebuilding from scratch. This is the compositor's *own* view of what is
+    /// visible — distinct from the WM's `Placements` (which is only the geometry
+    /// source) and from `stack` (which still includes off-screen windows).
+    scene: Vec<DrawItem>,
     /// Monotonic frame counter used to date `CompWin::transform`.
     frame_gen: u64,
     /// Corner radius the WM wants applied (shader SDF), px.
@@ -384,6 +429,7 @@ impl Compositor {
             dirty: true,
             stack_dirty: true,
             stack: Vec::new(),
+            scene: Vec::new(),
             frame_gen: 0,
             corner_radius: cfg.corner_radius,
         };
@@ -677,28 +723,16 @@ impl Compositor {
 
     // ── frame ───────────────────────────────────────────────────────────────
 
-    /// Render one frame: wallpaper, then every window bottom→top. Blocks to
-    /// vsync via the swap (when `vsync` is on). Returns `false` on a GL error
-    /// so the caller can disable the compositor.
-    pub fn render(&mut self) -> bool {
-        if self.stack_dirty {
-            self.refresh_stack();
-        }
-        self.renderer.begin_frame(self.screen_w, self.screen_h);
-
-        // Wallpaper first (so un-textured/transparent areas show it).
-        if let Some(wp) = self.wallpaper.as_mut() {
-            self.renderer.bind(wp);
-            self.renderer.draw(
-                wp,
-                &GlQuad {
-                    dst: [0.0, 0.0, self.screen_w as f32, self.screen_h as f32],
-                    ..Default::default()
-                },
-            );
-        }
-
+    /// Build the explicit scene for this frame into `self.scene` (reused buffer,
+    /// no allocation): one `DrawItem` per window that is mapped, on screen and
+    /// not hidden. Rebinds any texture whose client repainted, and culls
+    /// everything outside the viewport. The result is what `render` actually
+    /// submits to the GPU.
+    fn compute_scene(&mut self) {
         let gen = self.frame_gen;
+        let (sw, sh) = (self.screen_w, self.screen_h);
+        let mut items: Vec<DrawItem> = std::mem::take(&mut self.scene);
+        items.clear();
         for &win in &self.stack {
             // No `ignored` probe here: `track` refuses to record an ignored
             // window, so `wins` can never contain one and this lookup is the
@@ -712,7 +746,10 @@ impl Compositor {
             let Some(tex) = cw.tex.as_mut() else {
                 continue;
             };
-            // Rebind the texture if the client repainted.
+            // Rebind the texture if the client repainted. The filter is part of
+            // the texture's cached GL state, so read it out here (while we hold
+            // the only borrow) and carry it in the DrawItem.
+            let filter = tex.filter();
             if cw.damaged {
                 self.renderer.bind(tex);
                 cw.damaged = false;
@@ -724,6 +761,13 @@ impl Compositor {
                 (cw.outer, 0)
             };
             if outer.w == 0 || outer.h == 0 {
+                continue;
+            }
+            // Cull windows that are entirely outside the screen. This is the
+            // single biggest draw-time win: a 50-window ribbon only has ~5 on
+            // screen at once; the rest are scrolled off the edges and would
+            // otherwise each issue a `glDrawArrays` + texture bind for nothing.
+            if CompWin::offscreen(outer, sw, sh) {
                 continue;
             }
             let smooth = tex.width as u32 != outer.w || tex.height as u32 != outer.h;
@@ -740,7 +784,48 @@ impl Compositor {
                 smooth,
                 ..Default::default()
             };
-            self.renderer.draw(tex, &q);
+            items.push(DrawItem {
+                win,
+                quad: q,
+                tex: tex.tex,
+                filter,
+            });
+        }
+        self.scene = items;
+    }
+
+    /// Render one frame: wallpaper, then every on-screen window bottom→top.
+    /// Blocks to vsync via the swap (when `vsync` is on). Returns `false` on a
+    /// GL error so the caller can disable the compositor.
+    pub fn render(&mut self) -> bool {
+        if self.stack_dirty {
+            self.refresh_stack();
+        }
+        self.compute_scene();
+        self.renderer.begin_frame(self.screen_w, self.screen_h);
+
+        // Wallpaper first (so un-textured/transparent areas show it).
+        let mut last_tex = 0;
+        if let Some(wp) = self.wallpaper.as_mut() {
+            self.renderer.bind(wp);
+            last_tex = wp.tex;
+            self.renderer.draw(
+                wp,
+                &GlQuad {
+                    dst: [0.0, 0.0, self.screen_w as f32, self.screen_h as f32],
+                    ..Default::default()
+                },
+            );
+        }
+
+        for item in &self.scene {
+            // The texture is owned by `wins`; `draw_raw` takes the raw id and the
+            // texture's cached filter, and elides the `glBindTexture` when it
+            // matches `last_tex` — exactly the bind-cache the `&Texture` path
+            // kept on the texture, reconstructed from the scene.
+            last_tex = self
+                .renderer
+                .draw_raw(item.tex, item.filter, last_tex, &item.quad);
         }
 
         self.renderer.end_frame();
@@ -1101,11 +1186,36 @@ pub fn substep_bounds(dt: f32) -> impl Iterator<Item = f32> {
 
 #[cfg(test)]
 mod stack_tests {
-    use super::{stack_add_top, stack_remove, stack_restack};
+    use super::{stack_add_top, stack_remove, stack_restack, CompWin};
+    use crate::types::Rect;
 
     const A: u32 = 0xA;
     const B: u32 = 0xB;
     const C: u32 = 0xC;
+
+    /// The viewport-cull test: a window fully past any screen edge must be
+    /// culled, while one that merely touches the edge (or sits within the 64px
+    /// grace margin) must still be drawn — else windows scrolling in/out of
+    /// view would pop. This is the predicate `render` uses to skip the GPU draw
+    /// for the dozens of off-screen ribbon windows, so it must be exact at the
+    /// boundary. The screen here is 1920x1080.
+    #[test]
+    fn viewport_cull_matches_edges() {
+        const W: u32 = 1920;
+        const H: u32 = 1080;
+        // Fully on screen.
+        assert!(!CompWin::offscreen(Rect::new(100, 100, 400, 300), W, H));
+        // Touches the left edge.
+        assert!(!CompWin::offscreen(Rect::new(0, 100, 400, 300), W, H));
+        // Just inside the right edge (within the margin).
+        assert!(!CompWin::offscreen(Rect::new((W as i32) - 60, 100, 400, 300), W, H));
+        // Fully to the left, beyond the margin.
+        assert!(CompWin::offscreen(Rect::new(-200, 100, 100, 300), W, H));
+        // Fully below.
+        assert!(CompWin::offscreen(Rect::new(100, (H as i32) + 200, 100, 300), W, H));
+        // Entirely past the right edge.
+        assert!(CompWin::offscreen(Rect::new((W as i32) + 100, 100, 100, 300), W, H));
+    }
 
     /// The regression this whole commit exists for.
     ///
