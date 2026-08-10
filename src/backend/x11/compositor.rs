@@ -85,6 +85,21 @@ struct CompWin {
     /// 32-bit visuals with different channel layouts), and the fbconfig used to
     /// bind the pixmap has to match this one, not merely its width in bits.
     format: VisualFormat,
+    /// Live (this-frame) outer rect the WM wants this window drawn at, and the
+    /// corner radius to round it with.
+    ///
+    /// Stored *on the window* rather than in a side list because the draw loop
+    /// walks the stack and would otherwise have to search that list per window
+    /// — `N` windows × `N` transforms every frame, for a value the writer
+    /// already had a direct handle to.
+    transform: Rect,
+    transform_radius: u32,
+    /// Which frame `transform` was written for. Anything older than the
+    /// compositor's current generation means the WM did not place this window
+    /// this frame (an override-redirect menu, say), so it falls back to its X
+    /// geometry. A generation stamp avoids a clearing pass over every tracked
+    /// window at the top of each frame.
+    transform_gen: u64,
 }
 
 impl CompWin {
@@ -99,6 +114,11 @@ impl CompWin {
             mapped: false,
             hidden: false,
             format,
+            transform: Rect::default(),
+            transform_radius: 0,
+            // 0 is never a live generation: `set_transforms` pre-increments, so
+            // the first frame is generation 1.
+            transform_gen: 0,
         }
     }
 }
@@ -151,9 +171,8 @@ pub struct Compositor {
     /// never manages. `QueryTree` seeds it at startup and repairs it if an
     /// incremental update is ever impossible.
     stack: Vec<Window>,
-    /// Per-frame transforms for *managed* windows: window → outer rect (live) +
-    /// corner radius. Anything not present falls back to its X geometry.
-    transforms: Vec<(Window, Rect, u32)>,
+    /// Monotonic frame counter used to date `CompWin::transform`.
+    frame_gen: u64,
     /// Corner radius the WM wants applied (shader SDF), px.
     corner_radius: u32,
 }
@@ -365,7 +384,7 @@ impl Compositor {
             dirty: true,
             stack_dirty: true,
             stack: Vec::new(),
-            transforms: Vec::new(),
+            frame_gen: 0,
             corner_radius: cfg.corner_radius,
         };
 
@@ -487,7 +506,7 @@ impl Compositor {
     /// only asks for a resync when the window is missing entirely, which means
     /// we never saw its `CreateNotify`.
     pub fn on_map(&mut self, win: Window) {
-        if self.wins.get(&win).is_none() {
+        if !self.wins.contains_key(&win) {
             self.track(win);
         }
         {
@@ -605,12 +624,20 @@ impl Compositor {
 
     /// The WM computed live placements; hand them to the compositor as the
     /// per-window transform (outer rect + corner radius) for this frame.
+    ///
+    /// One pass, one hash lookup per placement, no allocation: the transform is
+    /// written straight onto the window it belongs to and stamped with this
+    /// frame's generation. The draw loop then reads it with no search at all.
     pub fn set_transforms(&mut self, placements: &[(Window, Rect, u32)]) {
-        self.transforms.clear();
+        self.frame_gen = self.frame_gen.wrapping_add(1);
+        let gen = self.frame_gen;
+        let corner_radius = self.corner_radius;
         for &(win, geom, bw) in placements {
-            if self.ignored.contains(&win) {
+            // `ignored` windows are never tracked (see `track`), so the lookup
+            // below already rejects them — no separate set probe needed.
+            let Some(cw) = self.wins.get_mut(&win) else {
                 continue;
-            }
+            };
             // Outer rect = content + borders on every side.
             let outer = Rect::new(
                 geom.x - bw as i32,
@@ -618,12 +645,13 @@ impl Compositor {
                 geom.w + 2 * bw,
                 geom.h + 2 * bw,
             );
-            let radius = if self.corner_radius == 0 {
+            cw.transform = outer;
+            cw.transform_radius = if corner_radius == 0 {
                 0
             } else {
-                self.corner_radius.min((outer.w / 2).min(outer.h / 2))
+                corner_radius.min((outer.w / 2).min(outer.h / 2))
             };
-            self.transforms.push((win, outer, radius));
+            cw.transform_gen = gen;
         }
         self.dirty = true;
     }
@@ -670,10 +698,11 @@ impl Compositor {
             );
         }
 
+        let gen = self.frame_gen;
         for &win in &self.stack {
-            if self.ignored.contains(&win) {
-                continue;
-            }
+            // No `ignored` probe here: `track` refuses to record an ignored
+            // window, so `wins` can never contain one and this lookup is the
+            // filter. That is one hash per stack entry saved every frame.
             let Some(cw) = self.wins.get_mut(&win) else {
                 continue;
             };
@@ -689,12 +718,11 @@ impl Compositor {
                 cw.damaged = false;
             }
             // Live outer rect, or fall back to the X geometry (OR windows).
-            let (outer, radius) = self
-                .transforms
-                .iter()
-                .find(|(w, _, _)| *w == win)
-                .map(|(_, r, rad)| (*r, *rad))
-                .unwrap_or((cw.outer, 0));
+            let (outer, radius) = if cw.transform_gen == gen {
+                (cw.transform, cw.transform_radius)
+            } else {
+                (cw.outer, 0)
+            };
             if outer.w == 0 || outer.h == 0 {
                 continue;
             }
