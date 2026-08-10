@@ -1,4 +1,5 @@
 use super::*;
+use x11rb::protocol::damage::NotifyEvent as DamageNotifyEvent;
 
 impl WindowManager {
     pub(super) fn on_map_request(
@@ -35,6 +36,9 @@ impl WindowManager {
         if self.docks.contains_key(&e.window) {
             self.remove_dock(e.window)?;
         }
+        if let Some(c) = self.compositor.as_mut() {
+            c.on_destroy(e.window);
+        }
         Ok(())
     }
 
@@ -42,6 +46,12 @@ impl WindowManager {
         &mut self,
         e: UnmapNotifyEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Drop the window's texture the moment it unmaps, whatever the cause —
+        // its off-screen pixmap is gone and the compositor must not draw stale
+        // (or freed) contents. `c.on_unmap` is a no-op for untracked windows.
+        if let Some(c) = self.compositor.as_mut() {
+            c.on_unmap(e.window);
+        }
         // Drop the duplicate `UnmapNotify` the X server delivers to the root
         // (SubstructureNotify) for an unmap the WM itself performed. Only the
         // variant targeted at the window itself (`e.event == e.window`)
@@ -160,6 +170,42 @@ impl WindowManager {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if e.window == self.root {
             self.handle_monitor_change()?;
+            return Ok(());
+        }
+        // A `SendEvent`-generated ConfigureNotify. `apply_geom` fabricates one
+        // of these for every client (ICCCM requires it), and because the WM
+        // selects `STRUCTURE_NOTIFY` on each managed window the server hands it
+        // straight back to us. Its `above_sibling` is a hard-coded `None`, which
+        // in X means "this window went to the very bottom" — replaying that
+        // would bury every window the WM just configured. Geometry from a
+        // synthetic event is redundant too (we are the ones who set it), so the
+        // whole event is dropped.
+        if e.response_type & 0x80 != 0 {
+            return Ok(());
+        }
+        let Some(c) = self.compositor.as_mut() else {
+            return Ok(());
+        };
+        // A child (managed or override-redirect) changed geometry: keep the
+        // compositor's cached outer rect in sync so the live transform and
+        // the texture crop match. This also marks the frame dirty.
+        c.on_configure(
+            e.window,
+            e.x as i32,
+            e.y as i32,
+            e.width as u32,
+            e.height as u32,
+            e.border_width as u32,
+        );
+        // ...and its stacking position. This is the only event that reports a
+        // restack, and it reports *every* restack — the WM's own `raise()`, a
+        // client's `ConfigureRequest`, and override-redirect menus the WM never
+        // manages. Only the root-targeted (SubstructureNotify) copy is used:
+        // managed windows also select StructureNotify, so the same restack
+        // arrives twice and applying it once is enough.
+        if e.event == self.root {
+            let above = (e.above_sibling != x11rb::NONE).then_some(e.above_sibling);
+            c.on_restack(e.window, above);
         }
         Ok(())
     }
@@ -244,15 +290,14 @@ impl WindowManager {
                 }
 
                 // Map the previously selected monitor to its new index, or clamp.
-                self.engine.state.sel_mon =
-                    match old_to_new.get(old_sel).copied().flatten() {
-                        Some(ni) => ni,
-                        None => self
-                            .engine
-                            .state
-                            .sel_mon
-                            .min(self.engine.state.monitors.len().saturating_sub(1)),
-                    };
+                self.engine.state.sel_mon = match old_to_new.get(old_sel).copied().flatten() {
+                    Some(ni) => ni,
+                    None => self
+                        .engine
+                        .state
+                        .sel_mon
+                        .min(self.engine.state.monitors.len().saturating_sub(1)),
+                };
 
                 // Re-home orphan windows (those on a monitor that disappeared):
                 // land them on the first surviving monitor, clamped to its tag
@@ -276,9 +321,7 @@ impl WindowManager {
                         .unwrap_or(0);
                     if let Some(c) = self.engine.state.clients.get_mut(win) {
                         c.monitor = target;
-                        let n_ws = self.engine.state.monitors[target]
-                            .workspaces
-                            .len();
+                        let n_ws = self.engine.state.monitors[target].workspaces.len();
                         c.workspace = c.workspace.min(n_ws.saturating_sub(1));
                         let ws_i = c.workspace;
                         if is_float {
@@ -300,8 +343,7 @@ impl WindowManager {
             } else {
                 // Geometry-only change: update screen/workarea in place,
                 // preserving all workspace state and client assignments.
-                for (new_mon, old_mon) in
-                    new_mons.iter().zip(self.engine.state.monitors.iter_mut())
+                for (new_mon, old_mon) in new_mons.iter().zip(self.engine.state.monitors.iter_mut())
                 {
                     old_mon.screen = new_mon.screen;
                     old_mon.workarea = new_mon.workarea;
@@ -345,6 +387,18 @@ impl WindowManager {
             return Ok(());
         }
 
+        // `_NET_WM_WINDOW_OPACITY`: tell the compositor the new value so it can
+        // fade the window's texture without re-`ConfigureWindow`ing it.
+        if e.atom == self.atoms.net_wm_window_opacity {
+            if let Some(c) = self.compositor.as_mut() {
+                let opacity =
+                    read_window_opacity(&self.conn, e.window, self.atoms.net_wm_window_opacity)
+                        .unwrap_or(1.0);
+                c.on_opacity(e.window, opacity);
+                return Ok(());
+            }
+        }
+
         if self.engine.state.clients.contains_key(&e.window) {
             let win = e.window;
             if e.atom == self.atoms.net_wm_name || e.atom == u32::from(AtomEnum::WM_NAME) {
@@ -356,6 +410,36 @@ impl WindowManager {
             // action here — `publish_state()` in the event loop diffs the JSON
             // snapshot and pushes updates to IPC subscribers (external bars,
             // maverickctl) exactly when something visible changed.
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_create_notify(
+        &mut self,
+        e: CreateNotifyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(c) = self.compositor.as_mut() {
+            c.on_create(e.window);
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_map_notify(
+        &mut self,
+        e: MapNotifyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(c) = self.compositor.as_mut() {
+            c.on_map(e.window);
+        }
+        Ok(())
+    }
+
+    pub(super) fn on_damage_notify(
+        &mut self,
+        e: DamageNotifyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(c) = self.compositor.as_mut() {
+            c.on_damage(e.drawable);
         }
         Ok(())
     }
@@ -433,11 +517,7 @@ impl WindowManager {
                         _ => !cur,
                     })
                 };
-                self.set_maximized(
-                    e.window,
-                    resolve(wants_v, cur_v),
-                    resolve(wants_h, cur_h),
-                )?;
+                self.set_maximized(e.window, resolve(wants_v, cur_v), resolve(wants_h, cur_h))?;
             }
             let urg = self.atoms.net_wm_state_demands_attention;
             if a1 == urg || a2 == urg {
@@ -465,43 +545,54 @@ impl WindowManager {
         let mods = clean_mask(u16::from(e.state), self.numlock);
         // Primary lookup uses the column-0 keysym (B6). Shift/Lock travel only in
         // `mods`, so `Mod4+Shift+bracketleft` resolves to the bound keysym.
-        let ksym = normalize_ksym(self.keycode_to_keysym(e.detail, u16::from(e.state))?);
-        let key = (mods, ksym);
-        let action = if let Some(a) = self.keymap.get(&key).cloned() {
-            Some(a)
-        } else {
-            // Fallback to the shifted/locked column: anyone who relied on the
-            // old shifted-only resolution still works (B6).
-            let shift = u16::from(e.state) & u16::from(ModMask::SHIFT) != 0;
-            let lock = u16::from(e.state) & u16::from(ModMask::LOCK) != 0;
-            let col = usize::from(shift ^ lock).min(self.raw_kpk.saturating_sub(1));
-            let ksym_shifted = normalize_ksym(self.keysym_at_col(e.detail, col));
-            self.keymap.get(&(mods, ksym_shifted)).cloned()
-        };
-        if let Some(action) = action {
-            let min_interval = match action {
-                Action::Spawn(_) => std::time::Duration::from_millis(200),
-                _ => std::time::Duration::from_millis(60),
-            };
-            if let Some(t) = self.last_key_times.get(&key) {
-                if t.elapsed() < min_interval {
-                    return Ok(());
-                }
-            }
-            let cutoff = std::time::Instant::now()
-                .checked_sub(std::time::Duration::from_secs(1))
-                .unwrap();
-            self.last_key_times.retain(|_, v| *v >= cutoff);
-            self.last_key_times.insert(key, std::time::Instant::now());
-            self.do_action(action)?;
-            // Keyboard navigation must not be instantly undone by an
-            // EnterNotify while the pointer is parked over another tile's
-            // edge. Ignore pointer-focus for a short window; the first real
-            // MotionNotify lifts the guard.
-            self.pointer_guard_until = Some(
-                std::time::Instant::now() + std::time::Duration::from_millis(50),
+        let ks_primary = self.keycode_to_keysym(e.detail, u16::from(e.state))?;
+        // Fallback to the shifted/locked column: anyone who relied on the old
+        // shifted-only resolution still works (B6). Clamped to group 1, which
+        // is the half of the keymap `grab_keys` actually grabbed on.
+        let shift = u16::from(e.state) & u16::from(ModMask::SHIFT) != 0;
+        let lock = u16::from(e.state) & u16::from(ModMask::LOCK) != 0;
+        let col = dispatch_col(shift, lock, self.raw_kpk);
+        let ks_shifted = self.keysym_at_col(e.detail, col);
+
+        // Last resort: keycodes grabbed through the keysym-directed fallback
+        // (the bind only exists at an AltGr / second-group level).
+        let resolved = resolve_binding(
+            &self.keymap,
+            &self.code_bindings,
+            mods,
+            e.detail,
+            ks_primary,
+            ks_shifted,
+        );
+        let Some((key, action)) = resolved else {
+            log::debug!(
+                "key press keycode={} mods={mods:#x} (keysyms {ks_primary:#x}/{ks_shifted:#x}) matched no binding",
+                e.detail
             );
+            return Ok(());
+        };
+
+        let min_interval = match action {
+            Action::Spawn(_) => std::time::Duration::from_millis(200),
+            _ => std::time::Duration::from_millis(60),
+        };
+        if let Some(t) = self.last_key_times.get(&key) {
+            if t.elapsed() < min_interval {
+                return Ok(());
+            }
         }
+        let cutoff = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap();
+        self.last_key_times.retain(|_, v| *v >= cutoff);
+        self.last_key_times.insert(key, std::time::Instant::now());
+        self.do_action(action)?;
+        // Keyboard navigation must not be instantly undone by an EnterNotify
+        // while the pointer is parked over another tile's edge. Ignore
+        // pointer-focus for a short window; the first real MotionNotify lifts
+        // the guard.
+        self.pointer_guard_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(50));
         Ok(())
     }
 
@@ -532,26 +623,32 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn on_mapping(
-        &mut self,
-        e: MappingNotifyEvent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    /// Core `MappingNotify`. Only arms the debounced refresh — re-reading the
+    /// keymap here (and propagating the error with `?`) used to take the whole
+    /// WM down on a transient failure, since this runs inside `run_once` (R3).
+    ///
+    /// `POINTER` is ignored: it reports button mapping, which changes nothing
+    /// about the keyboard grabs. Note that toggling `NumLock` does *not* generate
+    /// a `MappingNotify` — the modifier mapping only changes when a tool like
+    /// `xmodmap`/`setxkbmap` rewrites it.
+    pub(super) fn on_mapping(&mut self, e: &MappingNotifyEvent) {
         if e.request == Mapping::KEYBOARD || e.request == Mapping::MODIFIER {
-            let ks = fetch_keyboard_state(&self.conn)?;
-            self.raw_keymap = ks.keysyms;
-            self.raw_kpk = ks.kpk;
-            self.raw_min = ks.min;
-            self.numlock = ks.numlock;
-            self.grab_keys()?;
-
-            // Re-grab buttons on all existing windows.
-            // Without this, existing grab_button still uses the old numlock
-            // → Mod4+click stops working after NumLock toggle.
-            let wins: Vec<Window> = self.engine.state.clients.keys().copied().collect();
-            for win in wins {
-                let _ = self.grab_buttons(win, false);
-            }
+            self.schedule_keyboard_refresh();
         }
-        Ok(())
     }
+}
+
+/// Read `_NET_WM_WINDOW_OPACITY` (a 32-bit CARDINAL in `0..=0xFFFFFFFF`, where
+/// the max value means fully opaque) and normalise it to `0.0..=1.0`. Returns
+/// `None` when the property is absent or unreadable, so the caller keeps the
+/// current opacity.
+fn read_window_opacity(conn: &maverick_gl::XConn, win: Window, atom: Atom) -> Option<f32> {
+    let ty = u32::from(AtomEnum::CARDINAL);
+    let reply = conn
+        .get_property(false, win, atom, ty, 0, 1)
+        .ok()?
+        .reply()
+        .ok()?;
+    let raw = reply.value32()?.next()?;
+    Some(raw as f32 / 0xFFFF_FFFFu32 as f32)
 }
