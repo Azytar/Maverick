@@ -1636,7 +1636,7 @@ mod frameplan_tests {
 /// budget at realistic window counts.
 #[cfg(test)]
 mod bench {
-    use super::live_placements;
+    use super::{decide_redraw, live_placements, DamageRegion, FrameMode};
     use crate::config::Cfg;
     use crate::core::framebench::CountAllocs;
     use crate::core::layout::{LayoutRegistry, Placements, RibbonScratch};
@@ -1719,6 +1719,44 @@ mod bench {
         for (n, ns, _a) in &results {
             eprintln!("  N={n:>5}  {:.1} ns/frame", ns);
         }
+    }
+
+    /// The partial-redraw bookkeeping — `DamageRegion` accumulation, its bounding
+    /// box, and the `decide_redraw` policy — is pure arithmetic over fixed-size
+    /// arrays, so it must cost nothing in allocations and a negligible amount of
+    /// time per frame. This guards against a per-frame heap allocation sneaking
+    /// into the damage path (which would defeat the whole point of Fase 6..8).
+    #[test]
+    fn damage_region_and_plan_is_allocation_free_and_cheap() {
+        let iters: u64 = 20_000;
+        let counter = CountAllocs::start();
+        let mut region = DamageRegion::new();
+        let t0 = std::time::Instant::now();
+        for _ in 0..iters {
+            // A typical idle content-damage frame: a few small windows repainted.
+            region.clear();
+            region.add(Rect::new(100, 100, 200, 50));
+            region.add(Rect::new(800, 400, 120, 120));
+            region.add(Rect::new(1500, 900, 60, 40));
+            let _bbox = region.bounding_rect();
+            let _mode = decide_redraw(true, false, !region.is_empty());
+        }
+        let ns = t0.elapsed().as_nanos() as f64 / iters as f64;
+        let allocs = counter.finish().div_ceil(iters);
+        assert_eq!(
+            allocs, 0,
+            "{allocs} alloc(s)/frame in the damage + plan path — must reuse buffers"
+        );
+        assert!(
+            ns < 50_000.0,
+            "{ns:.0} ns/frame in the damage + plan path exceeds 50 µs"
+        );
+        eprintln!(
+            "damage+plan bench: {:.1} ns/frame, {allocs} allocs/frame (Partial expected)",
+            ns
+        );
+        // Sanity: the policy the bench exercised resolves to a partial redraw.
+        assert_eq!(decide_redraw(true, false, true), FrameMode::Partial);
     }
 }
 
