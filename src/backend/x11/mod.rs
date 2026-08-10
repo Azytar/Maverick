@@ -359,7 +359,12 @@ impl WindowManager {
                 anim |= self.engine.state.tick_animations(sub);
             }
             self.animating = anim;
-            if self.animating || comp.needs_frame() {
+            // Single scheduling decision: render this turn only if something is
+            // actually moving or the compositor has damage to show. This is what
+            // keeps idle free — when `false` we do no GL work and the wait phase
+            // below parks on a 100 ms poll (see `pending` / `timeout_ms`).
+            let wants_frame = self.animating || comp.needs_frame();
+            if wants_frame {
                 // Pace to the vertical retrace *before* drawing so the GPU flip
                 // lands on a retrace. This is the core fluidity fix: a fixed
                 // 16 ms sleep drifted against the real refresh and made us miss
