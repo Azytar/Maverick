@@ -32,12 +32,21 @@ use crate::types::{LayoutKind, Monitor, Rect, State, WindowId};
 
 #[cfg(test)]
 use crate::core::layout::LayoutRegistry;
+#[cfg(test)]
+use crate::core::layout::RibbonScratch;
 
-/// Rewrite `placements` in place, applying the presentation overlay for `mon`.
-/// Returns every presented window in `placements` order (focused last, so the
-/// caller can raise them in that order and the focused one lands on top).
-pub fn present(state: &State, mon: &Monitor, placements: &mut Placements) -> Vec<WindowId> {
-    let mut raise = Vec::new();
+/// Rewrite `placements` in place, applying the presentation overlay for `mon`,
+/// and collect every presented window into `raise` (cleared first) in
+/// `placements` order — focused last, so the caller can raise them in that
+/// order and the focused one lands on top.
+///
+/// `raise` is caller-owned rather than returned because the two production
+/// callers (`arrange_full_phase` and the compositor's `live_placements`) both
+/// discard it, and `live_placements` runs once per animating monitor *per
+/// frame*. Returning a fresh `Vec` there was a heap allocation on every frame
+/// of every scroll, for a value nobody read.
+pub fn present_into(state: &State, mon: &Monitor, placements: &mut Placements, raise: &mut Vec<WindowId>) {
+    raise.clear();
     for entry in placements.iter_mut() {
         let win = entry.0;
         let tile = entry.1;
@@ -57,9 +66,7 @@ pub fn present(state: &State, mon: &Monitor, placements: &mut Placements) -> Vec
             // is exclusive by definition, covers the screen in *any* layout, and
             // is excluded from `fs_ctx` so it never joins the ribbon at all.
             Some((mon.screen, 0))
-        } else if (client.is_maximized_v() || client.is_maximized_h())
-            && mon.focused == Some(win)
-        {
+        } else if (client.is_maximized_v() || client.is_maximized_h()) && mon.focused == Some(win) {
             // Per-axis maximize: `maximized_rect` only stretches the axes that
             // are actually on (a vertical-only maximize fills the workarea's
             // height but keeps its tile width), so `_NET_WM_STATE_MAXIMIZED_VERT`
@@ -82,6 +89,14 @@ pub fn present(state: &State, mon: &Monitor, placements: &mut Placements) -> Vec
             raise.push(win);
         }
     }
+}
+
+/// [`present_into`] with an owned result. Convenience for tests and for callers
+/// that genuinely want the list; the per-frame paths use `present_into`.
+#[cfg(test)]
+pub fn present(state: &State, mon: &Monitor, placements: &mut Placements) -> Vec<WindowId> {
+    let mut raise = Vec::new();
+    present_into(state, mon, placements, &mut raise);
     raise
 }
 
@@ -145,7 +160,15 @@ mod tests {
 
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
-        crate::core::layout::arrange(&state, 0, &cfg, &registry, &mut p);
+
+crate::core::layout::arrange(&state, 
+            0,
+            &cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut p,
+            &mut RibbonScratch::default(),
+        );
         let raised = present(&state, &state.monitors[0], &mut p);
 
         assert_eq!(raised, vec![1]);
@@ -170,7 +193,15 @@ mod tests {
 
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
-        crate::core::layout::arrange(&state, 0, &cfg, &registry, &mut p);
+
+crate::core::layout::arrange(&state, 
+            0,
+            &cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut p,
+            &mut RibbonScratch::default(),
+        );
         let raised = present(&state, &state.monitors[0], &mut p);
 
         assert_eq!(raised, vec![1], "unfocused fullscreen stays presented");
@@ -199,7 +230,15 @@ mod tests {
 
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
-        crate::core::layout::arrange(&state, 0, &cfg, &registry, &mut p);
+
+crate::core::layout::arrange(&state, 
+            0,
+            &cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut p,
+            &mut RibbonScratch::default(),
+        );
         let raised = present(&state, &state.monitors[0], &mut p);
 
         assert_eq!(raised, vec![1]);
@@ -228,7 +267,15 @@ mod tests {
 
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
-        crate::core::layout::arrange(&state, 0, &cfg, &registry, &mut p);
+
+crate::core::layout::arrange(&state, 
+            0,
+            &cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut p,
+            &mut RibbonScratch::default(),
+        );
         let raised = present(&state, &state.monitors[0], &mut p);
 
         assert!(
@@ -258,7 +305,15 @@ mod tests {
 
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
-        crate::core::layout::arrange(&state, 0, &cfg, &registry, &mut p);
+
+crate::core::layout::arrange(&state, 
+            0,
+            &cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut p,
+            &mut RibbonScratch::default(),
+        );
         present(&state, &state.monitors[0], &mut p);
 
         let (_, rect, bw) = p.iter().find(|e| e.0 == 1).copied().unwrap();
@@ -289,7 +344,15 @@ mod tests {
 
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
-        crate::core::layout::arrange(&state, 0, &cfg, &registry, &mut p);
+
+crate::core::layout::arrange(&state, 
+            0,
+            &cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut p,
+            &mut RibbonScratch::default(),
+        );
         let tile = p.iter().find(|e| e.0 == 1).copied().unwrap().1;
         present(&state, &state.monitors[0], &mut p);
         let presented = p.iter().find(|e| e.0 == 1).copied().unwrap().1;
@@ -345,7 +408,15 @@ mod tests {
 
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
-        crate::core::layout::arrange(&state, 0, &cfg, &registry, &mut p);
+
+crate::core::layout::arrange(&state, 
+            0,
+            &cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut p,
+            &mut RibbonScratch::default(),
+        );
         let snapshot = p.clone();
         let raised = present(&state, &state.monitors[0], &mut p);
 

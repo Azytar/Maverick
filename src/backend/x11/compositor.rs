@@ -49,9 +49,11 @@ use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::protocol::xproto::*;
 
 use crate::config::Cfg;
-use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements};
+use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements, RibbonScratch};
+#[cfg(test)]
 use crate::core::present::present;
-use crate::types::{Rect, State};
+use crate::core::present::present_into;
+use crate::types::{Rect, State, WindowId};
 
 /// Soft upper bound on substep length (seconds). The camera spring (`damping`
 /// 30) is unstable above ~8 ms, so every animation frame is split into pieces
@@ -1081,13 +1083,13 @@ pub fn live_placements(
     cfg: &Cfg,
     registry: &LayoutRegistry,
     out: &mut Placements,
+    raise: &mut Vec<WindowId>,
+    scratch: &mut RibbonScratch,
 ) {
-    let mut buf = Vec::with_capacity(out.capacity());
-    arrange(state, mon_idx, cfg, registry, Phase::Live, &mut buf);
-    let mon = &state.monitors[mon_idx];
-    present(state, mon, &mut buf);
     out.clear();
-    out.extend(buf.drain(..));
+    arrange(state, mon_idx, cfg, registry, Phase::Live, out, scratch);
+    let mon = &state.monitors[mon_idx];
+    present_into(state, mon, out, raise);
 }
 
 /// Substep the given total `dt` (seconds) into pieces no longer than

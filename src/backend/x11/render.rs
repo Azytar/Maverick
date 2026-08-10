@@ -1,6 +1,10 @@
 use super::*;
+use crate::core::commands::retarget_focus_to_window;
 use crate::core::layout::fs_ctx;
+use crate::core::layout::Phase;
+use crate::core::present::present_into;
 use x11rb::protocol::shape;
+
 
 /// Approximate a rounded rectangle of size `w`×`h` with corner radius `r` as
 /// a list of X11 `Rectangle`s: one full-width middle band, plus one 1px-tall
@@ -106,6 +110,17 @@ impl WindowManager {
         self.arrange_full(mon_idx, true)
     }
 
+    /// Like `arrange`, but projects with `Phase::Live` so the X11-only path
+    /// animates each frame (reads the live camera `position`). The compositor
+    /// path must NOT use this — it configures X only once, at the settled
+    /// (`target`) position, and animates on the GPU instead.
+    pub(super) fn arrange_live(
+        &mut self,
+        mon_idx: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.arrange_full_phase(mon_idx, true, Phase::Live)
+    }
+
     /// Reposition floating windows to stay within the workarea after a monitor
     /// geometry change. Clamps each float's size *and* position so its whole
     /// frame remains inside the new workarea — including floats that are larger
@@ -118,10 +133,10 @@ impl WindowManager {
             return Ok(());
         }
         let wa = self.engine.state.monitors[mon_idx].workarea;
-        
+
         // Collect all floats that need repositioning to avoid borrow conflicts
         let mut to_reposition: Vec<(WindowId, Rect, u32)> = Vec::new();
-        
+
         // Regular floats in workspaces
         for ws in &self.engine.state.monitors[mon_idx].workspaces {
             for &win in &ws.floats {
@@ -134,7 +149,7 @@ impl WindowManager {
                 }
             }
         }
-        
+
         // Sticky floats that belong to this monitor
         for (&win, client) in &self.engine.state.clients {
             if client.monitor == mon_idx && client.is_sticky() && client.is_float() {
@@ -145,12 +160,12 @@ impl WindowManager {
                 }
             }
         }
-        
+
         // Apply all repositionings
         for (win, g, bw) in to_reposition {
             self.apply_geom(win, g, bw)?;
         }
-        
+
         Ok(())
     }
 
@@ -161,6 +176,19 @@ impl WindowManager {
         &mut self,
         mon_idx: usize,
         do_hide: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.arrange_full_phase(mon_idx, do_hide, Phase::Settled)
+    }
+
+    /// `arrange_full` with an explicit projection phase. `Settled` (the
+    /// compositor path, one-shot) projects to the camera's rest `target`;
+    /// `Live` (the X11-only animation path, per-frame) projects to the live
+    /// `position` so windows ease smoothly.
+    pub(super) fn arrange_full_phase(
+        &mut self,
+        mon_idx: usize,
+        do_hide: bool,
+        phase: Phase,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if mon_idx >= self.engine.state.monitors.len() {
             return Ok(());
@@ -176,23 +204,36 @@ impl WindowManager {
             mon_idx,
             &self.engine.cfg,
             &self.layout_registry,
+            phase,
             &mut self.placements_buf,
+            &mut self.ribbon_scratch,
         );
-        // Presentation layer: apply the fullscreen/maximized overlay.
-        let mut buf = std::mem::take(&mut self.placements_buf);
-        present(
+        // Presentation layer: apply the fullscreen/maximized overlay in place.
+        present_into(
             &self.engine.state,
             &self.engine.state.monitors[mon_idx],
-            &mut buf,
+            &mut self.placements_buf,
+            &mut self.present_scratch,
         );
-        for &(win, geom, bw) in &buf {
+        // Collect into a local so the immutable borrow of `placements_buf`
+        // ends before `apply_geom` mutates `self`.
+        let placements: Vec<_> = self.placements_buf.to_vec();
+        for &(win, geom, bw) in &placements {
             self.apply_geom(win, geom, bw)?;
         }
-        buf.clear();
-        self.placements_buf = buf;
+        self.placements_buf.clear();
         // Overlay stacking: presented windows above tiles, popups of presented
         // windows above the overlay, focused window on top (or peek).
         self.stack_overlay(mon_idx);
+        // When the compositor owns the screen, the new (settled) geometry must
+        // trigger a redraw — the overlay is what's actually visible, not the
+        // window's live X geometry.
+        if let Some(c) = self.compositor.as_mut() {
+            c.invalidate();
+        }
+        // The live projection for this monitor is now stale; the frame loop
+        // recomputes it (and only it) on the next composited frame.
+        self.engine.state.monitors[mon_idx].layout_dirty = true;
         Ok(())
     }
 
@@ -212,21 +253,16 @@ impl WindowManager {
                 .flat_map(|c| c.windows.iter().copied())
                 .chain(ws.floats.iter().copied()),
         );
-        // A fullscreen window in the Column layout is a normal ribbon
-        // participant: its column's *siblings* must be hidden (off-screen)
-        // while it is fullscreen, so they don't peek out beside it. The
-        // fullscreen window itself stays in the set (it scrolls with the
-        // camera). Use the same `fs_ctx` the layout uses so the rule matches.
-        let fs = fs_ctx(&self.engine.state.clients, ws, mon.screen);
-        if let Some(fsc) = fs.col {
-            if let Some(col) = ws.columns.get(fsc) {
-                for &w in &col.windows {
-                    if fs.win != Some(w) {
-                        self.hide_ws_set.remove(&w);
-                    }
-                }
-            }
-        }
+        // NOTE: a fullscreen column stays visible (it scrolls with the camera as
+        // a normal ribbon participant), so it must remain *in* `hide_ws_set` —
+        // i.e. it is NOT physically hidden here. Previously fullscreen windows
+        // were removed from the set, which sent them through the hide branch
+        // (off-screen + `wm_hidden = true`); `arrange` then re-showed them
+        // physically but left `wm_hidden` stale. That stale flag later blocked
+        // `hide_offscreen` from ever hiding the window on a workspace switch, so
+        // a fullscreen tile kept covering the next workspace. Keeping it in the
+        // set avoids the stale flag entirely.
+        //
         // Sticky floats stay visible on every workspace of this monitor.
         self.hide_ws_set.extend(
             self.engine
@@ -258,6 +294,17 @@ impl WindowManager {
                     .conn
                     .configure_window(win, &ConfigureWindowAux::new().x(off_x));
                 client.wm_hidden = true;
+                // Only hide from the compositor when the window truly lives on
+                // another workspace. A fullscreen window in the *active*
+                // workspace is deliberately excluded from `hide_ws_set` (it is a
+                // participant of the scrolling ribbon, not an overlay) so it is
+                // never physically hidden — marking it hidden here would make it
+                // vanish. `client.workspace` is the authoritative membership.
+                if client.workspace != self.engine.state.monitors[mon_idx].active_ws {
+                    if let Some(c) = self.compositor.as_mut() {
+                        c.set_hidden(win, true);
+                    }
+                }
             } else if in_ws && client.wm_hidden {
                 let gx = client.geom.x;
                 let gy = client.geom.y;
@@ -265,6 +312,9 @@ impl WindowManager {
                     .conn
                     .configure_window(win, &ConfigureWindowAux::new().x(gx).y(gy));
                 client.wm_hidden = false;
+                if let Some(c) = self.compositor.as_mut() {
+                    c.set_hidden(win, false);
+                }
             }
         }
         Ok(())
@@ -336,25 +386,14 @@ impl WindowManager {
             .flat_map(|c| c.windows.iter().copied())
             .chain(ws.floats.iter().copied())
             .filter(|win| {
-            let focused = mon.focused;
-            self.engine
-                .state
-                .clients
-                .get(win)
-                .is_some_and(|c| {
-                    (c.is_fullscreen()
-                        && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen()))
-                        || ((c.is_maximized_v() || c.is_maximized_h())
-                            && focused == Some(*win))
+                let focused = mon.focused;
+                self.engine.state.clients.get(win).is_some_and(|c| {
+                    (c.is_fullscreen() && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen()))
+                        || ((c.is_maximized_v() || c.is_maximized_h()) && focused == Some(*win))
                 })
             })
             .collect();
-        presented.sort_by_key(|win| {
-            mon.focus_stack
-                .iter()
-                .position(|&x| x == *win)
-                .unwrap_or(0)
-        });
+        presented.sort_by_key(|win| mon.focus_stack.iter().position(|&x| x == *win).unwrap_or(0));
         order.extend(presented.iter().copied());
 
         // 3. Peek: a focused *floating* window (dialog/popup) is raised above
@@ -386,7 +425,11 @@ impl WindowManager {
             }
         }
 
-        if self.last_stack_order.get(&mon_idx).is_none_or(|prev| *prev != order) {
+        if self
+            .last_stack_order
+            .get(&mon_idx)
+            .is_none_or(|prev| *prev != order)
+        {
             for &win in &order {
                 self.raise(win);
             }
@@ -402,45 +445,46 @@ impl WindowManager {
         //    covering→not-covering transition, to avoid a `raise()` storm.
         let covering = ws.layout == LayoutKind::Column
             && !ws.overview
-            && fs.win.is_some_and(|w| mon.focused == Some(w))
+            && fs.win.is_some()
             && (ws.camera.position - ws.camera.target).abs() < 0.5
             && ws.camera.velocity.abs() < 0.01
             && (ws.zoom - ws.zoom_target).abs() < 0.001;
 
-        if covering {
-            if let Some(w) = fs.win {
-                // Last in `order` → raised above the dock and every tile.
-                self.raise(w);
-                self.last_stack_order
-                    .entry(mon_idx)
-                    .or_default()
-                    .push(w);
-            }
-        } else if fs.win.is_some_and(|w| mon.focused == Some(w) || self.engine.state.clients.get(&w).is_some_and(Client::is_fullscreen)) {
-            // Coverage just ended (or the fullscreen tile scrolled away): drop
-            // it to the bottom so the neighbour tile and bar paint over it.
-            let prev_covering = self.fs_covering.get(&mon_idx).copied().unwrap_or(false);
-            if prev_covering {
-                if let Some(w) = fs.win {
-                    let _ = self
-                        .conn
-                        .configure_window(w, &ConfigureWindowAux::new().stack_mode(StackMode::BELOW));
-                }
-                // Return the dock/bar above the (now bottom) fullscreen tile.
-                for (&dock, &dock_mon) in &self.docks {
-                    if dock_mon == mon_idx {
-                        self.raise(dock);
+        // `fs.win` is the *focused* fullscreen window (or `None`); exactly one
+        // fullscreen column is raised above the dock at a time — the one you are
+        // looking at. Track the transition so moving focus between fullscreen
+        // columns drops the old one and raises the new one.
+        let new_cover = if covering { fs.win } else { None };
+        let prev_cover = self.fs_covering.get(&mon_idx).copied().flatten();
+        if prev_cover != new_cover {
+            // Drop the previously-covering window to the bottom so the neighbour
+            // tile and the bar paint over it (only on this transition).
+            if let Some(w) = prev_cover {
+                if new_cover != Some(w) {
+                    let _ = self.conn.configure_window(
+                        w,
+                        &ConfigureWindowAux::new().stack_mode(StackMode::BELOW),
+                    );
+                    for (&dock, &dock_mon) in &self.docks {
+                        if dock_mon == mon_idx {
+                            self.raise(dock);
+                        }
                     }
                 }
             }
+            // Raise the newly-covering window above the dock and every tile.
+            if let Some(w) = new_cover {
+                self.raise(w);
+                self.last_stack_order.entry(mon_idx).or_default().push(w);
+            }
         }
-        self.fs_covering.insert(mon_idx, covering);
+        self.fs_covering.insert(mon_idx, new_cover);
     }
 
     /// True when `win`'s `transient_parent` chain reaches any window in `roots`.
     /// Walks at most `MAX_TRANSIENT_DEPTH` links to survive popup-of-popup
     /// ownership without risking cycles.
-    fn transient_of(&self, win: WindowId, roots: &[WindowId]) -> bool {
+    pub(super) fn transient_of(&self, win: WindowId, roots: &[WindowId]) -> bool {
         const MAX_TRANSIENT_DEPTH: usize = 4;
         let mut cur = self
             .engine
@@ -455,7 +499,12 @@ impl WindowManager {
             if roots.contains(&p) {
                 return true;
             }
-            cur = self.engine.state.clients.get(&p).and_then(|c| c.transient_parent);
+            cur = self
+                .engine
+                .state
+                .clients
+                .get(&p)
+                .and_then(|c| c.transient_parent);
         }
         false
     }
@@ -470,6 +519,8 @@ impl WindowManager {
             Some(c) => c,
             None => return Ok(()),
         };
+        // Monitor whose live projection is invalidated by this geometry write.
+        let mon = client.monitor;
         // A pending state transition (fullscreen/maximized on or off) forces the
         // reconfigure even when the rect is unchanged — see
         // `Client::geometry_dirty`. Otherwise identical geometry is skipped,
@@ -514,8 +565,13 @@ impl WindowManager {
             c.border_w = bw;
             c.geometry_dirty = false;
         }
+        // Invalidate this monitor's cached live projection so the compositor
+        // re-projects it on the next frame (the geometry it drew is now stale).
+        if mon < self.engine.state.monitors.len() {
+            self.engine.state.monitors[mon].layout_dirty = true;
+        }
 
-        if self.engine.cfg.corner_radius > 0 {
+        if self.engine.cfg.corner_radius > 0 && self.compositor.is_none() {
             // Fullscreen is always square, niri-style — border-0 and edge-to-
             // edge, so a rounded mask has no desktop behind it to reveal and
             // just chops the content under a curved clip instead.
@@ -635,6 +691,48 @@ impl WindowManager {
             mon.focus_stack.retain(|&x| x != w);
             mon.focus_stack.push(w);
 
+            // Keep the workspace's focused column/row in sync with the window
+            // that is actually focused, and recenter the camera on it (niri-
+            // style: focusing/clicking a window brings it to the centre).
+            // Keep the focused column/row in sync with the window that is
+            // actually focused, and recenter the camera so the focused column
+            // is brought into view ("the camera looks at it"), exactly like the
+            // `h`/`l` keyboard navigation — so a mouse click on a side tile
+            // makes that tile usable, not stuck peeking off-screen.
+            //
+            // The recenter moves the just-focused window under the pointer; to
+            // stop the *next* click (at the same spot) from landing on whatever
+            // scrolled under the cursor, `on_button_press` warps the pointer
+            // onto the newly-focused window after this runs. Keyboard navigation
+            // recenters itself via `ideal_scroll` before calling `focus`, so it
+            // stays unaffected.
+            //
+            // `retarget_focus_to_window` is the pure core helper the keyboard
+            // path's `ideal_scroll` retarget also funnels through, and it is
+            // `#[must_use]`: the monitor index it hands back is exactly the one
+            // whose settled projection is still owed (`self.arrange` below), so
+            // deleting that call turns the binding into an unused-variable
+            // warning instead of a silent input-geometry regression.
+            let retargeted =
+                retarget_focus_to_window(&mut self.engine.state, &self.engine.cfg, w);
+
+            // Keep X11 geometry (`client.geom`) in sync with the just-retargeted
+            // camera. The keyboard focus path emits `ArrangeMonitor` before
+            // `FocusWindow`, which makes `arrange` rewrite `client.geom` from the
+            // new `camera.target`. The mouse path (`on_button_press`, `on_enter`,
+            // `_NET_ACTIVE_WINDOW`) calls `focus()` directly with no
+            // `ArrangeMonitor`, so `client.geom` was left pointing at the previous
+            // settled position — and the next X hit-test (`find_client`) landed on
+            // the wrong window. Projecting here closes that asymmetry: every
+            // `camera.target` mutation now derives `client.geom` (design doc §5-§6).
+            //
+            // `arrange` only *reads* `camera.{target,position}` to compute
+            // geometry; it never mutates the spring, so the compositor keeps
+            // interpolating `position → target`. `hide_offscreen` is skipped while
+            // a drag is in progress (guarded in `arrange_full_phase`), so a focus
+            // change mid-drag can't un-hide/offscreen windows incorrectly.
+            self.arrange(retargeted.unwrap_or(mon_i))?;
+
             // Overlay stacking (presented / popups-of-presented / peek).
             self.stack_overlay(mon_i);
 
@@ -647,6 +745,17 @@ impl WindowManager {
             );
 
             if self.engine.cfg.warp_cursor {
+                // `arrange` above rewrote `client.geom` to the new settled
+                // position; warp onto *that* (not the stale pre-scroll `geom`
+                // captured at the top), so the warped pointer lands on the
+                // window we actually focused rather than wherever it slid from.
+                let g = self
+                    .engine
+                    .state
+                    .clients
+                    .get(&w)
+                    .map(|c| c.geom)
+                    .unwrap_or(geom);
                 let _ = self.conn.warp_pointer(
                     x11rb::NONE,
                     w,
@@ -654,8 +763,8 @@ impl WindowManager {
                     0,
                     0,
                     0,
-                    (geom.w / 2) as i16,
-                    (geom.h / 2) as i16,
+                    (g.w / 2) as i16,
+                    (g.h / 2) as i16,
                 );
             }
         } else {
@@ -742,7 +851,10 @@ mod tests {
         let wa = workarea();
         let bw = 2;
         let g = clamp_float_to_workarea(Rect::new(5000, 5000, 640, 480), wa, bw);
-        assert!(fits(g, wa, bw), "off-screen float must be pulled inside: {g:?}");
+        assert!(
+            fits(g, wa, bw),
+            "off-screen float must be pulled inside: {g:?}"
+        );
         assert_eq!(g.w, 640, "a float that fits keeps its size");
         assert_eq!(g.h, 480);
 

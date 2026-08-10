@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod unit_tests {
     use crate::config::Cfg;
+    use crate::core::layout::{FsCtx, LayoutRegistry, RibbonScratch};
     use crate::core::Engine;
-    use crate::core::layout::{FsCtx, LayoutRegistry};
     use crate::types::{Action, LayoutKind, Monitor, Rect};
 
     fn default_registry() -> LayoutRegistry {
@@ -21,6 +21,7 @@ mod unit_tests {
             warp_cursor: false,
             accordion_boost: 0.30,
             overview_zoom_min: 0.25,
+            compositor: crate::config::CompositorCfg::default(),
             col_normal: 0,
             col_focused: 0,
             col_urgent: 0,
@@ -77,10 +78,8 @@ mod unit_tests {
         // register the client and add it to the active workspace's columns.
         let mi = engine.state.sel_mon;
         let ws_i = engine.state.monitors[mi].active_ws;
-        engine.state.monitors[mi].workspaces[ws_i].add_tiled(
-            new_window_id,
-            engine.cfg.column_width,
-        );
+        engine.state.monitors[mi].workspaces[ws_i]
+            .add_tiled(new_window_id, engine.cfg.column_width);
         let mut client = Client::new(new_window_id, mi, ws_i);
         client.border_w = engine.cfg.border_w;
         engine.state.add_client(client);
@@ -88,7 +87,14 @@ mod unit_tests {
         // Run the pure layout the live path uses (backend::arrange → layout::arrange).
         let mut placements = Placements::with_capacity(4);
         let registry = default_registry();
-        arrange(&engine.state, mi, &engine.cfg, &registry, &mut placements);
+        arrange(            &engine.state,
+            mi,
+            &engine.cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut placements,
+            &mut RibbonScratch::default(),
+        );
 
         let placed = placements.iter().any(|(win, _, _)| *win == new_window_id);
         assert!(
@@ -120,14 +126,14 @@ mod unit_tests {
             windows: vec![10],
             focused: 0,
             weight: 0.5,
-    boost: 1.0,
-});
+            boost: 1.0,
+        });
         ws.columns.push(Column {
             windows: vec![20],
             focused: 0,
             weight: 0.5,
-    boost: 1.0,
-});
+            boost: 1.0,
+        });
         ws.focus = Focus { column_idx: 0 };
         engine.state.monitors[0].focused = Some(10);
         engine
@@ -167,8 +173,8 @@ mod unit_tests {
             windows: vec![10, 20],
             focused: 0,
             weight: 0.5,
-    boost: 1.0,
-});
+            boost: 1.0,
+        });
         ws.focus = Focus { column_idx: 0 };
         engine.state.monitors[0].focused = Some(10);
 
@@ -189,8 +195,8 @@ mod unit_tests {
             windows: vec![10],
             focused: 0,
             weight: 0.5,
-    boost: 1.0,
-});
+            boost: 1.0,
+        });
         ws.focus = Focus { column_idx: 0 };
         engine.state.monitors[0].focused = Some(10);
 
@@ -292,8 +298,8 @@ mod unit_tests {
                 windows: vec![10],
                 focused: 0,
                 weight: 0.5,
-    boost: 1.0,
-});
+                boost: 1.0,
+            });
             ws.focus = crate::types::Focus { column_idx: 0 };
         }
         engine.state.monitors[0].focused = Some(10);
@@ -313,7 +319,6 @@ mod unit_tests {
             "a 3-command transaction must coalesce into exactly one state publish, got {publishes}",
         );
     }
-
 
     // ─── Capability Layer ──────────────────────────────────────────────────
     // External consumers (bars, hooks, tests) read through `Engine::query()`,
@@ -337,8 +342,8 @@ mod unit_tests {
                 windows: vec![42],
                 focused: 0,
                 weight: 0.5,
-    boost: 1.0,
-});
+                boost: 1.0,
+            });
             ws.focus = Focus { column_idx: 0 };
         }
         engine.state.monitors[0].focused = Some(42);
@@ -357,7 +362,7 @@ mod unit_tests {
         assert_eq!(q.workspace_count(), 9);
     }
 
-#[test]
+    #[test]
     fn test_query_visible_windows_and_info() {
         let engine = seed_engine_with_window();
         let q = engine.query();
@@ -386,19 +391,13 @@ mod unit_tests {
                 windows: vec![7, 42],
                 focused: 1,
                 weight: 0.5,
-    boost: 1.0,
-});
+                boost: 1.0,
+            });
             ws.focus = Focus { column_idx: 0 };
         }
         engine.state.monitors[0].focused = Some(42);
-        engine
-            .state
-            .clients
-            .insert(7, Client::new(7, 0, 0));
-        engine
-            .state
-            .clients
-            .insert(42, Client::new(42, 0, 0));
+        engine.state.clients.insert(7, Client::new(7, 0, 0));
+        engine.state.clients.insert(42, Client::new(42, 0, 0));
         engine
             .state
             .clients
@@ -419,7 +418,13 @@ mod unit_tests {
 
         // Without any overlay window, behavior stays column-focused.
         // Without any overlay window, behavior stays column-focused.
-        engine.state.clients.get_mut(&7).unwrap().flags.clear(WinFlags::FULLSCREEN);
+        engine
+            .state
+            .clients
+            .get_mut(&7)
+            .unwrap()
+            .flags
+            .clear(WinFlags::FULLSCREEN);
         assert_eq!(engine.state.best_focus(0), Some(42));
     }
 
@@ -453,7 +458,10 @@ mod unit_tests {
             .unwrap()
             .floats
             .push(9);
-        engine.state.clients.insert(9, crate::types::Client::new(9, 0, 0));
+        engine
+            .state
+            .clients
+            .insert(9, crate::types::Client::new(9, 0, 0));
         engine.state.monitors[0].focused = Some(9);
         let focused = query_json(&engine.state, &engine.cfg, "focused");
         assert!(focused.contains("\"window\":9"));
@@ -487,7 +495,14 @@ mod unit_tests {
         let gap = engine.cfg.gaps_inner as i32;
         let mut placements = Placements::new();
         let registry = default_registry();
-        arrange(&engine.state, 0, &engine.cfg, &registry, &mut placements);
+        arrange(            &engine.state,
+            0,
+            &engine.cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut placements,
+            &mut RibbonScratch::default(),
+        );
 
         // Columns keep independent fixed widths and never shrink to fit: they
         // are laid out sequentially in a ribbon that may extend past the screen
@@ -496,7 +511,10 @@ mod unit_tests {
         for &(win, geom, _) in &placements {
             let _ = win;
             assert!(geom.x >= prev_right, "columns must not overlap");
-            assert!(geom.w as i32 <= wa.w as i32, "no single column exceeds the workarea");
+            assert!(
+                geom.w as i32 <= wa.w as i32,
+                "no single column exceeds the workarea"
+            );
             assert!(geom.y >= wa.y);
             assert!(geom.bottom() <= wa.bottom());
             prev_right = geom.right() + gap;
@@ -554,7 +572,14 @@ mod unit_tests {
         };
         let mut placements = Placements::new();
         let registry = default_registry();
-        arrange(&engine.state, 0, cfg, &registry, &mut placements);
+        arrange(            &engine.state,
+            0,
+            cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut placements,
+            &mut RibbonScratch::default(),
+        );
         for (i, &(win, geom, _)) in placements.iter().enumerate() {
             let _ = win;
             let c = (i as i32) % cols;
@@ -578,11 +603,7 @@ mod unit_tests {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
         let ws_i = engine.state.monitors[mi].active_ws;
-        engine
-            .state
-            .monitors[mi]
-            .workspaces[ws_i]
-            .add_tiled(1, 0.6);
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, 0.6);
         engine.state.monitors[mi].focused = Some(1);
         engine.state.monitors[mi].focus_stack = vec![1];
         let mut c = Client::new(1, mi, ws_i);
@@ -610,11 +631,7 @@ mod unit_tests {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
         let ws_i = engine.state.monitors[mi].active_ws;
-        engine
-            .state
-            .monitors[mi]
-            .workspaces[ws_i]
-            .add_tiled(1, 0.5);
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, 0.5);
         let mut c = Client::new(1, mi, ws_i);
         c.border_w = engine.cfg.border_w;
         engine.state.add_client(c);
@@ -629,7 +646,14 @@ mod unit_tests {
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Grid;
         let mut placements = Placements::new();
         let registry = default_registry();
-        arrange(&engine.state, mi, &engine.cfg, &registry, &mut placements);
+        arrange(            &engine.state,
+            mi,
+            &engine.cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut placements,
+            &mut RibbonScratch::default(),
+        );
 
         let (_, rect, _) = placements.iter().find(|e| e.0 == 2).copied().unwrap();
         let wa = engine.state.monitors[mi].workarea;
@@ -669,10 +693,20 @@ mod unit_tests {
 
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
-        arrange(&engine.state, 0, &engine.cfg, &registry, &mut p);
+        arrange(            &engine.state,
+            0,
+            &engine.cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut p,
+            &mut RibbonScratch::default(),
+        );
         let raised = present(&engine.state, &engine.state.monitors[0], &mut p);
 
-        assert!(!raised.contains(&1), "unfocused maximized must not bleed into overlay");
+        assert!(
+            !raised.contains(&1),
+            "unfocused maximized must not bleed into overlay"
+        );
         let (_, rect1, _) = p.iter().find(|e| e.0 == 1).copied().unwrap();
         assert!(rect1.w < engine.state.monitors[0].workarea.w);
     }
@@ -690,20 +724,39 @@ mod unit_tests {
         let mut engine = setup_engine();
         {
             let ws = &mut engine.state.monitors[0].workspaces[0];
-            ws.columns.push(Column { windows: vec![1], focused: 0, weight: 1.0, boost: 1.0 });
-            ws.columns.push(Column { windows: vec![2], focused: 0, weight: 1.0, boost: 1.0 });
+            ws.columns.push(Column {
+                windows: vec![1],
+                focused: 0,
+                weight: 1.0,
+                boost: 1.0,
+            });
+            ws.columns.push(Column {
+                windows: vec![2],
+                focused: 0,
+                weight: 1.0,
+                boost: 1.0,
+            });
             ws.focus = Focus { column_idx: 0 };
         }
         engine.state.monitors[0].focused = Some(1);
         engine.state.monitors[0].focus_stack = vec![1, 2];
         engine.state.clients.insert(1, Client::new(1, 0, 0));
         engine.state.clients.insert(2, Client::new(2, 0, 0));
-        engine.state.clients.get_mut(&1).unwrap().flags.set(WinFlags::FULLSCREEN);
+        engine
+            .state
+            .clients
+            .get_mut(&1)
+            .unwrap()
+            .flags
+            .set(WinFlags::FULLSCREEN);
 
         let before = engine.state.monitors[0].workspaces[0].focus.column_idx;
         engine.execute(FocusDirection(Dir::Right));
         let after = engine.state.monitors[0].workspaces[0].focus.column_idx;
-        assert_ne!(after, before, "FocusDirection must move columns even while window 1 is fullscreen");
+        assert_ne!(
+            after, before,
+            "FocusDirection must move columns even while window 1 is fullscreen"
+        );
         assert_eq!(
             engine.state.monitors[0].focused,
             Some(2),
@@ -721,7 +774,14 @@ mod unit_tests {
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
         engine.state.monitors[mi].workspaces[ws_i].camera.position = cam;
-        crate::core::layout::arrange(&engine.state, mi, &engine.cfg, &registry, &mut p);
+        crate::core::layout::arrange(            &engine.state,
+            mi,
+            &engine.cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut p,
+            &mut RibbonScratch::default(),
+        );
         let screen = engine.state.monitors[mi].screen;
         let (_, fs_rect, _) = p.iter().find(|e| e.0 == 1).copied().unwrap();
         assert!(
@@ -739,19 +799,38 @@ mod unit_tests {
         let mut engine = setup_engine();
         {
             let ws = &mut engine.state.monitors[0].workspaces[0];
-            ws.columns.push(Column { windows: vec![1], focused: 0, weight: 1.0, boost: 1.0 });
-            ws.columns.push(Column { windows: vec![2], focused: 0, weight: 1.0, boost: 1.0 });
+            ws.columns.push(Column {
+                windows: vec![1],
+                focused: 0,
+                weight: 1.0,
+                boost: 1.0,
+            });
+            ws.columns.push(Column {
+                windows: vec![2],
+                focused: 0,
+                weight: 1.0,
+                boost: 1.0,
+            });
             ws.focus = Focus { column_idx: 0 };
         }
         engine.state.monitors[0].focused = Some(1);
         engine.state.clients.insert(1, Client::new(1, 0, 0));
         engine.state.clients.insert(2, Client::new(2, 0, 0));
-        engine.state.clients.get_mut(&1).unwrap().flags.set(WinFlags::FULLSCREEN);
+        engine
+            .state
+            .clients
+            .get_mut(&1)
+            .unwrap()
+            .flags
+            .set(WinFlags::FULLSCREEN);
 
         let before = engine.state.monitors[0].workspaces[0].focus.column_idx;
         engine.execute(MoveWindow(1, Dir::Right));
         let after = engine.state.monitors[0].workspaces[0].focus.column_idx;
-        assert_ne!(after, before, "MoveWindow must move window 1's column even while fullscreen");
+        assert_ne!(
+            after, before,
+            "MoveWindow must move window 1's column even while fullscreen"
+        );
         assert!(engine.state.clients.get(&1).unwrap().is_fullscreen());
 
         // The fullscreen window is a RIBBON participant: moving it relocates its
@@ -763,7 +842,11 @@ mod unit_tests {
             &engine.state.monitors[mi].workspaces[ws_i],
             engine.state.monitors[mi].screen,
         );
-        assert_eq!(fs.col, Some(1), "fullscreen column must move within the ribbon");
+        assert_eq!(
+            fs.cols,
+            vec![1],
+            "fullscreen column must move within the ribbon"
+        );
         // And it is still laid out (covering the screen) by the column layout
         // because it remains the focused window.
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
@@ -771,7 +854,14 @@ mod unit_tests {
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
         engine.state.monitors[mi].workspaces[ws_i].camera.position = cam;
-        crate::core::layout::arrange(&engine.state, mi, &engine.cfg, &registry, &mut p);
+        crate::core::layout::arrange(            &engine.state,
+            mi,
+            &engine.cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut p,
+            &mut RibbonScratch::default(),
+        );
         let (_, fs_rect, bw) = p.iter().find(|e| e.0 == 1).copied().unwrap();
         assert_eq!(bw, 0, "fullscreen keeps border 0");
         assert_eq!(
@@ -814,7 +904,9 @@ mod unit_tests {
                     boost: boost_val,
                 });
             }
-            ws.focus = Focus { column_idx: focus_ci };
+            ws.focus = Focus {
+                column_idx: focus_ci,
+            };
             if overview {
                 ws.overview = true;
                 ws.zoom = 0.25;
@@ -839,12 +931,23 @@ mod unit_tests {
                 let mut engine = build_ribbon(n, focus, false);
                 let mi = engine.state.sel_mon;
                 let wa = engine.state.monitors[mi].workarea;
-                let scroll =
-                    ideal_scroll(&engine.state.monitors[mi].workspaces[0], &cfg, wa, FsCtx::default());
+                let scroll = ideal_scroll(
+                    &engine.state.monitors[mi].workspaces[0],
+                    &cfg,
+                    wa,
+                    FsCtx::default(),
+                );
                 engine.state.monitors[mi].workspaces[0].camera.position = scroll;
                 let mut placements = Placements::new();
                 let registry = default_registry();
-                arrange(&engine.state, mi, &cfg, &registry, &mut placements);
+                arrange(                    &engine.state,
+                    mi,
+                    &cfg,
+                    &registry,
+                    crate::core::layout::Phase::Live,
+                    &mut placements,
+            &mut RibbonScratch::default(),
+                );
 
                 let fw = engine.state.monitors[mi].workspaces[0]
                     .focused_win()
@@ -869,8 +972,7 @@ mod unit_tests {
                 // Bug #1: the focused column must never be wider than the
                 // visible area (was 2465px on a 1920 screen for column 0).
                 assert!(
-                    geom.w as i32 + 2 * bw
-                        <= wa.w as i32 - 2 * cfg.gaps_outer as i32 + 1,
+                    geom.w as i32 + 2 * bw <= wa.w as i32 - 2 * cfg.gaps_outer as i32 + 1,
                     "n={n} focus={focus}: focused column too wide"
                 );
             }
@@ -886,12 +988,23 @@ mod unit_tests {
                 let mut engine = build_ribbon(n, focus, false);
                 let mi = engine.state.sel_mon;
                 let wa = engine.state.monitors[mi].workarea;
-                let scroll =
-                    ideal_scroll(&engine.state.monitors[mi].workspaces[0], &cfg, wa, FsCtx::default());
+                let scroll = ideal_scroll(
+                    &engine.state.monitors[mi].workspaces[0],
+                    &cfg,
+                    wa,
+                    FsCtx::default(),
+                );
                 engine.state.monitors[mi].workspaces[0].camera.position = scroll;
                 let mut placements = Placements::new();
                 let registry = default_registry();
-                arrange(&engine.state, mi, &cfg, &registry, &mut placements);
+                arrange(                    &engine.state,
+                    mi,
+                    &cfg,
+                    &registry,
+                    crate::core::layout::Phase::Live,
+                    &mut placements,
+            &mut RibbonScratch::default(),
+                );
 
                 let fw = engine.state.monitors[mi].workspaces[0]
                     .focused_win()
@@ -939,15 +1052,26 @@ mod unit_tests {
                 let mut engine = build_ribbon(n, focus, false);
                 let mi = engine.state.sel_mon;
                 let wa = engine.state.monitors[mi].workarea;
-                let scroll =
-                    ideal_scroll(&engine.state.monitors[mi].workspaces[0], &cfg, wa, FsCtx::default());
+                let scroll = ideal_scroll(
+                    &engine.state.monitors[mi].workspaces[0],
+                    &cfg,
+                    wa,
+                    FsCtx::default(),
+                );
                 engine.state.monitors[mi].workspaces[0].camera.position = scroll;
                 let mut placements = Placements::new();
                 let registry = default_registry();
-                arrange(&engine.state, mi, &cfg, &registry, &mut placements);
+                arrange(                    &engine.state,
+                    mi,
+                    &cfg,
+                    &registry,
+                    crate::core::layout::Phase::Live,
+                    &mut placements,
+            &mut RibbonScratch::default(),
+                );
 
                 let ws = &engine.state.monitors[mi].workspaces[0];
-                let extents = column_screen_extents(ws, &cfg, wa, FsCtx::default());
+                let extents = column_screen_extents(ws, &cfg, wa, &FsCtx::default());
                 assert_eq!(extents.len(), n, "n={n} focus={focus}");
                 for (i, &(l, r)) in extents.iter().enumerate() {
                     let (_, geom, bw) = placements[i]; // placements are pushed in column order
@@ -974,11 +1098,23 @@ mod unit_tests {
         let mut engine = build_ribbon(n, 2, true);
         let mi = engine.state.sel_mon;
         let wa = engine.state.monitors[mi].workarea;
-        let scroll = ideal_scroll(&engine.state.monitors[mi].workspaces[0], &cfg, wa, FsCtx::default());
+        let scroll = ideal_scroll(
+            &engine.state.monitors[mi].workspaces[0],
+            &cfg,
+            wa,
+            FsCtx::default(),
+        );
         engine.state.monitors[mi].workspaces[0].camera.position = scroll;
         let mut placements = Placements::new();
         let registry = default_registry();
-        arrange(&engine.state, mi, &cfg, &registry, &mut placements);
+        arrange(            &engine.state,
+            mi,
+            &cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut placements,
+            &mut RibbonScratch::default(),
+        );
 
         let min_l = placements
             .iter()
@@ -994,7 +1130,10 @@ mod unit_tests {
             (mid - wac).abs() <= 2.0,
             "overview ribbon midpoint {mid} not centered on workarea center {wac}"
         );
-        assert!(min_l >= wa.x as f32 - 1.0, "overview: first column off left ({min_l})");
+        assert!(
+            min_l >= wa.x as f32 - 1.0,
+            "overview: first column off left ({min_l})"
+        );
         assert!(
             max_r <= wa.x as f32 + wa.w as f32 + 1.0,
             "overview: last column off right ({max_r})"
@@ -1027,8 +1166,8 @@ mod unit_tests {
                     windows: vec![i],
                     focused: 0,
                     weight: 0.4,
-    boost: 1.0,
-});
+                    boost: 1.0,
+                });
             }
             ws.focus = Focus { column_idx: 0 };
         }
@@ -1042,31 +1181,49 @@ mod unit_tests {
         engine.execute(FocusDirection(Dir::Next));
         assert_eq!(engine.state.monitors[mi].focused, Some(2));
         assert_eq!(
-            engine.state.monitors[mi].workspaces[0].focus.column_idx,
-            1,
+            engine.state.monitors[mi].workspaces[0].focus.column_idx, 1,
             "Next must sync ws.focus.column_idx to the focused window's column"
         );
 
         // The camera must center column 1, keeping window 2 on-screen.
         let wa = engine.state.monitors[mi].workarea;
-        let scroll = ideal_scroll(&engine.state.monitors[mi].workspaces[0], &cfg, wa, FsCtx::default());
+        let scroll = ideal_scroll(
+            &engine.state.monitors[mi].workspaces[0],
+            &cfg,
+            wa,
+            FsCtx::default(),
+        );
         engine.state.monitors[mi].workspaces[0].camera.position = scroll;
         let mut placements = Placements::new();
-        arrange(&engine.state, mi, &cfg, &default_registry(), &mut placements);
-        let fw = engine.state.monitors[mi].workspaces[0].focused_win().unwrap();
+        arrange(            &engine.state,
+            mi,
+            &cfg,
+            &default_registry(),
+            crate::core::layout::Phase::Live,
+            &mut placements,
+            &mut RibbonScratch::default(),
+        );
+        let fw = engine.state.monitors[mi].workspaces[0]
+            .focused_win()
+            .unwrap();
         assert_eq!(fw, 2);
         let (_, geom, bw) = placements.iter().find(|e| e.0 == fw).unwrap();
         let left = geom.x;
         let right = geom.x + geom.w as i32 + 2 * *bw as i32;
-        assert!(left >= wa.x - 1, "focused window {fw} left {left} off-screen left");
-        assert!(right <= wa.x + wa.w as i32 + 1, "focused window {fw} right {right} off-screen right");
+        assert!(
+            left >= wa.x - 1,
+            "focused window {fw} left {left} off-screen left"
+        );
+        assert!(
+            right <= wa.x + wa.w as i32 + 1,
+            "focused window {fw} right {right} off-screen right"
+        );
 
         // Prev: back to window 1 (column 0), camera follows.
         engine.execute(FocusDirection(Dir::Prev));
         assert_eq!(engine.state.monitors[mi].focused, Some(1));
         assert_eq!(
-            engine.state.monitors[mi].workspaces[0].focus.column_idx,
-            0,
+            engine.state.monitors[mi].workspaces[0].focus.column_idx, 0,
             "Prev must sync ws.focus.column_idx back to the focused window's column"
         );
     }
@@ -1081,8 +1238,8 @@ mod unit_tests {
             windows: vec![10, 20],
             focused: 0,
             weight: 0.5,
-    boost: 1.0,
-});
+            boost: 1.0,
+        });
         ws.focus = Focus { column_idx: 0 };
 
         // Drop window 30 between 10 and 20 (insert_pos = 1).
@@ -1147,7 +1304,11 @@ mod unit_tests {
             })
             .collect();
 
-        assert_eq!(clamped.len(), 3, "all three clients were on workspaces >= 3");
+        assert_eq!(
+            clamped.len(),
+            3,
+            "all three clients were on workspaces >= 3"
+        );
         assert_eq!(engine.state.monitors[0].workspaces.len(), n_tags);
         for c in engine.state.clients.values() {
             assert!(
@@ -1179,17 +1340,32 @@ mod unit_tests {
             }
             ws1.focus = Focus { column_idx: 1 };
         }
-        let s1 = ideal_scroll(&engine.state.monitors[mi].workspaces[1], &cfg, wa, FsCtx::default());
+        let s1 = ideal_scroll(
+            &engine.state.monitors[mi].workspaces[1],
+            &cfg,
+            wa,
+            FsCtx::default(),
+        );
         // Non-zero proves it read ws1's columns, NOT mon.ws() (which is empty → 0).
         assert!(
             s1 != 0.0,
             "ideal_scroll must read the passed workspace, not mon.ws()"
         );
         // Pure function of the passed workspace: independent of which is active.
-        let s1b = ideal_scroll(&engine.state.monitors[mi].workspaces[1], &cfg, wa, FsCtx::default());
+        let s1b = ideal_scroll(
+            &engine.state.monitors[mi].workspaces[1],
+            &cfg,
+            wa,
+            FsCtx::default(),
+        );
         assert!((s1 - s1b).abs() < 1e-6, "ideal_scroll must be pure");
         // The empty active workspace yields 0.
-        let s0 = ideal_scroll(&engine.state.monitors[mi].workspaces[0], &cfg, wa, FsCtx::default());
+        let s0 = ideal_scroll(
+            &engine.state.monitors[mi].workspaces[0],
+            &cfg,
+            wa,
+            FsCtx::default(),
+        );
         assert!((s0 - 0.0).abs() < 1e-6, "empty workspace scroll must be 0");
     }
 
@@ -1213,8 +1389,8 @@ mod unit_tests {
                     windows: vec![i],
                     focused: 0,
                     weight: 1.0 / 3.0,
-    boost: 1.0,
-});
+                    boost: 1.0,
+                });
             }
             ws.focus = Focus { column_idx: 1 };
         }
@@ -1268,20 +1444,20 @@ mod unit_tests {
                 windows: vec![1, 2, 3],
                 focused: 2, // row 2 == window 3
                 weight: 0.4,
-    boost: 1.0,
-});
+                boost: 1.0,
+            });
             ws.columns.push(Column {
                 windows: vec![4, 5, 6],
                 focused: 0, // stale: never visited
                 weight: 0.4,
-    boost: 1.0,
-});
+                boost: 1.0,
+            });
             ws.columns.push(Column {
                 windows: vec![7], // shorter than the row we come from
                 focused: 0,
                 weight: 0.4,
-    boost: 1.0,
-});
+                boost: 1.0,
+            });
             ws.focus = Focus { column_idx: 0 };
         }
         for i in 1..=7u32 {
@@ -1338,14 +1514,14 @@ mod unit_tests {
                 windows: vec![1],
                 focused: 0,
                 weight: 0.5,
-    boost: 1.0,
-});
+                boost: 1.0,
+            });
             ws.columns.push(Column {
                 windows: vec![2],
                 focused: 0,
                 weight: 0.5,
-    boost: 1.0,
-});
+                boost: 1.0,
+            });
             ws.focus = Focus { column_idx: 1 };
         }
         engine.state.add_client(Client::new(1, mi, 0));
@@ -1400,347 +1576,374 @@ mod unit_tests {
         engine.state.monitors[mi].workspaces[0].layout = LayoutKind::Grid;
         assert_eq!(engine.state.best_focus(mi), Some(1));
     }
-// ── GrowColumn clamp panic regression (bug C2) ──────────────────────────────
-//
-// With many columns the old `1.0 - 0.05*(n-1)` upper bound drops below the
-// `0.05` lower bound of the `.clamp`, so `f32::clamp`'s `min <= max` assert
-// panicked (in debug *and* release) on `GrowCol`. Assert the command runs
-// without panicking even with 25 columns.
+    // ── GrowColumn clamp panic regression (bug C2) ──────────────────────────────
+    //
+    // With many columns the old `1.0 - 0.05*(n-1)` upper bound drops below the
+    // `0.05` lower bound of the `.clamp`, so `f32::clamp`'s `min <= max` assert
+    // panicked (in debug *and* release) on `GrowCol`. Assert the command runs
+    // without panicking even with 25 columns.
 
-#[test]
-fn grow_column_does_not_panic_with_many_columns() {
-    use crate::types::Client;
-    let mut engine = setup_engine();
-    let mi = 0;
-    let ws_i = 0;
-    let n = 25usize;
-    for w in 1..=n as u32 {
+    #[test]
+    fn grow_column_does_not_panic_with_many_columns() {
+        use crate::types::Client;
+        let mut engine = setup_engine();
+        let mi = 0;
+        let ws_i = 0;
+        let n = 25usize;
+        for w in 1..=n as u32 {
+            engine.state.monitors[mi].workspaces[ws_i].add_tiled(w, 1.0 / n as f32);
+            engine.state.add_client(Client::new(w, mi, ws_i));
+        }
+        // Grow both directions; previously panicked once 21+ columns were present.
+        engine.dispatch(Action::GrowCol(50));
+        engine.dispatch(Action::GrowCol(-50));
+        // Sanity: weights stay finite and non-negative, sum preserved by the
+        // non-redistributive path.
+        let ws = &engine.state.monitors[mi].workspaces[ws_i];
+        let sum: f32 = ws.columns.iter().map(|c| c.weight).sum();
+        assert!(sum.is_finite() && sum > 0.0);
+        assert!(
+            ws.columns
+                .iter()
+                .all(|c| c.weight >= 0.0 && c.weight.is_finite()),
+            "no column weight panicked into NaN/negative"
+        );
+    }
+
+    // ─── Fullscreen-as-ribbon-regression (plan 1786166283911) ────────────────────
+    //
+    // The invariant: `ribbon_geom` is the single source of truth shared by
+    // `arrange_columns`, `ideal_scroll` and `column_screen_extents`. A fullscreen
+    // column must feed its special width through `ribbon_geom` so all three agree.
+    // This mirrors `layout.rs`'s `ribbon_invariants_hold_with_fullscreen` at the
+    // higher-level `Engine`/`arrange` boundary.
+
+    #[test]
+    fn fullscreen_column_invariants_match_ribbon_functions() {
+        use crate::core::layout::{
+            arrange, column_screen_extents, fs_ctx, ideal_scroll, Placements,
+        };
+        use crate::types::{Client, Column, Focus, WinFlags};
+        let cfg = default_cfg();
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        // Two columns; col0 is the fullscreen one (asymmetric left strut to exercise
+        // the screen.x alignment).
+        {
+            let ws = &mut engine.state.monitors[mi].workspaces[0];
+            ws.columns.push(Column {
+                windows: vec![1],
+                focused: 0,
+                weight: 1.0,
+                boost: 1.0,
+            });
+            ws.columns.push(Column {
+                windows: vec![2],
+                focused: 0,
+                weight: 0.5,
+                boost: 0.0,
+            });
+            ws.focus = Focus { column_idx: 0 };
+        }
+        engine.state.monitors[mi].focused = Some(1);
+        engine.state.monitors[mi].focus_stack = vec![1, 2];
+        let mut c1 = Client::new(1, mi, 0);
+        c1.border_w = 0;
+        c1.flags.set(WinFlags::FULLSCREEN);
+        engine.state.add_client(c1);
+        engine.state.add_client(Client::new(2, mi, 0));
+
+        let wa = engine.state.monitors[mi].workarea;
+        let fs = fs_ctx(
+            &engine.state.clients,
+            &engine.state.monitors[mi].workspaces[0],
+            engine.state.monitors[mi].screen,
+        );
+        let scroll = ideal_scroll(
+            &engine.state.monitors[mi].workspaces[0],
+            &cfg,
+            wa,
+            fs.clone(),
+        );
+        engine.state.monitors[mi].workspaces[0].camera.position = scroll;
+        let mut p = Placements::new();
+        let registry = default_registry();
+        arrange(            &engine.state,
+            mi,
+            &cfg,
+            &registry,
+            crate::core::layout::Phase::Live,
+            &mut p,
+            &mut RibbonScratch::default(),
+        );
+
+        // `column_screen_extents` must agree with the arrange placement of the fs col.
+        let extents =
+            column_screen_extents(&engine.state.monitors[mi].workspaces[0], &cfg, wa, &fs);
+        let (_, rect, _) = p.iter().find(|e| e.0 == 1).copied().unwrap();
+        let (el, er) = extents[0];
+        assert!(
+            (el - rect.x as f32).abs() <= 2.0,
+            "extents left {el} != arrange left {}",
+            rect.x
+        );
+        assert!(
+            (er - (rect.x + rect.w as i32) as f32).abs() <= 2.0,
+            "extents right {er} != arrange right {}",
+            rect.x + rect.w as i32
+        );
+        // The aligned camera puts the fullscreen left edge exactly at `screen.x`.
+        assert_eq!(
+            rect.x, engine.state.monitors[mi].screen.x,
+            "fullscreen left must equal screen.x under the aligned camera"
+        );
+    }
+
+    // ─── ToggleFullscreen moves a float in/out of the tiling (plan 1786166283911) ─
+    //
+    // Entering fullscreen from a float pulls the window into the tiling (as a fresh
+    // column) and remembers it was floating; leaving fullscreen returns it to its
+    // float. The core command owns this topology change; the FULLSCREEN flag itself
+    // is owned by the backend's `set_fullscreen` handler.
+
+    #[test]
+    fn float_fullscreen_moves_to_tiling_and_back() {
+        use crate::core::commands::{Command, ToggleFullscreen};
+        use crate::types::{Client, WinFlags};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        let win = 1u32;
+
+        // A floating client.
+        let mut c = Client::new(win, mi, ws_i);
+        c.border_w = 2;
+        c.flags.set(WinFlags::FLOAT);
+        c.geom = Rect::new(100, 100, 400, 300);
+        c.saved_geom = c.geom;
+        engine.state.add_client(c);
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(win);
+        engine.state.monitors[mi].focused = Some(win);
+        engine.state.monitors[mi].focus_stack = vec![win];
+
+        // Enter fullscreen: float → tiled column, remembers FS_WAS_FLOAT.
+        ToggleFullscreen(Some(win)).execute(&mut engine.state, &mut engine.cfg);
+        {
+            let c = engine.state.clients.get(&win).unwrap();
+            assert!(
+                !c.is_float(),
+                "client must leave the float set when fullscreen"
+            );
+            assert!(
+                c.flags.has(WinFlags::FS_WAS_FLOAT),
+                "must remember the window was floating"
+            );
+            assert!(
+                !engine.state.monitors[mi].workspaces[ws_i]
+                    .floats
+                    .contains(&win),
+                "client must leave ws.floats"
+            );
+            assert!(
+                engine.state.monitors[mi].workspaces[ws_i]
+                    .columns
+                    .iter()
+                    .any(|col| col.windows.contains(&win)),
+                "client must join the tiling as a column"
+            );
+        }
+
+        // Simulate the backend applying the FULLSCREEN flag (owned by set_fullscreen).
         engine
             .state
-            .monitors[mi]
-            .workspaces[ws_i]
-            .add_tiled(w, 1.0 / n as f32);
-        engine.state.add_client(Client::new(w, mi, ws_i));
+            .clients
+            .get_mut(&win)
+            .unwrap()
+            .flags
+            .set(WinFlags::FULLSCREEN);
+
+        // Leave fullscreen: tiled → float, restores FLOAT, clears FS_WAS_FLOAT.
+        ToggleFullscreen(Some(win)).execute(&mut engine.state, &mut engine.cfg);
+        {
+            let c = engine.state.clients.get(&win).unwrap();
+            assert!(c.is_float(), "client must return to being a float");
+            assert!(
+                !c.flags.has(WinFlags::FS_WAS_FLOAT),
+                "FS_WAS_FLOAT must be cleared on exit"
+            );
+            assert!(
+                engine.state.monitors[mi].workspaces[ws_i]
+                    .floats
+                    .contains(&win),
+                "client must return to ws.floats"
+            );
+            assert!(
+                !engine.state.monitors[mi].workspaces[ws_i]
+                    .columns
+                    .iter()
+                    .any(|col| col.windows.contains(&win)),
+                "client must leave the tiling"
+            );
+        }
     }
-    // Grow both directions; previously panicked once 21+ columns were present.
-    engine.dispatch(Action::GrowCol(50));
-    engine.dispatch(Action::GrowCol(-50));
-    // Sanity: weights stay finite and non-negative, sum preserved by the
-    // non-redistributive path.
-    let ws = &engine.state.monitors[mi].workspaces[ws_i];
-    let sum: f32 = ws.columns.iter().map(|c| c.weight).sum();
-    assert!(sum.is_finite() && sum > 0.0);
-    assert!(
-        ws.columns.iter().all(|c| c.weight >= 0.0 && c.weight.is_finite()),
-        "no column weight panicked into NaN/negative"
-    );
-}
 
-// ─── Fullscreen-as-ribbon-regression (plan 1786166283911) ────────────────────
-//
-// The invariant: `ribbon_geom` is the single source of truth shared by
-// `arrange_columns`, `ideal_scroll` and `column_screen_extents`. A fullscreen
-// column must feed its special width through `ribbon_geom` so all three agree.
-// This mirrors `layout.rs`'s `ribbon_invariants_hold_with_fullscreen` at the
-// higher-level `Engine`/`arrange` boundary.
+    // ─── Fase 1: the EWMH fullscreen path must promote a float too (bug C1/A1) ────
+    //
+    // The keyboard path (`ToggleFullscreen`) always promoted a float into the
+    // tiling before the backend set the `FULLSCREEN` flag. The EWMH path
+    // (`_NET_WM_STATE_FULLSCREEN` client message → `set_fullscreen`) did not, so a
+    // float — mpv is the canonical case — stayed in `ws.floats`, kept being laid
+    // out from `client.geom`, and the old `Rect::default()` sentinel collapsed it
+    // to 0×0. `apply_fullscreen_topology` is now the one shared implementation
+    // both paths call.
 
-#[test]
-fn fullscreen_column_invariants_match_ribbon_functions() {
-    use crate::core::layout::{arrange, column_screen_extents, fs_ctx, ideal_scroll, Placements};
-    use crate::types::{Client, Column, Focus, WinFlags};
-    let cfg = default_cfg();
-    let mut engine = setup_engine();
-    let mi = engine.state.sel_mon;
-    // Two columns; col0 is the fullscreen one (asymmetric left strut to exercise
-    // the screen.x alignment).
-    {
-        let ws = &mut engine.state.monitors[mi].workspaces[0];
-        ws.columns.push(Column { windows: vec![1], focused: 0, weight: 1.0, boost: 1.0 });
-        ws.columns.push(Column { windows: vec![2], focused: 0, weight: 0.5, boost: 0.0 });
-        ws.focus = Focus { column_idx: 0 };
-    }
-    engine.state.monitors[mi].focused = Some(1);
-    engine.state.monitors[mi].focus_stack = vec![1, 2];
-    let mut c1 = Client::new(1, mi, 0);
-    c1.border_w = 0;
-    c1.flags.set(WinFlags::FULLSCREEN);
-    engine.state.add_client(c1);
-    engine.state.add_client(Client::new(2, mi, 0));
+    #[test]
+    fn ewmh_fullscreen_promotes_float_and_never_collapses_to_zero() {
+        use crate::core::commands::apply_fullscreen_topology;
+        use crate::core::layout::{arrange, fs_ctx, ideal_scroll, Placements};
+        use crate::types::{Client, WinFlags};
+        let cfg = default_cfg();
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        let win = 1u32;
 
-    let wa = engine.state.monitors[mi].workarea;
-    let fs = fs_ctx(
-        &engine.state.clients,
-        &engine.state.monitors[mi].workspaces[0],
-        engine.state.monitors[mi].screen,
-    );
-    let scroll = ideal_scroll(&engine.state.monitors[mi].workspaces[0], &cfg, wa, fs);
-    engine.state.monitors[mi].workspaces[0].camera.position = scroll;
-    let mut p = Placements::new();
-    let registry = default_registry();
-    arrange(&engine.state, mi, &cfg, &registry, &mut p);
+        // A small floating client — exactly how mpv maps with `float = true`.
+        let float_rect = Rect::new(100, 100, 400, 300);
+        let mut c = Client::new(win, mi, ws_i);
+        c.flags.set(WinFlags::FLOAT);
+        c.geom = float_rect;
+        c.saved_geom = float_rect;
+        engine.state.add_client(c);
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(win);
+        engine.state.monitors[mi].focused = Some(win);
 
-    // `column_screen_extents` must agree with the arrange placement of the fs col.
-    let extents = column_screen_extents(&engine.state.monitors[mi].workspaces[0], &cfg, wa, fs);
-    let (_, rect, _) = p.iter().find(|e| e.0 == 1).copied().unwrap();
-    let (el, er) = extents[0];
-    assert!(
-        (el - rect.x as f32).abs() <= 2.0,
-        "extents left {el} != arrange left {}",
-        rect.x
-    );
-    assert!(
-        (er - (rect.x + rect.w as i32) as f32).abs() <= 2.0,
-        "extents right {er} != arrange right {}",
-        rect.x + rect.w as i32
-    );
-    // The aligned camera puts the fullscreen left edge exactly at `screen.x`.
-    assert_eq!(
-        rect.x, engine.state.monitors[mi].screen.x,
-        "fullscreen left must equal screen.x under the aligned camera"
-    );
-}
+        // The backend's `set_fullscreen` runs this before flipping the flag.
+        assert!(
+            apply_fullscreen_topology(&mut engine.state, &cfg, win, true),
+            "entering fullscreen must promote the float into the tiling"
+        );
+        {
+            let c = engine.state.clients.get(&win).unwrap();
+            assert!(!c.is_float());
+            assert!(c.flags.has(WinFlags::FS_WAS_FLOAT));
+            assert_eq!(
+                c.saved_geom, float_rect,
+                "the float rect must be snapshotted at promotion time, before \
+             arrange overwrites geom with the tile rect"
+            );
+        }
+        assert!(engine.state.monitors[mi].workspaces[ws_i].floats.is_empty());
 
-// ─── ToggleFullscreen moves a float in/out of the tiling (plan 1786166283911) ─
-//
-// Entering fullscreen from a float pulls the window into the tiling (as a fresh
-// column) and remembers it was floating; leaving fullscreen returns it to its
-// float. The core command owns this topology change; the FULLSCREEN flag itself
-// is owned by the backend's `set_fullscreen` handler.
+        // Now the flag, as `set_fullscreen` sets it (border 0, no geom sentinel).
+        {
+            let c = engine.state.clients.get_mut(&win).unwrap();
+            c.flags.set(WinFlags::FULLSCREEN);
+            c.old_border_w = c.border_w;
+            c.border_w = 0;
+        }
 
-#[test]
-fn float_fullscreen_moves_to_tiling_and_back() {
-    use crate::core::commands::{Command, ToggleFullscreen};
-    use crate::types::{Client, WinFlags};
-    let mut engine = setup_engine();
-    let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
-    let win = 1u32;
+        let wa = engine.state.monitors[mi].workarea;
+        let fs = fs_ctx(
+            &engine.state.clients,
+            &engine.state.monitors[mi].workspaces[ws_i],
+            engine.state.monitors[mi].screen,
+        );
+        let scroll = ideal_scroll(&engine.state.monitors[mi].workspaces[ws_i], &cfg, wa, fs);
+        engine.state.monitors[mi].workspaces[ws_i]
+            .camera
+            .snap(scroll);
+        let mut p = Placements::new();
+        arrange(            &engine.state,
+            mi,
+            &cfg,
+            &default_registry(),
+            crate::core::layout::Phase::Live,
+            &mut p,
+            &mut RibbonScratch::default(),
+        );
 
-    // A floating client.
-    let mut c = Client::new(win, mi, ws_i);
-    c.border_w = 2;
-    c.flags.set(WinFlags::FLOAT);
-    c.geom = Rect::new(100, 100, 400, 300);
-    c.saved_geom = c.geom;
-    engine.state.add_client(c);
-    engine
-        .state
-        .monitors[mi]
-        .workspaces[ws_i]
-        .floats
-        .push(win);
-    engine.state.monitors[mi].focused = Some(win);
-    engine.state.monitors[mi].focus_stack = vec![win];
+        let (_, rect, bw) = p
+            .iter()
+            .find(|e| e.0 == win)
+            .copied()
+            .expect("the promoted fullscreen window must be placed");
+        assert_eq!(
+            rect, engine.state.monitors[mi].screen,
+            "a float that went fullscreen must fill the screen, not collapse"
+        );
+        assert_eq!(bw, 0);
 
-    // Enter fullscreen: float → tiled column, remembers FS_WAS_FLOAT.
-    ToggleFullscreen(Some(win)).execute(&mut engine.state, &mut engine.cfg);
-    {
+        // Leaving fullscreen returns it to the float set at its remembered rect.
+        assert!(apply_fullscreen_topology(
+            &mut engine.state,
+            &cfg,
+            win,
+            false
+        ));
         let c = engine.state.clients.get(&win).unwrap();
-        assert!(!c.is_float(), "client must leave the float set when fullscreen");
-        assert!(
-            c.flags.has(WinFlags::FS_WAS_FLOAT),
-            "must remember the window was floating"
-        );
-        assert!(
-            !engine
-                .state
-                .monitors[mi]
-                .workspaces[ws_i]
-                .floats
-                .contains(&win),
-            "client must leave ws.floats"
-        );
-        assert!(
-            engine
-                .state
-                .monitors[mi]
-                .workspaces[ws_i]
-                .columns
-                .iter()
-                .any(|col| col.windows.contains(&win)),
-            "client must join the tiling as a column"
-        );
-    }
-
-    // Simulate the backend applying the FULLSCREEN flag (owned by set_fullscreen).
-    engine
-        .state
-        .clients
-        .get_mut(&win)
-        .unwrap()
-        .flags
-        .set(WinFlags::FULLSCREEN);
-
-    // Leave fullscreen: tiled → float, restores FLOAT, clears FS_WAS_FLOAT.
-    ToggleFullscreen(Some(win)).execute(&mut engine.state, &mut engine.cfg);
-    {
-        let c = engine.state.clients.get(&win).unwrap();
-        assert!(c.is_float(), "client must return to being a float");
-        assert!(
-            !c.flags.has(WinFlags::FS_WAS_FLOAT),
-            "FS_WAS_FLOAT must be cleared on exit"
-        );
-        assert!(
-            engine
-                .state
-                .monitors[mi]
-                .workspaces[ws_i]
-                .floats
-                .contains(&win),
-            "client must return to ws.floats"
-        );
-        assert!(
-            !engine
-                .state
-                .monitors[mi]
-                .workspaces[ws_i]
-                .columns
-                .iter()
-                .any(|col| col.windows.contains(&win)),
-            "client must leave the tiling"
-        );
-    }
-}
-
-// ─── Fase 1: the EWMH fullscreen path must promote a float too (bug C1/A1) ────
-//
-// The keyboard path (`ToggleFullscreen`) always promoted a float into the
-// tiling before the backend set the `FULLSCREEN` flag. The EWMH path
-// (`_NET_WM_STATE_FULLSCREEN` client message → `set_fullscreen`) did not, so a
-// float — mpv is the canonical case — stayed in `ws.floats`, kept being laid
-// out from `client.geom`, and the old `Rect::default()` sentinel collapsed it
-// to 0×0. `apply_fullscreen_topology` is now the one shared implementation
-// both paths call.
-
-#[test]
-fn ewmh_fullscreen_promotes_float_and_never_collapses_to_zero() {
-    use crate::core::commands::apply_fullscreen_topology;
-    use crate::core::layout::{arrange, fs_ctx, ideal_scroll, Placements};
-    use crate::types::{Client, WinFlags};
-    let cfg = default_cfg();
-    let mut engine = setup_engine();
-    let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
-    let win = 1u32;
-
-    // A small floating client — exactly how mpv maps with `float = true`.
-    let float_rect = Rect::new(100, 100, 400, 300);
-    let mut c = Client::new(win, mi, ws_i);
-    c.flags.set(WinFlags::FLOAT);
-    c.geom = float_rect;
-    c.saved_geom = float_rect;
-    engine.state.add_client(c);
-    engine.state.monitors[mi].workspaces[ws_i].floats.push(win);
-    engine.state.monitors[mi].focused = Some(win);
-
-    // The backend's `set_fullscreen` runs this before flipping the flag.
-    assert!(
-        apply_fullscreen_topology(&mut engine.state, &cfg, win, true),
-        "entering fullscreen must promote the float into the tiling"
-    );
-    {
-        let c = engine.state.clients.get(&win).unwrap();
-        assert!(!c.is_float());
-        assert!(c.flags.has(WinFlags::FS_WAS_FLOAT));
+        assert!(c.is_float(), "must go back to being a float");
+        assert!(!c.flags.has(WinFlags::FS_WAS_FLOAT));
         assert_eq!(
             c.saved_geom, float_rect,
-            "the float rect must be snapshotted at promotion time, before \
-             arrange overwrites geom with the tile rect"
+            "the pre-fullscreen float rect survives the round trip"
+        );
+        assert!(engine.state.monitors[mi].workspaces[ws_i]
+            .floats
+            .contains(&win));
+    }
+
+    #[test]
+    fn fullscreen_topology_is_idempotent() {
+        use crate::core::commands::apply_fullscreen_topology;
+        use crate::types::{Client, WinFlags};
+        let cfg = default_cfg();
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        let win = 1u32;
+
+        let mut c = Client::new(win, mi, ws_i);
+        c.flags.set(WinFlags::FLOAT);
+        c.geom = Rect::new(10, 10, 200, 150);
+        engine.state.add_client(c);
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(win);
+
+        // The keyboard path runs it once inside the command; the effect handler
+        // runs it again. The second call must change nothing.
+        assert!(apply_fullscreen_topology(
+            &mut engine.state,
+            &cfg,
+            win,
+            true
+        ));
+        let cols_after_first = engine.state.monitors[mi].workspaces[ws_i].columns.clone();
+        assert!(
+            !apply_fullscreen_topology(&mut engine.state, &cfg, win, true),
+            "a second 'entering' pass must be a no-op"
+        );
+        assert_eq!(
+            engine.state.monitors[mi].workspaces[ws_i].columns.len(),
+            cols_after_first.len(),
+            "the window must not be tiled twice"
+        );
+
+        assert!(apply_fullscreen_topology(
+            &mut engine.state,
+            &cfg,
+            win,
+            false
+        ));
+        assert!(
+            !apply_fullscreen_topology(&mut engine.state, &cfg, win, false),
+            "a second 'leaving' pass must be a no-op"
+        );
+        assert_eq!(
+            engine.state.monitors[mi].workspaces[ws_i].floats,
+            vec![win],
+            "the window must not be pushed into ws.floats twice"
         );
     }
-    assert!(engine.state.monitors[mi].workspaces[ws_i].floats.is_empty());
-
-    // Now the flag, as `set_fullscreen` sets it (border 0, no geom sentinel).
-    {
-        let c = engine.state.clients.get_mut(&win).unwrap();
-        c.flags.set(WinFlags::FULLSCREEN);
-        c.old_border_w = c.border_w;
-        c.border_w = 0;
-    }
-
-    let wa = engine.state.monitors[mi].workarea;
-    let fs = fs_ctx(
-        &engine.state.clients,
-        &engine.state.monitors[mi].workspaces[ws_i],
-        engine.state.monitors[mi].screen,
-    );
-    let scroll = ideal_scroll(&engine.state.monitors[mi].workspaces[ws_i], &cfg, wa, fs);
-    engine.state.monitors[mi].workspaces[ws_i].camera.snap(scroll);
-    let mut p = Placements::new();
-    arrange(&engine.state, mi, &cfg, &default_registry(), &mut p);
-
-    let (_, rect, bw) = p
-        .iter()
-        .find(|e| e.0 == win)
-        .copied()
-        .expect("the promoted fullscreen window must be placed");
-    assert_eq!(
-        rect,
-        engine.state.monitors[mi].screen,
-        "a float that went fullscreen must fill the screen, not collapse"
-    );
-    assert_eq!(bw, 0);
-
-    // Leaving fullscreen returns it to the float set at its remembered rect.
-    assert!(apply_fullscreen_topology(
-        &mut engine.state,
-        &cfg,
-        win,
-        false
-    ));
-    let c = engine.state.clients.get(&win).unwrap();
-    assert!(c.is_float(), "must go back to being a float");
-    assert!(!c.flags.has(WinFlags::FS_WAS_FLOAT));
-    assert_eq!(
-        c.saved_geom, float_rect,
-        "the pre-fullscreen float rect survives the round trip"
-    );
-    assert!(engine.state.monitors[mi].workspaces[ws_i]
-        .floats
-        .contains(&win));
-}
-
-#[test]
-fn fullscreen_topology_is_idempotent() {
-    use crate::core::commands::apply_fullscreen_topology;
-    use crate::types::{Client, WinFlags};
-    let cfg = default_cfg();
-    let mut engine = setup_engine();
-    let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
-    let win = 1u32;
-
-    let mut c = Client::new(win, mi, ws_i);
-    c.flags.set(WinFlags::FLOAT);
-    c.geom = Rect::new(10, 10, 200, 150);
-    engine.state.add_client(c);
-    engine.state.monitors[mi].workspaces[ws_i].floats.push(win);
-
-    // The keyboard path runs it once inside the command; the effect handler
-    // runs it again. The second call must change nothing.
-    assert!(apply_fullscreen_topology(&mut engine.state, &cfg, win, true));
-    let cols_after_first = engine.state.monitors[mi].workspaces[ws_i].columns.clone();
-    assert!(
-        !apply_fullscreen_topology(&mut engine.state, &cfg, win, true),
-        "a second 'entering' pass must be a no-op"
-    );
-    assert_eq!(
-        engine.state.monitors[mi].workspaces[ws_i].columns.len(),
-        cols_after_first.len(),
-        "the window must not be tiled twice"
-    );
-
-    assert!(apply_fullscreen_topology(&mut engine.state, &cfg, win, false));
-    assert!(
-        !apply_fullscreen_topology(&mut engine.state, &cfg, win, false),
-        "a second 'leaving' pass must be a no-op"
-    );
-    assert_eq!(
-        engine.state.monitors[mi].workspaces[ws_i].floats,
-        vec![win],
-        "the window must not be pushed into ws.floats twice"
-    );
-}
 
     #[test]
     fn fullscreen_policy_accessors() {
@@ -1793,8 +1996,8 @@ fn fullscreen_topology_is_idempotent() {
         let screen = engine.state.monitors[mi].screen;
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
         assert_eq!(
-            fs_ctx(&engine.state.clients, ws, screen).col,
-            Some(0),
+            fs_ctx(&engine.state.clients, ws, screen).cols,
+            vec![0],
             "a normal fullscreen window is the ribbon's overlay column"
         );
 
@@ -1803,8 +2006,8 @@ fn fullscreen_topology_is_idempotent() {
         engine.state.clients.get_mut(&1).unwrap().fullscreen_policy = FullscreenPolicy::True;
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
         assert_eq!(
-            fs_ctx(&engine.state.clients, ws, screen).col,
-            None,
+            fs_ctx(&engine.state.clients, ws, screen).cols,
+            Vec::<usize>::new(),
             "a True fullscreen window is excluded from the ribbon overlay"
         );
     }
@@ -1841,17 +2044,16 @@ fn fullscreen_topology_is_idempotent() {
         let ws_i = engine.state.monitors[mi].active_ws;
         for win in 1..=2u32 {
             engine.state.add_client(Client::new(win, mi, ws_i));
-            engine
-                .state
-                .monitors[mi]
-                .workspaces[ws_i]
-                .add_tiled(win, cfg.column_width);
+            engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, cfg.column_width);
         }
 
         engine.dispatch(Action::ViewportZoom(0.2));
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
         assert_eq!(ws.viewport_mode, ViewportMode::Zoomed);
-        assert!(ws.page_zoom_target > 1.0, "page_zoom target must grow past 1.0");
+        assert!(
+            ws.page_zoom_target > 1.0,
+            "page_zoom target must grow past 1.0"
+        );
 
         // The live `page_zoom` is an animated spring (Fase 11); advance it so
         // `ribbon_geom` reads the enlarged factor.
@@ -1865,7 +2067,7 @@ fn fullscreen_topology_is_idempotent() {
         // are enlarged (alpha > 1), independent of the Overview zoom.
         let wa = engine.state.monitors[mi].workarea;
         let fs = fs_ctx(&engine.state.clients, ws, engine.state.monitors[mi].screen);
-        let g = ribbon_geom(ws, &engine.cfg, wa, true, fs);
+        let g = ribbon_geom(ws, &engine.cfg, wa, true, &fs);
         assert!(
             g.alpha > 1.0,
             "a zoomed viewport must enlarge the ribbon (alpha > 1)"
@@ -1901,11 +2103,7 @@ fn fullscreen_topology_is_idempotent() {
         // page-snap has visible room to scroll.
         for win in 1..=12u32 {
             engine.state.add_client(Client::new(win, mi, ws_i));
-            engine
-                .state
-                .monitors[mi]
-                .workspaces[ws_i]
-                .add_tiled(win, cfg.column_width);
+            engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, cfg.column_width);
         }
         // Start the camera at the left edge, then snap one page to the right.
         engine.state.monitors[mi].workspaces[ws_i].camera.target = 0.0;
@@ -1919,5 +2117,4 @@ fn fullscreen_topology_is_idempotent() {
             "PageSnap right must scroll the camera forward by one page (~{expected_step}): got {after}"
         );
     }
-
 }
