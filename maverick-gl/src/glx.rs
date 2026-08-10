@@ -62,6 +62,12 @@ pub const GLX_CONTEXT_MINOR_VERSION_ARB: c_int = 0x2092;
 pub const GLX_CONTEXT_PROFILE_MASK_ARB: c_int = 0x9126;
 pub const GLX_CONTEXT_CORE_PROFILE_BIT_ARB: c_int = 0x0000_0001;
 
+// ── GLX_EXT_buffer_age ───────────────────────────────────────────────────────
+/// Query `glXQueryDrawable` with this attribute to learn how many frames old
+/// the back buffer's contents are. `0` means "undefined" (full repaint); `1`
+/// means it holds the last frame we presented, so a partial redraw is safe.
+pub const GLX_BACK_BUFFER_AGE_EXT: c_int = 0x20F4;
+
 macro_rules! glx_api {
     (
         required { $( fn $rname:ident ( $($rarg:ident : $rargty:ty),* $(,)? ) $(-> $rret:ty)? ; )+ }
@@ -119,6 +125,10 @@ glx_api! {
         // frame loop can pace to the real vblank instead of a fixed timer.
         fn glXGetVideoSyncSGI(count: *mut c_uint) -> c_int;
         fn glXWaitVideoSyncSGI(divisor: c_int, remainder: c_int, count: *mut c_uint) -> c_int;
+        // `GLX_EXT_buffer_age`: how many frames stale the back buffer is. Drives
+        // safe partial redraw (scissor) — without it a partial clear would leave
+        // garbage in the un-cleared region.
+        fn glXQueryDrawable(dpy: *mut Display, draw: GLXDrawable, attribute: c_int, value: *mut c_uint) -> c_int;
     }
 }
 

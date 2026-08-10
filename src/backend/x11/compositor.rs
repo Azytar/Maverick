@@ -196,6 +196,24 @@ impl DamageRegion {
     fn is_empty(&self) -> bool {
         self.count == 0 && !self.needs_full
     }
+
+    /// Bounding box of all accumulated rects. Used to size the scissor in the
+    /// partial-redraw path; a single scissor rectangle is what GL offers, so the
+    /// union of many damage rects is approximated by their bbox (the draw loop
+    /// still clips every window to it, so nothing outside is touched).
+    fn bounding_rect(&self) -> Rect {
+        let mut x0 = i32::MAX;
+        let mut y0 = i32::MAX;
+        let mut x1 = i32::MIN;
+        let mut y1 = i32::MIN;
+        for r in &self.rects[..self.count] {
+            x0 = x0.min(r.x);
+            y0 = y0.min(r.y);
+            x1 = x1.max(r.x + r.w as i32);
+            y1 = y1.max(r.y + r.h as i32);
+        }
+        Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32)
+    }
 }
 
 /// One window to draw this frame, fully resolved: where, at what opacity, with
@@ -288,6 +306,10 @@ pub struct Compositor {
     /// A change this frame cannot be expressed as a rectangle set (resize,
     /// reparent, restack, opacity, new/removed window). Set by `mark_full`.
     needs_full: bool,
+    /// Persistent damage accumulation across frames, used by the partial-redraw
+    /// path. Reset to empty on every full repaint (structural change, or when
+    /// buffer-age is unavailable so we always full-redraw).
+    damage_acc: DamageRegion,
 }
 
 impl Compositor {
@@ -502,6 +524,7 @@ impl Compositor {
             corner_radius: cfg.corner_radius,
             frame_dirty: DamageRegion::new(),
             needs_full: false,
+            damage_acc: DamageRegion::new(),
         };
 
         comp.scan_existing();
@@ -907,9 +930,51 @@ impl Compositor {
             self.refresh_stack();
         }
         self.compute_scene();
-        self.renderer.begin_frame(self.screen_w, self.screen_h);
 
-        // Wallpaper first (so un-textured/transparent areas show it).
+        let (sw, sh) = (self.screen_w, self.screen_h);
+
+        // Partial redraw is only safe when the back buffer's age is known:
+        // without `GLX_EXT_buffer_age` a partial clear leaves garbage in the
+        // un-cleared region. Anything that set `needs_full` (resize/opacity/
+        // restack/…) also forces a whole-screen repaint, as does an empty
+        // damage region (nothing to scissor).
+        let mut partial =
+            self.renderer.has_buffer_age && !self.needs_full && !self.frame_dirty.is_empty();
+        if partial {
+            for r in &self.frame_dirty.rects[..self.frame_dirty.count] {
+                self.damage_acc.add(*r);
+            }
+            // The accumulated region overflowed its fixed capacity → be safe and
+            // repaint everything this once, then restart the accumulation fresh.
+            if self.damage_acc.needs_full {
+                partial = false;
+            }
+        }
+
+        if partial {
+            let b = self.damage_acc.bounding_rect();
+            // Clamp to the screen: a rect that bled past an edge must not scissor
+            // a negative/out-of-range box.
+            let x = b.x.max(0);
+            let y = b.y.max(0);
+            let w = (b.w as i32).min(sw as i32 - x).max(0) as u32;
+            let h = (b.h as i32).min(sh as i32 - y).max(0) as u32;
+            if w == 0 || h == 0 {
+                // Degenerate box — fall back to a full repaint.
+                partial = false;
+            } else {
+                self.renderer.begin_frame(sw, sh, false);
+                self.renderer.set_scissor(x, y, w, h, sh);
+                self.renderer.scissor_clear();
+            }
+        }
+        if !partial {
+            self.damage_acc.clear();
+            self.renderer.begin_frame(sw, sh, true);
+        }
+
+        // Wallpaper first (so un-textured/transparent areas show it). Drawn
+        // clipped to the scissor in the partial path, full-screen otherwise.
         let mut last_tex = 0;
         if let Some(wp) = self.wallpaper.as_mut() {
             self.renderer.bind(wp);
@@ -917,7 +982,7 @@ impl Compositor {
             self.renderer.draw(
                 wp,
                 &GlQuad {
-                    dst: [0.0, 0.0, self.screen_w as f32, self.screen_h as f32],
+                    dst: [0.0, 0.0, sw as f32, sh as f32],
                     ..Default::default()
                 },
             );
@@ -931,6 +996,10 @@ impl Compositor {
             last_tex = self
                 .renderer
                 .draw_raw(item.tex, item.filter, last_tex, &item.quad);
+        }
+
+        if partial {
+            self.renderer.clear_scissor();
         }
 
         self.renderer.end_frame();
@@ -1475,6 +1544,15 @@ mod damage_tests {
             r.needs_full,
             "exceeding the rect cap must conservatively ask for a full redraw"
         );
+    }
+
+    #[test]
+    fn bounding_rect_spans_all_rects() {
+        let mut r = DamageRegion::new();
+        r.add(Rect::new(100, 200, 50, 60));
+        r.add(Rect::new(300, 50, 10, 10));
+        let b = r.bounding_rect();
+        assert_eq!(b, Rect::new(100, 50, 210, 210), "bbox must span every rect");
     }
 }
 ///

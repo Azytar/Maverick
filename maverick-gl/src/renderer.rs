@@ -483,6 +483,10 @@ pub struct Renderer {
     pub video_sync: bool,
     /// `GL_VENDOR / GL_RENDERER / GL_VERSION`, for the startup log line.
     pub info: String,
+    /// Whether `GLX_EXT_buffer_age` is present and `glXQueryDrawable` is
+    /// resolvable. When true, the compositor can do safe partial redraws
+    /// (scissor to the damage region) instead of clearing the whole screen.
+    pub has_buffer_age: bool,
 }
 
 impl Renderer {
@@ -620,6 +624,9 @@ impl Renderer {
             }
         }
 
+        let has_buffer_age =
+            has_extension(&exts, "GLX_EXT_buffer_age") && glx.glXQueryDrawable.is_some();
+
         let mut r = Renderer {
             dpy,
             screen,
@@ -647,6 +654,7 @@ impl Renderer {
             vsync,
             video_sync,
             info: String::new(),
+            has_buffer_age,
         };
 
         if let Err(e) = r.init_gl_objects() {
@@ -751,21 +759,78 @@ impl Renderer {
 
     // ── frame ───────────────────────────────────────────────────────────────
 
-    /// Start a frame: set the viewport to the whole overlay and clear it to
-    /// transparent black. The wallpaper quad is what actually fills the screen;
-    /// without one, a transparent clear shows the real root window underneath,
-    /// which is the friendliest failure mode.
-    pub fn begin_frame(&mut self, width: u32, height: u32) {
+    /// Start a frame: set the viewport to the whole overlay. When `full_clear`
+    /// is true the screen is cleared to transparent black and scissor is
+    /// disabled (the normal path). When false the screen is left intact so the
+    /// caller can scissor + clear only the damaged region (partial redraw) —
+    /// leaving the rest of the back buffer preserved, which is what makes
+    /// partial redraw correct.
+    pub fn begin_frame(&mut self, width: u32, height: u32, full_clear: bool) {
         let gl = &self.gl;
         unsafe {
             (gl.glViewport)(0, 0, width as GLsizei, height as GLsizei);
             (gl.glUseProgram)(self.prog);
             (gl.glBindVertexArray)(self.vao);
             (gl.glUniform2f)(self.u_res, width as GLfloat, height as GLfloat);
+            if full_clear {
+                (gl.glDisable)(GL_SCISSOR_TEST);
+                (gl.glClearColor)(0.0, 0.0, 0.0, 0.0);
+                (gl.glClear)(GL_COLOR_BUFFER_BIT);
+            }
+        }
+        self.last_tex = 0;
+    }
+
+    /// How many frames stale the back buffer is (`GLX_EXT_buffer_age`). Returns
+    /// `0` when the extension is unavailable or the buffer is undefined — the
+    /// caller treats `0` as "repaint everything".
+    pub fn back_buffer_age(&self) -> u32 {
+        let Some(f) = self.glx.glXQueryDrawable else {
+            return 0;
+        };
+        let mut age: c_uint = 0;
+        unsafe {
+            f(
+                self.dpy.as_ptr(),
+                self.glx_win,
+                GLX_BACK_BUFFER_AGE_EXT,
+                &mut age,
+            );
+        }
+        age
+    }
+
+    /// Enable a scissor rectangle. `x`/`y` are top-left screen coordinates
+    /// (y grows downward); GL's scissor origin is bottom-left, so the y is
+    /// flipped against `height`.
+    pub fn set_scissor(&mut self, x: i32, y: i32, w: u32, h: u32, height: u32) {
+        let gl = &self.gl;
+        unsafe {
+            (gl.glEnable)(GL_SCISSOR_TEST);
+            (gl.glScissor)(
+                x as GLint,
+                (height - (y as u32 + h)) as GLint,
+                w as GLsizei,
+                h as GLsizei,
+            );
+        }
+    }
+
+    /// Clear the colour buffer, respecting the current scissor rectangle.
+    pub fn scissor_clear(&mut self) {
+        let gl = &self.gl;
+        unsafe {
             (gl.glClearColor)(0.0, 0.0, 0.0, 0.0);
             (gl.glClear)(GL_COLOR_BUFFER_BIT);
         }
-        self.last_tex = 0;
+    }
+
+    /// Disable the scissor rectangle (back to full-screen drawing).
+    pub fn clear_scissor(&mut self) {
+        let gl = &self.gl;
+        unsafe {
+            (gl.glDisable)(GL_SCISSOR_TEST);
+        }
     }
 
     /// Draw one textured quad.
