@@ -216,6 +216,33 @@ impl DamageRegion {
     }
 }
 
+/// How much of the screen the next frame must repaint. Computed every frame by
+/// `decide_redraw` from three facts: whether buffer-age is known (so a partial
+/// clear is safe), whether a structural change forced a whole-screen repaint,
+/// and whether anything actually reported damage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameMode {
+    /// Nothing to draw (the frame is skipped entirely upstream).
+    Idle,
+    /// Clear and repaint the whole screen.
+    Full,
+    /// Scissor to the accumulated damage bounding box and repaint only that.
+    Partial,
+}
+
+/// Pure decision: given the capability and the two damage flags, what kind of
+/// frame is required? Kept free of any GL/renderer state so it is unit-testable
+/// in isolation (see `frameplan_tests`).
+pub(crate) fn decide_redraw(has_buffer_age: bool, needs_full: bool, damaged: bool) -> FrameMode {
+    if !damaged {
+        FrameMode::Idle
+    } else if !has_buffer_age || needs_full {
+        FrameMode::Full
+    } else {
+        FrameMode::Partial
+    }
+}
+
 /// One window to draw this frame, fully resolved: where, at what opacity, with
 /// which texture, and whether the texture needs linear filtering. Built by
 /// `compute_scene` into a reused buffer so the per-frame path allocates nothing,
@@ -933,44 +960,56 @@ impl Compositor {
 
         let (sw, sh) = (self.screen_w, self.screen_h);
 
-        // Partial redraw is only safe when the back buffer's age is known:
-        // without `GLX_EXT_buffer_age` a partial clear leaves garbage in the
-        // un-cleared region. Anything that set `needs_full` (resize/opacity/
-        // restack/…) also forces a whole-screen repaint, as does an empty
-        // damage region (nothing to scissor).
-        let mut partial =
-            self.renderer.has_buffer_age && !self.needs_full && !self.frame_dirty.is_empty();
-        if partial {
+        // Decide how much to repaint from the two damage facts plus the
+        // buffer-age capability. `decide_redraw` is the single source of truth
+        // for the full/partial/idle choice (unit-tested in `frameplan_tests`).
+        let mut mode = decide_redraw(
+            self.renderer.has_buffer_age,
+            self.needs_full,
+            !self.frame_dirty.is_empty(),
+        );
+
+        // In the partial path the damage region accumulates across frames; an
+        // overflow of its fixed capacity forces a one-off full repaint.
+        if mode == FrameMode::Partial {
             for r in &self.frame_dirty.rects[..self.frame_dirty.count] {
                 self.damage_acc.add(*r);
             }
-            // The accumulated region overflowed its fixed capacity → be safe and
-            // repaint everything this once, then restart the accumulation fresh.
             if self.damage_acc.needs_full {
-                partial = false;
+                mode = FrameMode::Full;
             }
         }
 
-        if partial {
-            let b = self.damage_acc.bounding_rect();
-            // Clamp to the screen: a rect that bled past an edge must not scissor
-            // a negative/out-of-range box.
-            let x = b.x.max(0);
-            let y = b.y.max(0);
-            let w = (b.w as i32).min(sw as i32 - x).max(0) as u32;
-            let h = (b.h as i32).min(sh as i32 - y).max(0) as u32;
-            if w == 0 || h == 0 {
-                // Degenerate box — fall back to a full repaint.
-                partial = false;
-            } else {
-                self.renderer.begin_frame(sw, sh, false);
-                self.renderer.set_scissor(x, y, w, h, sh);
-                self.renderer.scissor_clear();
+        match mode {
+            FrameMode::Idle => {
+                // `render` is only reached when something is dirty, so Idle here
+                // means the region was emptied by structural handling — repaint
+                // the whole screen to be safe.
+                self.damage_acc.clear();
+                self.renderer.begin_frame(sw, sh, true);
             }
-        }
-        if !partial {
-            self.damage_acc.clear();
-            self.renderer.begin_frame(sw, sh, true);
+            FrameMode::Full => {
+                self.damage_acc.clear();
+                self.renderer.begin_frame(sw, sh, true);
+            }
+            FrameMode::Partial => {
+                let b = self.damage_acc.bounding_rect();
+                // Clamp to the screen: a rect that bled past an edge must not
+                // scissor a negative / out-of-range box.
+                let x = b.x.max(0);
+                let y = b.y.max(0);
+                let w = (b.w as i32).min(sw as i32 - x).max(0) as u32;
+                let h = (b.h as i32).min(sh as i32 - y).max(0) as u32;
+                if w == 0 || h == 0 {
+                    // Degenerate box — fall back to a full repaint.
+                    self.damage_acc.clear();
+                    self.renderer.begin_frame(sw, sh, true);
+                } else {
+                    self.renderer.begin_frame(sw, sh, false);
+                    self.renderer.set_scissor(x, y, w, h, sh);
+                    self.renderer.scissor_clear();
+                }
+            }
         }
 
         // Wallpaper first (so un-textured/transparent areas show it). Drawn
@@ -998,7 +1037,7 @@ impl Compositor {
                 .draw_raw(item.tex, item.filter, last_tex, &item.quad);
         }
 
-        if partial {
+        if matches!(mode, FrameMode::Partial) {
             self.renderer.clear_scissor();
         }
 
@@ -1555,6 +1594,38 @@ mod damage_tests {
         assert_eq!(b, Rect::new(100, 50, 210, 210), "bbox must span every rect");
     }
 }
+
+/// Pure tests for the full/partial/idle frame decision. No X/GL: `decide_redraw`
+/// is a free function of three booleans, so the policy is fully covered in CI.
+#[cfg(test)]
+mod frameplan_tests {
+    use super::{decide_redraw, FrameMode};
+
+    #[test]
+    fn nothing_damaged_is_idle() {
+        assert_eq!(decide_redraw(true, false, false), FrameMode::Idle);
+        assert_eq!(decide_redraw(false, true, false), FrameMode::Idle);
+    }
+
+    #[test]
+    fn no_buffer_age_forces_full() {
+        // Even with a clean structural state, without buffer-age a partial clear
+        // would leave garbage, so we repaint everything.
+        assert_eq!(decide_redraw(false, false, true), FrameMode::Full);
+    }
+
+    #[test]
+    fn structural_change_forces_full() {
+        assert_eq!(decide_redraw(true, true, true), FrameMode::Full);
+        assert_eq!(decide_redraw(true, true, false), FrameMode::Idle);
+    }
+
+    #[test]
+    fn buffer_age_plus_damage_is_partial() {
+        assert_eq!(decide_redraw(true, false, true), FrameMode::Partial);
+    }
+}
+
 ///
 /// This is the *measure* half of the "idle must be near-free / 0 allocs per
 /// frame" rule from the compositor plan. It does not touch X or GL (the path
