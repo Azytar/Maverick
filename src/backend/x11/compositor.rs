@@ -138,6 +138,66 @@ impl CompWin {
     }
 }
 
+/// Bounded accumulation of screen-space damage rectangles for one frame.
+///
+/// Fixed capacity, zero heap allocation — the per-frame damage path stays
+/// allocation-free. A window that reported `XDamage` (or any other change that
+/// invalidates previously-drawn pixels) contributes its current screen rect
+/// here. `needs_full` short-circuits the whole thing when a change cannot be
+/// expressed as a set of rectangles (resize, reparent, restack, opacity): the
+/// renderer then clears and repaints the entire screen instead of scissoring the
+/// union. The actual scissor is applied later (partial-redraw phase); this type
+/// is only the accounting.
+#[derive(Clone, Copy)]
+pub(crate) struct DamageRegion {
+    rects: [Rect; Self::CAP],
+    count: usize,
+    needs_full: bool,
+}
+
+impl DamageRegion {
+    /// Hard cap on distinct rectangles. Exceeded only by pathological damage
+    /// storms; in that case we just ask for a full redraw.
+    const CAP: usize = 32;
+
+    fn new() -> Self {
+        Self {
+            rects: [Rect::default(); Self::CAP],
+            count: 0,
+            needs_full: false,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.count = 0;
+        self.needs_full = false;
+    }
+
+    /// Add a screen rect to the damaged area. Zero-size rects are ignored.
+    fn add(&mut self, r: Rect) {
+        if r.w == 0 || r.h == 0 {
+            return;
+        }
+        if self.count < Self::CAP {
+            self.rects[self.count] = r;
+            self.count += 1;
+        } else {
+            // Ran out of slots — be conservative and repaint everything.
+            self.needs_full = true;
+        }
+    }
+
+    /// Force a full-screen redraw this frame.
+    fn full(&mut self) {
+        self.needs_full = true;
+    }
+
+    #[allow(dead_code)]
+    fn is_empty(&self) -> bool {
+        self.count == 0 && !self.needs_full
+    }
+}
+
 /// One window to draw this frame, fully resolved: where, at what opacity, with
 /// which texture, and whether the texture needs linear filtering. Built by
 /// `compute_scene` into a reused buffer so the per-frame path allocates nothing,
@@ -220,6 +280,14 @@ pub struct Compositor {
     frame_gen: u64,
     /// Corner radius the WM wants applied (shader SDF), px.
     corner_radius: u32,
+    /// Accumulated screen-space damage for the current frame, rebuilt by
+    /// `compute_scene`. Drives partial redraw: when only a few windows repainted
+    /// (idle `XDamage`) the region is a small union; when a structural change
+    /// happened `needs_full` forces a full repaint. Empty ⇒ nothing to draw.
+    frame_dirty: DamageRegion,
+    /// A change this frame cannot be expressed as a rectangle set (resize,
+    /// reparent, restack, opacity, new/removed window). Set by `mark_full`.
+    needs_full: bool,
 }
 
 impl Compositor {
@@ -432,6 +500,8 @@ impl Compositor {
             scene: Vec::new(),
             frame_gen: 0,
             corner_radius: cfg.corner_radius,
+            frame_dirty: DamageRegion::new(),
+            needs_full: false,
         };
 
         comp.scan_existing();
@@ -530,7 +600,7 @@ impl Compositor {
             // it should cover).
             self.stack_dirty = true;
         }
-        self.dirty = true;
+        self.mark_full();
     }
 
     /// Window destroyed (DestroyNotify).
@@ -542,7 +612,7 @@ impl Compositor {
             let _ = self.conn.damage_destroy(dmg);
         }
         stack_remove(&mut self.stack, win);
-        self.dirty = true;
+        self.mark_full();
     }
 
     /// Window mapped (MapNotify). Name its off-screen pixmap and bind a texture.
@@ -565,7 +635,7 @@ impl Compositor {
         if !self.ignored.contains(&win) && !self.stack.contains(&win) {
             self.stack_dirty = true;
         }
-        self.dirty = true;
+        self.mark_full();
     }
 
     /// Window unmapped (UnmapNotify). Drop the texture (the pixmap is gone).
@@ -585,7 +655,7 @@ impl Compositor {
                 let _ = self.conn.free_pixmap(pm);
             }
         }
-        self.dirty = true;
+        self.mark_full();
     }
 
     /// Mark a window hidden/shown by the WM's workspace switcher
@@ -595,7 +665,7 @@ impl Compositor {
     pub fn set_hidden(&mut self, win: Window, hidden: bool) {
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.hidden = hidden;
-            self.dirty = true;
+            self.mark_full();
         }
     }
 
@@ -633,7 +703,7 @@ impl Compositor {
         if resized && mapped {
             self.rename_and_bind(win);
         }
-        self.dirty = true;
+        self.mark_full();
     }
 
     /// Damage reported (DamageNotify). Re-arm and mark dirty; the texture is
@@ -653,7 +723,7 @@ impl Compositor {
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.opacity = opacity.clamp(0.0, 1.0);
         }
-        self.dirty = true;
+        self.mark_full();
     }
 
     /// Client changed its own X shape (ShapeNotify). We never clobber the
@@ -665,7 +735,7 @@ impl Compositor {
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.damaged = true;
         }
-        self.dirty = true;
+        self.mark_full();
     }
 
     /// The WM computed live placements; hand them to the compositor as the
@@ -699,12 +769,12 @@ impl Compositor {
             };
             cw.transform_gen = gen;
         }
-        self.dirty = true;
+        self.mark_full();
     }
 
     /// Mark the whole frame dirty (used when stacking or the wallpaper changes).
     pub fn invalidate(&mut self) {
-        self.dirty = true;
+        self.mark_full();
     }
 
     /// Pace the next frame to the vertical retrace (see `Renderer::wait_vblank`).
@@ -721,6 +791,24 @@ impl Compositor {
         self.dirty
     }
 
+    /// The screen-space damage accumulated for the most recent `compute_scene`.
+    /// Empty when the last frame had nothing to repaint. Next phases use this to
+    /// scissor the redraw (partial update) instead of clearing the whole screen.
+    #[allow(dead_code)]
+    pub fn damage_region(&self) -> &DamageRegion {
+        &self.frame_dirty
+    }
+
+    /// Mark the whole frame dirty *and* require a full repaint: used for changes
+    /// that cannot be expressed as a rectangle set (resize, reparent, restack,
+    /// opacity, new/removed window, wallpaper). Content-only `XDamage` must call
+    /// `on_damage` instead, which sets `dirty` but leaves the damage region to
+    /// express the change as a union of rectangles (partial-redraw-friendly).
+    fn mark_full(&mut self) {
+        self.dirty = true;
+        self.needs_full = true;
+    }
+
     // ── frame ───────────────────────────────────────────────────────────────
 
     /// Build the explicit scene for this frame into `self.scene` (reused buffer,
@@ -733,6 +821,10 @@ impl Compositor {
         let (sw, sh) = (self.screen_w, self.screen_h);
         let mut items: Vec<DrawItem> = std::mem::take(&mut self.scene);
         items.clear();
+        // Rebuild the damage accounting from scratch every frame: only the
+        // windows that repainted since the last frame contribute their rect,
+        // plus `needs_full` (set by structural changes) forcing a full repaint.
+        self.frame_dirty.clear();
         for &win in &self.stack {
             // No `ignored` probe here: `track` refuses to record an ignored
             // window, so `wins` can never contain one and this lookup is the
@@ -750,7 +842,8 @@ impl Compositor {
             // the texture's cached GL state, so read it out here (while we hold
             // the only borrow) and carry it in the DrawItem.
             let filter = tex.filter();
-            if cw.damaged {
+            let was_damaged = cw.damaged;
+            if was_damaged {
                 self.renderer.bind(tex);
                 cw.damaged = false;
             }
@@ -769,6 +862,13 @@ impl Compositor {
             // otherwise each issue a `glDrawArrays` + texture bind for nothing.
             if CompWin::offscreen(outer, sw, sh) {
                 continue;
+            }
+            // A window that repainted this frame only dirtied its own area; that
+            // rect is the partial-redraw candidate (scissored in a later phase).
+            // Structural changes set `needs_full` and force the whole screen
+            // instead.
+            if was_damaged {
+                self.frame_dirty.add(outer);
             }
             let smooth = tex.width as u32 != outer.w || tex.height as u32 != outer.h;
             let q = GlQuad {
@@ -790,6 +890,11 @@ impl Compositor {
                 tex: tex.tex,
                 filter,
             });
+        }
+        // Structural changes (resize/restack/opacity/…) cannot be expressed as a
+        // rectangle set, so the whole screen must be cleared and repainted.
+        if self.needs_full {
+            self.frame_dirty.full();
         }
         self.scene = items;
     }
@@ -830,6 +935,7 @@ impl Compositor {
 
         self.renderer.end_frame();
         self.dirty = false;
+        self.needs_full = false;
         true
     }
 
@@ -932,7 +1038,7 @@ impl Compositor {
             Ok(tex) => {
                 self.wallpaper = Some(tex);
                 self.wallpaper_pixmap = Some(pm);
-                self.dirty = true;
+                self.mark_full();
             }
             Err(e) => {
                 self.wallpaper_pixmap = None;
@@ -1318,7 +1424,59 @@ mod stack_tests {
     }
 }
 
-/// Schedule + benchmark harness for the per-frame projection path.
+/// Pure tests for the damage-region accumulator that drives partial redraw.
+/// No X/GL: `DamageRegion` is a fixed-capacity, zero-alloc structure, so it can
+/// be exercised entirely in CI.
+#[cfg(test)]
+mod damage_tests {
+    use super::DamageRegion;
+    use crate::types::Rect;
+
+    #[test]
+    fn fresh_region_is_empty() {
+        let r = DamageRegion::new();
+        assert!(r.is_empty(), "a new region must report nothing to redraw");
+    }
+
+    #[test]
+    fn adding_a_rect_makes_it_non_empty() {
+        let mut r = DamageRegion::new();
+        r.add(Rect::new(10, 20, 100, 50));
+        assert!(!r.is_empty());
+        assert_eq!(r.count, 1);
+    }
+
+    #[test]
+    fn zero_size_rects_are_ignored() {
+        let mut r = DamageRegion::new();
+        r.add(Rect::new(0, 0, 0, 100));
+        r.add(Rect::new(0, 0, 100, 0));
+        assert!(r.is_empty(), "degenerate rects must not dirty the frame");
+    }
+
+    #[test]
+    fn full_short_circuits_the_region() {
+        let mut r = DamageRegion::new();
+        r.add(Rect::new(0, 0, 10, 10));
+        r.full();
+        assert!(r.needs_full, "full() must force a whole-screen repaint");
+        // clear wipes both the rects and the full flag.
+        r.clear();
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn overflow_falls_back_to_full() {
+        let mut r = DamageRegion::new();
+        for i in 0..(DamageRegion::CAP as i32 + 4) {
+            r.add(Rect::new(i * 2, 0, 1, 1));
+        }
+        assert!(
+            r.needs_full,
+            "exceeding the rect cap must conservatively ask for a full redraw"
+        );
+    }
+}
 ///
 /// This is the *measure* half of the "idle must be near-free / 0 allocs per
 /// frame" rule from the compositor plan. It does not touch X or GL (the path
