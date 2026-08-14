@@ -5,6 +5,100 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+Work toward 0.18.4: native wallpaper (image + GLSL shader) rendering,
+occlusion-aware compositor damage tracking, an explicit desired-state
+pipeline with a single applied-geometry owner (`Reconciler`), a rewritten
+`Grid` layout engine, session persistence/recovery, and per-session
+instance identity/discovery so multiple Mavericks (e.g. a real session +
+a Xephyr test instance) no longer collide.
+
+### Fixed
+
+- **Keys stolen from applications under multi-group / AltGr layouts.** The grab
+  side scanned *every* column of the core keymap looking for a bound keysym,
+  while the dispatch side only ever resolved column 0. Under `setxkbmap us,de`
+  columns 2/3 hold the *second group*, so `Mod4+z` also grabbed the physical
+  `y` key; since the grab is on root with `owner_events=true` and Maverick
+  never selects `KeyPress` on client windows, X delivered that press to the WM,
+  `on_key` matched nothing, and the application never saw the key at all.
+  Grabs and dispatch now share one **strict group-1** policy (columns 0/1, the
+  only part of the keymap whose meaning is unambiguous — columns 2/3 are
+  *either* a second group *or* levels 3/4 of group 1, decided per key by the
+  server).
+  - Binds whose keysym group 1 cannot reach (`bracketleft` on `es`/`latam`,
+    which only exists behind AltGr) still work, via a **keysym-directed
+    fallback**: only that keysym is scanned across the whole row, and the
+    keycodes it lands on are recorded so `on_key` can resolve them. Nothing is
+    grabbed that the dispatch would then drop on the floor.
+  - The shifted-column fallback in `on_key` was clamped with
+    `col.min(keysyms_per_keycode - 1)`, which on a 4-column keymap reached
+    column 3 — a different group. It is now clamped to group 1 as well.
+  - A bind whose keysym does not exist anywhere in the current layout is now
+    logged (`keybinding Super+p: that keysym does not exist in the current
+    layout — ignored`) instead of being grabbed and silently swallowing the
+    key.
+  - A bind written with the raw escape (`key = "0x41"`) now fires: the keymap
+    index is normalised to lowercase, matching what `on_key` looks up, while
+    the grab still searches for the raw keysym (`0x41` really does live in
+    column 1 of the `a` keycode).
+- **A transient keyboard-read failure could kill the window manager.**
+  `on_mapping` re-read the keymap with `?`, so any error propagated up through
+  `run_once` → `run` and exited the WM. Keyboard refreshes are now infallible:
+  on failure the previous keymap is kept, a warning is logged, and the next
+  notification retries.
+- **Rejected key grabs were invisible.** Every `grab_key`/`grab_button` was
+  fire-and-forget and `dispatch` swallowed `Event::Error`, so a `BadAccess`
+  (another client — `sxhkd`, a desktop environment — already owns the shortcut)
+  produced a bind that simply never fired, with nothing in the log. The base
+  variant of each grab is now checked and warns on rejection, and X errors are
+  logged at debug level.
+- **Keyboard stutter with the compositor enabled.** The event loop called
+  `poll(2)` on the X socket *before* draining. GLX round-trips
+  (`glXSwapBuffers`, `XSync`) make libxcb read the socket dry, so a `KeyPress`
+  that arrived in that window sat in libxcb's internal queue with the fd no
+  longer readable — and the loop slept the full 100 ms on top of an event it
+  already had. The loop now drains `xcb_poll_for_event` first (it returns the
+  internal queue, which `poll(2)` cannot see) and only blocks when nothing was
+  queued. Measured on Xephyr @ 1280×800 with a GLX compositor keeping the socket
+  busy: with the painter idle between frames, key→action latency went from
+  mean ≈8 ms / max ≈91 ms (baseline) to mean ≈3 ms / max ≈14 ms (drain-first),
+  and with the compositor always rendering, median ≈7.5 ms → ≈5 ms. Idle CPU
+  stays at 0 ticks/10 s and a `PropertyNotify` burst shows no regression
+  (drain-first == baseline). The one per-run miss seen only in the XTEST harness
+  (where each fake press synthesises a `MappingNotify` and a regrab) is a
+  test-environment race, not a regression — it appears identically with the
+  reorder reverted.
+- **(sin confirmar) `startx` crashing Xorg with `EnterVT failed` / `Failed to
+  enable any CRTC` on launch.** `maverick_sys::detach_from_terminal()` called
+  `setsid()` unconditionally, before checking whether stdin was even a real
+  terminal. Under `startx`, that put Maverick into a brand-new POSIX session
+  while still a child of the login session Xorg's VT/DRM master handoff
+  depends on. Removed the `setsid()` call entirely — Maverick doesn't fork
+  away from its parent, so it doesn't need a new session; it now only
+  redirects stdin/stdout to `/dev/null` when launched from a real tty, same
+  as before.
+- **XKB keyboard-change subscription with coalescing.** Maverick now selects
+  XKB `MapNotify` and `NewKeyboardNotify` (best-effort; without the extension
+  it falls back to core `MappingNotify` alone), so remaps the server only
+  reports through XKB, and USB keyboard hotplug, are picked up. All three
+  notifications describe the same change and arrive together, so each one only
+  arms a 50 ms coalescing window: a burst produces a *single*
+  `ungrab_key(ANY)` + regrab, not several — losing a grab mid-burst is exactly
+  when it hurts. `StateNotify` is deliberately not selected: under strict
+  group 1 the active group is irrelevant, so subscribing would mean a full
+  regrab on every layout toggle for no behavioural gain. The keymap itself is
+  still read with core `GetKeyboardMapping`, always clamped to
+  `Setup.min_keycode..=max_keycode` — a server cannot change the keycode range
+  of an established connection, so the range carried by
+  `XkbNewKeyboardNotify` must never be used for the request.
+
+## [0.18.3]
+
+Everything below was previously tracked as `[Unreleased]` in the GitHub
+repo — the refactor-rc1 rebuild plus the config-toml (B1-B12), keybinding,
+compositor damage-tracking (Fase 5-11), and installer/GTK-rule fixes that
+shipped as 0.18.3.
+
 ### Changed
 
 - **Default column width is now a fraction of the workarea, not pixels
