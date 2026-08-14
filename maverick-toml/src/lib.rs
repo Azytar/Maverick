@@ -291,10 +291,7 @@ impl<'a> Parser<'a> {
         }
         self.skip_horizontal_ws();
         let start = self.pos;
-        while !matches!(
-            self.byte(self.pos),
-            b']' | b' ' | b'\t' | b'\n' | b'\r'
-        ) && !self.at_eof()
+        while !matches!(self.byte(self.pos), b']' | b' ' | b'\t' | b'\n' | b'\r') && !self.at_eof()
         {
             self.pos += 1;
         }
@@ -400,8 +397,7 @@ impl<'a> Parser<'a> {
         if matches!(
             self.bytes().get(digits..digits + 2),
             Some(b"0x") | Some(b"0X")
-        )
-        {
+        ) {
             self.pos += 2;
             let hex_start = self.pos;
             while self.byte(self.pos).is_ascii_hexdigit() {
@@ -542,8 +538,7 @@ impl<'a> Parser<'a> {
         if matches!(
             self.bytes().get(digits..digits + 2),
             Some(b"0x") | Some(b"0X")
-        )
-        {
+        ) {
             self.pos += 2;
             let hex_start = self.pos;
             while self.byte(self.pos).is_ascii_hexdigit() {
@@ -696,10 +691,7 @@ mod tests {
     #[test]
     fn unicode_survives_in_strings_and_comments() {
         let e = all("title = \"pérez\" # ── box drawing ──\n");
-        assert_eq!(
-            kv(&e, "title"),
-            Some(&Value::Str(Cow::Borrowed("pérez")))
-        );
+        assert_eq!(kv(&e, "title"), Some(&Value::Str(Cow::Borrowed("pérez"))));
     }
 
     #[test]
@@ -786,9 +778,8 @@ commands = [
 
     #[test]
     fn array_of_tables() {
-        let e = all(
-            "[[rules]]\nclass = \"mpv\"\nfloat = true\n\n[[rules]]\nclass = \"pinentry\"\n",
-        );
+        let e =
+            all("[[rules]]\nclass = \"mpv\"\nfloat = true\n\n[[rules]]\nclass = \"pinentry\"\n");
         let sections: Vec<_> = e
             .iter()
             .filter_map(|ev| match ev {
