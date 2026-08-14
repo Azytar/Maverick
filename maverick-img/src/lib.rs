@@ -353,8 +353,8 @@ fn decode_png(path: &Path) -> Result<Rgba8, String> {
     let w = width as usize;
     let h = height as usize;
     let bd = bit_depth as usize;
-    let bpp = (channels * bd + 7) / 8; // bytes per pixel (filter neighbour distance)
-    let stride = (w * channels * bd + 7) / 8; // bytes per scanline (raw)
+    let bpp = (channels * bd).div_ceil(8); // bytes per pixel (filter neighbour distance)
+    let stride = (w * channels * bd).div_ceil(8); // bytes per scanline (raw)
 
     // Unfilter byte-by-byte into a per-row byte buffer.
     let mut unfiltered = vec![0u8; h * stride];
@@ -570,8 +570,8 @@ mod inflate {
             for len in 1..MAXBITS {
                 offs[len + 1] = offs[len] + self.count[len];
             }
-            for sym in 0..n {
-                let l = lengths[sym] as usize;
+            for (sym, &len) in lengths.iter().take(n).enumerate() {
+                let l = len as usize;
                 if l != 0 {
                     self.symbol[offs[l] as usize] = sym as i32;
                     offs[l] += 1;
@@ -656,21 +656,21 @@ mod inflate {
 
     fn fixed_trees() -> Result<(Huffman, Huffman), String> {
         let mut llengths = [0u16; FIXLCODES];
-        for i in 0..144 {
-            llengths[i] = 8;
+        for v in &mut llengths[0..144] {
+            *v = 8;
         }
-        for i in 144..256 {
-            llengths[i] = 9;
+        for v in &mut llengths[144..256] {
+            *v = 9;
         }
-        for i in 256..280 {
-            llengths[i] = 7;
+        for v in &mut llengths[256..280] {
+            *v = 7;
         }
-        for i in 280..288 {
-            llengths[i] = 8;
+        for v in &mut llengths[280..288] {
+            *v = 8;
         }
         let mut dlengths = [0u16; MAXDCODES];
-        for i in 0..MAXDCODES {
-            dlengths[i] = 5;
+        for v in dlengths.iter_mut().take(MAXDCODES) {
+            *v = 5;
         }
         let mut lencode = Huffman::new(FIXLCODES);
         let mut distcode = Huffman::new(MAXDCODES);

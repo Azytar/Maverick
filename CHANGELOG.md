@@ -88,9 +88,17 @@ a Xephyr test instance) no longer collide.
   group 1 the active group is irrelevant, so subscribing would mean a full
   regrab on every layout toggle for no behavioural gain. The keymap itself is
   still read with core `GetKeyboardMapping`, always clamped to
-  `Setup.min_keycode..=max_keycode` — a server cannot change the keycode range
-  of an established connection, so the range carried by
-  `XkbNewKeyboardNotify` must never be used for the request.
+   `Setup.min_keycode..=max_keycode` — a server cannot change the keycode range
+   of an established connection, so the range carried by
+   `XkbNewKeyboardNotify` must never be used for the request.
+
+### Quality
+
+- **Clippy hygiene in `maverick-img`.** Resolved lints in `src/lib.rs`:
+  `clippy::integer_division_ceil` (the `(x + 7) / 8` byte-size idiom replaced
+  with `div_ceil`) and `clippy::needless_range_loop` (index loops over
+  `lengths`/`llengths`/`dlengths` rewritten as `iter()`/`iter_mut()`). The crate
+  stays clean under `cargo clippy -D warnings`.
 
 ## [0.18.3]
 
