@@ -490,7 +490,10 @@ mod tests {
             "sock_path too long for sockaddr_un: {len} bytes ({p:?})"
         );
         // Fixed filename: the sid appears only as the directory component.
-        assert!(p.ends_with("control.sock"), "socket must use fixed name: {p:?}");
+        assert!(
+            p.ends_with("control.sock"),
+            "socket must use fixed name: {p:?}"
+        );
         assert_eq!(p, session_dir(&long_sid).join("control.sock"));
     }
 

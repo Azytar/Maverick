@@ -506,7 +506,10 @@ mod unit_tests {
             "\"overlay\"",
             "\"pending\"",
         ] {
-            assert!(json.contains(key), "query tree missing observability key {key}");
+            assert!(
+                json.contains(key),
+                "query tree missing observability key {key}"
+            );
         }
         // mon0.focused == 42 in the seed, so its window_obj must report focus.
         assert!(

@@ -130,7 +130,11 @@ impl WindowManager {
             e.root_x,
             e.root_y,
             e.detail,
-            self.engine.state.monitors.get(self.engine.state.sel_mon).and_then(|m| m.focused),
+            self.engine
+                .state
+                .monitors
+                .get(self.engine.state.sel_mon)
+                .and_then(|m| m.focused),
             self.engine.state.sel_mon
         );
 

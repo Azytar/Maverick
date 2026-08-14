@@ -155,8 +155,17 @@ impl WindowManager {
         if self.shutdown_deadline.is_some() {
             return;
         }
-        for win in self.engine.state.clients.keys().copied().collect::<Vec<_>>() {
-            let cooperate = self.has_protocol(win, self.atoms.wm_delete_window).unwrap_or(false);
+        for win in self
+            .engine
+            .state
+            .clients
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            let cooperate = self
+                .has_protocol(win, self.atoms.wm_delete_window)
+                .unwrap_or(false);
             if cooperate {
                 let _ = self.send_proto(win, self.atoms.wm_delete_window, self.last_event_time);
             } else {
@@ -170,7 +179,14 @@ impl WindowManager {
     /// Fire-and-forget — we do NOT wait for them to actually die; Maverick
     /// terminates regardless.
     pub(super) fn force_kill_remaining(&self) {
-        for win in self.engine.state.clients.keys().copied().collect::<Vec<_>>() {
+        for win in self
+            .engine
+            .state
+            .clients
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+        {
             let _ = self.conn.kill_client(win);
         }
     }

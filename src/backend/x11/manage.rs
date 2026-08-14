@@ -538,9 +538,23 @@ impl WindowManager {
                 wtrace!(
                     "manage() -> FOCUS win={:#x} mon={} ws={} (transient_parent={:?})",
                     win,
-                    self.engine.state.clients.get(&win).map(|c| c.monitor).unwrap_or(0),
-                    self.engine.state.clients.get(&win).map(|c| c.workspace).unwrap_or(0),
-                    self.engine.state.clients.get(&win).and_then(|c| c.transient_parent)
+                    self.engine
+                        .state
+                        .clients
+                        .get(&win)
+                        .map(|c| c.monitor)
+                        .unwrap_or(0),
+                    self.engine
+                        .state
+                        .clients
+                        .get(&win)
+                        .map(|c| c.workspace)
+                        .unwrap_or(0),
+                    self.engine
+                        .state
+                        .clients
+                        .get(&win)
+                        .and_then(|c| c.transient_parent)
                 );
                 self.relink_pending_transients()?;
             }
