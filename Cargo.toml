@@ -1,5 +1,12 @@
 [workspace]
-members = ["maverick-sys", "maverick-dialog", "maverick-toml", "maverick-installer"]
+members = [
+    "maverick-sys",
+    "maverick-gl",
+    "maverick-dialog",
+    "maverick-toml",
+    "maverick-installer",
+    "maverick-img",
+]
 exclude = []
 resolver = "2"
 
@@ -22,8 +29,37 @@ path = "src/main.rs"
 [dependencies]
 maverick-sys = { path = "maverick-sys" }
 maverick-toml = { path = "maverick-toml" }
+maverick-gl = { path = "maverick-gl" }
+maverick-img = { path = "maverick-img" }
 libc = "0.2"
-x11rb = { version = "0.13", default-features = false, features = ["randr", "shape"] }
+# `composite`/`damage`/`xfixes` are the compositor's X extensions; `xkb` is used
+# only to *subscribe* to keyboard-map changes (XkbMapNotify /
+# XkbNewKeyboardNotify), which core `MappingNotify` does not always deliver —
+# the keymap itself is still read with core `GetKeyboardMapping`.
+# `allow-unsafe-code` is what makes `x11rb::xcb_ffi::XCBConnection` available so
+# the WM and GLX can share one connection (see `maverick-gl::open_x`).
+x11rb = { version = "0.13", default-features = false, features = [
+    "randr",
+    "shape",
+    "composite",
+    "damage",
+    "xfixes",
+    "xkb",
+    "allow-unsafe-code",
+] }
+
+[features]
+# Diagnostic build: emits a structured "INPUT-TRACE" log on every input/focus
+# decision so the fullscreen+pointer-loss root cause can be confirmed live in
+# Xephyr. Off by default (no runtime cost, no extra deps). Enabled with
+# `cargo build --features input-trace`.
+input-trace = []
+# Diagnostic build: emits a structured "WINDOW-TRACE" log on every
+# reconcile/focus boundary so the desired→applied→real→x11_focus pipeline can be
+# confirmed live in Xephyr (Fase 8 of the real-client compatibility plan). Off by
+# default (no runtime cost, no extra deps). Enabled with
+# `cargo build --features window-trace`.
+window-trace = []
 
 [profile.release]
 opt-level = 3
