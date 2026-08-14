@@ -37,7 +37,7 @@ pub mod glx;
 pub mod renderer;
 pub mod xlib;
 
-pub use renderer::{Quad, Renderer, Texture, VisualFormat, VisualReport};
+pub use renderer::{Quad, Rect, Renderer, Texture, VisualFormat, VisualReport};
 pub use xlib::XDisplay;
 
 use x11rb::xcb_ffi::XCBConnection;

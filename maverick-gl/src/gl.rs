@@ -45,6 +45,10 @@ pub const GL_TEXTURE_WRAP_T: GLenum = 0x2803;
 pub const GL_NEAREST: GLint = 0x2600;
 pub const GL_LINEAR: GLint = 0x2601;
 pub const GL_CLAMP_TO_EDGE: GLint = 0x812F;
+pub const GL_UNPACK_ALIGNMENT: GLenum = 0x0CF5;
+pub const GL_UNSIGNED_BYTE: GLenum = 0x1401;
+pub const GL_RGBA: GLenum = 0x1908;
+pub const GL_MAX_TEXTURE_SIZE: GLenum = 0x0D33;
 
 pub const GL_ARRAY_BUFFER: GLenum = 0x8892;
 pub const GL_STATIC_DRAW: GLenum = 0x88E4;
@@ -136,6 +140,30 @@ gl_api! {
     fn glDeleteTextures(n: GLsizei, texs: *const GLuint);
     fn glTexParameteri(target: GLenum, pname: GLenum, param: GLint);
     fn glActiveTexture(unit: GLenum);
+    fn glPixelStorei(pname: GLenum, param: GLint);
+    fn glTexImage2D(
+        target: GLenum,
+        level: GLint,
+        internalformat: GLint,
+        width: GLsizei,
+        height: GLsizei,
+        border: GLint,
+        format: GLenum,
+        ty: GLenum,
+        pixels: *const c_void,
+    );
+    fn glTexSubImage2D(
+        target: GLenum,
+        level: GLint,
+        xoffset: GLint,
+        yoffset: GLint,
+        width: GLsizei,
+        height: GLsizei,
+        format: GLenum,
+        ty: GLenum,
+        pixels: *const c_void,
+    );
+    fn glGetIntegerv(pname: GLenum, data: *mut GLint);
 }
 
 impl Gl {

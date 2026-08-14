@@ -12,6 +12,7 @@ keywords = ["window-manager", "x11", "glx", "opengl", "compositor"]
 
 [dependencies]
 libc = "0.2"
+maverick-img = { path = "../maverick-img" }
 # `allow-unsafe-code` is what unlocks `x11rb::xcb_ffi::XCBConnection`, the
 # connection type that can wrap the `xcb_connection_t*` owned by an Xlib
 # `Display*` — the single connection shared by the WM (XCB requests) and GLX

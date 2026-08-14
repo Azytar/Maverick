@@ -15,9 +15,23 @@
 // the whole `vec4` (rgb *and* a) by coverage, never just the alpha.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::CString;
+use std::ffi::{c_void, CString};
 use std::fmt;
 use std::os::raw::{c_int, c_uint, c_ulong};
+
+use maverick_img::Rgba8;
+
+/// Screen-space rectangle in pixels, owned by `maverick-gl`. The compositor
+/// converts its `crate::types::Rect` into this when handing the renderer a
+/// wallpaper output quad — `maverick-gl` must not depend on the main crate's
+/// geometry type.
+#[derive(Debug, Clone, Copy)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
 
 use crate::dl::Lib;
 use crate::gl::*;
@@ -108,6 +122,21 @@ impl Texture {
     /// path) can carry the value out without borrowing the `Texture`.
     pub fn filter(&self) -> GLint {
         self.filter
+    }
+    /// Construct a `Texture` that owns a raw GL texture id uploaded from CPU pixels
+    /// (not a GLX pixmap). `glx_pixmap` is left 0 so `destroy_texture` never tries
+    /// to release an X pixmap that does not exist. `flip` is `false` because CPU
+    /// image data is already top-down.
+    pub fn new_cpu(tex: GLuint, w: u16, h: u16) -> Self {
+        Texture {
+            glx_pixmap: 0,
+            tex,
+            flip: false,
+            width: w,
+            height: h,
+            bound: false,
+            filter: GL_LINEAR,
+        }
     }
 }
 
@@ -456,6 +485,15 @@ pub struct Renderer {
     u_opacity: GLint,
     u_radius: GLint,
     u_size: GLint,
+    /// Wallpaper shader program (user fragment shader + our unit-quad vertex
+    /// shader). `0` when no shader wallpaper is active. Separate from `prog` so
+    /// the window path is untouched.
+    wp_prog: GLuint,
+    wp_u_dst: GLint,
+    wp_u_res: GLint,
+    wp_u_time: GLint,
+    wp_u_resolution: GLint,
+    wp_u_delta_time: GLint,
     /// Every visual the screen advertises, straight from the X `Setup`. This is
     /// what makes the renderer *screen-aware*: no depth or channel width is
     /// ever assumed, they are all read back from the server.
@@ -474,12 +512,16 @@ pub struct Renderer {
     verified: HashSet<u32>,
     /// Last texture bound via `draw`, to skip redundant `glBindTexture`.
     last_tex: GLuint,
+    /// Current viewport size (set by `begin_frame`), reused by `draw_shader`'s
+    /// vertex transform (clip space needs the full screen resolution).
+    screen_w: u32,
+    screen_h: u32,
     /// Whether vsync (swap interval 1) is actually in effect.
     pub vsync: bool,
-    /// Whether `GLX_SGI_video_sync` is available. When true the frame loop uses
-    /// `wait_vblank` as the synchroniser (and swap interval is left at 0, since
-    /// the vblank wait already lands the flip on a retrace); when false the loop
-    /// falls back to a tiny poll and swap interval 1 paces the present.
+    /// Whether `GLX_SGI_video_sync` is available. Retained purely as an
+    /// instrumentation signal (C1): its counter can measure missed vblanks. It
+    /// no longer drives pacing — swap interval 1 (see `vsync`) is the only
+    /// synchroniser.
     pub video_sync: bool,
     /// `GL_VENDOR / GL_RENDERER / GL_VERSION`, for the startup log line.
     pub info: String,
@@ -605,24 +647,18 @@ impl Renderer {
         };
 
         // ── vsync ───────────────────────────────────────────────────────────
-        // This is the whole point of the exercise: `glXSwapBuffers` with a swap
-        // interval of 1 blocks until the vertical blank, so a frame lands
-        // exactly once per refresh — no tearing on the moving edge, and the
-        // loop paces itself for free (no spinning, no 16 ms guess).
+        // `glXSwapBuffers` with swap interval 1 blocks until the vertical blank,
+        // so a frame lands exactly once per refresh — no tearing on the moving
+        // edge, and the loop paces itself for free (no spinning, no 16 ms guess).
+        // This is the *single* synchroniser: nothing else must set a conflicting
+        // interval, or the loop would skip vblanks (B1).
         let vsync = enable_vsync(&glx, d, screen, glx_win, &exts);
 
-        // `GLX_SGI_video_sync` lets the frame loop block on the real retrace.
-        // It is the preferred synchroniser: when present we drive pacing from
-        // `wait_vblank` (swap interval 0 — the vblank wait already lands the
-        // flip on a retrace, so a second swap-interval sync would only add a
-        // vblank of latency). Without it we keep swap interval 1 and pace with a
-        // short poll in the event loop.
+        // `GLX_SGI_video_sync` is kept purely as an instrumentation signal (C1):
+        // its counter can measure missed vblanks. It no longer drives pacing —
+        // the swap-interval-1 path above is the only synchroniser, so we must
+        // NOT zero the interval here (that used to undo `enable_vsync`).
         let video_sync = has_extension(&exts, "GLX_SGI_video_sync");
-        if video_sync {
-            if let Some(f) = glx.glXSwapIntervalEXT {
-                unsafe { f(d, glx_win, 0) };
-            }
-        }
 
         let has_buffer_age =
             has_extension(&exts, "GLX_EXT_buffer_age") && glx.glXQueryDrawable.is_some();
@@ -646,6 +682,12 @@ impl Renderer {
             u_opacity: -1,
             u_radius: -1,
             u_size: -1,
+            wp_prog: 0,
+            wp_u_dst: -1,
+            wp_u_res: -1,
+            wp_u_time: -1,
+            wp_u_resolution: -1,
+            wp_u_delta_time: -1,
             visuals: visuals.to_vec(),
             root_format,
             tfp_cache: HashMap::new(),
@@ -655,6 +697,8 @@ impl Renderer {
             video_sync,
             info: String::new(),
             has_buffer_age,
+            screen_w: 0,
+            screen_h: 0,
         };
 
         if let Err(e) = r.init_gl_objects() {
@@ -712,6 +756,18 @@ impl Renderer {
         self.u_radius = uniform("u_radius");
         self.u_size = uniform("u_size");
 
+        // The wallpaper shader program reuses the same unit-quad vertex shader as
+        // the window program, so a user fragment shader only has to declare the
+        // fixed contract uniforms (`u_time`, `u_resolution`, `u_delta_time`) plus
+        // `out vec4 frag`. It is compiled lazily per shader file in
+        // `compile_fragment`; here we just initialise its uniform slots to "absent".
+        self.wp_prog = 0;
+        self.wp_u_dst = -1;
+        self.wp_u_res = -1;
+        self.wp_u_time = -1;
+        self.wp_u_resolution = -1;
+        self.wp_u_delta_time = -1;
+
         // Unit quad, two triangles. Every window is this same quad transformed
         // by `u_dst` — there is no per-window geometry upload, ever.
         #[rustfmt::skip]
@@ -767,6 +823,8 @@ impl Renderer {
     /// partial redraw correct.
     pub fn begin_frame(&mut self, width: u32, height: u32, full_clear: bool) {
         let gl = &self.gl;
+        self.screen_w = width;
+        self.screen_h = height;
         unsafe {
             (gl.glViewport)(0, 0, width as GLsizei, height as GLsizei);
             (gl.glUseProgram)(self.prog);
@@ -902,12 +960,12 @@ impl Renderer {
         unsafe { (self.glx.glXSwapBuffers)(self.dpy.as_ptr(), self.glx_win) };
     }
 
-    /// Block until the next vertical retrace (`GLX_SGI_video_sync`), so the
-    /// frame loop can pace to the real display refresh instead of a fixed timer.
-    /// Returns `false` when the extension is unavailable, so the caller can fall
-    /// back to a short poll. When this returns `true` the caller must NOT also
-    /// rely on `glXSwapBuffers` to pace (the renderer leaves swap interval at 0
-    /// in that case) — doing both would skip every other vblank.
+    /// Block until the next vertical retrace (`GLX_SGI_video_sync`). Retained for
+    /// instrumentation only (C1): it reads the vblank counter and can be used to
+    /// measure missed retraces. It is no longer called from the frame loop — the
+    /// swap-interval-1 path in `end_frame` is the sole synchroniser, so calling
+    /// this *and* relying on `glXSwapBuffers` to pace would skip every other
+    /// vblank. Returns `false` when the extension is unavailable.
     pub fn wait_vblank(&self) -> bool {
         let (Some(get), Some(wait)) = (self.glx.glXGetVideoSyncSGI, self.glx.glXWaitVideoSyncSGI)
         else {
@@ -1030,9 +1088,174 @@ impl Renderer {
         t.bound = true;
     }
 
-    /// Release + delete everything belonging to `t`. The X `Pixmap` itself is
-    /// *not* freed here — it belongs to the caller, which got it from
-    /// `NameWindowPixmap` and must `FreePixmap` it over its own connection.
+    /// Delete a raw GL texture (one not backed by a GLX pixmap) created by
+    /// `upload_rgba`. Does not touch any X resource. Used to release wallpaper
+    /// image textures.
+    pub fn destroy_raw(&mut self, tex: GLuint) {
+        if tex == 0 {
+            return;
+        }
+        let gl = &self.gl;
+        unsafe {
+            if self.last_tex == tex {
+                self.last_tex = 0;
+            }
+            (gl.glDeleteTextures)(1, &tex);
+        }
+    }
+
+    /// Upload a decoded RGBA8 image to a GPU texture (straight → premultiplied, so
+    /// the window-path premultiplied blend is already correct). Returns the raw
+    /// texture name; the caller owns it and must `destroy_raw` it. Errors (driver
+    /// rejection, oversized) return `Err` with a clear message and free the
+    /// half-created texture. Respects `GL_MAX_TEXTURE_SIZE` (the plan's risk note:
+    /// reject, never silently downscale).
+    pub fn upload_rgba(&mut self, img: &Rgba8) -> Result<GLuint, String> {
+        let gl = &self.gl;
+        let max_size = self.max_texture_size();
+        if img.w > max_size || img.h > max_size {
+            return Err(format!(
+                "image {}x{} exceeds GL_MAX_TEXTURE_SIZE {}",
+                img.w, img.h, max_size
+            ));
+        }
+        let mut tex: GLuint = 0;
+        unsafe {
+            (gl.glGenTextures)(1, &mut tex);
+        }
+        if tex == 0 {
+            return Err("glGenTextures failed".into());
+        }
+        // Premultiply straight RGBA → premultiplied (the compositor's blend is
+        // (ONE, ONE_MINUS_SRC_ALPHA) and expects premultiplied source).
+        let mut premult = Vec::with_capacity(img.data.len());
+        for chunk in img.data.chunks_exact(4) {
+            let r = chunk[0] as u32;
+            let g = chunk[1] as u32;
+            let b = chunk[2] as u32;
+            let a = chunk[3] as u32;
+            premult.extend_from_slice(&[
+                ((r * a + 127) / 255) as u8,
+                ((g * a + 127) / 255) as u8,
+                ((b * a + 127) / 255) as u8,
+                a as u8,
+            ]);
+        }
+        unsafe {
+            (gl.glBindTexture)(GL_TEXTURE_2D, tex);
+            (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            (gl.glPixelStorei)(GL_UNPACK_ALIGNMENT, 4);
+            (gl.glTexImage2D)(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA as GLint,
+                img.w as GLsizei,
+                img.h as GLsizei,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                premult.as_ptr().cast::<c_void>(),
+            );
+        }
+        if self.gl.take_error() != GL_NO_ERROR {
+            self.destroy_raw(tex);
+            return Err("glTexImage2D failed for wallpaper texture".into());
+        }
+        Ok(tex)
+    }
+
+    /// Compile a user GLSL fragment shader into a wallpaper program (combined with
+    /// our unit-quad vertex shader). The fragment shader must declare the fixed
+    /// contract uniforms `u_time` (float), `u_resolution` (vec2) and `u_delta_time`
+    /// (float) and write its colour to `out vec4 frag`. On failure returns `Err`
+    /// with the GL log (no panic) so the wallpaper can be disabled without taking
+    /// down the compositor.
+    pub fn compile_fragment(&mut self, frag: &str) -> Result<GLuint, String> {
+        let gl = &self.gl;
+        let vs = match compile_shader(gl, GL_VERTEX_SHADER, VERTEX_SRC) {
+            Ok(v) => v,
+            Err(e) => return Err(format!("wallpaper vertex shader: {e}")),
+        };
+        let fs = match compile_shader(gl, GL_FRAGMENT_SHADER, frag) {
+            Ok(f) => f,
+            Err(e) => {
+                unsafe { (gl.glDeleteShader)(vs) };
+                return Err(format!("wallpaper fragment shader: {e}"));
+            }
+        };
+        let prog = unsafe { (gl.glCreateProgram)() };
+        unsafe {
+            (gl.glAttachShader)(prog, vs);
+            (gl.glAttachShader)(prog, fs);
+            (gl.glLinkProgram)(prog);
+            (gl.glDeleteShader)(vs);
+            (gl.glDeleteShader)(fs);
+        }
+        let mut ok: GLint = 0;
+        unsafe { (gl.glGetProgramiv)(prog, GL_LINK_STATUS, &mut ok) };
+        if ok == 0 {
+            let log = program_log(gl, prog);
+            unsafe { (gl.glDeleteProgram)(prog) };
+            return Err(format!("wallpaper shader link failed: {log}"));
+        }
+        let loc = |name: &str| -> GLint {
+            let c = CString::new(name).expect("uniform name has no NUL");
+            unsafe { (gl.glGetUniformLocation)(prog, c.as_ptr()) }
+        };
+        let u_dst = loc("u_dst");
+        let u_res = loc("u_res");
+        let u_time = loc("u_time");
+        let u_resolution = loc("u_resolution");
+        let u_delta_time = loc("u_delta_time");
+        self.wp_prog = prog;
+        self.wp_u_dst = u_dst;
+        self.wp_u_res = u_res;
+        self.wp_u_time = u_time;
+        self.wp_u_resolution = u_resolution;
+        self.wp_u_delta_time = u_delta_time;
+        Ok(prog)
+    }
+
+    /// Query `GL_MAX_TEXTURE_SIZE` once (cached lazily). Returns a sane default if
+    /// the query is unavailable.
+    fn max_texture_size(&self) -> u32 {
+        let mut v: GLint = 0;
+        unsafe { (self.gl.glGetIntegerv)(GL_MAX_TEXTURE_SIZE, &mut v) };
+        if v <= 0 {
+            4096
+        } else {
+            v as u32
+        }
+    }
+
+    /// Draw the wallpaper shader filling `out` (screen px) for `time`/`dt`. The
+    /// shader fills the quad; per-output `u_resolution` lets it know its own pixel
+    /// dimensions. No texture is sampled.
+    pub fn draw_shader(&mut self, prog: GLuint, out: Rect, time: f32, dt: f32) {
+        let gl = &self.gl;
+        unsafe {
+            (gl.glUseProgram)(prog);
+            (gl.glBindVertexArray)(self.vao);
+        }
+        let (sw, sh) = (self.screen_w as f32, self.screen_h as f32);
+        unsafe {
+            (gl.glUniform2f)(self.wp_u_res, sw, sh);
+            let dst = [
+                out.x as f32,
+                out.y as f32,
+                (out.x + out.w as i32) as f32,
+                (out.y + out.h as i32) as f32,
+            ];
+            (gl.glUniform4f)(self.wp_u_dst, dst[0], dst[1], dst[2], dst[3]);
+            (gl.glUniform1f)(self.wp_u_time, time);
+            (gl.glUniform2f)(self.wp_u_resolution, out.w as f32, out.h as f32);
+            (gl.glUniform1f)(self.wp_u_delta_time, dt);
+            (gl.glDrawArrays)(GL_TRIANGLES, 0, 6);
+        }
+    }
     pub fn destroy_texture(&mut self, mut t: Texture) {
         let d = self.dpy.as_ptr();
         unsafe {
