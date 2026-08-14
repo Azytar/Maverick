@@ -33,7 +33,11 @@ Rust. Presenta un diseño de columnas desplazables horizontalmente inspirado en
 ### Características principales
 - 🦅 Diseño de columnas desplazable horizontalmente.
 - ⚡ Huella reducida — sin cairo/pango/Xft, sin runtime asíncrono, un único binario estático.
-- 🔲 Dos modos de diseño: Column (desplazable, por defecto) y Grid (cuadrícula).
+- 🔲 Dos modos de diseño: Column (desplazable, por defecto) y Grid (reescrito como motor puro y determinista).
+- 🎨 Compositor OpenGL integrado (opcional, activado por defecto con fallback automático) con detección de daño consciente de oclusión — no hace falta `picom`/`xcompmgr`.
+- 🖼️ Fondo de pantalla nativo — una imagen (PNG decodificado sin dependencias; otros formatos vía un conversor externo) o un shader GLSL en vivo, configurable en `config.toml` o al vuelo con `maverick-msg wallpaper …`.
+- 💾 Persistencia de sesión — el layout de columnas/workspace y el foco sobreviven a un reinicio en caliente o recarga; nada de estado en tiempo real (geometría, animaciones, estado del compositor) se confía nunca al disco.
+- 🔒 Aislamiento por sesión — cada instancia en ejecución tiene su propio directorio/socket de runtime, así una sesión real y una instancia de prueba en Xephyr nunca chocan.
 - 🖼 Maximización real (llena el área de trabajo, conserva el borde) además de pantalla completa.
 - 🖥 Soporte multi-monitor vía RandR.
 - 🧩 Soporte de ventanas flotantes y a pantalla completa.
@@ -50,9 +54,12 @@ Rust. Presenta un diseño de columnas desplazables horizontalmente inspirado en
 
 ### Compilar desde las fuentes
 
-Maverick es un workspace de Cargo con varios binarios: `maverick` (el propio
-gestor), `maverickctl` (CLI de control) y `maverick-dialog` (el diálogo de
-confirmación de salida). Compílalos todos juntos:
+Maverick es un workspace de Cargo: el binario `maverick` (el propio gestor),
+`maverickctl` (CLI de control), `maverick-dialog` (el diálogo de
+confirmación de salida), `maverick-installer`, y los crates de librería
+`maverick-gl` (primitivas GL/GLX del compositor), `maverick-img` (decode de
+PNG sin dependencias para el wallpaper) y `maverick-toml` (el parser de
+config sin dependencias). Compílalos todos juntos:
 
 ```bash
 git clone https://github.com/azytar/Maverick.git
@@ -318,17 +325,20 @@ tag_names: (1..=9).map(|n| n.to_string()).collect(),
 autostart: vec![
     vec!["/usr/lib/xdg-desktop-portal-gtk"],
     vec!["/usr/lib/xdg-desktop-portal"],
-    vec!["picom", "--vsync"],                    // compositor, si lo quieres
     vec!["polybar", "main"],                     // barra externa
-    vec!["feh", "--bg-fill", "/ruta/a/wallpaper.png"],
     vec!["alacritty"],
 ],
 ```
 
-maverick no orquesta ninguna herramienta externa de forma especial — compositor,
-barra, wallpaper y portales son simples entradas de autostart, lanzadas una vez
-que el WM está listo. No hay lógica de orden/retardo configuable; si una
-herramienta necesita un momento antes de estar usable, eso depende de ella.
+El compositor y el wallpaper ya no son entradas de autostart — están
+integrados al WM y se controlan con `[compositor]`/`[wallpaper]` en
+`config.toml` (ver [Compositor y fondo de pantalla](#-compositor-y-fondo-de-pantalla)).
+Las barras y portales siguen siéndolo: maverick no las orquesta de forma
+especial, simplemente se lanzan una vez que el WM está listo, sin lógica de
+orden/retardo configurable — si una herramienta necesita un momento antes de
+estar usable, eso depende de ella. (Si preferís usar un compositor externo en
+vez del integrado, poné `[compositor] enabled = false` y agregalo a
+`autostart` como antes.)
 
 > El `autostart` por defecto también lanza `/usr/lib/xdg-desktop-portal` y
 > `/usr/lib/xdg-desktop-portal-gtk` — sin ellos, los selectores de archivos
@@ -353,6 +363,59 @@ Para el texto de estado, maverick lee el `WM_NAME` de la ventana raíz (fijado
 con `xsetroot -name "…"` o `xsetroot -name "$(date)"`) y lo expone vía
 `maverickctl state` / `maverickctl subscribe`, para que una barra o script lo
 lean sin rastrear propiedades X.
+
+---
+
+## 🎨 Compositor y fondo de pantalla
+
+Maverick levanta su propio compositor OpenGL/GLX sobre
+`CompositeGetOverlayWindow` cuando la pantalla lo soporta — no hace falta
+`picom`/`xcompmgr`. Si falta GL, no se puede crear un contexto 3.3, o ya hay
+otro compositor dueño de la pantalla, avisa por log y cae en silencio al
+camino clásico `ConfigureWindow` (las esquinas redondeadas vía `Shape` de
+X11 siguen funcionando sin GL). Se puede desactivar explícitamente con
+`[compositor] enabled = false` en `config.toml`, o con la variable de
+entorno `MAVERICK_NO_COMPOSITOR`.
+
+El compositor también gestiona un fondo de pantalla nativo, configurado
+bajo `[wallpaper]`:
+
+```toml
+[wallpaper]
+path = "~/Pictures/wallpaper.png"   # o un shader .glsl/.frag
+mode = "fill"                       # fill | fit | stretch | center
+```
+
+- **Imágenes** (`.png/.jpg/.jpeg/.webp/.avif/.bmp/.qoi/.ppm/.ff`): el PNG se
+  decodifica de forma nativa (`maverick-img`, sin dependencias); el resto de
+  formatos cae a un conversor externo.
+- **Shaders GLSL** (`.glsl/.frag/.vert/.shader/.fs`): se compilan una vez en
+  la GPU y se redibujan cada frame, recibiendo `u_time`, `u_resolution` y
+  `u_delta_time`.
+- `path = null` (por defecto) lo desactiva — sin fondo dibujado por el
+  compositor.
+
+Se controla en vivo, sin reiniciar:
+
+```bash
+maverick-msg wallpaper set ~/Pictures/wallpaper.png
+maverick-msg wallpaper mode fit
+maverick-msg wallpaper clear
+```
+
+## 💾 Sesiones
+
+El layout de columnas/workspace, los pesos por columna, el workspace activo
+y el foco sobreviven a un reinicio en caliente (`maverickctl restart`) o una
+recarga de config. Solo se persiste esa topología *lógica* — la geometría,
+el estado de animación de cámara/scroll, el estado de zoom/overview, la
+caché del layout Grid y el estado del compositor siempre se reconstruyen
+desde cero contra las ventanas realmente vivas, nunca se confían al disco.
+
+Como cada instancia en ejecución tiene ahora su propio directorio de
+runtime y socket de control (con clave un id de sesión aleatorio por
+proceso), una sesión real y una instancia de prueba en `Xephyr` corriendo
+al mismo tiempo ya no comparten — ni pelean por — el mismo socket.
 
 ---
 
@@ -395,7 +458,9 @@ maverick minimiza las capas de abstracción evitando dependencias innecesarias:
 * **Una sola costura de despacho** — `Engine::dispatch(Action) -> Vec<Effect>` es el *único* camino de un atajo o comando IPC a la mutación de estado. `Effect` es un vocabulario semántico (`ArrangeMonitor`, `FocusWindow`, `SetFullscreen`, …); el `execute()` del backend X11 es el único sitio que los convierte en llamadas de protocolo. Un backend no-X11 futuro implementaría `execute()` contra los mismos efectos sin tocar el núcleo.
 * **Pantalla completa/maximizar como presentación, no como bloqueo de máquina de estados** — `core/present.rs` reescribe solo el rectángulo de la ventana *enfocada* (pantalla completa → toda la pantalla, maximizar → área de trabajo, ambos con precedencia sobre el diseño simple) y reordena en cada transición de foco, en lugar de bloquear la entrada mientras una ventana está a pantalla completa.
 * **Colocación flotante autocalculada** — `manage()` nunca confía en la geometría X bruta que reporta una ventana nueva; las ventanas flotantes se centran sobre la geometría real almacenada del padre transitorio (o el área de trabajo del monitor asignado, para diálogos de portales sin padre real) y se recortan dentro de ella. Solo el ancho/alto vienen de la petición original.
-* **Plano de control por instancia** — `maverick-sys` da a cada instancia en ejecución una identidad PID/display/tty y un protocolo de socket Unix (`ping`/`identify`/`state`/`dispatch`/`restart`/`reload`/`subscribe`/`quit`). `maverickctl` habla con él: `list`, `state`, `msg <acción>`, `subscribe`, `quit[--confirm]`, `quit-all`, `restart`, `reload`, `prune`. Maneja varias instancias en distintos displays/ttys.
+* **Pipeline de estado deseado explícito, un solo dueño de la geometría aplicada** — `State -> layout::arrange -> present::present_into -> DesiredState -> Reconciler -> AppliedState -> X11`. El `Reconciler` (`backend/x11/reconciler.rs`) es el único lugar que decide si hace falta un `configure_window`, reemplazando detección de cambios que antes vivía duplicada en `render`, `manage` y `events`.
+* **Detección de daño consciente de oclusión en el compositor** — el compositor rastrea *por qué* un frame está sucio (bitflags `DirtyReason`) y se salta el redibujado de ventanas/regiones totalmente tapadas por una ventana opaca encima, en vez de repintar todo el frame ante cualquier cambio.
+* **Plano de control por instancia** — `maverick-sys` da a cada instancia en ejecución una identidad por sesión (un id de sesión aleatorio, independiente de la reutilización de PID) y un protocolo de socket Unix (`ping`/`identify`/`state`/`dispatch`/`restart`/`reload`/`subscribe`/`quit`), cada una en su propio directorio de runtime aislado. `maverickctl` habla con él: `list`, `state`, `msg <acción>`, `subscribe`, `quit[--confirm]`, `quit-all`, `restart`, `reload`, `prune`. Maneja varias instancias en distintos displays/ttys/sesiones sin choques.
 * **Capa TOML de configuración opcional** — `userconfig.rs` analiza `config.toml` y lo fusiona campo a campo sobre `config::compiled_config()`; un archivo que falla al analizar se rechaza entero, una entrada errónea se descarta con aviso. `maverickctl reload` lo relee en vivo, sin reiniciar.
 * **Struts de docks/barras externas** — Los docks se detectan vía `_NET_WM_WINDOW_TYPE_DOCK`/`_DESKTOP` (nunca por nombre de proceso) y reservan espacio leyendo `_NET_WM_STRUT_PARTIAL`/el legado `_NET_WM_STRUT`, seguidos por monitor y liberados al destruir/desmapear. maverick no incluye barra de estado — usa Waybar/Polybar/eww y deja que el WM reserve espacio para ella.
 * **Mapa de clientes `HashMap`** — Búsquedas O(1) por XID.
@@ -413,18 +478,24 @@ maverick minimiza las capas de abstracción evitando dependencias innecesarias:
 Maverick/                    # Cargo workspace
 ├── src/                     # `maverick` — el binario del WM
 │   ├── main.rs               punto de entrada, señales, autostart, cableado del plano de control
-│   ├── config.rs              config base compilada: Cfg, Rule, keybinds, colores
+│   ├── config.rs              config base compilada: Cfg, CompositorCfg, WallpaperCfg, Rule, keybinds
 │   ├── userconfig.rs           config.toml opcional: análisis, carga a prueba de fallos, fusión
-│   ├── types.rs                modelo de datos central: State, Monitor, Workspace, Column, Client
+│   ├── types.rs                modelo de datos central: State, Monitor, Workspace, Column, Client, tipos Grid/Fullscreen
 │   ├── log.rs                   logger ligero a stderr
 │   ├── core/                    capa de lógica pura — sin X11
 │   │   ├── engine.rs              Engine::dispatch(Action) -> Vec<Effect>
 │   │   ├── effect.rs               enum Effect (la costura núcleo/backend)
 │   │   ├── present.rs               capa de presentación fullscreen/maximize
 │   │   ├── layout.rs                 arrange_columns / arrange_grid
-│   │   ├── ipc.rs                     state_json / parse_action para el socket de control
-│   │   ├── action.rs                 vocabulario unificado de nombre/análisis de Action (TOML + IPC)
-│   │   └── tests.rs                   tests unitarios
+│   │   ├── grid.rs                    motor de layout Grid puro (determinista, sin X11/State)
+│   │   ├── desired.rs                 DesiredState — el traspaso explícito hacia el Reconciler
+│   │   ├── session.rs                  persistencia/recuperación de sesión (guarda/restaura topología)
+│   │   ├── wallpaper.rs                 modelo de dominio del wallpaper (fuente/modo, sin tipos GL/X11)
+│   │   ├── invariants.rs                 State::check_invariants() chequeos internos de consistencia
+│   │   ├── ipc.rs                         state_json / parse_action para el socket de control
+│   │   ├── action.rs                       vocabulario unificado de nombre/análisis de Action (TOML + IPC)
+│   │   ├── commands.rs                      manejadores de comando por cada Action
+│   │   └── tests.rs                          tests unitarios
 │   └── backend/                 backend X11 — el único sitio que habla el protocolo
 │       ├── atoms.rs               caché de átomos EWMH / ICCCM
 │       └── x11/                     el WindowManager en ejecución, dividido por preocupación
@@ -433,23 +504,34 @@ Maverick/                    # Cargo workspace
 │           ├── events.rs                 tabla de despacho de eventos X
 │           ├── ewmh.rs                    mantenimiento de propiedades EWMH
 │           ├── actions.rs                  do_action / execute (ejecuta Effects del núcleo), reload
-│           ├── input.rs                     keymap, grabs de teclas
+│           ├── input.rs                     keymap, grabs de teclas, suscripción a cambios XKB
 │           ├── pointer.rs                    drag-to-move/resize, click focus
-│           ├── render.rs                      aplicación de geometría, foco, restack
-│           ├── struts.rs                       reserva de docks externos
-├── maverick-sys/             # libc FFI + identidad de instancia/socket de control/hub/discover
+│           ├── render.rs                      recorte de geometría flotante, foco, restack
+│           ├── reconciler.rs                   único dueño de "qué hay realmente en X11"
+│           ├── struts.rs                        reserva de docks externos
+│           ├── compositor.rs                     detección de daño GL + dibujo GPU del wallpaper
+│           ├── framesched.rs                      scheduler puro de "necesito frame, cuándo"
+│           └── hubevents.rs                        puente de eventos del hub de control
+├── maverick-sys/             # libc FFI + identidad por sesión/socket de control/hub/discover
 │   └── src/
-│       ├── identity.rs         "ficha" por instancia PID/display/tty
+│       ├── identity.rs         id de sesión por instancia, directorio de runtime aislado, "ficha"
 │       ├── control.rs           ControlServer — el protocolo de socket Unix
 │       ├── hub.rs                 ControlHub — puente al bucle de eventos del WM
-│       ├── discover.rs             list/find/quit instancias
+│       ├── discover.rs             list/find/quit instancias (por id de sesión)
 │       └── bin/maverickctl.rs       la CLI `maverickctl`
+├── maverick-gl/               # contexto GLX + primitivas de textura/shader del compositor
+│   └── src/
+├── maverick-img/                # decode de PNG sin dependencias para el wallpaper nativo
+│   └── src/lib.rs
+├── maverick-toml/                # parser de TOML sin dependencias usado por userconfig.rs
+│   └── src/lib.rs
 ├── maverick-dialog/           # ventana X11 autónoma de confirmación de salida
 │   └── src/main.rs
 ├── maverick-installer/         # instalador opcional (miembro del workspace)
 │   └── src/main.rs
 ├── config/
 │   └── config.toml            ejemplo de configuración de usuario completo y comentado
+├── tests/                      # suite de integración basada en Xephyr + clientes C de prueba
 ├── CHANGELOG.md
 ├── Cargo.toml                 # raíz del workspace + el paquete `maverick`
 ├── Cargo.lock
