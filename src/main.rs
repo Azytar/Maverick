@@ -109,6 +109,11 @@ fn main() {
         }
     }
 
+    // Capture the original argv (minus argv[0]) so `restart` can re-exec with
+    // the EXACT same arguments (--config/--name/--replace), never a silently
+    // regenerated/defaulted config.
+    let launch_args: Vec<String> = std::env::args().skip(1).collect();
+
     if let Some(msg) = bad_arg {
         eprintln!("maverick: {msg}");
         process::exit(1);
@@ -169,10 +174,17 @@ fn main() {
 
     log::info!("instance name: {}", instance_name);
 
-    // Export the instance name so child processes (notably `maverickctl`, e.g.
+    // Build this instance's identity. The `session_id` is a random, unique-per-
+    // process key used for the per-session runtime dir / socket / ficha; the
+    // human `--name` is kept separately as a label. Computed before detaching so
+    // the tty_nr/start_time metadata are captured reliably.
+    let info = maverick_sys::self_info(&instance_name);
+    let sid = info.session_id.clone();
+
+    // Export the session id so child processes (notably `maverickctl`, e.g.
     // the Mod+Shift+Q quit-confirm keybind) target *this* instance by default,
     // even when several Mavericks run on different TTYs/DISPLAYs.
-    std::env::set_var("MAVERICK_INSTANCE", &instance_name);
+    std::env::set_var("MAVERICK_INSTANCE", &sid);
 
     maverick_sys::detach_from_terminal();
     maverick_sys::Signal::new()
@@ -184,7 +196,6 @@ fn main() {
     // ── Identity + control socket ───────────────────────────────────────────
     // Advertise this instance so an external tool can discover/close it,
     // even when several Mavericks run on different TTYs/DISPLAYs.
-    let info = maverick_sys::self_info(&instance_name);
     if let Err(e) = maverick_sys::identity::write_meta(&info) {
         log::warn!("failed to write instance ficha: {e}");
     }
@@ -193,19 +204,13 @@ fn main() {
     // queues dispatched commands, caches the state snapshot, and fans out
     // events to `subscribe` clients.
     let hub = maverick_sys::ControlHub::new();
-    let control =
-        match maverick_sys::ControlServer::spawn(&instance_name, identity_json, hub.clone()) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                log::warn!("failed to start control socket: {e}");
-                None
-            }
-        };
-
-    // Write PID file so external tools can find us (legacy compat).
-    if let Err(e) = std::fs::write("/tmp/maverick.pid", format!("{}\n", std::process::id())) {
-        log::warn!("failed to write PID file: {e}");
-    }
+    let control = match maverick_sys::ControlServer::spawn(&sid, identity_json, hub.clone()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            log::warn!("failed to start control socket: {e}");
+            None
+        }
+    };
 
     let cfg = config::load_config(config_path.as_deref().map(std::path::Path::new));
     log::info!(
@@ -217,11 +222,16 @@ fn main() {
     );
 
     // ── Phase 1: WM init ──────────────────────────────────────────────────────
-    match backend::x11::WindowManager::new(cfg, replace, config_path.clone().map(std::path::PathBuf::from)) {
+    match backend::x11::WindowManager::new(
+        cfg,
+        replace,
+        config_path.clone().map(std::path::PathBuf::from),
+        launch_args,
+    ) {
         Ok(mut manager) => {
-            // Hand over the control socket + instance name so cleanup() can
+            // Hand over the control socket + session id so cleanup() can
             // tear them down and remove the identity ficha on exit.
-            manager.set_instance_name(instance_name.clone());
+            manager.set_session_id(sid.clone());
             manager.set_hub(hub);
             if let Some(server) = control {
                 manager.set_control(server);
@@ -245,6 +255,10 @@ fn main() {
             }
 
             // ── Phase 3: event loop ───────────────────────────────────────────
+            // Start the loop: `running` is initialised to `false` (State::new)
+            // so the WM would otherwise exit immediately without ever servicing
+            // a single X11 event. Flip it on before handing control to run().
+            manager.engine.state.running = true;
             match manager.run() {
                 Ok(()) => {
                     let disconnected = manager.engine.state.running;
@@ -256,12 +270,10 @@ fn main() {
                             log::warn!("cleanup error: {e}");
                         }
                     }
-                    let _ = std::fs::remove_file("/tmp/maverick.pid");
                 }
                 Err(e) => {
                     log::error!("fatal error in event loop: {e}");
                     let _ = manager.cleanup();
-                    let _ = std::fs::remove_file("/tmp/maverick.pid");
                     process::exit(1);
                 }
             }
@@ -270,7 +282,7 @@ fn main() {
             eprintln!("maverick: failed to initialise: {e}");
             // Clean up the identity ficha written earlier so it doesn't
             // linger and confuse tools that list instances.
-            maverick_sys::identity::cleanup_meta(&instance_name);
+            maverick_sys::identity::cleanup_meta(&sid);
             process::exit(1);
         }
     }
