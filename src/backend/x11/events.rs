@@ -1,3 +1,4 @@
+use super::render::clamp_float_to_workarea;
 use super::*;
 use x11rb::protocol::damage::NotifyEvent as DamageNotifyEvent;
 
@@ -81,17 +82,6 @@ impl WindowManager {
         // prevent "dead" unmapped windows leaving holes in the layout. The
         // destroyed=false path restores border + WM_STATE + ungrab, then
         // re-arranges and focuses the next best window.
-        let presented = self
-            .engine
-            .state
-            .clients
-            .get(&e.window)
-            .is_some_and(|c| c.is_fullscreen() || c.is_maximized_v() || c.is_maximized_h());
-        if presented {
-            return self.unmanage(e.window, false);
-        }
-        // Treat normal window unmap the same as presented: unmanage with
-        // destroyed=false. This handles ICCCM Withdrawn state properly.
         self.unmanage(e.window, false)
     }
 
@@ -100,7 +90,14 @@ impl WindowManager {
         e: ConfigureRequestEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(client) = self.engine.state.clients.get(&e.window) {
-            if !client.is_float() && !client.is_fullscreen() {
+            // WM authority (tiled AND fullscreen): the client's request is
+            // ignored and we re-assert the Desired rect. A fullscreen window's
+            // Desired is the fullscreen rect the WM computed, so honouring a
+            // client `ConfigureRequest` would let a game/browser shrink the
+            // overlay — exactly the divergence `classify_configure(follow=false)`
+            // already rejects for `ConfigureNotify`. Both request paths now agree
+            // the WM owns tiled/fullscreen geometry (model A: request ignored).
+            if !client.is_float() {
                 let geom = client.geom;
                 let bw = client.border_w;
                 let ev = ConfigureNotifyEvent {
@@ -122,7 +119,53 @@ impl WindowManager {
                 return Ok(());
             }
         }
-        // floating or unmanaged: honor the request
+        // floating (or fullscreen) managed client: honor the request through the
+        // single geometry sink so `AppliedState` stays coherent with the client's
+        // desired geometry. The per-field writes below start from the current
+        // `client.geom`/`border_w` and only override the masked fields, exactly
+        // as the old code did; `apply_geom` then re-applies them and diffs
+        // `AppliedState`. (Stacking bits are intentionally dropped — float
+        // restacks are handled by the normal `arrange`/`stack_overlay`.)
+        if let Some(client) = self.engine.state.clients.get(&e.window) {
+            let mut geom = client.geom;
+            let mut bw = client.border_w;
+            if e.value_mask.contains(ConfigWindow::X) {
+                geom.x = e.x as i32;
+            }
+            if e.value_mask.contains(ConfigWindow::Y) {
+                geom.y = e.y as i32;
+            }
+            if e.value_mask.contains(ConfigWindow::WIDTH) {
+                geom.w = e.width as u32;
+            }
+            if e.value_mask.contains(ConfigWindow::HEIGHT) {
+                geom.h = e.height as u32;
+            }
+            if e.value_mask.contains(ConfigWindow::BORDER_WIDTH) {
+                bw = e.border_width as u32;
+            }
+            // WM policy for floats: the client may size/move itself, but the
+            // rect must stay inside the workarea (no 0x0, no overflow off-screen,
+            // no negative-size frames). Clamp at this single geometry sink so the
+            // desired logical float rect AND Applied/X11 all receive the
+            // normalized rect; the model and X11 never disagree on a degenerate.
+            if let Some(wa) = self
+                .engine
+                .state
+                .monitors
+                .get(client.monitor)
+                .map(|m| m.workarea)
+            {
+                geom = clamp_float_to_workarea(geom, wa, bw);
+            }
+            // `client` borrow ends here (geom/bw are copies); now take &mut self.
+            self.apply_geom(e.window, geom, bw, true)?;
+            return Ok(());
+        }
+        // Unmanaged (override-redirect / not-yet-tracked) window: honor geometry
+        // directly. These windows have no `AppliedState` entry, so the single
+        // sink is a no-op for them; emit the raw configure to keep them correctly
+        // placed. Stacking bits are intentionally dropped.
         let mut aux = ConfigureWindowAux::new();
         if e.value_mask.contains(ConfigWindow::X) {
             aux = aux.x(e.x as i32);
@@ -139,28 +182,7 @@ impl WindowManager {
         if e.value_mask.contains(ConfigWindow::BORDER_WIDTH) {
             aux = aux.border_width(e.border_width as u32);
         }
-        if e.value_mask.contains(ConfigWindow::STACK_MODE) {
-            aux = aux.stack_mode(e.stack_mode);
-        }
-        if e.value_mask.contains(ConfigWindow::SIBLING) {
-            aux = aux.sibling(e.sibling);
-        }
         let _ = self.conn.configure_window(e.window, &aux);
-
-        if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
-            if e.value_mask.contains(ConfigWindow::X) {
-                c.geom.x = e.x as i32;
-            }
-            if e.value_mask.contains(ConfigWindow::Y) {
-                c.geom.y = e.y as i32;
-            }
-            if e.value_mask.contains(ConfigWindow::WIDTH) {
-                c.geom.w = e.width as u32;
-            }
-            if e.value_mask.contains(ConfigWindow::HEIGHT) {
-                c.geom.h = e.height as u32;
-            }
-        }
         Ok(())
     }
 
@@ -183,29 +205,87 @@ impl WindowManager {
         if e.response_type & 0x80 != 0 {
             return Ok(());
         }
-        let Some(c) = self.compositor.as_mut() else {
-            return Ok(());
-        };
-        // A child (managed or override-redirect) changed geometry: keep the
-        // compositor's cached outer rect in sync so the live transform and
-        // the texture crop match. This also marks the frame dirty.
-        c.on_configure(
-            e.window,
-            e.x as i32,
-            e.y as i32,
-            e.width as u32,
-            e.height as u32,
-            e.border_width as u32,
-        );
-        // ...and its stacking position. This is the only event that reports a
-        // restack, and it reports *every* restack — the WM's own `raise()`, a
-        // client's `ConfigureRequest`, and override-redirect menus the WM never
-        // manages. Only the root-targeted (SubstructureNotify) copy is used:
-        // managed windows also select StructureNotify, so the same restack
-        // arrives twice and applying it once is enough.
+        // ── Convergence (step 3): treat this as an *observation* of X11 Real,
+        // not an instruction. Only the root-targeted (SubstructureNotify) copy is
+        // authoritative here; the window also delivers a StructureNotify copy
+        // that the compositor sync below consumes. Compare the reported geometry
+        // to what we last APPLIED: a match is our own echo / a compliant client
+        // -> ignore. A mismatch means the client resized itself.
         if e.event == self.root {
-            let above = (e.above_sibling != x11rb::NONE).then_some(e.above_sibling);
-            c.on_restack(e.window, above);
+            let reported = Rect::new(e.x as i32, e.y as i32, e.width as u32, e.height as u32);
+            let reported_bw = e.border_width as u32;
+            // Observability-only: mirror the *real* geometry the client reported
+            // back (X11 Real). Never read for layout/focus/overlay decisions.
+            if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
+                c.last_reported = Some(reported);
+            }
+            let observation = {
+                let clients = &self.engine.state.clients;
+                let applied = &self.applied.windows;
+                match (clients.get(&e.window), applied.get(&e.window)) {
+                    (Some(client), Some(applied_win)) => {
+                        Some(crate::backend::x11::reconciler::classify_configure(
+                            reported,
+                            reported_bw,
+                            applied_win,
+                            client,
+                        ))
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(crate::backend::x11::reconciler::ConfigureObservation::Diverged {
+                follow,
+            }) = observation
+            {
+                if follow {
+                    // Float: the WM allows external geometry — adopt the client's
+                    // rect into the model instead of fighting it. Route through the
+                    // single sink: the redundant `client.geom` write below is
+                    // followed by `apply_geom`, whose `AppliedState::diff` updates
+                    // `AppliedState` to `reported`. Because `applied == reported`
+                    // afterwards, the NEXT `ConfigureNotify` classifies as
+                    // `Compliant` and no loop is created.
+                    if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
+                        c.geom = reported;
+                        c.border_w = reported_bw;
+                    }
+                    self.apply_geom(e.window, reported, reported_bw, true)?;
+                } else {
+                    // WM authority (tiled/fullscreen): force a re-emit of the
+                    // desired geometry so the client snaps back. `geometry_dirty`
+                    // makes `apply_geom` emit even though Desired == Applied.
+                    if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
+                        c.geometry_dirty = true;
+                    }
+                    let desired = self
+                        .engine
+                        .state
+                        .clients
+                        .get(&e.window)
+                        .map(|c| (c.geom, c.border_w))
+                        .unwrap_or((reported, reported_bw));
+                    self.apply_geom(e.window, desired.0, desired.1, true)?;
+                }
+            }
+        }
+
+        // Keep the compositor's cached outer rect in sync (render-only) so the
+        // live transform and texture crop match; also track restacking. This runs
+        // for every managed or override-redirect child and is idempotent.
+        if let Some(c) = self.compositor.as_mut() {
+            c.on_configure(
+                e.window,
+                e.x as i32,
+                e.y as i32,
+                e.width as u32,
+                e.height as u32,
+                e.border_width as u32,
+            );
+            if e.event == self.root {
+                let above = (e.above_sibling != x11rb::NONE).then_some(e.above_sibling);
+                c.on_restack(e.window, above);
+            }
         }
         Ok(())
     }
@@ -361,6 +441,19 @@ impl WindowManager {
             // reset to 0 on every monitor topology change (N1).
             self.update_ewmh_desktop_count()?;
             self.update_workarea()?;
+
+            // Keep the wallpaper output layout in sync with the new topology so a
+            // native wallpaper covers every (possibly resized/rearranged) monitor.
+            if let Some(comp) = self.compositor.as_mut() {
+                let outs: Vec<crate::types::Rect> = self
+                    .engine
+                    .state
+                    .monitors
+                    .iter()
+                    .map(|m| m.screen)
+                    .collect();
+                comp.set_outputs(&outs);
+            }
         }
         Ok(())
     }
@@ -487,7 +580,15 @@ impl WindowManager {
                         _ => !cur,
                     };
                     if new_fs != cur {
-                        self.set_fullscreen(e.window, new_fs)?;
+                        // Route through the `ToggleFullscreen` Command so the
+                        // fullscreen transition is decided by the core (single
+                        // funnel), not by ad-hoc backend state mutation. The
+                        // Command emits `Effect::SetFullscreen`, which the
+                        // backend then carries out.
+                        let effects = self
+                            .engine
+                            .execute(crate::core::commands::ToggleFullscreen(Some(e.window)));
+                        self.run_effects(effects)?;
                     }
                 }
             }
@@ -517,6 +618,12 @@ impl WindowManager {
                         _ => !cur,
                     })
                 };
+                crate::core::commands::apply_maximize(
+                    &mut self.engine.state,
+                    e.window,
+                    resolve(wants_v, cur_v),
+                    resolve(wants_h, cur_h),
+                );
                 self.set_maximized(e.window, resolve(wants_v, cur_v), resolve(wants_h, cur_h))?;
             }
             let urg = self.atoms.net_wm_state_demands_attention;
@@ -529,10 +636,27 @@ impl WindowManager {
             let ws = e.data.as_data32()[0] as usize;
             self.do_action(Action::View(ws))?;
         } else if e.type_ == self.atoms.net_active_window {
-            // _NET_ACTIVE_WINDOW: focus the window on whatever monitor it's on.
-            // Don't change the monitor's active_ws — that's the user's decision.
-            if self.engine.state.clients.contains_key(&e.window) {
-                self.focus(Some(e.window))?;
+            // _NET_ACTIVE_WINDOW (EWMH active-window request from an app/pager).
+            // The focus decision is made by the pure core policy
+            // `decide_active_window`, which refuses to let an unrelated window
+            // steal focus from a presented fullscreen/overlay on the same
+            // (monitor, workspace), and never switches the user's selected
+            // monitor or active workspace.
+            match crate::core::commands::decide_active_window(&self.engine.state, e.window) {
+                crate::core::commands::ActiveWindowIntent::Focus(w) => {
+                    // An explicit active-window request supersedes any deferred
+                    // focus pending behind an overlay on this (monitor, ws).
+                    if self.engine.state.pending_focus.is_some() {
+                        self.engine.state.pending_focus = None;
+                    }
+                    self.focus(Some(w))?;
+                }
+                crate::core::commands::ActiveWindowIntent::Ignore => {
+                    log::debug!(
+                        "_NET_ACTIVE_WINDOW for {} ignored: would steal a presented overlay",
+                        e.window
+                    );
+                }
             }
         } else if e.type_ == self.atoms.net_close_window {
             self.kill(e.window)?;
@@ -620,6 +744,40 @@ impl WindowManager {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// `FocusIn` on a managed client. The WM selected `EventMask::FOCUS_CHANGE`
+    /// on every client (manage.rs), so the server tells us the real X input
+    /// focus moved. Mirror it into `state.x11_input_focus` and let `reconcile_focus`
+    /// re-affirm the WM's logical intent if the two have drifted.
+    pub(super) fn on_focus_in(
+        &mut self,
+        e: FocusInEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.engine.state.x11_input_focus = if e.event == self.root {
+            None
+        } else {
+            Some(e.event)
+        };
+        self.reconcile_focus()?;
+        Ok(())
+    }
+
+    /// `FocusOut` from a managed client: focus left `e.event`. If it went to
+    /// another of our clients we'll receive the matching `FocusIn`; otherwise it
+    /// moved to root / an unmanaged target (e.g. an OR popup, a Wine dialog, or
+    /// an external `XSetInputFocus`). Clear our mirror if it pointed here and let
+    /// `reconcile_focus` re-assert the logical focus so the WM stays authoritative
+    /// and the border colors track reality.
+    pub(super) fn on_focus_out(
+        &mut self,
+        e: FocusOutEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.engine.state.x11_input_focus == Some(e.event) {
+            self.engine.state.x11_input_focus = None;
+        }
+        self.reconcile_focus()?;
         Ok(())
     }
 

@@ -37,10 +37,7 @@ pub enum Event {
         to: usize,
     },
     /// A workspace's layout changed.
-    LayoutChanged {
-        monitor: usize,
-        workspace: usize,
-    },
+    LayoutChanged { monitor: usize, workspace: usize },
     /// A window was moved (within a workspace, between rooms, or to a monitor).
     WindowMoved(WindowId),
     /// A window's floating state flipped.
@@ -57,6 +54,8 @@ pub enum Event {
     SessionQuit,
     /// The WM is about to re-exec itself.
     SessionRestart,
+    /// The native wallpaper source/mode changed (set/clear/mode).
+    WallpaperChanged,
 }
 
 /// Lo que devuelve `Command::execute`: los efectos para el backend y el
@@ -69,7 +68,10 @@ pub struct CommandReport {
 
 impl CommandReport {
     pub fn new(effects: Vec<Effect>) -> Self {
-        Self { effects, event: None }
+        Self {
+            effects,
+            event: None,
+        }
     }
 
     pub fn with_event(effects: Vec<Effect>, event: Event) -> Self {

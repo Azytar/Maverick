@@ -41,10 +41,7 @@ pub enum Effect {
     /// Ask the window to close (`WM_DELETE_WINDOW`, else kill).
     KillWindow(WindowId),
     /// Set the fullscreen presentation state for a window, then re-present.
-    SetFullscreen {
-        win: WindowId,
-        on: bool,
-    },
+    SetFullscreen { win: WindowId, on: bool },
     /// Set the maximized (workarea-filling) presentation state for a window,
     /// then re-present. Only presented while the window is focused (peek).
     ///
@@ -63,10 +60,7 @@ pub enum Effect {
     /// Set _`NET_CURRENT_DESKTOP` on the root window.
     SetCurrentDesktop(usize),
     /// Set _`NET_WM_DESKTOP` on a window.
-    SetWindowDesktop {
-        win: WindowId,
-        ws: usize,
-    },
+    SetWindowDesktop { win: WindowId, ws: usize },
     /// Launch an external process.
     Spawn(Vec<String>),
     /// Terminate the WM cleanly.
@@ -75,4 +69,8 @@ pub enum Effect {
     Restart,
     /// Publish the current state snapshot to IPC subscribers.
     PublishIpcState,
+    /// Apply the engine's current `state.wallpaper` to the compositor: decode +
+    /// upload (or compile a shader) and request one full repaint. Emitted by
+    /// `SetWallpaper`; the backend decides HOW (GL calls stay in x11/GL).
+    SetWallpaper,
 }

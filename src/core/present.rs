@@ -45,7 +45,12 @@ use crate::core::layout::RibbonScratch;
 /// discard it, and `live_placements` runs once per animating monitor *per
 /// frame*. Returning a fresh `Vec` there was a heap allocation on every frame
 /// of every scroll, for a value nobody read.
-pub fn present_into(state: &State, mon: &Monitor, placements: &mut Placements, raise: &mut Vec<WindowId>) {
+pub fn present_into(
+    state: &State,
+    mon: &Monitor,
+    placements: &mut Placements,
+    raise: &mut Vec<WindowId>,
+) {
     raise.clear();
     for entry in placements.iter_mut() {
         let win = entry.0;
@@ -66,7 +71,7 @@ pub fn present_into(state: &State, mon: &Monitor, placements: &mut Placements, r
             // is exclusive by definition, covers the screen in *any* layout, and
             // is excluded from `fs_ctx` so it never joins the ribbon at all.
             Some((mon.screen, 0))
-        } else if (client.is_maximized_v() || client.is_maximized_h()) && mon.focused == Some(win) {
+        } else if mon.ws().presented_maximize == Some(win) {
             // Per-axis maximize: `maximized_rect` only stretches the axes that
             // are actually on (a vertical-only maximize fills the workarea's
             // height but keeps its tile width), so `_NET_WM_STATE_MAXIMIZED_VERT`
@@ -161,7 +166,8 @@ mod tests {
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
 
-crate::core::layout::arrange(&state, 
+        crate::core::layout::arrange(
+            &state,
             0,
             &cfg,
             &registry,
@@ -194,7 +200,8 @@ crate::core::layout::arrange(&state,
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
 
-crate::core::layout::arrange(&state, 
+        crate::core::layout::arrange(
+            &state,
             0,
             &cfg,
             &registry,
@@ -227,11 +234,13 @@ crate::core::layout::arrange(&state,
             .flags
             .set(WinFlags::MAXIMIZED_V | WinFlags::MAXIMIZED_H);
         state.monitors[0].focused = Some(1);
+        state.monitors[0].workspaces[0].presented_maximize = Some(1);
 
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
 
-crate::core::layout::arrange(&state, 
+        crate::core::layout::arrange(
+            &state,
             0,
             &cfg,
             &registry,
@@ -268,7 +277,8 @@ crate::core::layout::arrange(&state,
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
 
-crate::core::layout::arrange(&state, 
+        crate::core::layout::arrange(
+            &state,
             0,
             &cfg,
             &registry,
@@ -302,11 +312,13 @@ crate::core::layout::arrange(&state,
         c.flags.set(WinFlags::MAXIMIZED_V | WinFlags::MAXIMIZED_H);
         c.flags.set(WinFlags::FULLSCREEN);
         state.monitors[0].focused = Some(1);
+        state.monitors[0].workspaces[0].presented_maximize = Some(1);
 
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
 
-crate::core::layout::arrange(&state, 
+        crate::core::layout::arrange(
+            &state,
             0,
             &cfg,
             &registry,
@@ -341,11 +353,13 @@ crate::core::layout::arrange(&state,
             c.flags.set(WinFlags::MAXIMIZED_H);
         }
         state.monitors[0].focused = Some(1);
+        state.monitors[0].workspaces[0].presented_maximize = Some(1);
 
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
 
-crate::core::layout::arrange(&state, 
+        crate::core::layout::arrange(
+            &state,
             0,
             &cfg,
             &registry,
@@ -409,7 +423,8 @@ crate::core::layout::arrange(&state,
         let mut p = Placements::new();
         let registry = LayoutRegistry::new();
 
-crate::core::layout::arrange(&state, 
+        crate::core::layout::arrange(
+            &state,
             0,
             &cfg,
             &registry,

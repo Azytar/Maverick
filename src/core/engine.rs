@@ -1,5 +1,10 @@
 use crate::config::Cfg;
-use crate::core::commands::{CollapseColumn, CycleLayout, FocusDirection, FocusMonitor, GrowColumn, KillWindow, MoveToWorkspace, MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav, PageSnap, Quit, Restart, SetLayout, Spawn, ToggleFloat, ToggleFullscreen, ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom, Command};
+use crate::core::commands::{
+    CollapseColumn, Command, CycleLayout, FocusDirection, FocusMonitor, GrowColumn, KillWindow,
+    MoveToWorkspace, MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav,
+    PageSnap, Quit, Restart, SetLayout, SetWallpaper, Spawn, ToggleFloat, ToggleFullscreen,
+    ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
+};
 use crate::core::effect::Effect;
 use crate::core::event::{Event, EventBus, EventHandler};
 use crate::types::*;
@@ -55,13 +60,28 @@ impl Engine {
         if !effects.is_empty() && !effects.iter().any(|e| matches!(e, Effect::PublishIpcState)) {
             effects.push(Effect::PublishIpcState);
         }
+        // Centralized safety net: resolve any `pending_focus` whose overlay owner
+        // is no longer presented (per #8c) right before the debug-only invariant
+        // check, so no transition can leave a transient #8c violation.
+        if let Some(w) =
+            crate::core::commands::reconcile_pending_focus_after_transition(&mut self.state)
+        {
+            if !effects.iter().any(|e| matches!(e, Effect::FocusWindow(_))) {
+                effects.push(Effect::FocusWindow(Some(w)));
+            }
+        }
+        #[cfg(debug_assertions)]
+        self.state.assert_invariants();
         effects
     }
 
     /// Execute a batch of commands as ONE transaction. This is the answer to
     /// "macro publishes 50 times": N commands here coalesce into a single
     /// state publish, no matter how many mutate state or fire events.
-    pub fn execute_batch(&mut self, commands: impl IntoIterator<Item = Box<dyn Command>>) -> Vec<Effect> {
+    pub fn execute_batch(
+        &mut self,
+        commands: impl IntoIterator<Item = Box<dyn Command>>,
+    ) -> Vec<Effect> {
         let mut all = Vec::new();
         let mut dirty = false;
         let mut events = Vec::new();
@@ -84,6 +104,18 @@ impl Engine {
         if dirty && !all.iter().any(|e| matches!(e, Effect::PublishIpcState)) {
             all.push(Effect::PublishIpcState);
         }
+        // Centralized safety net: resolve any `pending_focus` whose overlay owner
+        // is no longer presented (per #8c) right before the debug-only invariant
+        // check, so no transition can leave a transient #8c violation.
+        if let Some(w) =
+            crate::core::commands::reconcile_pending_focus_after_transition(&mut self.state)
+        {
+            if !all.iter().any(|e| matches!(e, Effect::FocusWindow(_))) {
+                all.push(Effect::FocusWindow(Some(w)));
+            }
+        }
+        #[cfg(debug_assertions)]
+        self.state.assert_invariants();
         all
     }
 
@@ -97,7 +129,12 @@ impl Engine {
             Action::CycleLayout => self.execute(CycleLayout),
             Action::SetLayout(lk) => self.execute(SetLayout(lk)),
             Action::FocusDir(dir) => self.execute(FocusDirection(dir)),
-            Action::MoveDir(dir) => match self.state.monitors.get(self.state.sel_mon).and_then(|m| m.focused) {
+            Action::MoveDir(dir) => match self
+                .state
+                .monitors
+                .get(self.state.sel_mon)
+                .and_then(|m| m.focused)
+            {
                 Some(w) => self.execute(MoveWindow(w, dir)),
                 None => vec![],
             },
@@ -151,6 +188,7 @@ impl Engine {
             Action::OverviewEnter => self.execute(OverviewEnter),
             Action::ViewportZoom(delta) => self.execute(ViewportZoom(delta)),
             Action::PageSnap(dir) => self.execute(PageSnap(dir)),
+            Action::Wallpaper(cmd) => self.execute(SetWallpaper(cmd)),
         }
     }
 }
