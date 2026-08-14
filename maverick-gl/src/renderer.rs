@@ -21,6 +21,10 @@ use std::os::raw::{c_int, c_uint, c_ulong};
 
 use maverick_img::Rgba8;
 
+/// Opaque handle to a compiled wallpaper shader program (opaque `u32`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShaderId(pub u32);
+
 /// Screen-space rectangle in pixels, owned by `maverick-gl`. The compositor
 /// converts its `crate::types::Rect` into this when handing the renderer a
 /// wallpaper output quad — `maverick-gl` must not depend on the main crate's
@@ -93,7 +97,7 @@ void main() {
 /// does that from exactly three places (unmap, destroy, resize).
 pub struct Texture {
     pub glx_pixmap: GLXPixmap,
-    pub tex: GLuint,
+    pub(crate) tex: GLuint,
     /// `true` when the fbconfig reports `GLX_Y_INVERTED_EXT`, i.e. the texture's
     /// row 0 is the *bottom* of the window. Not optional: GLX pixmaps coming
     /// from redirected windows are y-flipped relative to plain GL textures on
@@ -109,19 +113,17 @@ pub struct Texture {
     /// object.
     ///
     /// Filtering is *texture* state, not draw state, so it survives between
-    /// frames — but it depends on `Quad::smooth`, which changes when a window
+    /// frames — but it depends on `DrawQuad::filter`, which changes when a window
     /// starts or stops being scaled by an animation. Caching the value here is
     /// what lets `draw` re-issue `glTexParameteri` only on that transition
     /// instead of twice per quad per frame.
-    filter: GLint,
+    filter: Filter,
 }
 
 impl Texture {
-    /// The texture's cached min/mag filter (set by `draw`/`draw_raw`). Exposed so
-    /// callers that submit a quad via a raw id (the compositor's explicit scene
-    /// path) can carry the value out without borrowing the `Texture`.
-    pub fn filter(&self) -> GLint {
-        self.filter
+    /// Opaque handle to the underlying GL texture name.
+    pub fn handle(&self) -> TextureHandle {
+        TextureHandle(self.tex)
     }
     /// Construct a `Texture` that owns a raw GL texture id uploaded from CPU pixels
     /// (not a GLX pixmap). `glx_pixmap` is left 0 so `destroy_texture` never tries
@@ -135,7 +137,7 @@ impl Texture {
             width: w,
             height: h,
             bound: false,
-            filter: GL_LINEAR,
+            filter: Filter::Linear,
         }
     }
 }
@@ -144,38 +146,6 @@ impl Texture {
     #[inline]
     pub fn is_bound(&self) -> bool {
         self.bound
-    }
-}
-
-/// One textured quad to draw this frame.
-#[derive(Debug, Clone, Copy)]
-pub struct Quad {
-    /// Destination rect in screen pixels: `x0, y0, x1, y1`, origin top-left.
-    pub dst: [f32; 4],
-    /// Source rect in normalised texture coords: `u0, v0, u1, v1`, `v` top-down.
-    /// `[0.0, 0.0, 1.0, 1.0]` for a whole window.
-    pub src: [f32; 4],
-    /// Quad size in pixels — what the rounded-rect SDF measures against.
-    pub size: [f32; 2],
-    /// Corner radius in pixels; `0.0` takes the fast path (no SDF at all).
-    pub radius: f32,
-    /// 0..1 multiplier applied to the premultiplied source.
-    pub opacity: f32,
-    /// `true` → `GL_LINEAR` (the quad is scaled by an animation),
-    /// `false` → `GL_NEAREST` (1:1, so nearest is both sharper and cheaper).
-    pub smooth: bool,
-}
-
-impl Default for Quad {
-    fn default() -> Self {
-        Self {
-            dst: [0.0; 4],
-            src: [0.0, 0.0, 1.0, 1.0],
-            size: [1.0, 1.0],
-            radius: 0.0,
-            opacity: 1.0,
-            smooth: false,
-        }
     }
 }
 
@@ -237,6 +207,120 @@ impl fmt::Display for VisualFormat {
             self.alpha_bits,
             if self.direct { "" } else { " (palette)" }
         )
+    }
+}
+
+/// Filter mode for a textured quad. Mirrors the OpenGL constants
+/// `GL_NEAREST` / `GL_LINEAR` without exposing them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Filter {
+    /// `GL_NEAREST` (1:1, so nearest is both sharper and cheaper). The default.
+    #[default]
+    Nearest,
+    /// `GL_LINEAR` (the quad is scaled by an animation).
+    Linear,
+}
+
+impl Filter {
+    #[inline]
+    pub fn to_gl(self) -> GLint {
+        match self {
+            Filter::Nearest => GL_NEAREST,
+            Filter::Linear => GL_LINEAR,
+        }
+    }
+}
+
+/// Opaque handle to a GPU texture. The underlying `u32` is backend-private.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextureHandle(pub u32);
+
+/// Quad to draw this frame, free of any OpenGL constant.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DrawQuad {
+    /// Destination rect in screen pixels: `x0, y0, x1, y1`, origin top-left.
+    pub dst: [f32; 4],
+    /// Source rect in normalised texture coords: `u0, v0, u1, v1`, `v` top-down.
+    pub src: [f32; 4],
+    /// Quad size in pixels — what the rounded-rect SDF measures against.
+    pub size: [f32; 2],
+    /// Corner radius in pixels; `0.0` takes the fast path (no SDF at all).
+    pub radius: f32,
+    /// 0..1 multiplier applied to the premultiplied source.
+    pub opacity: f32,
+    /// Texture filtering mode.
+    pub filter: Filter,
+}
+
+/// Which backend is driving the renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RendererBackend {
+    OpenGlGlx,
+}
+
+impl fmt::Display for RendererBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RendererBackend::OpenGlGlx => f.write_str("OpenGL/GLX"),
+        }
+    }
+}
+
+/// Hardware vs software acceleration classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acceleration {
+    Gpu,
+    Software,
+    Unknown,
+}
+
+impl fmt::Display for Acceleration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Acceleration::Gpu => f.write_str("GPU"),
+            Acceleration::Software => f.write_str("Software"),
+            Acceleration::Unknown => f.write_str("Unknown"),
+        }
+    }
+}
+
+/// Structured renderer info returned to the compositor for startup logging.
+#[derive(Debug, Clone)]
+pub struct RendererInfo {
+    pub backend: RendererBackend,
+    pub vendor: String,
+    pub renderer: String,
+    pub version: String,
+    pub accelerated: Acceleration,
+}
+
+impl fmt::Display for RendererInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Compositor:")?;
+        writeln!(f, "  Backend: {}", self.backend)?;
+        writeln!(f, "  Vendor: {}", self.vendor)?;
+        writeln!(f, "  Renderer: {}", self.renderer)?;
+        writeln!(f, "  Version: {}", self.version)?;
+        writeln!(f, "  Acceleration: {}", self.accelerated)
+    }
+}
+
+/// Classify a (vendor, renderer) pair as GPU, Software, or Unknown using
+/// purely string-based heuristics (no GPU-vendor-name guessing).
+pub fn classify_acceleration(vendor: &str, renderer: &str) -> Acceleration {
+    let s = format!("{vendor} {renderer}").to_ascii_lowercase();
+    if s.contains("llvmpipe")
+        || s.contains("softpipe")
+        || s.contains("swrast")
+        || s.contains("software renderer")
+        || s.contains("software rasterizer")
+        || s.contains("swiftshader")
+    {
+        Acceleration::Software
+    } else if vendor.is_empty() && renderer.is_empty() {
+        Acceleration::Unknown
+    } else {
+        Acceleration::Gpu
     }
 }
 
@@ -511,7 +595,7 @@ pub struct Renderer {
     /// the sync.
     verified: HashSet<u32>,
     /// Last texture bound via `draw`, to skip redundant `glBindTexture`.
-    last_tex: GLuint,
+    last_tex: TextureHandle,
     /// Current viewport size (set by `begin_frame`), reused by `draw_shader`'s
     /// vertex transform (clip space needs the full screen resolution).
     screen_w: u32,
@@ -523,8 +607,8 @@ pub struct Renderer {
     /// no longer drives pacing — swap interval 1 (see `vsync`) is the only
     /// synchroniser.
     pub video_sync: bool,
-    /// `GL_VENDOR / GL_RENDERER / GL_VERSION`, for the startup log line.
-    pub info: String,
+    /// Structured renderer info for the compositor's startup log.
+    pub info: RendererInfo,
     /// Whether `GLX_EXT_buffer_age` is present and `glXQueryDrawable` is
     /// resolvable. When true, the compositor can do safe partial redraws
     /// (scissor to the damage region) instead of clearing the whole screen.
@@ -692,10 +776,16 @@ impl Renderer {
             root_format,
             tfp_cache: HashMap::new(),
             verified: HashSet::new(),
-            last_tex: 0,
+            last_tex: TextureHandle(0),
             vsync,
             video_sync,
-            info: String::new(),
+            info: RendererInfo {
+                backend: RendererBackend::OpenGlGlx,
+                vendor: String::new(),
+                renderer: String::new(),
+                version: String::new(),
+                accelerated: Acceleration::Unknown,
+            },
             has_buffer_age,
             screen_w: 0,
             screen_h: 0,
@@ -706,12 +796,16 @@ impl Renderer {
             return Err(e);
         }
 
-        r.info = format!(
-            "{} / {} / GL {}",
-            r.gl.get_string(GL_VENDOR),
-            r.gl.get_string(GL_RENDERER),
-            r.gl.get_string(GL_VERSION)
-        );
+        let vendor = r.gl.get_string(GL_VENDOR);
+        let renderer_str = r.gl.get_string(GL_RENDERER);
+        let version = r.gl.get_string(GL_VERSION);
+        r.info = RendererInfo {
+            backend: RendererBackend::OpenGlGlx,
+            vendor: vendor.clone(),
+            renderer: renderer_str.clone(),
+            version: version.clone(),
+            accelerated: classify_acceleration(&vendor, &renderer_str),
+        };
         let _ = (width, height);
         Ok(r)
     }
@@ -836,7 +930,7 @@ impl Renderer {
                 (gl.glClear)(GL_COLOR_BUFFER_BIT);
             }
         }
-        self.last_tex = 0;
+        self.last_tex = TextureHandle(0);
     }
 
     /// How many frames stale the back buffer is (`GLX_EXT_buffer_age`). Returns
@@ -896,23 +990,19 @@ impl Renderer {
     /// Takes `&mut Texture` so the filter cache can be updated: the only
     /// per-draw GL *state* change left is the one that genuinely varies, and
     /// only when it varies.
-    pub fn draw(&mut self, tex: &mut Texture, q: &Quad) {
+    pub fn draw(&mut self, tex: &mut Texture, q: &DrawQuad) {
         let gl = &self.gl;
+        let handle = tex.handle();
         unsafe {
-            if self.last_tex != tex.tex {
+            if self.last_tex != handle {
                 (gl.glBindTexture)(GL_TEXTURE_2D, tex.tex);
-                self.last_tex = tex.tex;
+                self.last_tex = handle;
             }
-            // `smooth` only flips when a window starts/stops being scaled, so
-            // in the steady state (and during a scroll, where every window is
-            // either 1:1 or not) this branch is not taken at all. It used to
-            // run twice per quad per frame, which is a texture-object state
-            // change the driver may have to revalidate against.
-            let filter = if q.smooth { GL_LINEAR } else { GL_NEAREST };
-            if tex.filter != filter {
+            let filter = q.filter.to_gl();
+            if tex.filter != q.filter {
                 (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
                 (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
-                tex.filter = filter;
+                tex.filter = q.filter;
             }
             (gl.glUniform4f)(self.u_dst, q.dst[0], q.dst[1], q.dst[2], q.dst[3]);
             (gl.glUniform4f)(self.u_src, q.src[0], q.src[1], q.src[2], q.src[3]);
@@ -924,23 +1014,27 @@ impl Renderer {
         }
     }
 
-    /// Draw a quad given a raw texture id, the texture's cached filter, and the
-    /// previously-bound texture id (for bind-cache elision). Used by the
+    /// Draw a quad given a texture handle, the previously-bound texture id (for
+    /// bind-cache elision), and the quad parameters. Used by the
     /// compositor's explicit-scene path, where the `Texture` itself stays owned
     /// by `CompWin` (so the filter cache and flip flag are read there and passed
-    /// in), and only the `GLuint` travels in the `DrawItem`.
-    pub fn draw_raw(&mut self, tex: GLuint, filter: GLint, prev_tex: GLuint, q: &Quad) -> GLuint {
+    /// in), and only the handle travels in the `DrawItem`.
+    pub fn draw_raw(
+        &mut self,
+        tex: TextureHandle,
+        prev_tex: TextureHandle,
+        q: &DrawQuad,
+    ) -> TextureHandle {
         let gl = &self.gl;
-        let bound = if prev_tex != tex {
-            unsafe { (gl.glBindTexture)(GL_TEXTURE_2D, tex) };
+        let inner = tex.0;
+        let bound = if prev_tex.0 != inner {
+            unsafe { (gl.glBindTexture)(GL_TEXTURE_2D, inner) };
             tex
         } else {
             prev_tex
         };
+        let filter = q.filter.to_gl();
         unsafe {
-            // `filter` is the texture's cached value, so this is just the
-            // one-time (or changing) state upload — no per-draw re-validation
-            // beyond what the caller already decided.
             (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
             (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
             (gl.glUniform4f)(self.u_dst, q.dst[0], q.dst[1], q.dst[2], q.dst[3]);
@@ -1047,7 +1141,7 @@ impl Renderer {
             (self.gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             (self.gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         }
-        self.last_tex = tex;
+        self.last_tex = TextureHandle(tex);
         let mut t = Texture {
             glx_pixmap,
             tex,
@@ -1057,7 +1151,7 @@ impl Renderer {
             bound: false,
             // Must match the filter actually set above, or the first `draw`
             // would skip the update it needs.
-            filter: GL_LINEAR,
+            filter: Filter::Linear,
         };
         self.bind(&mut t);
         Ok(t)
@@ -1074,10 +1168,11 @@ impl Renderer {
             return;
         };
         let d = self.dpy.as_ptr();
+        let handle = t.handle();
         unsafe {
-            if self.last_tex != t.tex {
+            if self.last_tex != handle {
                 (self.gl.glBindTexture)(GL_TEXTURE_2D, t.tex);
-                self.last_tex = t.tex;
+                self.last_tex = handle;
             }
             if t.bound {
                 release(d, t.glx_pixmap, GLX_FRONT_LEFT_EXT);
@@ -1091,26 +1186,26 @@ impl Renderer {
     /// Delete a raw GL texture (one not backed by a GLX pixmap) created by
     /// `upload_rgba`. Does not touch any X resource. Used to release wallpaper
     /// image textures.
-    pub fn destroy_raw(&mut self, tex: GLuint) {
-        if tex == 0 {
+    pub fn destroy_raw(&mut self, tex: TextureHandle) {
+        if tex.0 == 0 {
             return;
         }
         let gl = &self.gl;
         unsafe {
             if self.last_tex == tex {
-                self.last_tex = 0;
+                self.last_tex = TextureHandle(0);
             }
-            (gl.glDeleteTextures)(1, &tex);
+            (gl.glDeleteTextures)(1, &tex.0);
         }
     }
 
     /// Upload a decoded RGBA8 image to a GPU texture (straight → premultiplied, so
-    /// the window-path premultiplied blend is already correct). Returns the raw
-    /// texture name; the caller owns it and must `destroy_raw` it. Errors (driver
+    /// the window-path premultiplied blend is already correct). Returns the
+    /// texture handle; the caller owns it and must `destroy_raw` it. Errors (driver
     /// rejection, oversized) return `Err` with a clear message and free the
     /// half-created texture. Respects `GL_MAX_TEXTURE_SIZE` (the plan's risk note:
     /// reject, never silently downscale).
-    pub fn upload_rgba(&mut self, img: &Rgba8) -> Result<GLuint, String> {
+    pub fn upload_rgba(&mut self, img: &Rgba8) -> Result<TextureHandle, String> {
         let gl = &self.gl;
         let max_size = self.max_texture_size();
         if img.w > max_size || img.h > max_size {
@@ -1161,10 +1256,11 @@ impl Renderer {
             );
         }
         if self.gl.take_error() != GL_NO_ERROR {
-            self.destroy_raw(tex);
+            self.destroy_raw(TextureHandle(tex));
             return Err("glTexImage2D failed for wallpaper texture".into());
         }
-        Ok(tex)
+        self.last_tex = TextureHandle(tex);
+        Ok(TextureHandle(tex))
     }
 
     /// Compile a user GLSL fragment shader into a wallpaper program (combined with
@@ -1173,7 +1269,7 @@ impl Renderer {
     /// (float) and write its colour to `out vec4 frag`. On failure returns `Err`
     /// with the GL log (no panic) so the wallpaper can be disabled without taking
     /// down the compositor.
-    pub fn compile_fragment(&mut self, frag: &str) -> Result<GLuint, String> {
+    pub fn compile_fragment(&mut self, frag: &str) -> Result<ShaderId, String> {
         let gl = &self.gl;
         let vs = match compile_shader(gl, GL_VERTEX_SHADER, VERTEX_SRC) {
             Ok(v) => v,
@@ -1216,7 +1312,7 @@ impl Renderer {
         self.wp_u_time = u_time;
         self.wp_u_resolution = u_resolution;
         self.wp_u_delta_time = u_delta_time;
-        Ok(prog)
+        Ok(ShaderId(prog))
     }
 
     /// Query `GL_MAX_TEXTURE_SIZE` once (cached lazily). Returns a sane default if
@@ -1234,10 +1330,10 @@ impl Renderer {
     /// Draw the wallpaper shader filling `out` (screen px) for `time`/`dt`. The
     /// shader fills the quad; per-output `u_resolution` lets it know its own pixel
     /// dimensions. No texture is sampled.
-    pub fn draw_shader(&mut self, prog: GLuint, out: Rect, time: f32, dt: f32) {
+    pub fn draw_shader(&mut self, s: ShaderId, out: Rect, time: f32, dt: f32) {
         let gl = &self.gl;
         unsafe {
-            (gl.glUseProgram)(prog);
+            (gl.glUseProgram)(s.0);
             (gl.glBindVertexArray)(self.vao);
         }
         let (sw, sh) = (self.screen_w as f32, self.screen_h as f32);
@@ -1281,7 +1377,7 @@ impl Renderer {
         // the window samples texture 0 — it renders as an empty hole. This is
         // reachable on any destroy/resize (both free the texture) that is not
         // the most recently drawn window.
-        self.last_tex = 0;
+        self.last_tex = TextureHandle(0);
     }
 
     fn tfp_config(&mut self, visual: VisualFormat) -> Result<TfpConfig, String> {
@@ -1829,5 +1925,80 @@ mod tests {
         let mut cfg = fb(RGB24.id, Some(24), [8, 8, 8, 8]);
         cfg.pixmap_renderable = false;
         assert_eq!(rate_fbconfig(RGB24, &cfg), Err(Reject::NotPixmap));
+    }
+
+    // ── acceleration classification (pure, no X/GPU) ─────────────────────────
+
+    #[test]
+    fn software_rasterizers_classify_as_software() {
+        assert_eq!(
+            classify_acceleration("Mesa", "llvmpipe (LLVM 15.0.7, 256 bits)"),
+            Acceleration::Software
+        );
+        assert_eq!(
+            classify_acceleration("Red Hat", "softpipe"),
+            Acceleration::Software
+        );
+        assert_eq!(classify_acceleration("", "swrast"), Acceleration::Software);
+        assert_eq!(
+            classify_acceleration("VMware, Inc.", "Software Renderer"),
+            Acceleration::Software
+        );
+        assert_eq!(
+            classify_acceleration("Google", "Software Rasterizer"),
+            Acceleration::Software
+        );
+        assert_eq!(
+            classify_acceleration("X.Org", "swiftshader"),
+            Acceleration::Software
+        );
+    }
+
+    #[test]
+    fn real_gpus_classify_as_gpu_regardless_of_vendor() {
+        // Intel is NOT assumed software — the i5-7300HQ diagnostic case.
+        assert_eq!(
+            classify_acceleration("Intel", "Mesa Intel(R) HD Graphics 630 (KBL GT2)"),
+            Acceleration::Gpu
+        );
+        // NVIDIA gets no software heuristic either.
+        assert_eq!(
+            classify_acceleration("NVIDIA Corporation", "NVIDIA GeForce GTX 1060/PCIe/SSE2"),
+            Acceleration::Gpu
+        );
+        // AMD keeps behaving exactly as before.
+        assert_eq!(
+            classify_acceleration("X.Org", "AMD Radeon RX 580 (POLARIS10, DRM 3.49)"),
+            Acceleration::Gpu
+        );
+    }
+
+    #[test]
+    fn empty_renderer_info_classifies_unknown() {
+        assert_eq!(classify_acceleration("", ""), Acceleration::Unknown);
+    }
+
+    #[test]
+    fn renderer_info_display_matches_startup_block() {
+        let info = RendererInfo {
+            backend: RendererBackend::OpenGlGlx,
+            vendor: "Intel".into(),
+            renderer: "Mesa Intel(R) HD Graphics 630".into(),
+            version: "4.6 (Core Profile)".into(),
+            accelerated: Acceleration::Gpu,
+        };
+        assert_eq!(
+            info.to_string(),
+            "Compositor:\n  Backend: OpenGL/GLX\n  Vendor: Intel\n  \
+             Renderer: Mesa Intel(R) HD Graphics 630\n  Version: 4.6 (Core Profile)\n  \
+             Acceleration: GPU\n"
+        );
+    }
+
+    #[test]
+    fn filter_maps_to_gl_constants() {
+        assert_eq!(Filter::Nearest.to_gl(), GL_NEAREST);
+        assert_eq!(Filter::Linear.to_gl(), GL_LINEAR);
+        assert_eq!(Filter::default(), Filter::Nearest);
     }
 }

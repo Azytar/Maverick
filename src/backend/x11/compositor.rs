@@ -39,7 +39,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
-use maverick_gl::{gl::*, Quad as GlQuad, Renderer, Texture, VisualFormat, XConn, XDisplay};
+use maverick_gl::{
+    DrawQuad, Filter, Rect as GlRect, Renderer, Texture, TextureHandle, VisualFormat, XConn,
+    XDisplay,
+};
 use maverick_img::Rgba8;
 
 use crate::core::wallpaper::{
@@ -334,16 +337,10 @@ pub(crate) fn fully_covered_by(inner: Rect, occluders: &[Rect]) -> bool {
 /// WM's `Placements` (only the geometry source) and from `stack` (which still
 /// includes off-screen windows).
 struct DrawItem {
-    // Carried so later phases (damage, partial redraw, debug overlays) can
-    // attribute each submitted quad back to its window. Not read by `render`
-    // yet, hence `allow`.
     #[allow(dead_code)]
     win: Window,
-    quad: GlQuad,
-    tex: GLuint,
-    /// The texture's cached filter (`GL_LINEAR`/`GL_NEAREST`), carried out of
-    /// `CompWin` so the draw path need not borrow the `Texture` back.
-    filter: GLint,
+    quad: DrawQuad,
+    tex: TextureHandle,
 }
 
 pub struct Compositor {
@@ -387,7 +384,7 @@ pub struct Compositor {
     wallpaper_native: Option<GpuImage>,
     /// Compiled wallpaper shader program id (`0` when inactive). When set, the
     /// wallpaper is animated and forces a frame every turn.
-    wallpaper_shader: Option<GLuint>,
+    wallpaper_shader: Option<ShaderId>,
     /// Decoded image dimensions (for `compute_wallpaper_rects`).
     wallpaper_img_w: u32,
     wallpaper_img_h: u32,
@@ -603,12 +600,7 @@ impl Compositor {
                 return None;
             }
         };
-        log::info!(
-            "compositor: GL ready ({}; vsync {}, video_sync {})",
-            renderer.info,
-            renderer.vsync,
-            renderer.video_sync
-        );
+        log::info!("{}", renderer.info);
 
         // The screen-awareness self-check: for every visual the server offers,
         // work out whether a window using it can be turned into a texture. A
@@ -1042,7 +1034,7 @@ impl Compositor {
     /// panics or takes the WM down (riesgo: decode bloquea, conversor ausente).
     pub fn set_wallpaper(&mut self, spec: &WallpaperSpec) {
         if let Some(t) = self.wallpaper_native.take() {
-            self.renderer.destroy_raw(t.0);
+            self.renderer.destroy_raw(TextureHandle(t.0));
         }
         self.wallpaper_shader = None;
         self.wallpaper_active = None;
@@ -1054,7 +1046,7 @@ impl Compositor {
             WallpaperSource::Image(path) => match maverick_img::decode(path) {
                 Ok(img) => match self.renderer.upload_rgba(&img) {
                     Ok(tex) => {
-                        self.wallpaper_native = Some(GpuImage(tex));
+                        self.wallpaper_native = Some(GpuImage(tex.0));
                         self.wallpaper_img_w = img.w;
                         self.wallpaper_img_h = img.h;
                         self.wallpaper_mode = spec.mode;
@@ -1136,13 +1128,13 @@ impl Compositor {
 /// Vulkan backend implements the same trait against a different `Renderer`.
 impl WallpaperGpu for Compositor {
     fn upload_image(&mut self, img: &Rgba8) -> Result<GpuImage, String> {
-        self.renderer.upload_rgba(img).map(GpuImage)
+        self.renderer.upload_rgba(img).map(|h| GpuImage(h.0))
     }
     fn compile_shader(&mut self, frag: &str) -> Result<ShaderId, String> {
-        self.renderer.compile_fragment(frag).map(ShaderId)
+        self.renderer.compile_fragment(frag)
     }
     fn draw_image(&mut self, img: &GpuImage, dst: Rect, src_uv: [f32; 4]) {
-        let q = GlQuad {
+        let q = DrawQuad {
             dst: [
                 dst.x as f32,
                 dst.y as f32,
@@ -1153,19 +1145,24 @@ impl WallpaperGpu for Compositor {
             opacity: 1.0,
             ..Default::default()
         };
-        self.renderer.draw_raw(img.0, GL_LINEAR, 0, &q);
+        self.renderer
+            .draw_raw(TextureHandle(img.0), TextureHandle(0), &q);
     }
     fn draw_shader(&mut self, s: ShaderId, out: Rect, time: f32, dt: f32) {
-        let r = maverick_gl::Rect {
-            x: out.x,
-            y: out.y,
-            w: out.w,
-            h: out.h,
-        };
-        self.renderer.draw_shader(s.0, r, time, dt);
+        self.renderer.draw_shader(
+            s,
+            GlRect {
+                x: out.x,
+                y: out.y,
+                w: out.w,
+                h: out.h,
+            },
+            time,
+            dt,
+        );
     }
     fn release(&mut self, img: GpuImage) {
-        self.renderer.destroy_raw(img.0);
+        self.renderer.destroy_raw(TextureHandle(img.0));
     }
 }
 
@@ -1258,10 +1255,7 @@ impl Compositor {
             let Some(tex) = cw.tex.as_mut() else {
                 continue;
             };
-            // Rebind the texture if the client repainted. The filter is part of
-            // the texture's cached GL state, so read it out here (while we hold
-            // the only borrow) and carry it in the DrawItem.
-            let filter = tex.filter();
+            // Rebind the texture if the client repainted.
             let was_damaged = cw.damaged;
             if was_damaged {
                 self.renderer.bind(tex);
@@ -1313,24 +1307,28 @@ impl Compositor {
                 self.frame_dirty.add(outer);
             }
             let smooth = tex.width as u32 != outer.w || tex.height as u32 != outer.h;
-            let q = GlQuad {
+            let filter = if smooth {
+                Filter::Linear
+            } else {
+                Filter::Nearest
+            };
+            let q = DrawQuad {
                 dst: [
                     outer.x as f32,
                     outer.y as f32,
                     (outer.x + outer.w as i32) as f32,
                     (outer.y + outer.h as i32) as f32,
                 ],
+                src: [0.0, 0.0, 1.0, 1.0],
                 size: [outer.w as f32, outer.h as f32],
                 radius: radius as f32,
                 opacity: cw.opacity,
-                smooth,
-                ..Default::default()
+                filter,
             };
             items.push(DrawItem {
                 win,
                 quad: q,
-                tex: tex.tex,
-                filter,
+                tex: tex.handle(),
             });
         }
         // Structural changes (resize/restack/opacity/…) cannot be expressed as a
@@ -1429,14 +1427,14 @@ impl Compositor {
         // clipped to the scissor in the partial path, full-screen otherwise.
         // Precedence: animated shader > static native image (per-output quads) >
         // legacy root pixmap (`_XROOTPMAP_ID` from feh/hsetroot).
-        let mut last_tex = 0;
+        let mut last_tex = TextureHandle(0);
         if let Some(shader) = self.wallpaper_shader {
             // Animated shader: one fill per output; `u_resolution` tells each shader
             // its own pixel size. Keeps requesting frames via `wallpaper_animating`.
             for out in &self.wallpaper_outputs {
                 self.renderer.draw_shader(
                     shader,
-                    maverick_gl::Rect {
+                    GlRect {
                         x: out.x,
                         y: out.y,
                         w: out.w,
@@ -1459,7 +1457,7 @@ impl Compositor {
                     &self.wallpaper_outputs,
                 );
                 for (dst, src) in quads {
-                    let q = GlQuad {
+                    let q = DrawQuad {
                         dst: [
                             dst.x as f32,
                             dst.y as f32,
@@ -1470,16 +1468,18 @@ impl Compositor {
                         opacity: 1.0,
                         ..Default::default()
                     };
-                    last_tex = self.renderer.draw_raw(native.0, GL_LINEAR, last_tex, &q);
+                    last_tex = self
+                        .renderer
+                        .draw_raw(TextureHandle(native.0), last_tex, &q);
                 }
             }
         } else if let Some(wp) = self.wallpaper.as_mut() {
             // Legacy root pixmap fallback (no native wallpaper configured).
             self.renderer.bind(wp);
-            last_tex = wp.tex;
+            last_tex = wp.handle();
             self.renderer.draw(
                 wp,
-                &GlQuad {
+                &DrawQuad {
                     dst: [0.0, 0.0, sw as f32, sh as f32],
                     ..Default::default()
                 },
@@ -1487,13 +1487,11 @@ impl Compositor {
         }
 
         for item in &self.scene {
-            // The texture is owned by `wins`; `draw_raw` takes the raw id and the
-            // texture's cached filter, and elides the `glBindTexture` when it
-            // matches `last_tex` — exactly the bind-cache the `&Texture` path
+            // The texture is owned by `wins`; `draw_raw` takes the handle and the
+            // quad's filter, and elides the `glBindTexture` when it matches
+            // `last_tex` — exactly the bind-cache the `&Texture` path
             // kept on the texture, reconstructed from the scene.
-            last_tex = self
-                .renderer
-                .draw_raw(item.tex, item.filter, last_tex, &item.quad);
+            last_tex = self.renderer.draw_raw(item.tex, last_tex, &item.quad);
         }
 
         if matches!(mode, FrameMode::Partial) {

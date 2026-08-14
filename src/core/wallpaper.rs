@@ -98,14 +98,12 @@ impl WallpaperSource {
     }
 }
 
+pub use maverick_gl::ShaderId;
+
 /// Neutral GPU handle for an uploaded wallpaper image (opaque `u32` texture id).
 /// Lives in `core`, never names GL — the backend fills it in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuImage(pub u32);
-
-/// Neutral GPU handle for a compiled wallpaper shader program (opaque `u32`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ShaderId(pub u32);
 
 /// The GPU abstraction the wallpaper needs. Implemented by the x11/GL backend
 /// (`GlWallpaper`); a future Vulkan backend implements the same trait. The core
