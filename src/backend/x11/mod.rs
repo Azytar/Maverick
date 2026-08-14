@@ -15,6 +15,8 @@ use x11rb::COPY_DEPTH_FROM_PARENT;
 use maverick_gl::{XConn, XDisplay};
 
 use crate::backend::atoms::Atoms;
+use crate::backend::x11::compositor::DirtyReason;
+use crate::backend::x11::framesched::FrameScheduler;
 use crate::config::Cfg;
 use crate::core::layout::{arrange, ideal_scroll, Placements, RibbonScratch};
 use crate::core::{parse_action, state_json, Effect, Engine};
@@ -25,10 +27,12 @@ mod actions;
 mod compositor;
 mod events;
 mod ewmh;
+mod framesched;
 mod hubevents;
 mod input;
 mod manage;
 mod pointer;
+pub(crate) mod reconciler;
 mod render;
 mod struts;
 #[cfg(test)]
@@ -89,11 +93,19 @@ pub struct WindowManager {
     client_list_dirty: bool,
     /// P9: Deferred restack — only restack when floats/fullscreen change.
     stack_dirty: bool,
+    /// Fase 1 (plan 1786564084575): the Reconciler's record of what geometry has
+    /// actually been written to X11. `apply_geom` diffs every desired placement
+    /// against this so `configure_window` fires only on real changes.
+    applied: crate::backend::x11::reconciler::AppliedState,
     /// P12: Reusable buffers for `hide_offscreen` — avoids reallocation per arrange.
     hide_ws_set: std::collections::HashSet<Window>,
     hide_mon_vec: Vec<Window>,
-    /// P10: Reusable placements buffer — avoids allocation per `arrange()` call.
-    placements_buf: Placements,
+    /// The single desired representation fed to the `Reconciler`: `layout::arrange`
+    /// fills it with the base `(win, geom, border_w)` for every window, then
+    /// `present_into` rewrites it in place with the fullscreen/maximized overlay.
+    /// The `Reconciler` diffs this `Desired` against `AppliedState` to decide what
+    /// to write to X11. P10: reusable buffer — avoids allocation per `arrange()`.
+    desired: Placements,
     /// P10: Reusable raise-list scratch for `live_placements` → `present_into`.
     /// The WM discards the raise list, so a fresh `Vec` here would allocate once
     /// per animating monitor per frame. Owned by the WM and threaded through.
@@ -118,14 +130,24 @@ pub struct WindowManager {
     last_key_times: std::collections::BTreeMap<(u16, u32), std::time::Instant>,
     /// Control socket server (identity + remote quit). None if it failed to start.
     control: Option<maverick_sys::ControlServer>,
-    /// Instance name passed via --name (for identity/control).
-    instance_name: String,
+    /// Session id (random, per-session) used as the control-socket/ficha key.
+    session_id: String,
     /// Config file path that was loaded at boot (the --config override when
     /// given, otherwise the resolved XDG path, or `None` when the compiled
     /// defaults were used). `reload_config` re-reads this exact file (B10/T7):
     /// the override must survive a reload, not be silently replaced by the
     /// XDG default.
     config_path: Option<PathBuf>,
+    /// Original command-line arguments (excluding argv[0]) captured at startup.
+    /// `restart` re-execs with these EXACTLY, so the new instance reuses the
+    /// same --config/--name/--replace instead of silently falling back to
+    /// XDG/defaults.
+    launch_args: Vec<String>,
+    /// When `Some`, a graceful shutdown is in progress: clients were asked to
+    /// close cooperatively and Maverick will terminate once either all clients
+    /// are gone OR this deadline elapses. The deadline is a HARD upper bound —
+    /// shutdown never depends on client cooperation to finish.
+    shutdown_deadline: Option<std::time::Instant>,
     /// Bridge to the control-socket thread: drains dispatched commands, publishes
     /// state snapshots, and emits events for `subscribe` clients.
     hub: Option<maverick_sys::ControlHub>,
@@ -190,6 +212,8 @@ impl WindowManager {
             Event::CreateNotify(e) => self.on_create_notify(e)?,
             Event::DestroyNotify(e) => self.on_destroy(e)?,
             Event::EnterNotify(e) => self.on_enter(e)?,
+            Event::FocusIn(e) => self.on_focus_in(e)?,
+            Event::FocusOut(e) => self.on_focus_out(e)?,
             Event::KeyPress(e) => self.on_key(e)?,
             Event::MappingNotify(e) => self.on_mapping(&e),
             Event::MapNotify(e) => self.on_map_notify(e)?,
@@ -307,8 +331,8 @@ impl WindowManager {
         // listing this (now dead) instance. The ControlServer thread stops when
         // its handle is dropped at the end of the process; explicitly remove the
         // on-disk meta here.
-        if !self.instance_name.is_empty() {
-            maverick_sys::identity::cleanup_meta(&self.instance_name);
+        if !self.session_id.is_empty() {
+            maverick_sys::identity::cleanup_meta(&self.session_id);
         }
         drop(self.control.take());
         Ok(())
@@ -325,7 +349,7 @@ impl WindowManager {
         }
         if maverick_sys::quit_requested() {
             maverick_sys::clear_quit();
-            self.engine.state.running = false;
+            self.begin_shutdown();
             return Ok(());
         }
 
@@ -336,43 +360,83 @@ impl WindowManager {
         self.flush_client_list()?;
         self.conn.flush()?;
 
+        // ── drain phase ───────────────────────────────────────────────────────
+        // Drain X11 + control-socket events *before* deciding the frame (B2):
+        // a freshly arrived DamageNotify/ConfigureNotify must feed this turn's
+        // `FrameScheduler`, not the next one after the present. The previous
+        // ordering drained after the swap, so every frame was composed with
+        // ≥1 refresh of stale input state.
+        while let Some(ev) = self.conn.poll_for_event()? {
+            self.dispatch(ev)?;
+        }
+
         // ── animation phase ──────────────────────────────────────────────────
         // Advance camera (and accordion/zoom) springs. While anything is still
         // moving we keep ticking at a high frame rate; otherwise we fall back to
         // the idle 100ms wake so control-socket commands are still drained
         // promptly.
+        let was_animating = self.animating;
         let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32().clamp(0.0, 0.05);
+        // `dt` is the time since the previous turn's animation phase. Because
+        // the loop presents at most once per turn, that span *is* the
+        // present-to-present interval — including the time `glXSwapBuffers`
+        // spends blocked on the retrace, which is most of the frame and must be
+        // integrated or the springs run in slow motion. The clamping policy
+        // (seed one refresh on the idle→animating edge so a scroll does not jump
+        // by the whole idle gap (B8); clamp to ~2 refreshes while animating as a
+        // guard against a stalled GPU) lives in `framesched::clamp_frame_dt` so
+        // it is unit-testable.
+        let raw_dt = (now - self.last_frame).as_secs_f32();
+        let dt = crate::backend::x11::framesched::clamp_frame_dt(raw_dt, was_animating);
         self.last_frame = now;
 
-        // Whether the compositor paced this frame on the real vblank (drives the
-        // wait phase below: when true we don't also sleep on a timer).
-        let mut vblank_synced = false;
+        // Fase 9 — single authoritative frame scheduler for this turn. Built once
+        // from the animation flag (set by the tick below) and the dirty reasons
+        // accumulated since the last present. Both the render gate and the wait
+        // timeout read this one object, so no subsystem can request a redundant
+        // render and multiple reasons (Damage×N, Geometry, Animation, …) coalesce
+        // into a single pending frame.
+        let mut sched;
+
         if let Some(comp) = self.compositor.as_mut() {
             // Compositor path: the camera is substepped (its semi-implicit
             // integrator is unstable above ~8 ms) and the *live* layout — read
-            // from the spring's current value — is drawn by the GPU with vsync.
-            // The WM's settled geometry was already written by whichever action
-            // triggered the change, so no per-frame `ConfigureWindow` storm.
+            // from the spring's current value — is drawn by the GPU. Swap
+            // interval 1 (set at init) paces the present from inside `end_frame`,
+            // so there is no explicit vblank wait here — the flip is scheduled by
+            // the server for the next retrace (B1). The WM's settled geometry was
+            // already written by whichever action triggered the change, so no
+            // per-frame `ConfigureWindow` storm.
             let mut anim = false;
             for sub in compositor::substep_bounds(dt) {
                 anim |= self.engine.state.tick_animations(sub);
             }
             self.animating = anim;
-            // Single scheduling decision: render this turn only if something is
-            // actually moving or the compositor has damage to show. This is what
-            // keeps idle free — when `false` we do no GL work and the wait phase
-            // below parks on a 100 ms poll (see `pending` / `timeout_ms`).
-            let wants_frame = self.animating || comp.needs_frame();
+            // Advance the wallpaper animation clock with the same clamped `dt` the
+            // WM springs use (no separate timer). A static wallpaper leaves
+            // `wallpaper_animating` false and the loop goes idle.
+            comp.tick_wallpaper(dt);
+            // Fase 9 — frame scheduling. Build the single turn scheduler from the
+            // WM-side animation flag, the wallpaper animation flag, and the
+            // compositor's *why* (its reason bits), so the render-loop decision is
+            // explicit and testable. Idle stays free: when the scheduler reports no
+            // reason we do no GL work and the wait phase below parks on a 100 ms poll.
+            sched = FrameScheduler::from_compositor(
+                self.animating,
+                comp.wallpaper_animating(),
+                comp.dirty_reasons(),
+            );
+            if log::enabled(log::DEBUG) {
+                let why: Vec<&str> = sched.reasons().map(|r| r.as_str()).collect();
+                log::debug!(
+                    "compositor: scheduling frame (animating={}, dirty={}): {}",
+                    sched.is_animating(),
+                    sched.has_dirty(),
+                    why.join(", ")
+                );
+            }
+            let wants_frame = sched.needs_frame();
             if wants_frame {
-                // Pace to the vertical retrace *before* drawing so the GPU flip
-                // lands on a retrace. This is the core fluidity fix: a fixed
-                // 16 ms sleep drifted against the real refresh and made us miss
-                // vblanks (~30 fps during animation). When `GLX_SGI_video_sync`
-                // is present the renderer blocks here; otherwise swap interval
-                // 1 (set at init) paces the present and the loop falls back to a
-                // short poll in the wait phase.
-                vblank_synced = comp.wait_vblank();
                 // Keep the per-monitor cache sized to the live monitor set; a
                 // change in monitor count (hotplug) invalidates everything.
                 if self.live_cache.len() != self.engine.state.monitors.len() {
@@ -388,18 +452,18 @@ impl WindowManager {
                     // so a scroll on one monitor costs nothing on the others.
                     let recompute = self.animating || self.engine.state.monitors[i].layout_dirty;
                     if recompute {
-                        self.placements_buf.clear();
+                        self.desired.clear();
                         compositor::live_placements(
                             &self.engine.state,
                             i,
                             &self.engine.cfg,
                             &self.layout_registry,
-                            &mut self.placements_buf,
+                            &mut self.desired,
                             &mut self.compositor_present_scratch,
                             &mut self.ribbon_scratch,
                         );
                         self.live_cache[i].clear();
-                        self.live_cache[i].extend(self.placements_buf.iter().copied());
+                        self.live_cache[i].extend(self.desired.iter().copied());
                         self.engine.state.monitors[i].layout_dirty = false;
                     }
                     self.transforms_buf
@@ -418,9 +482,19 @@ impl WindowManager {
                     }
                     self.compositor = None;
                 }
+                // NOTE: the frame clock is *not* re-seeded here. `last_frame`
+                // was already stamped at the top of the animation phase, so the
+                // next turn's `dt` spans one whole turn — which, with exactly
+                // one present per turn, is precisely the inter-present interval.
+                // Re-seeding after the present instead subtracted the present
+                // itself from `dt`, and with swap interval 1 the present *is*
+                // almost the entire frame: the springs were then advanced by the
+                // few hundred microseconds of loop overhead per 16.7 ms frame,
+                // running every animation 15–150x slow (B8).
             }
         } else {
             self.animating = self.engine.state.tick_animations(dt);
+            sched = FrameScheduler::from_compositor(self.animating, false, DirtyReason::NONE);
             if self.animating {
                 for i in 0..self.engine.state.monitors.len() {
                     let _ = self.arrange_live(i);
@@ -428,44 +502,28 @@ impl WindowManager {
             }
         }
 
-        // ── drain + wait phase ─────────────────────────────────────────────────
-        // Drain *first*, block second. `poll(2)` only sees bytes still sitting
-        // in the socket; every GLX round-trip (`glXSwapBuffers`, `XSync`) makes
-        // libxcb read the socket dry, so a KeyPress that arrives in that window
-        // ends up in libxcb's internal queue with the fd no longer readable.
-        // Waiting first meant sleeping the full timeout on top of an event we
-        // already had — keyboard stutter that only showed up with the
-        // compositor on. `xcb_poll_for_event` returns the internal queue first,
-        // which is exactly what `poll(2)` cannot see.
-        //
-        // Pacing: while animating we no longer sleep on a fixed 16 ms timer
-        // (that drifted against the real refresh and made us miss vblanks,
-        // dropping to ~30 fps). The frame is already synced to the retrace by
-        // `comp.wait_vblank()` above (or by swap interval 1); here we only
-        // block on the socket so X/control-socket events are drained promptly.
-        // `block_ms` is 0 when the vblank already paced us, a couple of ms as a
-        // fallback poll when it did not (avoids 100% CPU spin), or 100 ms idle.
+        // The present (if any) just consumed the accumulated dirty reasons; only
+        // an ongoing animation keeps the loop tight. Clear the dirty bits from
+        // the same scheduler so the wait phase consults one authoritative
+        // decision instead of rebuilding it (which would duplicate the NEED_FRAME
+        // logic and could drift).
+        sched.clear_dirty();
+
+        // ── wait phase ────────────────────────────────────────────────────────
+        // Block on the X/control-socket fd just long enough to wake for the next
+        // decision. The swap (interval 1) already paced the present, so while a
+        // frame is needed we block on the socket for 0 ms and drain events
+        // promptly; when idle we park on a 100 ms poll so control-socket commands
+        // and keyboard changes are still picked up quickly. There is no separate
+        // vblank-sync branch — the swap is the only synchroniser (B1).
         let fd = self.conn.as_raw_fd();
-        let pending = self.animating
-            || self
-                .compositor
-                .as_ref()
-                .is_some_and(compositor::Compositor::needs_frame);
-        let mut timeout_ms: u64 = if pending {
-            if vblank_synced {
-                0
-            } else if self.compositor.is_some() {
-                // Compositor present but no video_sync: a short poll avoids a
-                // 100% CPU spin while swap interval 1 still paces the present.
-                2
-            } else {
-                // Non-composited fallback path: keep the original 16 ms poll
-                // (no vsync here; this just bounds the ConfigureWindow rate).
-                16
-            }
-        } else {
-            100
-        };
+        // Fase 9 — the one authoritative scheduler (post-present: dirty bits
+        // cleared, only `Animation` survives) decides the wait window. A frame
+        // still due -> block on the socket for 0 ms and drain promptly; idle ->
+        // park on a 100 ms poll so control-socket commands and keyboard changes
+        // are still picked up quickly. The swap (interval 1) remains the only
+        // synchroniser (B1) — there is no separate vblank branch.
+        let mut timeout_ms: u64 = sched.timeout_ms();
         // Never sleep past a pending keyboard refresh, or the coalescing window
         // would stretch to the idle timeout.
         if let Some(due) = self.kbd_refresh_due {
@@ -473,12 +531,9 @@ impl WindowManager {
             timeout_ms = timeout_ms.min(left.as_millis() as u64);
         }
 
-        while let Some(ev) = self.conn.poll_for_event()? {
-            self.dispatch(ev)?;
-        }
         if timeout_ms > 0 {
             maverick_sys::wait_readable(fd, std::time::Duration::from_millis(timeout_ms));
-            // Drain again for anything that arrived while we were blocked.
+            // Drain for anything that arrived while we were blocked.
             while let Some(ev) = self.conn.poll_for_event()? {
                 self.dispatch(ev)?;
             }
@@ -513,6 +568,18 @@ impl WindowManager {
                     Err(e)
                 };
             }
+            // Graceful shutdown: once a quit was requested, keep pumping the
+            // event loop (so cooperative clients can close and be unmanaged)
+            // until either every client is gone OR the global budget elapses.
+            // The budget is a hard upper bound — Maverick ALWAYS terminates,
+            // never waiting on client cooperation.
+            if let Some(deadline) = self.shutdown_deadline {
+                if self.engine.state.clients.is_empty() || std::time::Instant::now() >= deadline {
+                    self.force_kill_remaining();
+                    self.engine.state.running = false;
+                    break;
+                }
+            }
         }
         Ok(())
     }
@@ -520,6 +587,7 @@ impl WindowManager {
         cfg: Cfg,
         replace: bool,
         config_path: Option<PathBuf>,
+        launch_args: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (dpy, conn, screen_num) = maverick_gl::open_x()?;
         // `conn` is shared (via `Rc`) with the compositor so both the WM and the
@@ -555,6 +623,16 @@ impl WindowManager {
         let mut engine = Engine::new(cfg);
         engine.state.monitors = monitors;
 
+        // Seed the native wallpaper from config: a configured `path` becomes the
+        // wallpaper source (image/shader inferred by extension); the compositor
+        // decodes/uploads it below when GL is available. A missing path leaves
+        // `WallpaperSource::None` so the legacy root pixmap (if any) shows.
+        if let Some(path) = engine.cfg.wallpaper.path.clone() {
+            engine.state.wallpaper.source =
+                crate::core::wallpaper::WallpaperSource::from_path(path.into());
+            engine.state.wallpaper.mode = engine.cfg.wallpaper.mode;
+        }
+
         // create EWMH check window
         let check_win = conn.generate_id()?;
         conn.create_window(
@@ -580,7 +658,7 @@ impl WindowManager {
         // `_NET_WM_CM_S0`, redirects every subwindow to Manual, and sets up the
         // GLX context. On any failure it logs and returns `None`, leaving the WM
         // on the classic `ConfigureWindow` path.
-        let compositor = if crate::config::compositor_enabled(&engine.cfg) {
+        let mut compositor = if crate::config::compositor_enabled(&engine.cfg) {
             compositor::Compositor::init(
                 conn.clone(),
                 dpy,
@@ -592,6 +670,14 @@ impl WindowManager {
         } else {
             None
         };
+
+        // Apply the configured native wallpaper (if any) to the freshly-built
+        // compositor. A path of `None` leaves the legacy root pixmap in place.
+        if let Some(comp) = compositor.as_mut() {
+            if engine.state.wallpaper.source != crate::core::wallpaper::WallpaperSource::None {
+                comp.set_wallpaper(&engine.state.wallpaper);
+            }
+        }
 
         let mut wm = WindowManager {
             conn,
@@ -613,9 +699,10 @@ impl WindowManager {
             drag: None,
             client_list_dirty: false,
             stack_dirty: false,
+            applied: crate::backend::x11::reconciler::AppliedState::default(),
             hide_ws_set: std::collections::HashSet::with_capacity(32),
             hide_mon_vec: Vec::with_capacity(64),
-            placements_buf: Placements::with_capacity(32),
+            desired: Placements::with_capacity(32),
             compositor_present_scratch: Vec::with_capacity(32),
             live_cache: Vec::new(),
             transforms_buf: Vec::with_capacity(256),
@@ -623,8 +710,10 @@ impl WindowManager {
             ribbon_scratch: RibbonScratch::default(),
             last_key_times: std::collections::BTreeMap::new(),
             control: None,
-            instance_name: String::new(),
+            session_id: String::new(),
             config_path,
+            launch_args,
+            shutdown_deadline: None,
             hub: None,
             last_state_json: String::new(),
             docks: std::collections::HashMap::new(),
@@ -656,21 +745,29 @@ impl WindowManager {
 
 // ── Free functions ─────────────────────────────────────────────────────────────
 
-/// Interpret a strut vector as a single (edge, thickness). Both `_NET_WM_STRUT`
-/// (4 values) and `_NET_WM_STRUT_PARTIAL` (12 values) start with
-/// `[left, right, top, bottom]`; we take the first non-zero edge.
-fn strut_edge(v: &[u32]) -> Option<(Edge, u32)> {
+/// Interpret a strut vector as every non-zero (edge, thickness). Both
+/// `_NET_WM_STRUT` (4 values) and `_NET_WM_STRUT_PARTIAL` (12 values) start
+/// with `[left, right, top, bottom]`; a single dock may reserve several edges
+/// at once (bug B4), so all non-zero ones are returned.
+fn strut_edge(v: &[u32]) -> Option<Vec<(Edge, u32)>> {
     let (left, right, top, bottom) = (v[0], v[1], v[2], v[3]);
+    let mut out: Vec<(Edge, u32)> = Vec::new();
     if top > 0 {
-        Some((Edge::Top, top))
-    } else if bottom > 0 {
-        Some((Edge::Bottom, bottom))
-    } else if left > 0 {
-        Some((Edge::Left, left))
-    } else if right > 0 {
-        Some((Edge::Right, right))
-    } else {
+        out.push((Edge::Top, top));
+    }
+    if bottom > 0 {
+        out.push((Edge::Bottom, bottom));
+    }
+    if left > 0 {
+        out.push((Edge::Left, left));
+    }
+    if right > 0 {
+        out.push((Edge::Right, right));
+    }
+    if out.is_empty() {
         None
+    } else {
+        Some(out)
     }
 }
 

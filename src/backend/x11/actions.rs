@@ -1,5 +1,13 @@
 use super::*;
 
+use std::os::unix::io::AsRawFd;
+
+/// Maximum time Maverick waits for clients to close cooperatively during a
+/// graceful shutdown. After this elapses, any remaining clients are force-killed
+/// (escape hatch) and Maverick terminates regardless. This is a global budget,
+/// NOT a per-client wait.
+const SHUTDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
 impl WindowManager {
     /// The backend's action entry point: the Engine owns *all* domain logic
     /// (State mutation) and returns the semantic Effects; the backend only
@@ -39,7 +47,7 @@ impl WindowManager {
                 win,
                 geom,
                 border_w,
-            } => self.apply_geom(win, geom, border_w)?,
+            } => self.apply_geom(win, geom, border_w, true)?,
             Effect::KillWindow(win) => self.kill(win)?,
             Effect::SetFullscreen { win, on } => self.set_fullscreen(win, on)?,
             Effect::SetMaximized { win, vert, horiz } => self.set_maximized(win, vert, horiz)?,
@@ -63,26 +71,55 @@ impl WindowManager {
                 );
             }
             Effect::Spawn(cmd) => self.spawn(&cmd),
-            Effect::Quit => self.engine.state.running = false,
+            Effect::Quit => self.begin_shutdown(),
             Effect::Restart => self.restart(),
+            Effect::SetWallpaper => {
+                // Push the engine's current wallpaper spec into the compositor.
+                // A decode/compile failure there logs once and leaves the
+                // wallpaper disabled — it never takes the WM down (criterio #2).
+                if let Some(comp) = self.compositor.as_mut() {
+                    comp.set_wallpaper(&self.engine.state.wallpaper);
+                }
+            }
             Effect::PublishIpcState => self.publish_state(),
         }
         Ok(())
     }
 
-    /// Re-exec the WM binary in place. `exec()` replaces the current process
-    /// image without forking, so there's no race where two maverick instances
-    /// fight over X11 grabs simultaneously.
+    /// Re-exec the WM binary in place with the EXACT arguments it was launched
+    /// with, so the new instance reuses the same `--config`, `--name` and
+    /// `--replace` (a real hard restart that rebuilds all state from scratch).
+    ///
+    /// Before exec we explicitly tear down X11 (key grabs, SubstructureRedirect,
+    /// EWMH root props, check window) and the IPC socket + identity ficha via
+    /// `cleanup()`, and mark the X connection fd `FD_CLOEXEC` so it is closed on
+    /// exec — we do NOT rely on the connection layer having set CLOEXEC. `exec`
+    /// replaces the process image without forking, so there is no window where
+    /// two maverick instances contend over X11 grabs.
     pub(super) fn restart(&mut self) {
         use std::os::unix::process::CommandExt;
-        // Tear down the control socket and identity ficha before exec
-        // so the new process starts with a clean slate.
-        if !self.instance_name.is_empty() {
-            maverick_sys::identity::cleanup_meta(&self.instance_name);
+
+        // Release X11 resources + IPC + ficha so the new instance starts clean
+        // and can reclaim the screen.
+        let _ = self.cleanup();
+
+        // Close the X connection fd on exec (explicit, not assumed): the new
+        // process must open its own connection, not inherit this one's identity.
+        let fd = self.conn.as_raw_fd();
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 {
+                let _ = libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
         }
-        drop(self.control.take());
+
         if let Ok(exe) = std::env::current_exe() {
-            let err = std::process::Command::new(exe).exec();
+            // `launch_args` excludes argv[0] (the program name), which
+            // `Command::new(exe)` already supplies, so the new argv matches the
+            // original launch exactly.
+            let err = std::process::Command::new(exe)
+                .args(&self.launch_args)
+                .exec();
             log::error!("restart exec failed: {err}");
         }
         self.engine.state.running = false;
@@ -109,14 +146,43 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Begin a graceful shutdown. Asks every managed client to close: clients
+    /// that advertise `WM_DELETE_WINDOW` get the cooperative delete request;
+    /// clients without it cannot cooperate, so they are force-killed
+    /// immediately (there is nothing to wait for). Then arms a single global
+    /// deadline. Idempotent: a second call is a no-op.
+    pub(super) fn begin_shutdown(&mut self) {
+        if self.shutdown_deadline.is_some() {
+            return;
+        }
+        for win in self.engine.state.clients.keys().copied().collect::<Vec<_>>() {
+            let cooperate = self.has_protocol(win, self.atoms.wm_delete_window).unwrap_or(false);
+            if cooperate {
+                let _ = self.send_proto(win, self.atoms.wm_delete_window, self.last_event_time);
+            } else {
+                let _ = self.conn.kill_client(win);
+            }
+        }
+        self.shutdown_deadline = Some(std::time::Instant::now() + SHUTDOWN_BUDGET);
+    }
+
+    /// Escape hatch: force-kill (X KillClient) every still-managed client.
+    /// Fire-and-forget — we do NOT wait for them to actually die; Maverick
+    /// terminates regardless.
+    pub(super) fn force_kill_remaining(&self) {
+        for win in self.engine.state.clients.keys().copied().collect::<Vec<_>>() {
+            let _ = self.conn.kill_client(win);
+        }
+    }
+
     /// Hand over the control socket server (kept so `cleanup` can tear it down).
     pub fn set_control(&mut self, server: maverick_sys::ControlServer) {
         self.control = Some(server);
     }
 
-    /// Record the instance name (used for the identity ficha teardown).
-    pub fn set_instance_name(&mut self, name: String) {
-        self.instance_name = name;
+    /// Record the session id (used for the identity ficha teardown).
+    pub fn set_session_id(&mut self, sid: String) {
+        self.session_id = sid;
     }
 
     /// Attach the control hub bridging the socket thread and the WM loop, and
@@ -137,7 +203,7 @@ impl WindowManager {
         };
         for cmd in cmds {
             match cmd {
-                maverick_sys::ControlCommand::Quit => self.engine.state.running = false,
+                maverick_sys::ControlCommand::Quit => self.begin_shutdown(),
                 maverick_sys::ControlCommand::Restart => self.restart(),
                 maverick_sys::ControlCommand::Reload => self.reload_config()?,
                 maverick_sys::ControlCommand::Dispatch(line) => {
@@ -152,11 +218,8 @@ impl WindowManager {
                     // blocked on the channel until the reply lands. State is
                     // only touched here (the WM thread), which is exactly why
                     // querying has to happen through this queue.
-                    let json = crate::core::ipc::query_json(
-                        &self.engine.state,
-                        &self.engine.cfg,
-                        &topic,
-                    );
+                    let json =
+                        crate::core::ipc::query_json(&self.engine.state, &self.engine.cfg, &topic);
                     let _ = reply.send(json);
                 }
             }
@@ -204,6 +267,21 @@ impl WindowManager {
         self.engine.cfg = cfg;
         self.keymap = build_keymap(&self.engine.cfg);
         self.grab_keys()?;
+
+        // Re-seed the native wallpaper from the freshly reloaded config. The
+        // startup path does this too; without it `reload` would silently ignore
+        // `[wallpaper]` changes (the wallpaper is only read from config here,
+        // never from IPC state — IPC `wallpaper set` updates `state` directly).
+        if let Some(comp) = self.compositor.as_mut() {
+            if let Some(path) = self.engine.cfg.wallpaper.path.clone() {
+                self.engine.state.wallpaper.source =
+                    crate::core::wallpaper::WallpaperSource::from_path(path.into());
+                self.engine.state.wallpaper.mode = self.engine.cfg.wallpaper.mode;
+            } else {
+                self.engine.state.wallpaper.source = crate::core::wallpaper::WallpaperSource::None;
+            }
+            comp.set_wallpaper(&self.engine.state.wallpaper);
+        }
 
         // Republish EWMH desktop state for external bars/taskbars. Only the
         // count/names need a refresh here — `_NET_CURRENT_DESKTOP` must NOT be

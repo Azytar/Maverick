@@ -1,7 +1,35 @@
 use super::*;
 
+// ── input-trace instrumentation (feature `input-trace`) ───────────────────────
+#[cfg(feature = "input-trace")]
+#[allow(unused_macros)]
+macro_rules! itrace {
+    ($($arg:tt)*) => {{
+        eprintln!("[INPUT-TRACE] {}", format!($($arg)*));
+    }};
+}
+#[cfg(not(feature = "input-trace"))]
+#[allow(unused_macros)]
+macro_rules! itrace {
+    ($($arg:tt)*) => {{}};
+}
+
+// ── window-trace instrumentation (feature `window-trace`) ─────────────────────
+#[cfg(feature = "window-trace")]
+#[allow(unused_macros)]
+macro_rules! wtrace {
+    ($($arg:tt)*) => {{
+        eprintln!("[WINDOW-TRACE] {}", format!($($arg)*));
+    }};
+}
+#[cfg(not(feature = "window-trace"))]
+#[allow(unused_macros)]
+macro_rules! wtrace {
+    ($($arg:tt)*) => {{}};
+}
+
 impl WindowManager {
-    pub(super) fn setup_root(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn setup_root(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let a = &self.atoms;
         self.conn
             .change_window_attributes(
@@ -81,6 +109,7 @@ impl WindowManager {
 
         self.update_ewmh_desktops()?;
         self.grab_keys()?;
+        self.setup_xkb();
 
         // Subscribe to RandR change events so hotplug / resolution changes are
         // handled even when the server does not deliver a root ConfigureNotify.
@@ -97,8 +126,71 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn grab_keys(&self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Subscribe to XKB keyboard-change events. Best-effort: without XKB the WM
+    /// still sees core `MappingNotify`, it just misses the remaps the server
+    /// reports only through XKB.
+    ///
+    /// Note what is *not* selected: `StateNotify`. Under the strict-group-1
+    /// policy the active group is irrelevant to grabs and dispatch, so
+    /// subscribing would mean a full ungrab/regrab on every layout toggle for
+    /// no behavioural gain.
+    ///
+    /// The keymap itself is still read with core `GetKeyboardMapping`, always
+    /// clamped to `Setup.min_keycode..=max_keycode`: a server cannot change the
+    /// keycode range of an established connection, and asking outside it is a
+    /// `BadValue` — so the range carried by `XkbNewKeyboardNotify` must never be
+    /// used for the request.
+    pub(super) fn setup_xkb(&self) {
+        use x11rb::protocol::xkb::{ConnectionExt as _, EventType, SelectEventsAux, ID};
+
+        let supported = match self.conn.xkb_use_extension(1, 0) {
+            Ok(cookie) => match cookie.reply() {
+                Ok(reply) => reply.supported,
+                Err(e) => {
+                    log::info!("XKB: UseExtension failed ({e}) — core MappingNotify only");
+                    return;
+                }
+            },
+            Err(e) => {
+                log::info!("XKB: extension unavailable ({e}) — core MappingNotify only");
+                return;
+            }
+        };
+        if !supported {
+            log::info!(
+                "XKB: server reports the extension as unsupported — core MappingNotify only"
+            );
+            return;
+        }
+
+        let events = EventType::NEW_KEYBOARD_NOTIFY | EventType::MAP_NOTIFY;
+        let res = self.conn.xkb_select_events(
+            ID::USE_CORE_KBD.into(),
+            0u16.into(),
+            events,
+            0u16.into(),
+            0u16.into(),
+            &SelectEventsAux::new(),
+        );
+        match res {
+            Ok(cookie) => {
+                if let Err(e) = cookie.check() {
+                    log::info!("XKB: SelectEvents rejected ({e}) — core MappingNotify only");
+                }
+            }
+            Err(e) => log::info!("XKB: SelectEvents failed ({e}) — core MappingNotify only"),
+        }
+    }
+
+    /// Rebuild every key grab from the current config and keymap.
+    ///
+    /// Grabs and dispatch must agree on which keysym a keycode "is", so both
+    /// sides work on group 1 and share the same keysym-directed fallback (see
+    /// `plan_key_grabs`). Anything grabbed here that `on_key` could not resolve
+    /// would be a key stolen from the focused application, not a no-op.
+    pub(super) fn grab_keys(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let _ = self.conn.ungrab_key(0u8, self.root, ModMask::ANY);
+        self.code_bindings.clear();
 
         // P7: Use cached keyboard mapping instead of fetching it again
         let kpk = self.raw_kpk;
@@ -107,20 +199,86 @@ impl WindowManager {
         }
         let min = self.raw_min;
 
-        for (mask, keysym, _) in &self.engine.cfg.keybinds {
-            for code in keysym_to_codes(&self.raw_keymap, min, kpk, *keysym) {
-                for extra in mod_variants(self.numlock) {
-                    let _ = self.conn.grab_key(
-                        true,
-                        self.root,
-                        (mask | extra).into(),
-                        code,
-                        GrabMode::ASYNC,
-                        GrabMode::ASYNC,
-                    );
+        let binds: Vec<(u16, u32)> = self
+            .engine
+            .cfg
+            .keybinds
+            .iter()
+            .map(|(mask, keysym, _)| (*mask, *keysym))
+            .collect();
+        let plan = plan_key_grabs(&self.raw_keymap, min, kpk, &binds);
+
+        // Diagnostics are collected, not logged inline: see the dedup at the
+        // end of the function.
+        let mut warnings: Vec<String> = Vec::new();
+        for (mask, keysym) in &plan.missing {
+            warnings.push(format!(
+                "keybinding {}: that keysym does not exist in the current layout — ignored",
+                bind_name(*mask, *keysym)
+            ));
+        }
+
+        for (mask, keysym, code) in &plan.grabs {
+            // Base variant, checked. A rejection means another client already
+            // owns the shortcut and the bind is simply dead — worth a warning,
+            // and one round-trip per bind is an acceptable price on
+            // startup/reload/mapping change.
+            match self.conn.grab_key(
+                true,
+                self.root,
+                (*mask).into(),
+                *code,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            ) {
+                Ok(cookie) => {
+                    if let Err(e) = cookie.check() {
+                        warnings.push(format!(
+                            "keybinding {}: grab rejected ({}) — is another client already holding the shortcut?",
+                            bind_name(*mask, *keysym),
+                            x_error_kind(&e)
+                        ));
+                    }
                 }
+                Err(e) => warnings.push(format!(
+                    "keybinding {}: grab request failed ({e})",
+                    bind_name(*mask, *keysym)
+                )),
+            }
+
+            // NumLock/CapsLock variants. Unchecked: they share the base
+            // variant's destination, so a check would cost a round-trip without
+            // adding information. Repeats are skipped — `mod_variants` yields
+            // the same mask twice when NumLock is unmapped, and a duplicate
+            // grab is a `BadAccess` that would show up as a phantom conflict.
+            let mut done: Vec<u16> = vec![0];
+            for extra in mod_variants(self.numlock) {
+                if done.contains(&extra) {
+                    continue;
+                }
+                done.push(extra);
+                let _ = self.conn.grab_key(
+                    true,
+                    self.root,
+                    (mask | extra).into(),
+                    *code,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                );
             }
         }
+
+        // Grabs are rebuilt on every keyboard change, and a broken bind stays
+        // broken across all of them: log the complaint when it appears (or
+        // changes), not once per rebuild.
+        if warnings != self.last_grab_warnings {
+            for w in &warnings {
+                log::warn!("{w}");
+            }
+            self.last_grab_warnings = warnings;
+        }
+
+        self.code_bindings = plan.code_bindings;
         Ok(())
     }
 
@@ -153,6 +311,17 @@ impl WindowManager {
             x11rb::NONE,
             ButtonIndex::ANY,
             ModMask::ANY,
+        );
+
+        #[cfg(feature = "input-trace")]
+        itrace!(
+            "grab_buttons win={:#x}: installed SYNC BUTTON_PRESS grab (pointer FREEZES on every ButtonPress until allow_events runs)",
+            win
+        );
+        #[cfg(feature = "window-trace")]
+        wtrace!(
+            "grab_buttons win={:#x}: input-grab installed (focus-on-click path for clients that grab focus, e.g. Firefox/Minecraft)",
+            win
         );
 
         // keyboard_mode MUST be ASYNC here too, for the same reason as the

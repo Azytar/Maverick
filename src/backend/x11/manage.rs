@@ -1,6 +1,34 @@
 use super::*;
 use crate::core::layout::fs_ctx;
 
+// ── input-trace instrumentation (feature `input-trace`) ───────────────────────
+#[cfg(feature = "input-trace")]
+#[allow(unused_macros)]
+macro_rules! itrace {
+    ($($arg:tt)*) => {{
+        eprintln!("[INPUT-TRACE] {}", format!($($arg)*));
+    }};
+}
+#[cfg(not(feature = "input-trace"))]
+#[allow(unused_macros)]
+macro_rules! itrace {
+    ($($arg:tt)*) => {{}};
+}
+
+// ── window-trace instrumentation (feature `window-trace`) ─────────────────────
+#[cfg(feature = "window-trace")]
+#[allow(unused_macros)]
+macro_rules! wtrace {
+    ($($arg:tt)*) => {{
+        eprintln!("[WINDOW-TRACE] {}", format!($($arg)*));
+    }};
+}
+#[cfg(not(feature = "window-trace"))]
+#[allow(unused_macros)]
+macro_rules! wtrace {
+    ($($arg:tt)*) => {{}};
+}
+
 impl WindowManager {
     pub(super) fn scan_windows(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let tree = match self.conn.query_tree(self.root)?.reply() {
@@ -349,8 +377,12 @@ impl WindowManager {
             };
             if client.monitor < self.engine.state.monitors.len() {
                 let wa = self.engine.state.monitors[client.monitor].workarea;
-                let cx = target.x.clamp(wa.x, (wa.x + wa.w as i32 - target.w as i32).max(wa.x));
-                let cy = target.y.clamp(wa.y, (wa.y + wa.h as i32 - target.h as i32).max(wa.y));
+                let cx = target
+                    .x
+                    .clamp(wa.x, (wa.x + wa.w as i32 - target.w as i32).max(wa.x));
+                let cy = target
+                    .y
+                    .clamp(wa.y, (wa.y + wa.h as i32 - target.h as i32).max(wa.y));
                 client.geom = Rect::new(cx, cy, target.w, target.h);
             } else {
                 client.geom = target;
@@ -467,51 +499,52 @@ impl WindowManager {
 
         // Presentation-aware focus policy (EWMH focus stealing): a new window
         // must never yank input away from a live fullscreen/maximized overlay.
-        //  - Dialog owned by a presented window (WM_TRANSIENT_FOR reaches it,
-        //    e.g. Ctrl+S file picker of a fullscreen app) → focus it; the
-        //    overlay stack raises it above its parent.
-        //  - Any other window → added to the tiling tree *silently*: no focus
-        //    change, overlay keeps input and stays on top; the new window is
-        //    flagged urgent (`_NET_WM_STATE_DEMANDS_ATTENTION` + border color)
-        //    so bars/taskbars can highlight it.
-        let (overlay_present, owned_dialog) = {
-            let m = &self.engine.state.monitors[mon_i];
-            if ws_i >= m.workspaces.len() {
-                (false, false)
-            } else {
-                let ws = &m.workspaces[ws_i];
-                let mut presented: std::collections::HashSet<WindowId> =
-                    ws.columns.iter().flat_map(|c| c.windows.iter().copied()).collect();
-                presented.extend(ws.floats.iter().copied());
-                presented.retain(|w| {
-                    self.engine
-                        .state
-                        .clients
-                        .get(w)
-                        .is_some_and(|c| {
-                            c.is_fullscreen()
-                                || c.is_maximized_v()
-                                || c.is_maximized_h()
-                        })
+        // The *decision* is pure and lives in core (`decide_manage_focus`): a
+        // window owned by the presented overlay (dialog) takes focus; anything
+        // else is deferred behind the overlay via the global `pending_focus`
+        // slot, which carries the exact monitor/workspace/owner context so a
+        // deferred window is never orphaned when the overlay tears down on a
+        // non-active workspace or non-selected monitor.
+        let intent = crate::core::commands::decide_manage_focus(&self.engine.state, win);
+        match intent {
+            crate::core::commands::ManageFocusIntent::Defer {
+                owner,
+                monitor,
+                workspace,
+            } => {
+                if let Some(c) = self.engine.state.clients.get_mut(&win) {
+                    c.flags.set(WinFlags::URGENT);
+                }
+                self.write_net_wm_state(win);
+                // Keep `mon.focused` pointing at the overlay so logical == real.
+                // Record the deferral in the global slot with full context.
+                #[cfg(feature = "input-trace")]
+                itrace!(
+                    "manage() -> DEFER win={:#x} behind overlay {:#x} (mon={}, ws={}); X input focus stays on overlay",
+                    win, owner, monitor, workspace
+                );
+                self.engine.state.pending_focus = Some(crate::types::PendingFocus {
+                    window: win,
+                    owner,
+                    monitor,
+                    workspace,
                 });
-                let owned = self
-                    .engine
-                    .state
-                    .clients
-                    .get(&win)
-                    .and_then(|c| c.transient_parent)
-                    .is_some_and(|p| presented.contains(&p));
-                (!presented.is_empty(), owned)
+                return Ok(());
             }
-        };
-        if overlay_present && !owned_dialog {
-            if let Some(c) = self.engine.state.clients.get_mut(&win) {
-                c.flags.set(WinFlags::URGENT);
+            crate::core::commands::ManageFocusIntent::Focus(_) => {
+                // Unmanaged-by-overlay window: focus it through the sole X sink.
+                self.focus(Some(win))?;
+                #[cfg(feature = "window-trace")]
+                wtrace!(
+                    "manage() -> FOCUS win={:#x} mon={} ws={} (transient_parent={:?})",
+                    win,
+                    self.engine.state.clients.get(&win).map(|c| c.monitor).unwrap_or(0),
+                    self.engine.state.clients.get(&win).map(|c| c.workspace).unwrap_or(0),
+                    self.engine.state.clients.get(&win).and_then(|c| c.transient_parent)
+                );
+                self.relink_pending_transients()?;
             }
-            self.write_net_wm_state(win);
-            return Ok(());
         }
-        self.focus(Some(win))?;
 
         // A popup (KakaoTalk / Telegram / file picker) may have mapped *before*
         // the window we just managed — its owner. Relink any deferred transients
@@ -532,6 +565,9 @@ impl WindowManager {
             Some(c) => c,
             None => return Ok(()),
         };
+        // Drop the reconciler's record of this window so a remap re-emits a full
+        // configure (its previous applied rect is no longer valid).
+        self.applied.forget(win);
 
         // Announce the departure on the typed EventBus.
         self.engine
@@ -548,6 +584,18 @@ impl WindowManager {
 
         self.client_list_dirty = true;
         let mon_i = client.monitor;
+
+        // Clear any dangling reference to the just-removed window in the
+        // per-monitor stacking caches. `stack_overlay` reads these and would
+        // otherwise issue a configure/raise on a dead WindowId (only a swallowed
+        // BadWindow, but avoidable). The window belonged to `mon_i`, so only
+        // that monitor's entries can name it.
+        if self.fs_covering.get(&mon_i) == Some(&Some(win)) {
+            self.fs_covering.remove(&mon_i);
+        }
+        if let Some(order) = self.last_stack_order.get_mut(&mon_i) {
+            order.retain(|&w| w != win);
+        }
 
         // 2. Avoid panic if the monitor no longer exists after a hotplug.
         if mon_i < self.engine.state.monitors.len() {
@@ -574,7 +622,64 @@ impl WindowManager {
                 }
             }
             let _ = self.arrange(mon_i);
-            let _ = self.focus_best(mon_i);
+            // `remove_client` (above) may have already cleared the global deferral
+            // slot because this window was its `owner` (the presented overlay) or
+            // its `window` (the deferred target). Snapshot the slot *before* that so
+            // we can still consume the deferred window deterministically when the
+            // overlay owner is destroyed — that is exactly the orphan-fix path.
+            let pending_snapshot = self.engine.state.pending_focus;
+            if mon_i == self.engine.state.sel_mon {
+                let aws = self.engine.state.monitors[mon_i].active_ws;
+                // If the window just destroyed was the overlay that created the
+                // deferral, focus the deferred window now (consume). This is keyed
+                // on the overlay's own monitor and works regardless of whether the
+                // overlay's workspace is the active one.
+                let deferred = match pending_snapshot {
+                    Some(pf)
+                        if pf.owner == win
+                            && pf.monitor == mon_i
+                            && self.engine.state.clients.contains_key(&pf.window) =>
+                    {
+                        Some(pf.window)
+                    }
+                    _ => None,
+                };
+                if let Some(p) = deferred {
+                    self.engine.state.pending_focus = None;
+                    self.focus(Some(p))?;
+                } else if let Some(p) = crate::core::commands::consume_pending_focus(
+                    &mut self.engine.state,
+                    mon_i,
+                    aws,
+                    Some(win),
+                ) {
+                    self.focus(Some(p))?;
+                } else {
+                    self.focus_best(mon_i)?;
+                }
+            } else {
+                // A non-selected monitor: apply the logical focus only, never the
+                // real-X sink (that runs for `sel_mon`). Route through the core
+                // helper so `mon.focused`/`focus_stack` are only mutated by the
+                // single logical funnel. When the destroyed window was this
+                // monitor's presented overlay, consume the deferral onto it.
+                let deferred = match pending_snapshot {
+                    Some(pf)
+                        if pf.owner == win
+                            && pf.monitor == mon_i
+                            && self.engine.state.clients.contains_key(&pf.window) =>
+                    {
+                        Some(pf.window)
+                    }
+                    _ => None,
+                };
+                if let Some(p) = deferred {
+                    self.engine.state.pending_focus = None;
+                    crate::core::commands::focus_logical_on(&mut self.engine.state, mon_i, p);
+                } else if let Some(c) = self.engine.state.best_focus(mon_i) {
+                    crate::core::commands::focus_logical_on(&mut self.engine.state, mon_i, c);
+                }
+            }
         }
         Ok(())
     }
@@ -608,10 +713,21 @@ impl WindowManager {
                     // about to give it rather than still claiming maximized.
                     let mut atoms: Vec<u32> = self
                         .conn
-                        .get_property(false, c.window, self.atoms.net_wm_state, AtomEnum::ATOM, 0, 32)
+                        .get_property(
+                            false,
+                            c.window,
+                            self.atoms.net_wm_state,
+                            AtomEnum::ATOM,
+                            0,
+                            32,
+                        )
                         .ok()
                         .and_then(|ck| ck.reply().ok())
-                        .map(|r| r.value32().map(Iterator::collect::<Vec<u32>>).unwrap_or_default())
+                        .map(|r| {
+                            r.value32()
+                                .map(Iterator::collect::<Vec<u32>>)
+                                .unwrap_or_default()
+                        })
                         .unwrap_or_default();
                     atoms.retain(|&a| {
                         a != self.atoms.net_wm_state_fullscreen
@@ -642,9 +758,7 @@ impl WindowManager {
                 // the permissive-but-explicit reading is the useful one.
                 if rule.true_fullscreen {
                     c.fullscreen_policy = FullscreenPolicy::True;
-                } else if rule.deny_fullscreen
-                    && c.fullscreen_policy != FullscreenPolicy::True
-                {
+                } else if rule.deny_fullscreen && c.fullscreen_policy != FullscreenPolicy::True {
                     c.fullscreen_policy = FullscreenPolicy::Deny;
                 }
                 if let Some(bw) = rule.border_w {
@@ -722,7 +836,14 @@ impl WindowManager {
     fn read_float_prefs(&self, win: Window) -> (bool, Option<Rect>) {
         let was_float = self
             .conn
-            .get_property(false, win, self.atoms.maverick_float, AtomEnum::CARDINAL, 0, 1)
+            .get_property(
+                false,
+                win,
+                self.atoms.maverick_float,
+                AtomEnum::CARDINAL,
+                0,
+                1,
+            )
             .ok()
             .and_then(|c| c.reply().ok())
             .and_then(|p| p.value32().map(|mut v| v.next().unwrap_or(0) == 1))
@@ -732,7 +853,14 @@ impl WindowManager {
         }
         let geom = self
             .conn
-            .get_property(false, win, self.atoms.maverick_geom, AtomEnum::CARDINAL, 0, 4)
+            .get_property(
+                false,
+                win,
+                self.atoms.maverick_geom,
+                AtomEnum::CARDINAL,
+                0,
+                4,
+            )
             .ok()
             .and_then(|c| c.reply().ok())
             .and_then(|p| p.value32().map(std::iter::Iterator::collect::<Vec<u32>>))
@@ -881,9 +1009,7 @@ impl WindowManager {
                     self.engine.state.monitors[pmon].workspaces[pws]
                         .floats
                         .push(child);
-                    self.engine.state.monitors[pmon]
-                        .focus_stack
-                        .push(child);
+                    self.engine.state.monitors[pmon].focus_stack.push(child);
                 }
                 touched_mons.insert(from);
                 touched_mons.insert(pmon);
@@ -951,65 +1077,20 @@ impl WindowManager {
         win: Window,
         fs: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self
-            .engine
-            .state
-            .clients
-            .get(&win)
-            .is_none_or(|c| fs == c.is_fullscreen())
-        {
+        // X11-only: reflect the core's desired fullscreen state in the EWMH hint
+        // and the compositor bypass hint. ALL logical state — the `FULLSCREEN`
+        // flag, border width, `fs_snapshot` and the scroll `camera` — is now
+        // owned by the `ToggleFullscreen` Command, so this handler must not
+        // mutate `State` at all. The Command has already set the flag (so
+        // `write_net_wm_state` below reads it correctly), snapshotted/restored
+        // the geometry, retargeted the camera and emitted `ArrangeMonitor`.
+        if self.engine.state.clients.get(&win).is_none() {
             return Ok(());
         }
-        // Topology first: a *tiled* fullscreen is a column of the ribbon, so a
-        // float entering fullscreen has to join the tiling before the flag goes
-        // on (and go back to being a float when it comes off). This is the same
-        // pure helper `ToggleFullscreen` uses and it is idempotent, so the
-        // keyboard path (which already ran it) is unaffected — but the EWMH
-        // client-message path, which used to skip it entirely and leave the
-        // float laid out from a zeroed `geom`, is now fixed (bug C1/A1).
-        crate::core::commands::apply_fullscreen_topology(
-            &mut self.engine.state,
-            &self.engine.cfg,
-            win,
-            fs,
-        );
-
-        if let Some(c) = self.engine.state.clients.get_mut(&win) {
-            if fs {
-                c.flags.set(WinFlags::FULLSCREEN);
-                // A window promoted out of the float set already had its float
-                // rect snapshotted by `apply_fullscreen_topology`; `geom` is now
-                // (or is about to become) the tile rect, so overwriting
-                // `saved_geom` here would forget where the float lived.
-                if !c.flags.has(WinFlags::FS_WAS_FLOAT) {
-                    c.saved_geom = c.geom;
-                }
-                c.old_border_w = c.border_w;
-                c.border_w = 0;
-            } else {
-                c.flags.clear(WinFlags::FULLSCREEN);
-                c.border_w = c.old_border_w;
-                // Floats are laid out from `client.geom`, so restore the saved
-                // pre-fullscreen rect. Tiled windows are re-laid by `arrange`,
-                // which overwrites `geom` wholesale, so they need nothing here.
-                if c.is_float() {
-                    c.geom = c.saved_geom;
-                }
-            }
-            // The border width always changes across this transition, but the
-            // *rect* may not (e.g. a tile that already filled the screen), and
-            // `apply_geom` skips windows whose geometry is unchanged. Mark the
-            // client dirty so the reconfigure is emitted regardless — this is
-            // what the old `geom = Rect::default()` sentinel was really for.
-            c.geometry_dirty = true;
-            self.stack_dirty = true;
-        }
-        // Tell an external compositor (picom, etc.) to skip its effect pass on
-        // this window while it is fullscreen. Value 2 = "bypass whenever the
-        // window is fullscreen" (compositors read `_NET_WM_STATE`), so FX resume
-        // the moment the window leaves fullscreen. Without this, a fullscreen
-        // video/game still gets redirected + per-frame shadow work in picom →
-        // input lag and frame drops.
+        // `_NET_WM_BYPASS_COMPOSITOR` = 2 tells an external compositor (picom,
+        // etc.) to skip its effect pass while the window is fullscreen, resuming
+        // the moment it leaves. Without it a fullscreen video/game still gets
+        // redirected + per-frame shadow work in picom → input lag and frame drops.
         if fs {
             let _ = self.conn.change_property32(
                 PropMode::REPLACE,
@@ -1023,42 +1104,9 @@ impl WindowManager {
                 .conn
                 .delete_property(win, self.atoms.net_wm_bypass_compositor);
         }
+        // `write_net_wm_state` reads the `FULLSCREEN` flag (set by the Command)
+        // and pushes the matching `_NET_WM_STATE_FULLSCREEN` atom.
         self.write_net_wm_state(win);
-        let mi = self.engine.state.clients.get(&win).map_or(0, |c| c.monitor);
-        let ws_i = self.engine.state.clients.get(&win).map_or(0, |c| c.workspace);
-        // `FullscreenPolicy::True` is an exclusive overlay outside the ribbon
-        // (`core::present`), and is excluded from `fs_ctx`, so recentering the
-        // ribbon camera for it would just scroll the now-hidden tiling around an
-        // invisible fullscreen — skip it.
-        let true_fs = self
-            .engine
-            .state
-            .clients
-            .get(&win)
-            .is_some_and(Client::is_true_fullscreen);
-        if !true_fs {
-            // Recenter the camera now that the FULLSCREEN flag is set (the core
-            // command cannot do this because it must not pre-set the flag). This
-            // makes the fullscreen column align its left edge to `screen.x`,
-            // which matters with asymmetric struts (a side dock would otherwise
-            // leave an offset).
-            let wa = self.engine.state.monitors[mi].workarea;
-            let fs = fs_ctx(
-                &self.engine.state.clients,
-                &self.engine.state.monitors[mi].workspaces[ws_i],
-                self.engine.state.monitors[mi].screen,
-            );
-            let scroll = ideal_scroll(
-                &self.engine.state.monitors[mi].workspaces[ws_i],
-                &self.engine.cfg,
-                wa,
-                fs,
-            );
-            self.engine.state.monitors[mi].workspaces[ws_i].camera.target = scroll;
-        }
-        // Stacking is no longer decided here — `stack_overlay` (run inside
-        // `arrange`) now owns raising/covering based on focus + camera stillness.
-        self.arrange(mi)?;
         Ok(())
     }
 
@@ -1074,55 +1122,26 @@ impl WindowManager {
     pub(super) fn set_maximized(
         &mut self,
         win: Window,
-        vert: Option<bool>,
-        horiz: Option<bool>,
+        _vert: Option<bool>,
+        _horiz: Option<bool>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(c) = self.engine.state.clients.get_mut(&win) {
-            let was_max = c.is_maximized();
-            let want_v = vert.unwrap_or_else(|| c.is_maximized_v());
-            let want_h = horiz.unwrap_or_else(|| c.is_maximized_h());
-            if want_v == c.is_maximized_v() && want_h == c.is_maximized_h() {
-                return Ok(());
-            }
-            if want_v {
-                c.flags.set(WinFlags::MAXIMIZED_V);
-            } else {
-                c.flags.clear(WinFlags::MAXIMIZED_V);
-            }
-            if want_h {
-                c.flags.set(WinFlags::MAXIMIZED_H);
-            } else {
-                c.flags.clear(WinFlags::MAXIMIZED_H);
-            }
-            if !was_max {
-                // Entering the overlay from a normal tile/float: remember where
-                // the window was so leaving it can restore a float exactly.
-                c.saved_geom = c.geom;
-            } else if !c.is_maximized() && c.is_float() {
-                c.geom = c.saved_geom;
-            }
-            // Same rationale as `set_fullscreen`: the presented rect can equal
-            // the tile rect, and `apply_geom` skips unchanged geometry, so the
-            // transition has to be announced explicitly instead of via a zeroed
-            // `geom` sentinel.
-            c.geometry_dirty = true;
-            self.stack_dirty = true;
+        if self.engine.state.clients.get(&win).is_none() {
+            return Ok(());
         }
+        // Logical state (MAXIMIZED_V/H, saved_geom, geom, geometry_dirty,
+        // presented_maximize) is now owned by `apply_maximize` (core). This sink
+        // only reflects it on X11.
         self.write_net_wm_state(win);
         let mi = self.engine.state.clients.get(&win).map_or(0, |c| c.monitor);
         self.arrange(mi)?;
-        // A maximized window is only raised when it is the focused window —
-        // mirroring the focus-dependent overlay rule in `core::present`
-        // (unfocused maximized windows keep their normal tile slot and must
-        // not be stacked above other tiles). Fullscreen is always raised
-        // because it always renders as an overlay (N2).
         if self
             .engine
             .state
-            .clients
-            .get(&win)
-            .is_some_and(|c| c.is_maximized_v() || c.is_maximized_h())
-            && self.engine.state.monitors[mi].focused == Some(win)
+            .monitors
+            .get(mi)
+            .and_then(|m| m.workspaces.get(m.active_ws))
+            .and_then(|ws| ws.presented_maximize)
+            == Some(win)
         {
             let _ = self
                 .conn

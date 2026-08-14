@@ -43,9 +43,7 @@ impl WindowManager {
     /// current config. Unlike `update_ewmh_desktops`, this deliberately leaves
     /// `_NET_CURRENT_DESKTOP` untouched — callers that reconcile workspaces
     /// (e.g. `reload_config`) must not reset the active desktop to 0.
-    pub(super) fn update_ewmh_desktop_count(
-        &self,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn update_ewmh_desktop_count(&self) -> Result<(), Box<dyn std::error::Error>> {
         let a = &self.atoms;
         let n = self.engine.cfg.n_tags as u32;
 
