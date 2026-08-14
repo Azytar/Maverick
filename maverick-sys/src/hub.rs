@@ -40,7 +40,10 @@ pub enum ControlCommand {
     /// A structured read-only query ("workspaces", "tree", "focused", …).
     /// The WM answers by sending the result JSON through `reply`; the server
     /// thread blocks on the channel until it arrives.
-    Query { topic: String, reply: Sender<String> },
+    Query {
+        topic: String,
+        reply: Sender<String>,
+    },
 }
 
 /// Shared hub cloned into both the server thread and the WM thread.

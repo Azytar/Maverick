@@ -48,9 +48,14 @@ impl ControlServer {
     /// `subscribe` streams hub events.
     pub fn spawn(name: &str, identity_json: String, hub: ControlHub) -> std::io::Result<Self> {
         let path = identity::sock_path(name);
-        // Ensure the runtime dir exists (bind won't create parent dirs).
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        // Ensure the per-session dir exists (bind won't create parent dirs) and
+        // is private (0700) so other UIDs can't interfere.
+        let dir = identity::session_dir(name);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return Err(e);
+        }
+        if let Err(e) = identity::set_private_dir(&dir) {
+            return Err(e);
         }
         // Stale socket from a previous crashed instance: unlink so bind works.
         // Defend against TOCTOU symlink attacks: only remove if it's a socket.
@@ -344,11 +349,14 @@ where
 pub fn identity_json(info: &InstanceInfo) -> String {
     use crate::json::json_quote;
     format!(
-        r#"{{"name":{},"pid":{},"display":{},"tty_nr":{},"exe":{},"started_at":{},"alive":{}}}"#,
+        r#"{{"name":{},"session_id":{},"pid":{},"display":{},"tty_nr":{},"x_server_identity":{},"start_time":{},"exe":{},"started_at":{},"alive":{}}}"#,
         json_quote(&info.name),
+        json_quote(&info.session_id),
         info.pid,
         json_quote(&info.display),
         info.tty_nr,
+        json_quote(&info.x_server_identity),
+        info.start_time,
         json_quote(&info.exe),
         info.started_at,
         info.alive,
@@ -366,9 +374,12 @@ mod tests {
         let name = "testctl";
         let info = InstanceInfo {
             name: name.into(),
+            session_id: name.into(),
             pid: std::process::id(),
             display: ":9".into(),
             tty_nr: 0x1234,
+            x_server_identity: "?".into(),
+            start_time: 0,
             exe: "/usr/bin/maverick".into(),
             started_at: 1,
             alive: true,
@@ -415,9 +426,12 @@ mod tests {
         let name = "testsub";
         let info = InstanceInfo {
             name: name.into(),
+            session_id: name.into(),
             pid: std::process::id(),
             display: ":9".into(),
             tty_nr: 0,
+            x_server_identity: "?".into(),
+            start_time: 0,
             exe: String::new(),
             started_at: 1,
             alive: true,

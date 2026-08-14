@@ -97,7 +97,12 @@ mod tests {
 
     #[test]
     fn escape_unescape_roundtrip() {
-        for s in ["plain", "with \"quotes\" and \\slashes\\", "tab\there\n", "é👍"] {
+        for s in [
+            "plain",
+            "with \"quotes\" and \\slashes\\",
+            "tab\there\n",
+            "é👍",
+        ] {
             assert_eq!(json_unescape(&json_escape(s)), s);
             let quoted = json_quote(s);
             // json_quote adds the surrounding quotes; unescape expects the

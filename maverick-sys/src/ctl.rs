@@ -18,8 +18,8 @@
 
 use std::process::ExitCode;
 
+use crate::identity::{current_display, current_tty_nr, InstanceInfo};
 use crate::{control, discover};
-use crate::identity::InstanceInfo;
 
 /// Entry point shared by both control binaries.
 pub fn main_with_args(tool: &str, args: Vec<String>) -> ExitCode {
@@ -32,7 +32,7 @@ pub fn main_with_args(tool: &str, args: Vec<String>) -> ExitCode {
     let rest = &args[1..];
 
     match cmd {
-        "-h" | "--help" | "help" => {
+        "-h" | "--help" | "help" | "h" => {
             usage(tool);
             ExitCode::SUCCESS
         }
@@ -71,23 +71,28 @@ USAGE:
 
 COMMANDS:
     list                       List running/known instances
-    state    [--name <id>]     Print the WM state snapshot (JSON)
-    query <topic> [--name <id>]
-                               Structured query: state, workspaces, tree, focused
-                               (topic may also be a bare CLI action like
-                               \"focus-left\" / \"view 3\", forwarded verbatim)
-    msg <action> [--name <id>] Dispatch an action (e.g. \"focus-left\", \"view 3\")
+    state    [--name <id>] [--session <sid>]   Print the WM state snapshot (JSON)
+    query <topic> [--name <id>] [--session <sid>]
+                                Structured query: state, workspaces, tree, focused
+                                (topic may also be a bare CLI action like
+                                \"focus-left\" / \"view 3\", forwarded verbatim)
+    msg <action> [--name <id>] [--session <sid>] Dispatch an action; e.g.
+                                \"focus-left\", \"view 3\", or wallpaper verbs:
+                                \"wallpaper set /ruta\", \"wallpaper clear\",
+                                \"wallpaper mode fill\"
     command <action>           Alias for msg (dispatch)
-    subscribe   [--name <id>]  Stream WM events until interrupted
-    quit     [--name <id>] [--confirm] [--yes]
-                               Ask an instance to quit (confirmation optional)
+    subscribe   [--name <id>] [--session <sid>]  Stream WM events until interrupted
+    quit     [--name <id>] [--session <sid>] [--confirm] [--yes]
+                                Ask an instance to quit (confirmation optional)
     quit-all [--yes]           Quit every running instance
-    restart  [--name <id>]     Restart an instance (re-exec)
-    reload   [--name <id>]     Reload config (no-op for compiled config)
+    restart  [--name <id>] [--session <sid>]     Restart an instance (re-exec)
+    reload   [--name <id>] [--session <sid>]     Reload config (no-op for compiled config)
     prune                      Remove stale file far whose socket is dead
 
 INSTANCE SELECTION:
-    --name <id>   explicit; else $MAVERICK_INSTANCE; else the sole instance."
+    --session <sid>  explicit session id (from `list`)
+    --name <id>      human label (or session id); else $MAVERICK_INSTANCE;
+                     else the sole instance on this DISPLAY/TTY."
     );
 }
 
@@ -95,6 +100,7 @@ INSTANCE SELECTION:
 
 struct Opts {
     name: Option<String>,
+    session: Option<String>,
     confirm: bool,
     yes: bool,
     positional: Vec<String>,
@@ -103,6 +109,7 @@ struct Opts {
 fn parse_opts(args: &[String], keep_flags: &[&str]) -> Opts {
     let mut o = Opts {
         name: None,
+        session: None,
         confirm: false,
         yes: false,
         positional: Vec::new(),
@@ -111,6 +118,7 @@ fn parse_opts(args: &[String], keep_flags: &[&str]) -> Opts {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--name" | "-n" => o.name = it.next().cloned(),
+            "--session" | "-s" => o.session = it.next().cloned(),
             "--confirm" => o.confirm = true,
             "--yes" | "-y" => o.yes = true,
             other => {
@@ -127,30 +135,61 @@ fn parse_opts_default(args: &[String]) -> Opts {
     parse_opts(args, &[])
 }
 
-/// Resolve the target instance name given `--name`/env/singleton rules.
-/// On ambiguity, prints the candidates and returns None.
-fn resolve_target(tool: &str, explicit: &Option<String>) -> Option<String> {
-    if let Some(n) = explicit {
-        return Some(n.clone());
+/// Resolve the target instance session id given `--session`/`--name`/env/
+/// context/singleton rules. On ambiguity, prints the candidates and returns
+/// None. The returned string is a `session_id` (the filesystem key).
+fn resolve_target(tool: &str, name: &Option<String>, session: &Option<String>) -> Option<String> {
+    // 1. `--session <sid>` is an explicit, unambiguous session id.
+    if let Some(s) = session {
+        return if crate::identity::read_meta(s).is_some() {
+            Some(s.clone())
+        } else {
+            eprintln!("{tool}: no instance with session id '{s}'");
+            None
+        };
     }
+    // 2. `--name <label>` matches a known instance by human label or sid.
+    if let Some(n) = name {
+        return discover::find_by_name(n).map(|i| i.session_id);
+    }
+    // 3. `$MAVERICK_INSTANCE` holds the session id the WM exported to its
+    //    children (the common case when a tool is launched by a Maverick keybind).
     if let Ok(env) = std::env::var("MAVERICK_INSTANCE") {
-        if !env.is_empty() {
+        if !env.is_empty() && crate::identity::read_meta(&env).is_some() {
             return Some(env);
         }
     }
+    // 4. Resolve by the caller's own context: DISPLAY + controlling tty. This
+    //    is what lets `maverickctl` launched from a bare TTY pick "the session
+    //    on my DISPLAY/TTY" rather than a globally ambiguous "default".
+    let ctx_display = current_display();
+    let ctx_tty = current_tty_nr();
     let live: Vec<InstanceInfo> = discover::list_instances()
         .into_iter()
         .filter(|i| i.alive)
         .collect();
-    match live.len() {
-        1 => Some(live[0].name.clone()),
+    let by_context: Vec<InstanceInfo> = live
+        .iter()
+        .filter(|i| {
+            (ctx_display.is_empty() || i.display == ctx_display)
+                && (ctx_tty == 0 || i.tty_nr == ctx_tty)
+        })
+        .cloned()
+        .collect();
+    let candidates: &[InstanceInfo] = if ctx_display.is_empty() && ctx_tty == 0 {
+        &live
+    } else {
+        &by_context
+    };
+    match candidates.len() {
+        1 => Some(candidates[0].session_id.clone()),
         0 => {
-            eprintln!("{tool}: no running Maverick instance found");
+            eprintln!("{tool}: no running Maverick instance found for this context");
             None
         }
         _ => {
-            eprintln!("{tool}: multiple instances running — pick one with --name:");
-            for i in &live {
+            eprintln!("{tool}: multiple instances match — pick one with --session/--name:");
+            for i in candidates {
                 eprintln!("  {}", i.label());
             }
             None
@@ -175,17 +214,14 @@ fn cmd_list(_tool: &str) -> ExitCode {
         };
         let status = if i.alive { "alive" } else { "STALE" };
         println!(
-            "  {:<12} pid={:<7} display={:<6} tty={:#x} {}",
-            i.name, i.pid, disp, i.tty_nr, status
+            "  {:<22} {:<12} pid={:<7} display={:<6} tty={:#x} xserver={:<8} {}",
+            i.session_id, i.name, i.pid, disp, i.tty_nr, i.x_server_identity, status
         );
     }
     ExitCode::SUCCESS
 }
 
-fn print_json<E: std::error::Error + 'static>(
-    tool: &str,
-    res: Result<String, E>,
-) -> ExitCode {
+fn print_json<E: std::error::Error + 'static>(tool: &str, res: Result<String, E>) -> ExitCode {
     match res {
         Ok(json) => {
             println!("{json}");
@@ -202,7 +238,7 @@ fn print_json<E: std::error::Error + 'static>(
 /// bare action line passed through as a dispatcher).
 fn cmd_state(tool: &str, args: &[String], full_snapshot: bool) -> ExitCode {
     let o = parse_opts(args, &["-j", "--json", "-b", "--bare"]);
-    let name = match resolve_target(tool, &o.name) {
+    let name = match resolve_target(tool, &o.name, &o.session) {
         Some(n) => n,
         None => return ExitCode::FAILURE,
     };
@@ -224,7 +260,7 @@ fn cmd_msg(tool: &str, args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let action = o.positional.join(" ");
-    let name = match resolve_target(tool, &o.name) {
+    let name = match resolve_target(tool, &o.name, &o.session) {
         Some(n) => n,
         None => return ExitCode::FAILURE,
     };
@@ -246,7 +282,7 @@ fn cmd_msg(tool: &str, args: &[String]) -> ExitCode {
 
 fn cmd_subscribe(tool: &str, args: &[String]) -> ExitCode {
     let o = parse_opts_default(args);
-    let name = match resolve_target(tool, &o.name) {
+    let name = match resolve_target(tool, &o.name, &o.session) {
         Some(n) => n,
         None => return ExitCode::FAILURE,
     };
@@ -265,7 +301,7 @@ fn cmd_subscribe(tool: &str, args: &[String]) -> ExitCode {
 
 fn cmd_quit(tool: &str, args: &[String]) -> ExitCode {
     let o = parse_opts_default(args);
-    let name = match resolve_target(tool, &o.name) {
+    let name = match resolve_target(tool, &o.name, &o.session) {
         Some(n) => n,
         None => return ExitCode::FAILURE,
     };
@@ -320,7 +356,7 @@ fn cmd_quit_all(tool: &str, args: &[String]) -> ExitCode {
 
 fn cmd_simple(tool: &str, args: &[String], verb: &str) -> ExitCode {
     let o = parse_opts_default(args);
-    let name = match resolve_target(tool, &o.name) {
+    let name = match resolve_target(tool, &o.name, &o.session) {
         Some(n) => n,
         None => return ExitCode::FAILURE,
     };
@@ -358,7 +394,7 @@ fn cmd_prune(_tool: &str) -> ExitCode {
 /// ("focus-right", "view 3"). Resolution order: raw command words first, then
 /// `query <topic>` (structured), then fall back to dispatching.
 fn cmd_forward(tool: &str, line: &str) -> ExitCode {
-    let name = match resolve_target(tool, &None) {
+    let name = match resolve_target(tool, &None, &None) {
         Some(n) => n,
         None => return ExitCode::FAILURE,
     };
@@ -379,9 +415,10 @@ fn cmd_forward(tool: &str, line: &str) -> ExitCode {
             &name,
             l.strip_prefix(QUERY_CMD).map(str::trim).unwrap_or(""),
         ),
-        l if l.starts_with(DISPATCH_CMD) => {
-            control::dispatch(&name, l.strip_prefix(DISPATCH_CMD).map(str::trim).unwrap_or(""))
-        }
+        l if l.starts_with(DISPATCH_CMD) => control::dispatch(
+            &name,
+            l.strip_prefix(DISPATCH_CMD).map(str::trim).unwrap_or(""),
+        ),
         l => control::dispatch(&name, l),
     };
     print_json(tool, res)
