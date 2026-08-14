@@ -37,9 +37,15 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Instant;
 
 use maverick_gl::{gl::*, Quad as GlQuad, Renderer, Texture, VisualFormat, XConn, XDisplay};
+use maverick_img::Rgba8;
 
+use crate::core::wallpaper::{
+    compute_wallpaper_rects, GpuImage, ShaderId, WallpaperGpu, WallpaperMode, WallpaperSource,
+    WallpaperSpec,
+};
 use crate::log;
 use x11rb::connection::Connection;
 use x11rb::protocol::composite::{ConnectionExt as _, Redirect};
@@ -100,6 +106,17 @@ struct CompWin {
     /// geometry. A generation stamp avoids a clearing pass over every tracked
     /// window at the top of each frame.
     transform_gen: u64,
+    /// The visual (drawn) rect this window had on the *previous* composited
+    /// frame. Used for Fase 7 animation damage: when a window moves we must
+    /// repaint both this rect and the new one, or the pixels it slid off of
+    /// (and into) linger as residue during scroll. `None` means it was not
+    /// drawn last frame (just appeared / was off-screen), so only the current
+    /// rect needs repainting.
+    prev_visual: Option<Rect>,
+    /// Fase 12 — true when this window is fully hidden behind a single opaque,
+    /// square-cornered window above it this frame, so it need not be drawn.
+    /// Recomputed every frame by `compute_scene`'s top→bottom occlusion pass.
+    occluded: bool,
 }
 
 impl CompWin {
@@ -119,6 +136,8 @@ impl CompWin {
             // 0 is never a live generation: `set_transforms` pre-increments, so
             // the first frame is generation 1.
             transform_gen: 0,
+            prev_visual: None,
+            occluded: false,
         }
     }
 
@@ -230,6 +249,40 @@ pub(crate) enum FrameMode {
     Partial,
 }
 
+/// Why the compositor needs a frame (Fase 9). Bitflags so several reasons can
+/// coexist in a single frame and the `FrameScheduler` can report them. Pure, no
+/// GL/X: it is just an integer mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DirtyReason(u8);
+impl DirtyReason {
+    pub const NONE: DirtyReason = DirtyReason(0);
+    /// A client repainted (XDamage) — only its own area is dirty.
+    pub const DAMAGE: DirtyReason = DirtyReason(1 << 0);
+    /// A window's geometry changed (configure, opacity, hide, wallpaper).
+    pub const GEOMETRY: DirtyReason = DirtyReason(1 << 1);
+    /// A surface appeared/disappeared (map, unmap, destroy).
+    pub const SURFACE: DirtyReason = DirtyReason(1 << 2);
+    /// The stacking order changed (focus / raise / restack).
+    pub const FOCUS: DirtyReason = DirtyReason(1 << 3);
+    /// The native (or root) wallpaper changed — a full repaint of the whole
+    /// screen. Inserted exactly once per `SetWallpaper` (Fase 6): a static
+    /// wallpaper must not keep the loop awake.
+    pub const WALLPAPER: DirtyReason = DirtyReason(1 << 4);
+
+    #[inline]
+    pub fn contains(self, other: DirtyReason) -> bool {
+        self.0 & other.0 != 0
+    }
+    #[inline]
+    pub fn insert(&mut self, other: DirtyReason) {
+        self.0 |= other.0;
+    }
+    #[inline]
+    pub fn clear(&mut self) {
+        self.0 = 0;
+    }
+}
+
 /// Pure decision: given the capability and the two damage flags, what kind of
 /// frame is required? Kept free of any GL/renderer state so it is unit-testable
 /// in isolation (see `frameplan_tests`).
@@ -241,6 +294,34 @@ pub(crate) fn decide_redraw(has_buffer_age: bool, needs_full: bool, damaged: boo
     } else {
         FrameMode::Partial
     }
+}
+
+/// Fase 7: the screen rects that must be repainted when a window's drawn rect
+/// moves from `prev` (last frame) to `cur` (this frame). Both are emitted so
+/// neither the pixels the window left behind nor the pixels it slid into linger
+/// as residue during scroll/animation. A window with no `prev` (just appeared,
+/// or was off-screen) only needs its current rect. Pure and allocation-free:
+/// the result is written into the caller's `[Rect; 2]` and the count returned,
+/// so the hot path reuses a stack buffer instead of allocating.
+pub(crate) fn anim_damage_rects(prev: Option<Rect>, cur: Rect, out: &mut [Rect; 2]) -> usize {
+    let mut n = 0;
+    if let Some(p) = prev {
+        if p != cur {
+            out[n] = p;
+            n += 1;
+        }
+    }
+    out[n] = cur;
+    n + 1
+}
+
+/// Fase 12: true when `inner` is entirely contained by a single rect in
+/// `occluders`. A window behind one opaque, square-cornered window above it is
+/// fully hidden and can be skipped. Joint coverage by several smaller windows
+/// is a safe *miss* — we simply keep drawing the window rather than risk
+/// clipping something visible. Pure and allocation-free.
+pub(crate) fn fully_covered_by(inner: Rect, occluders: &[Rect]) -> bool {
+    occluders.iter().any(|o| o.contains_rect(inner))
 }
 
 /// One window to draw this frame, fully resolved: where, at what opacity, with
@@ -300,8 +381,34 @@ pub struct Compositor {
     /// client destroy any resource id it knows, so freeing it here really does
     /// wipe the desktop background out from under its owner.
     wallpaper_pixmap: Option<Pixmap>,
+    /// Native wallpaper (Maverick's own, decoded from a file) as an uploaded GPU
+    /// texture. Takes precedence over `wallpaper` when set. `None` ⇒ fall back to
+    /// the external root pixmap.
+    wallpaper_native: Option<GpuImage>,
+    /// Compiled wallpaper shader program id (`0` when inactive). When set, the
+    /// wallpaper is animated and forces a frame every turn.
+    wallpaper_shader: Option<GLuint>,
+    /// Decoded image dimensions (for `compute_wallpaper_rects`).
+    wallpaper_img_w: u32,
+    wallpaper_img_h: u32,
+    /// Mapping mode for the native image.
+    wallpaper_mode: WallpaperMode,
+    /// The active native source (Image/Shader), used to decide animation.
+    wallpaper_active: Option<WallpaperSource>,
+    /// Outputs the wallpaper is laid out across (screen-space rects).
+    wallpaper_outputs: Vec<Rect>,
+    /// Monotonic wallpaper clock advanced by `tick_wallpaper` (seconds).
+    wallpaper_clock: f32,
+    /// Whether the wallpaper is currently animating (shader source active).
+    wallpaper_animating: bool,
+    /// `dt` of the most recent `tick_wallpaper`, passed to the shader.
+    wallpaper_last_dt: f32,
     /// True while at least one frame is queued/needed.
     dirty: bool,
+    /// *Why* the compositor needs a frame (Fase 9). Bitflags so several reasons
+    /// can coincide in one frame and the `FrameScheduler` can report them; it is
+    /// cleared together with `dirty` at the end of `render`.
+    dirty_reasons: DirtyReason,
     /// An incremental restack could not be applied (we saw a `ConfigureNotify`
     /// naming a sibling we do not track) → fall back to a `QueryTree` resync
     /// before the next frame. This is the *recovery* path, not the normal one.
@@ -321,6 +428,10 @@ pub struct Compositor {
     /// visible — distinct from the WM's `Placements` (which is only the geometry
     /// source) and from `stack` (which still includes off-screen windows).
     scene: Vec<DrawItem>,
+    /// Fase 12 — persistent buffer of opaque on-screen occluder rects, rebuilt
+    /// (cleared, not reallocated) every frame by `compute_scene`'s top→bottom
+    /// pass. Reused so the per-frame path stays allocation-free.
+    occluder_rects: Vec<Rect>,
     /// Monotonic frame counter used to date `CompWin::transform`.
     frame_gen: u64,
     /// Corner radius the WM wants applied (shader SDF), px.
@@ -337,6 +448,34 @@ pub struct Compositor {
     /// path. Reset to empty on every full repaint (structural change, or when
     /// buffer-age is unavailable so we always full-redraw).
     damage_acc: DamageRegion,
+    /// Debug/test hook: when set, pretend buffer-age is unavailable so the
+    /// partial-redraw path is never taken (used by the Xephyr harness to
+    /// exercise the full-redraw fallback). Set via `MAVERICK_FORCE_FULL_REDRAW`.
+    force_full_redraw: bool,
+    /// Debug/test hook: when set, log per-batch render timing every 120 frames
+    /// so the Xephyr harness can compare partial vs full cost. `MAVERICK_PERF_LOG`.
+    perf_log: bool,
+    perf_count: u64,
+    perf_ns_total: u64,
+    perf_ns_max: u64,
+    /// Debug/trace hook: when set, log per-frame CPU build time, time-to-swap,
+    /// `glXSwapBuffers` duration, present-to-present interval, observed
+    /// back-buffer age, frame mode and partial→full escalations. Gated by
+    /// `MAVERICK_TRACE`; purely observational — it never changes what is drawn.
+    trace: bool,
+    trace_count: u64,
+    trace_ns_build_total: u64,
+    trace_ns_swap_total: u64,
+    trace_ns_interval_total: u64,
+    trace_ns_interval_max: u64,
+    /// Histogram of observed `back_buffer_age`: indices 0, 1, 2, 3+.
+    trace_age_hist: [u64; 4],
+    trace_mode_full: u64,
+    trace_mode_partial: u64,
+    /// Frames the planner chose Partial but the age gate forced a Full repaint.
+    trace_partial_to_full: u64,
+    /// Timestamp of the previous present, for the present-to-present interval.
+    last_present: Option<Instant>,
 }
 
 impl Compositor {
@@ -465,9 +604,10 @@ impl Compositor {
             }
         };
         log::info!(
-            "compositor: GL ready ({}; vsync {})",
+            "compositor: GL ready ({}; vsync {}, video_sync {})",
             renderer.info,
-            renderer.vsync
+            renderer.vsync,
+            renderer.video_sync
         );
 
         // The screen-awareness self-check: for every visual the server offers,
@@ -543,20 +683,56 @@ impl Compositor {
             warned_visuals: HashSet::new(),
             wallpaper: None,
             wallpaper_pixmap: None,
+            wallpaper_clock: 0.0,
+            wallpaper_animating: false,
+            wallpaper_last_dt: 0.0,
+            wallpaper_native: None,
+            wallpaper_shader: None,
+            wallpaper_img_w: 0,
+            wallpaper_img_h: 0,
+            wallpaper_mode: WallpaperMode::Fill,
+            wallpaper_active: None,
+            wallpaper_outputs: Vec::new(),
             dirty: true,
+            dirty_reasons: DirtyReason::GEOMETRY,
             stack_dirty: true,
             stack: Vec::new(),
             scene: Vec::new(),
+            occluder_rects: Vec::new(),
             frame_gen: 0,
             corner_radius: cfg.corner_radius,
             frame_dirty: DamageRegion::new(),
             needs_full: false,
             damage_acc: DamageRegion::new(),
+            force_full_redraw: std::env::var_os("MAVERICK_FORCE_FULL_REDRAW").is_some(),
+            perf_log: std::env::var_os("MAVERICK_PERF_LOG").is_some(),
+            perf_count: 0,
+            perf_ns_total: 0,
+            perf_ns_max: 0,
+            trace: std::env::var_os("MAVERICK_TRACE").is_some(),
+            trace_count: 0,
+            trace_ns_build_total: 0,
+            trace_ns_swap_total: 0,
+            trace_ns_interval_total: 0,
+            trace_ns_interval_max: 0,
+            trace_age_hist: [0; 4],
+            trace_mode_full: 0,
+            trace_mode_partial: 0,
+            trace_partial_to_full: 0,
+            last_present: None,
         };
 
         comp.scan_existing();
         comp.refresh_wallpaper();
         comp.refresh_stack();
+        // Seed the wallpaper output layout from the root screen so a native
+        // wallpaper set before the first RandR event still covers the whole screen.
+        comp.set_outputs(&[Rect::new(0, 0, screen_w, screen_h)]);
+        if comp.force_full_redraw {
+            log::info!(
+                "compositor: MAVERICK_FORCE_FULL_REDRAW set — partial redraw disabled (full-redraw fallback path)"
+            );
+        }
         Some(comp)
     }
 
@@ -650,7 +826,7 @@ impl Compositor {
             // it should cover).
             self.stack_dirty = true;
         }
-        self.mark_full();
+        self.mark_full(DirtyReason::FOCUS);
     }
 
     /// Window destroyed (DestroyNotify).
@@ -662,7 +838,7 @@ impl Compositor {
             let _ = self.conn.damage_destroy(dmg);
         }
         stack_remove(&mut self.stack, win);
-        self.mark_full();
+        self.mark_full(DirtyReason::SURFACE);
     }
 
     /// Window mapped (MapNotify). Name its off-screen pixmap and bind a texture.
@@ -685,7 +861,7 @@ impl Compositor {
         if !self.ignored.contains(&win) && !self.stack.contains(&win) {
             self.stack_dirty = true;
         }
-        self.mark_full();
+        self.mark_full(DirtyReason::SURFACE);
     }
 
     /// Window unmapped (UnmapNotify). Drop the texture (the pixmap is gone).
@@ -705,7 +881,7 @@ impl Compositor {
                 let _ = self.conn.free_pixmap(pm);
             }
         }
-        self.mark_full();
+        self.mark_full(DirtyReason::SURFACE);
     }
 
     /// Mark a window hidden/shown by the WM's workspace switcher
@@ -715,7 +891,7 @@ impl Compositor {
     pub fn set_hidden(&mut self, win: Window, hidden: bool) {
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.hidden = hidden;
-            self.mark_full();
+            self.mark_full(DirtyReason::SURFACE);
         }
     }
 
@@ -753,7 +929,7 @@ impl Compositor {
         if resized && mapped {
             self.rename_and_bind(win);
         }
-        self.mark_full();
+        self.mark_full(DirtyReason::GEOMETRY);
     }
 
     /// Damage reported (DamageNotify). Re-arm and mark dirty; the texture is
@@ -766,6 +942,7 @@ impl Compositor {
             cw.damaged = true;
         }
         self.dirty = true;
+        self.dirty_reasons.insert(DirtyReason::DAMAGE);
     }
 
     /// `_NET_WM_WINDOW_OPACITY` changed (PropertyNotify).
@@ -773,7 +950,7 @@ impl Compositor {
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.opacity = opacity.clamp(0.0, 1.0);
         }
-        self.mark_full();
+        self.mark_full(DirtyReason::GEOMETRY);
     }
 
     /// Client changed its own X shape (ShapeNotify). We never clobber the
@@ -785,7 +962,7 @@ impl Compositor {
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.damaged = true;
         }
-        self.mark_full();
+        self.mark_full(DirtyReason::GEOMETRY);
     }
 
     /// The WM computed live placements; hand them to the compositor as the
@@ -819,29 +996,180 @@ impl Compositor {
             };
             cw.transform_gen = gen;
         }
-        self.mark_full();
+        // No `mark_full` here: a pure animation/scroll only moves windows, which
+        // `compute_scene` records as `old ∪ new` animation damage (Fase 7) so the
+        // buffer-age Partial path can scissor just the swept region. Forcing a
+        // full repaint every animation frame would defeat partial redraw during
+        // scroll. Structural changes (resize/restack/opacity/map/unmap) already
+        // call `mark_full` through their own events, and the frame loop renders
+        // while `animating` is true, so dropping this flag does not skip frames.
     }
 
     /// Mark the whole frame dirty (used when stacking or the wallpaper changes).
     pub fn invalidate(&mut self) {
-        self.mark_full();
+        self.mark_full(DirtyReason::GEOMETRY);
     }
 
-    /// Pace the next frame to the vertical retrace (see `Renderer::wait_vblank`).
-    /// Returns `false` when `GLX_SGI_video_sync` is unavailable so the loop can
-    /// fall back to a short poll.
+    /// Instrumentation-only vblank counter read (see `Renderer::wait_vblank`).
+    /// The frame loop no longer paces here — swap interval 1 is the sole
+    /// synchroniser.
+    #[allow(dead_code)]
     pub fn wait_vblank(&mut self) -> bool {
         self.renderer.wait_vblank()
     }
 
-    /// Whether a frame is still needed (an animation is running or a damage/
-    /// configure/opacity event marked us dirty). Drives the event-loop's wake
-    /// timeout so the compositor redraws as soon as something changed.
+    /// Whether a frame is still needed (a compositor event marked us dirty).
+    /// The `FrameScheduler` reads the finer-grained `dirty_reasons()`; this is
+    /// the coarse boolean it reduces to. Kept as a direct accessor.
+    #[allow(dead_code)]
     pub fn needs_frame(&self) -> bool {
         self.dirty
     }
 
-    /// The screen-space damage accumulated for the most recent `compute_scene`.
+    /// *Why* a frame is needed right now (Fase 9). The `FrameScheduler` reads
+    /// this to report the reasons behind a scheduled frame; it is empty exactly
+    /// when `needs_frame` is false.
+    pub fn dirty_reasons(&self) -> DirtyReason {
+        self.dirty_reasons
+    }
+
+    // ── native wallpaper (Parte 1 Fase 4 / Parte 2 Fases 7,8,9) ─────────────────
+
+    /// Apply a new wallpaper spec: decode + upload (or compile shader) and request a
+    /// single full repaint. Keyed on source + mode so an unchanged wallpaper reuses
+    /// the GPU texture without re-decoding per frame (criterio #5). Any
+    /// decode/compile failure logs once and leaves the wallpaper disabled — it never
+    /// panics or takes the WM down (riesgo: decode bloquea, conversor ausente).
+    pub fn set_wallpaper(&mut self, spec: &WallpaperSpec) {
+        if let Some(t) = self.wallpaper_native.take() {
+            self.renderer.destroy_raw(t.0);
+        }
+        self.wallpaper_shader = None;
+        self.wallpaper_active = None;
+        self.wallpaper_animating = false;
+        self.wallpaper_clock = 0.0;
+
+        match &spec.source {
+            WallpaperSource::None => {}
+            WallpaperSource::Image(path) => match maverick_img::decode(path) {
+                Ok(img) => match self.renderer.upload_rgba(&img) {
+                    Ok(tex) => {
+                        self.wallpaper_native = Some(GpuImage(tex));
+                        self.wallpaper_img_w = img.w;
+                        self.wallpaper_img_h = img.h;
+                        self.wallpaper_mode = spec.mode;
+                        self.wallpaper_active = Some(spec.source.clone());
+                    }
+                    Err(e) => log::warn!("wallpaper: upload failed: {e}"),
+                },
+                Err(e) => log::warn!("wallpaper: decode '{}' failed: {e}", path.display()),
+            },
+            WallpaperSource::Shader(path) => match std::fs::read_to_string(path) {
+                Ok(src) => match self.renderer.compile_fragment(&src) {
+                    Ok(prog) => {
+                        self.wallpaper_shader = Some(prog);
+                        self.wallpaper_mode = spec.mode;
+                        self.wallpaper_active = Some(spec.source.clone());
+                        self.wallpaper_clock = 0.0;
+                        self.wallpaper_animating = true;
+                    }
+                    Err(e) => log::warn!("wallpaper: shader compile failed: {e}"),
+                },
+                Err(e) => log::warn!("wallpaper: cannot read shader '{}': {e}", path.display()),
+            },
+            WallpaperSource::Video(_) => {
+                log::warn!(
+                    "wallpaper: Video source is reserved (Fase 10) and not implemented; ignoring"
+                );
+            }
+        }
+        self.mark_full(DirtyReason::WALLPAPER);
+    }
+
+    /// Sync the wallpaper's output layout from the WM's monitors. Called at init and
+    /// on RandR change. Also refreshes `screen_w/h` from the union of outputs so the
+    /// wallpaper keeps covering the whole screen after a resize (RandR edge case).
+    pub fn set_outputs(&mut self, outputs: &[Rect]) {
+        self.wallpaper_outputs = outputs.to_vec();
+        if !outputs.is_empty() {
+            let mut x0 = i32::MAX;
+            let mut y0 = i32::MAX;
+            let mut x1 = i32::MIN;
+            let mut y1 = i32::MIN;
+            for o in outputs {
+                x0 = x0.min(o.x);
+                y0 = y0.min(o.y);
+                x1 = x1.max(o.x + o.w as i32);
+                y1 = y1.max(o.y + o.h as i32);
+            }
+            self.screen_w = (x1 - x0).max(1) as u32;
+            self.screen_h = (y1 - y0).max(1) as u32;
+        }
+        self.mark_full(DirtyReason::GEOMETRY);
+    }
+
+    /// Advance the wallpaper animation clock by `dt` (the same clamped dt the WM
+    /// uses for its own springs — no separate timer). Only a `Shader` source
+    /// animates; a static image or `None` leaves `wallpaper_animating` false so the
+    /// loop goes idle (criterio #4).
+    pub fn tick_wallpaper(&mut self, dt: f32) {
+        let anim = matches!(self.wallpaper_active, Some(WallpaperSource::Shader(_)));
+        if anim {
+            self.wallpaper_clock += dt;
+            self.wallpaper_last_dt = dt;
+            self.wallpaper_animating = true;
+        } else {
+            self.wallpaper_animating = false;
+        }
+    }
+
+    /// Whether the wallpaper is currently animating (feeds the `FrameScheduler`).
+    #[inline]
+    pub fn wallpaper_animating(&self) -> bool {
+        self.wallpaper_animating
+    }
+}
+
+/// `WallpaperGpu` — the backend's concrete implementation of the GPU
+/// abstraction the core talks to. The core never names OpenGL; it calls these
+/// methods (upload/compile/draw/release) and the GL calls live here. A future
+/// Vulkan backend implements the same trait against a different `Renderer`.
+impl WallpaperGpu for Compositor {
+    fn upload_image(&mut self, img: &Rgba8) -> Result<GpuImage, String> {
+        self.renderer.upload_rgba(img).map(GpuImage)
+    }
+    fn compile_shader(&mut self, frag: &str) -> Result<ShaderId, String> {
+        self.renderer.compile_fragment(frag).map(ShaderId)
+    }
+    fn draw_image(&mut self, img: &GpuImage, dst: Rect, src_uv: [f32; 4]) {
+        let q = GlQuad {
+            dst: [
+                dst.x as f32,
+                dst.y as f32,
+                (dst.x + dst.w as i32) as f32,
+                (dst.y + dst.h as i32) as f32,
+            ],
+            src: src_uv,
+            opacity: 1.0,
+            ..Default::default()
+        };
+        self.renderer.draw_raw(img.0, GL_LINEAR, 0, &q);
+    }
+    fn draw_shader(&mut self, s: ShaderId, out: Rect, time: f32, dt: f32) {
+        let r = maverick_gl::Rect {
+            x: out.x,
+            y: out.y,
+            w: out.w,
+            h: out.h,
+        };
+        self.renderer.draw_shader(s.0, r, time, dt);
+    }
+    fn release(&mut self, img: GpuImage) {
+        self.renderer.destroy_raw(img.0);
+    }
+}
+
+impl Compositor {
     /// Empty when the last frame had nothing to repaint. Next phases use this to
     /// scissor the redraw (partial update) instead of clearing the whole screen.
     #[allow(dead_code)]
@@ -854,9 +1182,10 @@ impl Compositor {
     /// opacity, new/removed window, wallpaper). Content-only `XDamage` must call
     /// `on_damage` instead, which sets `dirty` but leaves the damage region to
     /// express the change as a union of rectangles (partial-redraw-friendly).
-    fn mark_full(&mut self) {
+    fn mark_full(&mut self, reason: DirtyReason) {
         self.dirty = true;
         self.needs_full = true;
+        self.dirty_reasons.insert(reason);
     }
 
     // ── frame ───────────────────────────────────────────────────────────────
@@ -875,6 +1204,44 @@ impl Compositor {
         // windows that repainted since the last frame contribute their rect,
         // plus `needs_full` (set by structural changes) forcing a full repaint.
         self.frame_dirty.clear();
+
+        // ── Fase 12, pass 1 (top→bottom): occlusion culling. A window fully
+        // hidden behind a single opaque, square-cornered, on-screen window above
+        // it need never be drawn, saving fragment processing. We walk the stack
+        // from the top so every occluder is known before the window it covers;
+        // `occluder_rects` (a reused buffer) accumulates the opaque rects seen so
+        // far, and a window is marked `occluded` when one of them entirely
+        // contains it. Windows with `opacity < 1` or a rounded corner are *not*
+        // occluders (their corners/translucency would wrongly clip what is
+        // behind), so they never hide another window — a correct, conservative
+        // miss.
+        self.occluder_rects.clear();
+        for &win in self.stack.iter().rev() {
+            let Some(cw) = self.wins.get_mut(&win) else {
+                continue;
+            };
+            if !cw.mapped || cw.hidden {
+                cw.occluded = false;
+                continue;
+            }
+            let (outer, radius) = if cw.transform_gen == gen {
+                (cw.transform, cw.transform_radius)
+            } else {
+                (cw.outer, 0)
+            };
+            if outer.w == 0 || outer.h == 0 {
+                cw.occluded = false;
+                continue;
+            }
+            let onscreen = !CompWin::offscreen(outer, sw, sh);
+            let opaque = cw.opacity >= 1.0 && radius == 0;
+            cw.occluded = onscreen && fully_covered_by(outer, &self.occluder_rects);
+            if onscreen && opaque && !cw.occluded {
+                self.occluder_rects.push(outer);
+            }
+        }
+
+        // ── pass 2 (bottom→top): build the scene, skipping occluded windows.
         for &win in &self.stack {
             // No `ignored` probe here: `track` refuses to record an ignored
             // window, so `wins` can never contain one and this lookup is the
@@ -883,6 +1250,9 @@ impl Compositor {
                 continue;
             };
             if !cw.mapped || cw.hidden {
+                continue;
+            }
+            if cw.occluded {
                 continue;
             }
             let Some(tex) = cw.tex.as_mut() else {
@@ -906,6 +1276,28 @@ impl Compositor {
             if outer.w == 0 || outer.h == 0 {
                 continue;
             }
+            // Fase 7 — animation damage. A window whose drawn rect changed since
+            // the last frame must repaint both its previous and current screen
+            // rect, else the pixels it slid off of (and into) linger during
+            // scroll. Emitted into the same `DamageRegion` the XDamage path
+            // uses; `decide_redraw` only turns it into a scissored Partial when
+            // buffer-age is available, so without it the Full fallback still
+            // repaints everything. Done *before* the off-screen cull so a window
+            // scrolling out still damages the area it just vacated.
+            // Only windows that moved (their drawn rect differs from last
+            // frame's) or that the client repainted actually need a damage
+            // entry. A stationary, undamaged window contributes nothing, so the
+            // partial-redraw bounding box no longer balloons to the whole screen
+            // every frame (B5).
+            let moved = cw.prev_visual != Some(outer);
+            if was_damaged || moved {
+                let mut aout = [Rect::default(); 2];
+                let n = anim_damage_rects(cw.prev_visual, outer, &mut aout);
+                for &r in &aout[..n] {
+                    self.frame_dirty.add(r);
+                }
+            }
+            cw.prev_visual = Some(outer);
             // Cull windows that are entirely outside the screen. This is the
             // single biggest draw-time win: a 50-window ribbon only has ~5 on
             // screen at once; the rest are scrolled off the edges and would
@@ -956,26 +1348,50 @@ impl Compositor {
         if self.stack_dirty {
             self.refresh_stack();
         }
+        let t_frame_start = if self.trace {
+            Some(Instant::now())
+        } else {
+            None
+        };
         self.compute_scene();
+        let t_build = t_frame_start.map(|t| t.elapsed().as_nanos() as u64);
 
         let (sw, sh) = (self.screen_w, self.screen_h);
 
         // Decide how much to repaint from the two damage facts plus the
         // buffer-age capability. `decide_redraw` is the single source of truth
         // for the full/partial/idle choice (unit-tested in `frameplan_tests`).
-        let mut mode = decide_redraw(
-            self.renderer.has_buffer_age,
-            self.needs_full,
-            !self.frame_dirty.is_empty(),
-        );
+        // `force_full_redraw` (MAVERICK_FORCE_FULL_REDRAW) pretends buffer-age
+        // is unavailable so the harness can exercise the full-redraw fallback.
+        let has_age = self.renderer.has_buffer_age && !self.force_full_redraw;
+        let t0 = Instant::now();
+        let mut mode = decide_redraw(has_age, self.needs_full, !self.frame_dirty.is_empty());
+        let decided_partial = mode == FrameMode::Partial;
+        let mut observed_age: u32 = 0;
 
-        // In the partial path the damage region accumulates across frames; an
-        // overflow of its fixed capacity forces a one-off full repaint.
+        // Honest partial: only trust the accumulated damage when the back buffer
+        // is exactly one present stale (buffer-age == 1). With a double-buffered
+        // fbconfig the age is usually 2, so the Partial path would otherwise
+        // repaint content two presents old and leave ghosting (B3). Without a
+        // trustworthy age we fall back to a full clear. Per `GLX_EXT_buffer_age`:
+        // age 0 = undefined, age 1 = back buffer holds the *previous* frame (last
+        // swap was a copy), age 2+ = back buffer is that many frames old (the
+        // norm for double-buffered exchange). The single-frame `damage_acc` we
+        // keep only matches age 1, so anything else is rejected as Full.
         if mode == FrameMode::Partial {
-            for r in &self.frame_dirty.rects[..self.frame_dirty.count] {
-                self.damage_acc.add(*r);
-            }
-            if self.damage_acc.needs_full {
+            observed_age = if has_age {
+                self.renderer.back_buffer_age()
+            } else {
+                0
+            };
+            if observed_age == 1 {
+                for r in &self.frame_dirty.rects[..self.frame_dirty.count] {
+                    self.damage_acc.add(*r);
+                }
+                if self.damage_acc.needs_full {
+                    mode = FrameMode::Full;
+                }
+            } else {
                 mode = FrameMode::Full;
             }
         }
@@ -985,11 +1401,9 @@ impl Compositor {
                 // `render` is only reached when something is dirty, so Idle here
                 // means the region was emptied by structural handling — repaint
                 // the whole screen to be safe.
-                self.damage_acc.clear();
                 self.renderer.begin_frame(sw, sh, true);
             }
             FrameMode::Full => {
-                self.damage_acc.clear();
                 self.renderer.begin_frame(sw, sh, true);
             }
             FrameMode::Partial => {
@@ -1002,7 +1416,6 @@ impl Compositor {
                 let h = (b.h as i32).min(sh as i32 - y).max(0) as u32;
                 if w == 0 || h == 0 {
                     // Degenerate box — fall back to a full repaint.
-                    self.damage_acc.clear();
                     self.renderer.begin_frame(sw, sh, true);
                 } else {
                     self.renderer.begin_frame(sw, sh, false);
@@ -1014,8 +1427,54 @@ impl Compositor {
 
         // Wallpaper first (so un-textured/transparent areas show it). Drawn
         // clipped to the scissor in the partial path, full-screen otherwise.
+        // Precedence: animated shader > static native image (per-output quads) >
+        // legacy root pixmap (`_XROOTPMAP_ID` from feh/hsetroot).
         let mut last_tex = 0;
-        if let Some(wp) = self.wallpaper.as_mut() {
+        if let Some(shader) = self.wallpaper_shader {
+            // Animated shader: one fill per output; `u_resolution` tells each shader
+            // its own pixel size. Keeps requesting frames via `wallpaper_animating`.
+            for out in &self.wallpaper_outputs {
+                self.renderer.draw_shader(
+                    shader,
+                    maverick_gl::Rect {
+                        x: out.x,
+                        y: out.y,
+                        w: out.w,
+                        h: out.h,
+                    },
+                    self.wallpaper_clock,
+                    self.wallpaper_last_dt,
+                );
+            }
+        } else if let Some(native) = self.wallpaper_native {
+            // Static decoded image: one quad per output (shared texture, own src/dst).
+            if self.wallpaper_img_w > 0
+                && self.wallpaper_img_h > 0
+                && !self.wallpaper_outputs.is_empty()
+            {
+                let quads = compute_wallpaper_rects(
+                    self.wallpaper_img_w,
+                    self.wallpaper_img_h,
+                    self.wallpaper_mode,
+                    &self.wallpaper_outputs,
+                );
+                for (dst, src) in quads {
+                    let q = GlQuad {
+                        dst: [
+                            dst.x as f32,
+                            dst.y as f32,
+                            (dst.x + dst.w as i32) as f32,
+                            (dst.y + dst.h as i32) as f32,
+                        ],
+                        src,
+                        opacity: 1.0,
+                        ..Default::default()
+                    };
+                    last_tex = self.renderer.draw_raw(native.0, GL_LINEAR, last_tex, &q);
+                }
+            }
+        } else if let Some(wp) = self.wallpaper.as_mut() {
+            // Legacy root pixmap fallback (no native wallpaper configured).
             self.renderer.bind(wp);
             last_tex = wp.tex;
             self.renderer.draw(
@@ -1042,8 +1501,93 @@ impl Compositor {
         }
 
         self.renderer.end_frame();
+        let swap_ns = t_frame_start.map(|t| t.elapsed().as_nanos() as u64);
+        // The just-presented frame is now the committed back buffer, so the
+        // accumulated damage describes only what changed since this present.
+        // Clearing it each frame bounds the partial-redraw work and stops the
+        // region from growing until it covers the whole screen (B4).
+        self.damage_acc.clear();
         self.dirty = false;
         self.needs_full = false;
+        self.dirty_reasons.clear();
+
+        if self.trace {
+            if let (Some(b), Some(s), Some(ts)) = (t_build, swap_ns, t_frame_start) {
+                self.trace_count += 1;
+                self.trace_ns_build_total += b;
+                self.trace_ns_swap_total += s;
+                let ai = if observed_age as usize >= self.trace_age_hist.len() {
+                    self.trace_age_hist.len() - 1
+                } else {
+                    observed_age as usize
+                };
+                self.trace_age_hist[ai] += 1;
+                match mode {
+                    FrameMode::Partial => self.trace_mode_partial += 1,
+                    FrameMode::Full => self.trace_mode_full += 1,
+                    FrameMode::Idle => {}
+                }
+                if decided_partial && mode != FrameMode::Partial {
+                    self.trace_partial_to_full += 1;
+                }
+                if let Some(last) = self.last_present {
+                    let iv = ts.duration_since(last).as_nanos() as u64;
+                    self.trace_ns_interval_total += iv;
+                    self.trace_ns_interval_max = self.trace_ns_interval_max.max(iv);
+                }
+                self.last_present = Some(ts);
+
+                if self.trace_count >= 120 {
+                    let n = self.trace_count;
+                    log::info!(
+                        "compositor[trace]: frames={} avg_build_ns={} avg_swap_ns={} \
+                         avg_interval_ns={} max_interval_ns={} age[0,1,2,3+]={:?} \
+                         mode(full={},partial={}) partial_to_full={}",
+                        n,
+                        self.trace_ns_build_total / n,
+                        self.trace_ns_swap_total / n,
+                        if self.trace_ns_interval_total > 0 {
+                            self.trace_ns_interval_total / n
+                        } else {
+                            0
+                        },
+                        self.trace_ns_interval_max,
+                        self.trace_age_hist,
+                        self.trace_mode_full,
+                        self.trace_mode_partial,
+                        self.trace_partial_to_full,
+                    );
+                    self.trace_count = 0;
+                    self.trace_ns_build_total = 0;
+                    self.trace_ns_swap_total = 0;
+                    self.trace_ns_interval_total = 0;
+                    self.trace_ns_interval_max = 0;
+                    self.trace_age_hist = [0; 4];
+                    self.trace_mode_full = 0;
+                    self.trace_mode_partial = 0;
+                    self.trace_partial_to_full = 0;
+                }
+            }
+        }
+
+        if self.perf_log {
+            let ns = t0.elapsed().as_nanos() as u64;
+            self.perf_count += 1;
+            self.perf_ns_total += ns;
+            self.perf_ns_max = self.perf_ns_max.max(ns);
+            if self.perf_count >= 120 {
+                let avg = self.perf_ns_total / self.perf_count;
+                log::info!(
+                    "compositor: perf frames={} avg_render_ns={} max_render_ns={}",
+                    self.perf_count,
+                    avg,
+                    self.perf_ns_max
+                );
+                self.perf_count = 0;
+                self.perf_ns_total = 0;
+                self.perf_ns_max = 0;
+            }
+        }
         true
     }
 
@@ -1146,7 +1690,7 @@ impl Compositor {
             Ok(tex) => {
                 self.wallpaper = Some(tex);
                 self.wallpaper_pixmap = Some(pm);
-                self.mark_full();
+                self.mark_full(DirtyReason::SURFACE);
             }
             Err(e) => {
                 self.wallpaper_pixmap = None;
@@ -1177,7 +1721,27 @@ impl Compositor {
             .and_then(|c| c.reply().ok())
         {
             for win in reply.children {
-                self.track(win);
+                // Already-mapped (viewable) windows — e.g. those that survived a
+                // `restart` re-exec, or that mapped in the brief window before the
+                // compositor finished scanning — never receive a `MapNotify`, so
+                // routing them through `track` alone leaves `mapped=false` and
+                // `tex=None`. The renderer skips any window without a GPU texture
+                // (render pass 2: `let Some(tex) = cw.tex … else continue`), so the
+                // tiles would vanish. Mark them mapped and bind their texture now.
+                // Non-viewable windows keep the lazy `track` path (they bind on
+                // their own MapNotify).
+                let viewable = self
+                    .conn
+                    .get_window_attributes(win)
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .map(|a| a.map_state == MapState::VIEWABLE)
+                    .unwrap_or(false);
+                if viewable {
+                    self.on_map(win);
+                } else {
+                    self.track(win);
+                }
             }
         }
     }
@@ -1422,13 +1986,25 @@ mod stack_tests {
         // Touches the left edge.
         assert!(!CompWin::offscreen(Rect::new(0, 100, 400, 300), W, H));
         // Just inside the right edge (within the margin).
-        assert!(!CompWin::offscreen(Rect::new((W as i32) - 60, 100, 400, 300), W, H));
+        assert!(!CompWin::offscreen(
+            Rect::new((W as i32) - 60, 100, 400, 300),
+            W,
+            H
+        ));
         // Fully to the left, beyond the margin.
         assert!(CompWin::offscreen(Rect::new(-200, 100, 100, 300), W, H));
         // Fully below.
-        assert!(CompWin::offscreen(Rect::new(100, (H as i32) + 200, 100, 300), W, H));
+        assert!(CompWin::offscreen(
+            Rect::new(100, (H as i32) + 200, 100, 300),
+            W,
+            H
+        ));
         // Entirely past the right edge.
-        assert!(CompWin::offscreen(Rect::new((W as i32) + 100, 100, 100, 300), W, H));
+        assert!(CompWin::offscreen(
+            Rect::new((W as i32) + 100, 100, 100, 300),
+            W,
+            H
+        ));
     }
 
     /// The regression this whole commit exists for.
@@ -1460,7 +2036,11 @@ mod stack_tests {
         let mut stack = vec![A, B, C];
         for _ in 0..3 {
             assert!(stack_restack(&mut stack, B, Some(A)));
-            assert_eq!(stack, vec![A, B, C], "re-applying the same order is a no-op");
+            assert_eq!(
+                stack,
+                vec![A, B, C],
+                "re-applying the same order is a no-op"
+            );
         }
     }
 
@@ -1514,7 +2094,11 @@ mod stack_tests {
         let mut sorted = stack.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), stack.len(), "no window may appear twice: {stack:?}");
+        assert_eq!(
+            sorted.len(),
+            stack.len(),
+            "no window may appear twice: {stack:?}"
+        );
     }
 
     #[test]
@@ -1537,8 +2121,83 @@ mod stack_tests {
 /// be exercised entirely in CI.
 #[cfg(test)]
 mod damage_tests {
-    use super::DamageRegion;
+    use super::{anim_damage_rects, fully_covered_by, DamageRegion};
     use crate::types::Rect;
+
+    /// Fase 7: a window that moved from `A` to `B` must repaint *both* rects, so
+    /// neither the pixels it left nor the ones it slid into linger. The helper
+    /// returns exactly the union pair, nothing more.
+    #[test]
+    fn moving_window_damages_old_and_new() {
+        let prev = Rect::new(0, 0, 100, 100);
+        let cur = Rect::new(200, 0, 100, 100);
+        let mut out = [Rect::default(); 2];
+        let n = anim_damage_rects(Some(prev), cur, &mut out);
+        assert_eq!(n, 2);
+        assert_eq!(out[0], prev);
+        assert_eq!(out[1], cur);
+    }
+
+    /// A window that did not move emits only its current rect — no spurious
+    /// damage that would force a larger (or full) redraw.
+    #[test]
+    fn stationary_window_damages_only_current() {
+        let cur = Rect::new(50, 50, 100, 100);
+        let mut out = [Rect::default(); 2];
+        let n = anim_damage_rects(Some(cur), cur, &mut out);
+        assert_eq!(n, 1);
+        assert_eq!(out[0], cur);
+    }
+
+    /// A window with no previous rect (just appeared / was off-screen) only
+    /// needs its current rect repainted.
+    #[test]
+    fn freshly_visible_window_damages_only_current() {
+        let cur = Rect::new(10, 20, 300, 40);
+        let mut out = [Rect::default(); 2];
+        let n = anim_damage_rects(None, cur, &mut out);
+        assert_eq!(n, 1);
+        assert_eq!(out[0], cur);
+    }
+
+    /// End-to-end: two windows scrolling apart produce a damage region whose
+    /// bounding box spans both old and new positions — the minimal union that
+    /// `decide_redraw` will scissor (Partial) when buffer-age is available.
+    #[test]
+    fn scrolling_pair_union_spans_old_and_new() {
+        let a_old = Rect::new(0, 0, 100, 100);
+        let a_new = Rect::new(400, 0, 100, 100);
+        let b_old = Rect::new(500, 0, 100, 100);
+        let b_new = Rect::new(0, 0, 100, 100);
+        let mut region = DamageRegion::new();
+        let mut out = [Rect::default(); 2];
+        for (prev, cur) in [(Some(a_old), a_new), (Some(b_old), b_new)] {
+            let n = anim_damage_rects(prev, cur, &mut out);
+            for &r in &out[..n] {
+                region.add(r);
+            }
+        }
+        let bbox = region.bounding_rect();
+        assert_eq!(bbox, Rect::new(0, 0, 600, 100), "union must span 0..600");
+    }
+
+    /// Fase 12: a window is occluded only when a *single* opaque rect above it
+    /// contains it entirely. Joint coverage by two side-by-side windows (neither
+    /// of which alone contains it) must NOT report occlusion — that is the
+    /// conservative miss the helper is allowed to make.
+    #[test]
+    fn fully_covered_by_single_occluder_only() {
+        let small = Rect::new(50, 50, 40, 40);
+        // One big occluder contains it.
+        assert!(fully_covered_by(small, &[Rect::new(0, 0, 200, 200)]));
+        // Two side-by-side windows that jointly cover it but neither alone does
+        // (left covers x 0..70, right covers x 70..270) -> not occluded.
+        let left = Rect::new(0, 0, 70, 200);
+        let right = Rect::new(70, 0, 200, 200);
+        assert!(!fully_covered_by(small, &[left, right]));
+        // Partially overlapping occluder does not contain it.
+        assert!(!fully_covered_by(small, &[Rect::new(60, 60, 30, 30)]));
+    }
 
     #[test]
     fn fresh_region_is_empty() {
@@ -1646,7 +2305,9 @@ mod bench {
     /// monitor, camera mid-animation (the only state in which this path runs).
     fn ribbon(n: u32) -> State {
         let mut state = State::new();
-        state.monitors.push(Monitor::new(Rect::new(0, 0, 1920, 1080), 1));
+        state
+            .monitors
+            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 1));
         for i in 0..n {
             let win = (i + 1) as WindowId;
             let mut c = Client::new(win, 0, 0);
@@ -1677,18 +2338,42 @@ mod bench {
 
         // Warm up so every reused buffer is at steady-state capacity.
         for _ in 0..16 {
-            live_placements(state, 0, &cfg, &registry, &mut out, &mut raise, &mut scratch);
+            live_placements(
+                state,
+                0,
+                &cfg,
+                &registry,
+                &mut out,
+                &mut raise,
+                &mut scratch,
+            );
         }
         // Two rounds: one timed, one counted (the counter only runs while armed).
         let t0 = std::time::Instant::now();
         for _ in 0..iters {
-            live_placements(state, 0, &cfg, &registry, &mut out, &mut raise, &mut scratch);
+            live_placements(
+                state,
+                0,
+                &cfg,
+                &registry,
+                &mut out,
+                &mut raise,
+                &mut scratch,
+            );
         }
         let elapsed = t0.elapsed().as_nanos() as f64 / iters as f64;
 
         let counter = CountAllocs::start();
         for _ in 0..iters {
-            live_placements(state, 0, &cfg, &registry, &mut out, &mut raise, &mut scratch);
+            live_placements(
+                state,
+                0,
+                &cfg,
+                &registry,
+                &mut out,
+                &mut raise,
+                &mut scratch,
+            );
         }
         let allocs = counter.finish().div_ceil(iters as u64);
         (elapsed, allocs)
@@ -1758,5 +2443,44 @@ mod bench {
         // Sanity: the policy the bench exercised resolves to a partial redraw.
         assert_eq!(decide_redraw(true, false, true), FrameMode::Partial);
     }
-}
 
+    /// Fase 12: the occlusion pass (top→bottom `fully_covered_by` over the
+    /// opacquer rect set) is pure arithmetic over a reused buffer, so per frame
+    /// it must cost no allocations and a negligible amount of time even at high
+    /// window counts. This guards against a per-frame heap allocation sneaking
+    /// into the new pass (which would defeat the "0 allocs/frame" rule the rest
+    /// of the plan fought for).
+    #[test]
+    fn occlusion_pass_is_cheap_and_allocation_free() {
+        use super::fully_covered_by;
+        // A tiled ribbon: 1000 opaque, on-screen columns stacked left→right; the
+        // inner window sits at the far right, fully covered by a single one of
+        // them. Mirrors the worst case the pass walks every frame.
+        let occluders: Vec<Rect> = (0..1000)
+            .map(|i| Rect::new((i * 2) as i32, 0, 100, 1080))
+            .collect();
+        let target = Rect::new(1990, 100, 40, 40);
+        let iters: u64 = 20_000;
+        let counter = CountAllocs::start();
+        let t0 = std::time::Instant::now();
+        let mut covered = false;
+        for _ in 0..iters {
+            covered = fully_covered_by(target, &occluders);
+        }
+        let ns = t0.elapsed().as_nanos() as f64 / iters as f64;
+        let allocs = counter.finish().div_ceil(iters);
+        assert!(covered, "the far-right target must be reported covered");
+        assert_eq!(
+            allocs, 0,
+            "{allocs} alloc(s)/frame in the occlusion pass — must reuse buffers"
+        );
+        assert!(
+            ns < 200_000.0,
+            "{ns:.0} ns/frame in the occlusion pass exceeds 200 µs (1000 occluders)"
+        );
+        eprintln!(
+            "occlusion bench: {:.1} ns/frame, {allocs} allocs/frame (1000 occluders)",
+            ns
+        );
+    }
+}
