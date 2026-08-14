@@ -11,7 +11,8 @@
 #![allow(clippy::unwrap_used, clippy::map_unwrap_or)]
 
 use crate::config::Cfg;
-use crate::types::{Action, LayoutKind, State, WindowId};
+use crate::core::wallpaper::{WallpaperMode, WallpaperSource};
+use crate::types::{Action, LayoutKind, Rect, State, WindowId};
 use std::fmt::Write;
 
 /// Serialize the live WM `State` into a compact JSON snapshot for external
@@ -47,7 +48,12 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
             Some(w) => {
                 write!(s, "\"focused\":{w},").unwrap();
                 if let Some(c) = state.clients.get(&w) {
-                    write!(s, "\"focused_title\":\"{}\",", maverick_sys::json::json_escape(&c.name)).unwrap();
+                    write!(
+                        s,
+                        "\"focused_title\":\"{}\",",
+                        maverick_sys::json::json_escape(&c.name)
+                    )
+                    .unwrap();
                     write!(
                         s,
                         "\"focused_class\":\"{}\",",
@@ -67,10 +73,7 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
             if wi > 0 {
                 s.push(',');
             }
-            let name: &str = cfg.tag_names
-                .get(wi)
-                .map(String::as_str)
-                .unwrap_or("?");
+            let name: &str = cfg.tag_names.get(wi).map(String::as_str).unwrap_or("?");
             let n_wins: usize =
                 ws.columns.iter().map(|c| c.windows.len()).sum::<usize>() + ws.floats.len();
             s.push('{');
@@ -86,6 +89,30 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
         s.push('}');
     }
     s.push(']');
+
+    // Native wallpaper (source + mode) — pure `State` data the compositor reads;
+    // exposing it lets bars/status tools and tests observe the active wallpaper.
+    s.push_str(",\"wallpaper\":{");
+    let (kind, wpath) = match &state.wallpaper.source {
+        WallpaperSource::None => ("none", String::new()),
+        WallpaperSource::Image(p) => ("image", p.display().to_string()),
+        WallpaperSource::Shader(p) => ("shader", p.display().to_string()),
+        WallpaperSource::Video(_) => ("video", String::new()),
+    };
+    write!(
+        s,
+        "\"kind\":\"{kind}\",\"path\":\"{}\",",
+        maverick_sys::json::json_escape(&wpath)
+    )
+    .unwrap();
+    let mode = match state.wallpaper.mode {
+        WallpaperMode::Fill => "fill",
+        WallpaperMode::Fit => "fit",
+        WallpaperMode::Stretch => "stretch",
+        WallpaperMode::Center => "center",
+    };
+    write!(s, "\"mode\":\"{mode}\",\"rev\":{}", state.wallpaper_rev).unwrap();
+    s.push('}');
 
     s.push('}');
     s
@@ -133,11 +160,7 @@ fn workspaces_json(state: &State, cfg: &Cfg) -> String {
             if wi > 0 {
                 s.push(',');
             }
-            let name: &str = cfg
-                .tag_names
-                .get(wi)
-                .map(String::as_str)
-                .unwrap_or("?");
+            let name: &str = cfg.tag_names.get(wi).map(String::as_str).unwrap_or("?");
             s.push('{');
             write!(s, "\"index\":{wi},").unwrap();
             write!(s, "\"name\":\"{}\",", maverick_sys::json::json_escape(name)).unwrap();
@@ -174,14 +197,24 @@ fn window_obj(s: &mut String, id: WindowId, state: &State) {
         .map(|c| (c.class.as_str(), c.instance.as_str(), c.name.as_str()))
         .unwrap_or(("", "", ""));
     write!(s, "{{\"id\":{id},").unwrap();
-    write!(s, "\"class\":\"{}\",", maverick_sys::json::json_escape(class)).unwrap();
+    write!(
+        s,
+        "\"class\":\"{}\",",
+        maverick_sys::json::json_escape(class)
+    )
+    .unwrap();
     write!(
         s,
         "\"instance\":\"{}\",",
         maverick_sys::json::json_escape(instance)
     )
     .unwrap();
-    write!(s, "\"title\":\"{}\",", maverick_sys::json::json_escape(title)).unwrap();
+    write!(
+        s,
+        "\"title\":\"{}\",",
+        maverick_sys::json::json_escape(title)
+    )
+    .unwrap();
     if let Some(c) = c {
         write!(s, "\"monitor\":{},", c.monitor).unwrap();
         write!(s, "\"workspace\":{},", c.workspace).unwrap();
@@ -197,6 +230,34 @@ fn window_obj(s: &mut String, id: WindowId, state: &State) {
             s,
             "\"geom\":[{},{},{},{}]",
             c.geom.x, c.geom.y, c.geom.w, c.geom.h
+        )
+        .unwrap();
+        // ── Fase 8 observability fields (non-semantic) ────────────────────────
+        // `desired` = the last *desired* rect the core arranged this window to.
+        // `applied` = `c.geom`, the WM-applied rect. `real` = the last rect the
+        // client actually reported back via ConfigureNotify (X11 Real).
+        // `focus` = logical focus (any monitor's `focused`). `x11_focus` = the
+        // last X input focus the WM observed. `overlay` = this window is the
+        // presented fullscreen/maximized overlay owner. `pending` = a deferred
+        // focus request is outstanding for it. None of these drive layout.
+        let rect_json = |r: Option<Rect>| match r {
+            Some(r) => format!("[{},{},{},{}]", r.x, r.y, r.w, r.h),
+            None => "null".to_string(),
+        };
+        let is_focus = state.monitors.iter().any(|m| m.focused == Some(id));
+        let is_x11 = state.x11_input_focus == Some(id);
+        let is_overlay = state.presented_overlay_owner(c.monitor) == Some(id);
+        let is_pending = state.pending_focus.as_ref().map(|p| p.window) == Some(id);
+        write!(
+            s,
+            ",\"desired\":{},\"applied\":[{},{},{},{}],\"real\":{},\"focus\":{},\"x11_focus\":{},\"overlay\":{},\"pending\":{}",
+            rect_json(c.last_desired),
+            c.geom.x, c.geom.y, c.geom.w, c.geom.h,
+            rect_json(c.last_reported),
+            is_focus,
+            is_x11,
+            is_overlay,
+            is_pending
         )
         .unwrap();
     }
@@ -234,7 +295,7 @@ fn tree_json(state: &State) -> String {
                     s.push(',');
                 }
                 s.push('{');
-                 write!(s, "\"width\":{},", col.weight * (mon.workarea.w as f32)).unwrap();
+                write!(s, "\"width\":{},", col.weight * (mon.workarea.w as f32)).unwrap();
 
                 write!(s, "\"focused\":{},", col.focused).unwrap();
                 s.push_str("\"windows\":[");
@@ -275,12 +336,33 @@ fn focused_json(state: &State) -> String {
                 .map(|c| (c.class.as_str(), c.name.as_str()))
                 .unwrap_or(("", ""));
             write!(s, "{{\"window\":{w},").unwrap();
-            write!(s, "\"class\":\"{}\",", maverick_sys::json::json_escape(class)).unwrap();
-            write!(s, "\"title\":\"{}\",", maverick_sys::json::json_escape(title)).unwrap();
+            write!(
+                s,
+                "\"class\":\"{}\",",
+                maverick_sys::json::json_escape(class)
+            )
+            .unwrap();
+            write!(
+                s,
+                "\"title\":\"{}\",",
+                maverick_sys::json::json_escape(title)
+            )
+            .unwrap();
             let (fl, fs, mx, st) = c
-                .map(|c| (c.is_float(), c.is_fullscreen(), c.is_maximized(), c.is_sticky()))
+                .map(|c| {
+                    (
+                        c.is_float(),
+                        c.is_fullscreen(),
+                        c.is_maximized(),
+                        c.is_sticky(),
+                    )
+                })
                 .unwrap_or((false, false, false, false));
-            write!(s, "\"float\":{fl},\"fullscreen\":{fs},\"maximized\":{mx},\"sticky\":{st}").unwrap();
+            write!(
+                s,
+                "\"float\":{fl},\"fullscreen\":{fs},\"maximized\":{mx},\"sticky\":{st}"
+            )
+            .unwrap();
             s.push('}');
         }
         None => s.push_str("{\"window\":null}"),

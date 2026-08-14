@@ -30,6 +30,17 @@ pub struct Cfg {
     /// Minimum zoom factor for the Overview film-strip (Phase 2).
     pub overview_zoom_min: f32,
 
+    /// Compositor configuration (OpenGL/GLX). The WM tries to bring up GL on
+    /// `CompositeGetOverlayWindow`; if GL is missing, the 3.3 context can't be
+    /// created, or another compositor already owns the screen, it logs and
+    /// silently falls back to the classic `ConfigureWindow` path.
+    pub compositor: CompositorCfg,
+
+    /// Native wallpaper configuration (source + mode). `None` path ⇒ no native
+    /// wallpaper (legacy root pixmap / transparent). Applied to `State.wallpaper`
+    /// at startup; the compositor decodes/uploads it when GL is available.
+    pub wallpaper: WallpaperCfg,
+
     // Catppuccin Mocha
     pub col_normal: u32, // 0xRRGGBB
     pub col_focused: u32,
@@ -61,6 +72,8 @@ impl Default for Cfg {
             warp_cursor: false,
             accordion_boost: 0.0,
             overview_zoom_min: 0.25,
+            compositor: CompositorCfg::default(),
+            wallpaper: WallpaperCfg::default(),
             col_normal: 0x45475a,
             col_focused: 0x89b4fa,
             col_urgent: 0xf38ba8,
@@ -68,6 +81,52 @@ impl Default for Cfg {
             keybinds: vec![],
             rules: vec![],
             autostart: vec![],
+        }
+    }
+}
+
+/// Compositor (OpenGL/GLX) configuration, exposed as `[compositor]` in the
+/// TOML. Absent => no compositor. `enabled = false` (or the `MAVERICK_NO_COMPOSITOR`
+/// env var) => the compositor is never attempted and the WM stays on the plain
+/// `ConfigureWindow` path, which also keeps the legacy X11 `Shape` corner-radius
+/// rounding working for users who don't want GL.
+#[derive(Debug, Clone)]
+pub struct CompositorCfg {
+    /// Master switch. Default `true`: on by default, with automatic fallback.
+    pub enabled: bool,
+    /// Spring stiffness for the scroll camera (see `Camera::step`). Higher =
+    /// snappier. Default 220.
+    pub stiffness: f32,
+    /// Spring damping for the scroll camera. Higher = less overshoot. Default 30.
+    /// The integrator runs substeps so the combination can't oscillate.
+    pub damping: f32,
+}
+
+impl Default for CompositorCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            stiffness: 220.0,
+            damping: 30.0,
+        }
+    }
+}
+
+/// Native wallpaper configuration, exposed as `[wallpaper]` in the TOML.
+/// `path = null` (default) ⇒ no native wallpaper is set.
+#[derive(Debug, Clone)]
+pub struct WallpaperCfg {
+    /// Path to a wallpaper image or GLSL shader. `None` ⇒ disabled.
+    pub path: Option<String>,
+    /// Mapping mode applied to the source.
+    pub mode: crate::core::wallpaper::WallpaperMode,
+}
+
+impl Default for WallpaperCfg {
+    fn default() -> Self {
+        Self {
+            path: None,
+            mode: crate::core::wallpaper::WallpaperMode::Fill,
         }
     }
 }
@@ -235,13 +294,13 @@ pub fn compiled_config() -> Cfg {
         (sup, XK_EQUAL, Action::ViewportZoom(0.2)), // Mod4+=  zoom viewport in
         (sup, XK_MINUS, Action::ViewportZoom(-0.2)), // Mod4+-  zoom viewport out (back to Normal at 1.0)
         (sup, XK_BRACKETRIGHT, Action::PageSnap(Dir::Right)), // Mod4+]  scroll one page right
-        (sup, XK_BRACKETLEFT, Action::PageSnap(Dir::Left)),    // Mod4+[  scroll one page left
+        (sup, XK_BRACKETLEFT, Action::PageSnap(Dir::Left)), // Mod4+[  scroll one page left
     ];
 
-        Cfg {
+    Cfg {
         keybinds,
 
-                rules: vec![
+        rules: vec![
             Rule {
                 class: Some("xdg-desktop-portal".into()),
                 title: None,
@@ -336,6 +395,13 @@ pub fn compiled_config() -> Cfg {
         ],
         ..Default::default()
     }
+}
+
+/// Whether the compositor should be attempted at startup. `true` only when the
+/// `[compositor]` config opts in *and* the `MAVERICK_NO_COMPOSITOR` env var is
+/// not set. The actual GL probe/fallback happens later; this is the policy gate.
+pub fn compositor_enabled(cfg: &Cfg) -> bool {
+    cfg.compositor.enabled && std::env::var_os("MAVERICK_NO_COMPOSITOR").is_none()
 }
 
 /// Build the runtime config: the compiled baseline, with an optional user

@@ -7,6 +7,7 @@
 //! never abort WM startup.
 
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use maverick_toml::{parse, Event, ParseError, Value};
 use x11rb::protocol::xproto::ModMask;
@@ -56,6 +57,13 @@ struct UserConfig {
     keybindings: Vec<KeybindEntry>,
     rules: Vec<RuleEntry>,
     autostart: Option<AutostartCfg>,
+    wallpaper: Option<WallpaperEntry>,
+}
+
+#[derive(Debug, Default)]
+struct WallpaperEntry {
+    path: Option<String>,
+    mode: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -86,6 +94,12 @@ struct GeneralCfg {
     accordion_boost: Option<f32>,
     /// Overview film-strip minimum zoom (0.05–1.0), see `Cfg::overview_zoom_min`.
     overview_zoom_min: Option<f32>,
+    /// Compositor (OpenGL/GLX) master switch, `[compositor].enabled`.
+    compositor_enabled: Option<bool>,
+    /// Scroll-camera spring stiffness, `[compositor].stiffness`.
+    camera_stiffness: Option<f32>,
+    /// Scroll-camera spring damping, `[compositor].damping`.
+    camera_damping: Option<f32>,
     /// Auto-generate Super+1..n / Super+Shift+1..n workspace binds (T3).
     /// Defaults to `true`; when `false` no workspace binds are added.
     auto_workspace_binds: Option<bool>,
@@ -253,6 +267,14 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                         }
                     }
                 }
+                Some(Cur::Plain("wallpaper")) => {
+                    let w = user.wallpaper.get_or_insert_with(WallpaperEntry::default);
+                    match key {
+                        "path" => set_string(&mut w.path, key, &value, diag),
+                        "mode" => set_string(&mut w.mode, key, &value, diag),
+                        _ => {}
+                    }
+                }
                 Some(Cur::Row("keybindings")) => {
                     if let Some(row) = user.keybindings.last_mut() {
                         apply_keybind_key(row, key, &value);
@@ -296,6 +318,9 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         "auto_workspace_binds" => set_bool(&mut g.auto_workspace_binds, key, value, diag),
         "focus_mouse" => set_bool(&mut g.focus_mouse, key, value, diag),
         "warp_cursor" => set_bool(&mut g.warp_cursor, key, value, diag),
+        "compositor_enabled" => set_bool(&mut g.compositor_enabled, key, value, diag),
+        "camera_stiffness" => set_f32(&mut g.camera_stiffness, key, value, diag),
+        "camera_damping" => set_f32(&mut g.camera_damping, key, value, diag),
         "tag_names" => {
             if let Some(list) = value.as_str_list() {
                 g.tag_names = Some(list.iter().map(|s| s.as_ref().to_string()).collect());
@@ -432,8 +457,9 @@ fn set_usize(slot: &mut Option<usize>, key: &str, value: &Value<'_>, diag: &mut 
 }
 
 fn warn_bad(diag: &mut Diagnostics, key: &str) {
-    diag.warnings
-        .push(format!("value for '{key}' has an unexpected type; ignoring it"));
+    diag.warnings.push(format!(
+        "value for '{key}' has an unexpected type; ignoring it"
+    ));
 }
 
 // ── merge ──────────────────────────────────────────────────────────────────
@@ -470,11 +496,15 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
                 if cmd.first().is_some_and(|bin| !bin.trim().is_empty()) {
                     true
                 } else {
-                    diag.warnings.push("discarded empty autostart command".into());
+                    diag.warnings
+                        .push("discarded empty autostart command".into());
                     false
                 }
             })
             .collect();
+    }
+    if let Some(wp) = user.wallpaper {
+        apply_wallpaper(&mut cfg, wp, diag);
     }
 
     normalize_tag_names(&mut cfg);
@@ -509,8 +539,9 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
                 cfg.col_urgent = urgent;
             }
             None => {
-                diag.warnings
-                    .push(format!("general.theme '{name}' is not a known preset; ignoring it"));
+                diag.warnings.push(format!(
+                    "general.theme '{name}' is not a known preset; ignoring it"
+                ));
             }
         }
     }
@@ -518,8 +549,9 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
         if (1..=9).contains(&v) {
             cfg.n_tags = v;
         } else {
-            diag.errors
-                .push(format!("general.n_tags must be between 1 and 9; ignoring {v}"));
+            diag.errors.push(format!(
+                "general.n_tags must be between 1 and 9; ignoring {v}"
+            ));
         }
     }
     // New-style column width (fraction of the workarea).
@@ -543,7 +575,8 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
                     .into(),
             );
         } else {
-            diag.errors.push("general.default_col_width must be greater than zero".into());
+            diag.errors
+                .push("general.default_col_width must be greater than zero".into());
         }
     }
     // Legacy `split_bias` (fraction) → column_width.
@@ -556,8 +589,9 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
                     .into(),
             );
         } else {
-            diag.errors
-                .push(format!("general.split_bias must be between 0.0 and 1.0; ignoring {v}"));
+            diag.errors.push(format!(
+                "general.split_bias must be between 0.0 and 1.0; ignoring {v}"
+            ));
         }
     }
     if let Some(v) = general.accordion_boost {
@@ -584,11 +618,30 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     if let Some(v) = general.warp_cursor {
         cfg.warp_cursor = v;
     }
+    if let Some(v) = general.compositor_enabled {
+        cfg.compositor.enabled = v;
+    }
+    if let Some(v) = general.camera_stiffness {
+        if v > 0.0 {
+            cfg.compositor.stiffness = v;
+        } else {
+            diag.errors.push(format!(
+                "general.camera_stiffness must be > 0; ignoring {v}"
+            ));
+        }
+    }
+    if let Some(v) = general.camera_damping {
+        if v > 0.0 {
+            cfg.compositor.damping = v;
+        } else {
+            diag.errors
+                .push(format!("general.camera_damping must be > 0; ignoring {v}"));
+        }
+    }
     if let Some(names) = general.tag_names {
         if names.is_empty() || names.iter().any(String::is_empty) {
-            diag.warnings.push(
-                "general.tag_names must contain non-empty names; ignoring it".into(),
-            );
+            diag.warnings
+                .push("general.tag_names must contain non-empty names; ignoring it".into());
         } else {
             cfg.tag_names = names;
         }
@@ -604,6 +657,41 @@ fn apply_colors(cfg: &mut Cfg, colors: ColorsCfg, _diag: &mut Diagnostics) {
     }
     if let Some(v) = colors.urgent {
         cfg.col_urgent = v;
+    }
+}
+
+/// Expand a leading `~` (or `~/`) to `$HOME` so `path = "~/img/wp.png"` in the
+/// config resolves as users expect (TOML strings are literal; the shell does
+/// not expand them). Anything else is returned unchanged.
+fn expand_tilde(path: &str) -> String {
+    if path == "~" {
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            return home.to_string_lossy().into_owned();
+        }
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            return Path::new(&home).join(rest).to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
+/// Apply the `[wallpaper]` section. A `path` sets the native wallpaper source
+/// (image/shader inferred by extension); `mode` overrides the mapping mode.
+/// Only validated values are written — a bad `mode` is reported and ignored.
+fn apply_wallpaper(cfg: &mut Cfg, wp: WallpaperEntry, diag: &mut Diagnostics) {
+    if let Some(path) = wp.path {
+        // TOML strings are literal; expand a leading `~`/`~/` so
+        // `path = "~/img/wp.png"` resolves as users expect.
+        cfg.wallpaper.path = Some(expand_tilde(&path));
+    }
+    if let Some(mode) = wp.mode {
+        match crate::core::wallpaper::WallpaperMode::from_str(&mode) {
+            Ok(m) => cfg.wallpaper.mode = m,
+            Err(e) => diag
+                .warnings
+                .push(format!("[wallpaper].mode: {e}; keeping default (fill)")),
+        }
     }
 }
 
@@ -632,14 +720,7 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
             }
             if let Some(wt) = entry.window_type.as_deref() {
                 const KNOWN_TYPES: [&str; 8] = [
-                    "normal",
-                    "desktop",
-                    "dock",
-                    "toolbar",
-                    "menu",
-                    "utility",
-                    "splash",
-                    "dialog",
+                    "normal", "desktop", "dock", "toolbar", "menu", "utility", "splash", "dialog",
                 ];
                 if !KNOWN_TYPES.contains(&wt.to_ascii_lowercase().as_str()) {
                     diag.errors.push(format!(
@@ -744,7 +825,9 @@ fn parse_keybindings(
 fn action_name_of(list: &[(u16, u32, Action)], mods: u16, keysym: u32) -> String {
     list.iter()
         .find(|(m, k, _)| *m == mods && *k == keysym)
-        .map_or_else(String::new, |(_, _, a)| crate::core::action::name(a).to_string())
+        .map_or_else(String::new, |(_, _, a)| {
+            crate::core::action::name(a).to_string()
+        })
 }
 
 fn action_workspace_is_valid(action: &Action, n_tags: usize) -> bool {
@@ -922,6 +1005,39 @@ fn keysym_name_exists(ksym: u32) -> bool {
         || KEYSYMS.iter().any(|(_, k)| *k == ksym)
 }
 
+/// Reverse of `keysym_from_name`, for diagnostics only. Falls back to the raw
+/// `0x<hex>` escape, which is itself valid config syntax — so whatever this
+/// prints can be pasted straight back into a keybinding.
+pub fn keysym_name(ksym: u32) -> String {
+    if let Some((name, _)) = KEYSYMS.iter().find(|(_, k)| *k == ksym) {
+        return (*name).to_string();
+    }
+    if ksym < 0x80 {
+        let byte = ksym as u8;
+        if byte.is_ascii_alphanumeric() {
+            return (byte as char).to_string();
+        }
+    }
+    format!("0x{ksym:x}")
+}
+
+/// Render a modifier mask the way a user writes it in the TOML
+/// (`Super+Shift`). Returns an empty string for a bind with no modifiers.
+pub fn mods_name(mask: u16) -> String {
+    let mut parts: Vec<&str> = Vec::with_capacity(4);
+    for (bit, name) in [
+        (u16::from(ModMask::M4), "Super"),
+        (u16::from(ModMask::CONTROL), "Control"),
+        (u16::from(ModMask::M1), "Alt"),
+        (u16::from(ModMask::SHIFT), "Shift"),
+    ] {
+        if mask & bit != 0 {
+            parts.push(name);
+        }
+    }
+    parts.join("+")
+}
+
 fn keybind_from_str(input: &str) -> Option<(u16, u32)> {
     let parts: Vec<_> = input
         .split('+')
@@ -1079,7 +1195,8 @@ auto_workspace_binds = false
         let mut diag = Diagnostics::default();
         let cfg = merge_config(compiled_config(), user, &mut diag);
         assert!(!cfg.keybinds.iter().any(|(_, k, a)| {
-            (b'1'..=b'9').contains(&(*k as u8)) && matches!(a, Action::View(_) | Action::MoveToWs(_))
+            (b'1'..=b'9').contains(&(*k as u8))
+                && matches!(a, Action::View(_) | Action::MoveToWs(_))
         }));
     }
 
@@ -1145,9 +1262,7 @@ commands = [["example", "--flag"]]
         // Deny — refuse the app's own runtime fullscreen (F11/EWMH), but leave
         // `Mod4+F` working.
         for key in ["deny_fullscreen", "no_fullscreen"] {
-            let user = parse_string(&format!(
-                "[[rules]]\nclass = \"firefox\"\n{key} = true\n"
-            ));
+            let user = parse_string(&format!("[[rules]]\nclass = \"firefox\"\n{key} = true\n"));
             let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
             assert_eq!(cfg.rules.len(), 1);
             assert!(
@@ -1180,9 +1295,7 @@ commands = [["example", "--flag"]]
     #[test]
     fn rule_ignore_initial_state_parses_and_all_aliases_agree() {
         for key in ["ignore_initial_state", "no_initial_state", "no_maximize"] {
-            let user = parse_string(&format!(
-                "[[rules]]\nclass = \"firefox\"\n{key} = true\n"
-            ));
+            let user = parse_string(&format!("[[rules]]\nclass = \"firefox\"\n{key} = true\n"));
             let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
             assert_eq!(cfg.rules.len(), 1);
             assert!(
@@ -1294,16 +1407,24 @@ border_width = 0
         // with deny/true fullscreen, autostart grid).
         let (cfg, _diag) = load_from_path(Path::new("config/config.toml"));
         assert!(!cfg.keybinds.is_empty(), "keybindings must parse");
-        assert!(cfg.rules.iter().any(|r| r.class.as_deref() == Some("firefox")
-            && r.deny_fullscreen));
-        assert!(cfg.rules.iter().any(|r| r.class.as_deref() == Some("steam")
-            && r.true_fullscreen));
+        assert!(cfg
+            .rules
+            .iter()
+            .any(|r| r.class.as_deref() == Some("firefox") && r.deny_fullscreen));
+        assert!(cfg
+            .rules
+            .iter()
+            .any(|r| r.class.as_deref() == Some("steam") && r.true_fullscreen));
         assert_eq!(cfg.col_focused, 0x89b4fa);
-        assert!(cfg.autostart.iter().any(|c| c.first().is_some_and(|b| b == "picom")));
+        assert!(cfg
+            .autostart
+            .iter()
+            .any(|c| c.first().is_some_and(|b| b == "picom")));
         // Numeric workspace binds are auto-restored when no digit keybinds exist.
-        assert!(cfg.keybinds.iter().any(|(_, k, a)| {
-            *k == b'1' as u32 && matches!(a, crate::types::Action::View(0))
-        }));
+        assert!(cfg
+            .keybinds
+            .iter()
+            .any(|(_, k, a)| { *k == b'1' as u32 && matches!(a, crate::types::Action::View(0)) }));
     }
 
     #[test]

@@ -74,6 +74,17 @@ normal  = 0x45475a        # catppuccin-mocha surface
 focused = 0x89b4fa        # catppuccin-mocha blue
 urgent  = 0xf38ba8        # catppuccin-mocha red
 
+# Native wallpaper (requires the compositor). The source type is inferred from
+# the file extension: .png/.jpg/.jpeg/.webp/.avif/.bmp/.qoi/.ppm/.ff → image
+# (PNG decoded natively; the rest via ffmpeg); .glsl/.frag/.vert/.shader/.fs →
+# GLSL fragment shader (compiled on the GPU). `path = null` (default) disables
+# it. Applied at startup, or live via `maverick-msg wallpaper set <path>`,
+# `maverick-msg wallpaper clear`, `maverick-msg wallpaper mode <fill|fit|
+# stretch|center>`. A `~` in the path is expanded to $HOME.
+[wallpaper]
+# path = "~/Pictures/wallpaper.png"
+# mode = "fill"          # fill (cover) | fit (contain) | stretch | center
+
 # ── Keybindings ──────────────────────────────────────────────────────────────
 # Each entry is one [[keybindings]] table with `key` and `action`.
 # Action grammar (colon separates the verb from its argument):
