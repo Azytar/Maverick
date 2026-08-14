@@ -1,1 +1,8 @@
 /target
+
+# compiled test-client binaries (built from tests/*.c on demand)
+/tests/winmove
+/tests/damager
+/tests/mgdwin
+/tests/pxsample
+/tests/staticwin
