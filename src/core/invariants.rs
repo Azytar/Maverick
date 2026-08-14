@@ -41,8 +41,13 @@
 // scope; no further production changes are made here.
 
 use crate::config::Cfg;
-use crate::core::commands::{Command, MoveWindow, PageSnap, ToggleMaximize, ToggleOverview, ViewportZoom, ViewWorkspace};
-use crate::core::layout::{arrange, column_screen_extents, fs_ctx, ideal_scroll, LayoutRegistry, Phase, ribbon_geom, RibbonScratch};
+use crate::core::commands::{
+    Command, MoveWindow, PageSnap, ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
+};
+use crate::core::layout::{
+    arrange, column_screen_extents, fs_ctx, ideal_scroll, ribbon_geom, LayoutRegistry, Phase,
+    RibbonScratch,
+};
 use crate::core::present::present;
 use crate::core::Engine;
 use crate::types::{Client, Column, Dir, Monitor, Rect, WinFlags, WindowId};
@@ -68,6 +73,7 @@ fn default_cfg() -> Cfg {
         keybinds: vec![],
         rules: vec![],
         autostart: vec![],
+        ..Default::default()
     }
 }
 
@@ -89,17 +95,27 @@ fn setup_engine() -> Engine {
 /// Run the exact pure layout + presentation the backend uses inside
 /// `arrange()` → `apply_geom`, then write the resulting rect/border back into
 /// `client.geom` / `client.border_w` (what X11 then reads for input).
-fn apply_settled(engine: &mut Engine, mi: usize, registry: &LayoutRegistry) -> std::collections::HashMap<WindowId, (Rect, u32)> {
+fn apply_settled(
+    engine: &mut Engine,
+    mi: usize,
+    registry: &LayoutRegistry,
+) -> std::collections::HashMap<WindowId, (Rect, u32)> {
     let mut placements = Vec::new();
-    arrange(&engine.state, mi, &engine.cfg, registry, Phase::Settled, &mut placements, &mut RibbonScratch::default());
+    arrange(
+        &engine.state,
+        mi,
+        &engine.cfg,
+        registry,
+        Phase::Settled,
+        &mut placements,
+        &mut RibbonScratch::default(),
+    );
     // Capture the projection BEFORE `present`: `present` mutates `camera.target`
     // (it calls `scroll_to_focused` to keep an exclusive fullscreen pinned), so
     // any later `arrange` would read a different target. The backend writes
     // `client.geom` from exactly this projection each frame, so assert against it.
-    let projected: std::collections::HashMap<WindowId, (Rect, u32)> = placements
-        .iter()
-        .map(|(w, r, b)| (*w, (*r, *b)))
-        .collect();
+    let projected: std::collections::HashMap<WindowId, (Rect, u32)> =
+        placements.iter().map(|(w, r, b)| (*w, (*r, *b))).collect();
     present(&engine.state, &engine.state.monitors[mi], &mut placements);
     for (win, rect, bw) in placements {
         if let Some(c) = engine.state.clients.get_mut(&win) {
@@ -131,10 +147,20 @@ fn snap_all(engine: &mut Engine, mi: usize, ws_i: usize) {
 /// Replicate the geometry half of `Backend::focus()`: retarget `camera.target`
 /// onto column `ci`, settle the camera, then project with the Settled phase.
 /// No `ArrangeMonitor` is emitted — this is the mouse/EWMH pointer path.
-fn settle_on_column(engine: &mut Engine, mi: usize, ws_i: usize, ci: usize, registry: &LayoutRegistry) -> std::collections::HashMap<WindowId, (Rect, u32)> {
+fn settle_on_column(
+    engine: &mut Engine,
+    mi: usize,
+    ws_i: usize,
+    ci: usize,
+    registry: &LayoutRegistry,
+) -> std::collections::HashMap<WindowId, (Rect, u32)> {
     let wa = engine.state.monitors[mi].workarea;
     let screen = engine.state.monitors[mi].screen;
-    let fs = fs_ctx(&engine.state.clients, &engine.state.monitors[mi].workspaces[ws_i], screen);
+    let fs = fs_ctx(
+        &engine.state.clients,
+        &engine.state.monitors[mi].workspaces[ws_i],
+        screen,
+    );
     let win = engine.state.monitors[mi].workspaces[ws_i].columns[ci].windows[0];
     {
         let ws = &mut engine.state.monitors[mi].workspaces[ws_i];
@@ -145,7 +171,11 @@ fn settle_on_column(engine: &mut Engine, mi: usize, ws_i: usize, ci: usize, regi
     // accordion boost that `ideal_scroll`/`column_screen_extents` read), so the
     // settled camera target and the projected geometry stay in lockstep.
     engine.state.monitors[mi].focused = Some(win);
-    if let Some(pos) = engine.state.monitors[mi].focus_stack.iter().position(|w| *w == win) {
+    if let Some(pos) = engine.state.monitors[mi]
+        .focus_stack
+        .iter()
+        .position(|w| *w == win)
+    {
         engine.state.monitors[mi].focus_stack.remove(pos);
     }
     engine.state.monitors[mi].focus_stack.push(win);
@@ -160,7 +190,11 @@ fn settle_on_column(engine: &mut Engine, mi: usize, ws_i: usize, ci: usize, regi
 /// It also applies the focus the command announced via the `FocusChanged` event
 /// (the backend's event handler does this; the pure `Engine` does not), so the
 /// accordion boost that `ideal_scroll` reads stays consistent.
-fn focus_step(engine: &mut Engine, mut cmd: impl Command, registry: &LayoutRegistry) -> std::collections::HashMap<WindowId, (Rect, u32)> {
+fn focus_step(
+    engine: &mut Engine,
+    mut cmd: impl Command,
+    registry: &LayoutRegistry,
+) -> std::collections::HashMap<WindowId, (Rect, u32)> {
     // Mirror `Engine::execute` but keep the `CommandReport` so we can apply the
     // focus the command announced (the backend's event handler does this).
     let report = cmd.execute(&mut engine.state, &mut engine.cfg);
@@ -170,7 +204,11 @@ fn focus_step(engine: &mut Engine, mut cmd: impl Command, registry: &LayoutRegis
     if let Some(crate::core::event::Event::FocusChanged { to: Some(win), .. }) = &report.event {
         let mi = engine.state.sel_mon;
         engine.state.monitors[mi].focused = Some(*win);
-        if let Some(pos) = engine.state.monitors[mi].focus_stack.iter().position(|w| *w == *win) {
+        if let Some(pos) = engine.state.monitors[mi]
+            .focus_stack
+            .iter()
+            .position(|w| *w == *win)
+        {
             engine.state.monitors[mi].focus_stack.remove(pos);
         }
         engine.state.monitors[mi].focus_stack.push(*win);
@@ -202,8 +240,12 @@ fn focus_step(engine: &mut Engine, mut cmd: impl Command, registry: &LayoutRegis
             &engine.state.monitors[m].workspaces[ws_i],
             engine.state.monitors[m].screen,
         );
-        engine.state.monitors[m].workspaces[ws_i].camera.target =
-            ideal_scroll(&engine.state.monitors[m].workspaces[ws_i], &engine.cfg, wa, fs);
+        engine.state.monitors[m].workspaces[ws_i].camera.target = ideal_scroll(
+            &engine.state.monitors[m].workspaces[ws_i],
+            &engine.cfg,
+            wa,
+            fs,
+        );
         snap_all(engine, m, ws_i);
         return apply_settled(engine, m, registry);
     }
@@ -249,8 +291,16 @@ fn assert_all_tiled_match_settled(
 }
 
 /// Drive focus to a specific window via the command `Backend::focus` emits.
-fn focus_window(engine: &mut Engine, win: WindowId, registry: &LayoutRegistry) -> std::collections::HashMap<WindowId, (Rect, u32)> {
-    focus_step(engine, crate::core::commands::FocusWindow(Some(win)), registry)
+fn focus_window(
+    engine: &mut Engine,
+    win: WindowId,
+    registry: &LayoutRegistry,
+) -> std::collections::HashMap<WindowId, (Rect, u32)> {
+    focus_step(
+        engine,
+        crate::core::commands::FocusWindow(Some(win)),
+        registry,
+    )
 }
 
 // ─── tests ──────────────────────────────────────────────────────────────────
@@ -309,7 +359,13 @@ fn fullscreen_then_neighbor_settled_geometry() {
         engine.state.add_client(Client::new(win, mi, ws_i));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, engine.cfg.column_width);
         if ci == 0 {
-            engine.state.clients.get_mut(&win).unwrap().flags.set(WinFlags::FULLSCREEN);
+            engine
+                .state
+                .clients
+                .get_mut(&win)
+                .unwrap()
+                .flags
+                .set(WinFlags::FULLSCREEN);
         }
     }
     let a = 1u32;
@@ -332,7 +388,10 @@ fn fullscreen_then_neighbor_settled_geometry() {
     let gb = geom_of(&engine, b);
     assert_all_tiled_match_settled(&engine, mi, &proj);
     // B must be the on-screen click target: its rect is what X11 hit-tests.
-    assert!(gb.w > 0 && gb.h > 0, "neighbour B must have a real rect: {gb:?}");
+    assert!(
+        gb.w > 0 && gb.h > 0,
+        "neighbour B must have a real rect: {gb:?}"
+    );
 
     // focus A again → A fills the screen once more.
     let proj = settle_on_column(&mut engine, mi, ws_i, 0, &registry);
@@ -362,6 +421,9 @@ fn toggle_maximize_focused_only() {
         c.flags.set(WinFlags::MAXIMIZED_V);
         c.flags.set(WinFlags::MAXIMIZED_H);
     }
+    // Emulate the backend's `set_maximized`/`focus` keeping `presented_maximize`
+    // in sync with the focused maximized window — `present` reads it from there.
+    engine.state.sync_presented_maximize(mi);
     snap_all(&mut engine, mi, ws_i);
     let proj = apply_settled(&mut engine, mi, &registry);
 
@@ -379,15 +441,25 @@ fn toggle_maximize_focused_only() {
     // its border is the normal width.
     let gs = geom_of(&engine, second);
     assert!(!rect_eq(gs, wa), "neighbour must NOT be maximized: {gs:?}");
-    assert_eq!(engine.state.clients.get(&second).unwrap().border_w, engine.cfg.border_w);
+    assert_eq!(
+        engine.state.clients.get(&second).unwrap().border_w,
+        engine.cfg.border_w
+    );
 
     // Move focus away: the ex-focused window drops the overlay (no longer
     // focused) and returns to its projected tile.
     engine.state.monitors[mi].focused = Some(second);
-    if let Some(pos) = engine.state.monitors[mi].focus_stack.iter().position(|w| *w == second) {
+    if let Some(pos) = engine.state.monitors[mi]
+        .focus_stack
+        .iter()
+        .position(|w| *w == second)
+    {
         engine.state.monitors[mi].focus_stack.remove(pos);
     }
     engine.state.monitors[mi].focus_stack.push(second);
+    // Move-focus also updates the maximize overlay owner (the ex-focused window
+    // is no longer presented); mirror the backend `focus` sync.
+    engine.state.sync_presented_maximize(mi);
     snap_all(&mut engine, mi, ws_i);
     let proj = apply_settled(&mut engine, mi, &registry);
     let gf2 = geom_of(&engine, first);
@@ -396,9 +468,78 @@ fn toggle_maximize_focused_only() {
         "ex-focused maximized window must leave the workarea overlay: {gf2:?}"
     );
     let g2 = geom_of(&engine, first);
-    assert!(inside_wa(&engine, mi, g2), "ex-focused window returns to a tiled rect: {g2:?}");
+    assert!(
+        inside_wa(&engine, mi, g2),
+        "ex-focused window returns to a tiled rect: {g2:?}"
+    );
     // Its geom must equal its settled projection (no maximize overlay anymore).
     assert_all_tiled_match_settled(&engine, mi, &proj);
+}
+
+#[test]
+fn presented_maximize_tracks_focus_and_is_cleared_on_lifecycle() {
+    let _registry = default_registry();
+    let mut engine = engine_with_columns(2, 1);
+    let mi = engine.state.sel_mon;
+    let ws_i = engine.state.monitors[mi].active_ws;
+    let a = engine.state.monitors[mi].workspaces[ws_i].columns[0].windows[0];
+    let b = engine.state.monitors[mi].workspaces[ws_i].columns[1].windows[0];
+
+    // focused A + maximize A -> both the logical focus and the explicit overlay
+    // owner point at A. `mon.focused` is *only* the logical focus.
+    engine.state.monitors[mi].focused = Some(a);
+    if let Some(c) = engine.state.clients.get_mut(&a) {
+        c.flags.set(WinFlags::MAXIMIZED_V);
+        c.flags.set(WinFlags::MAXIMIZED_H);
+    }
+    engine.state.sync_presented_maximize(mi);
+    assert_eq!(engine.state.monitors[mi].focused, Some(a));
+    assert_eq!(
+        engine.state.monitors[mi].workspaces[ws_i].presented_maximize,
+        Some(a)
+    );
+
+    // unmaximize A while still focused -> overlay owner gone (flags only)
+    if let Some(c) = engine.state.clients.get_mut(&a) {
+        c.flags.clear(WinFlags::MAXIMIZED_V);
+        c.flags.clear(WinFlags::MAXIMIZED_H);
+    }
+    engine.state.sync_presented_maximize(mi);
+    assert_eq!(
+        engine.state.monitors[mi].workspaces[ws_i].presented_maximize,
+        None
+    );
+
+    // maximize A again, then focus B -> A is no longer the overlay owner even
+    // though it is still maximized (overlay follows the *focused* window).
+    if let Some(c) = engine.state.clients.get_mut(&a) {
+        c.flags.set(WinFlags::MAXIMIZED_V);
+        c.flags.set(WinFlags::MAXIMIZED_H);
+    }
+    engine.state.sync_presented_maximize(mi);
+    assert_eq!(
+        engine.state.monitors[mi].workspaces[ws_i].presented_maximize,
+        Some(a)
+    );
+    engine.state.monitors[mi].focused = Some(b);
+    engine.state.sync_presented_maximize(mi);
+    assert_eq!(
+        engine.state.monitors[mi].workspaces[ws_i].presented_maximize,
+        None
+    );
+
+    // destroy A while it is the presented maximize overlay -> no dangling owner
+    engine.state.monitors[mi].focused = Some(a);
+    engine.state.sync_presented_maximize(mi);
+    assert_eq!(
+        engine.state.monitors[mi].workspaces[ws_i].presented_maximize,
+        Some(a)
+    );
+    engine.state.remove_client(a);
+    assert_eq!(
+        engine.state.monitors[mi].workspaces[ws_i].presented_maximize,
+        None
+    );
 }
 
 #[test]
@@ -493,7 +634,10 @@ fn workspace_switch_resettles() {
     // The active workspace is now ws1; its clients must sit at their projection.
     let fw = engine.state.monitors[mi].workspaces[ws1].columns[0].windows[0];
     let g = geom_of(&engine, fw);
-    assert!(g.w > 0 && g.h > 0, "ws1 focused window must have a real rect: {g:?}");
+    assert!(
+        g.w > 0 && g.h > 0,
+        "ws1 focused window must have a real rect: {g:?}"
+    );
 }
 
 #[test]
@@ -517,7 +661,20 @@ fn dock_strut_retarget_respects_workarea() {
     for ci in 0..engine.state.monitors[mi].workspaces[ws_i].columns.len() {
         let win = engine.state.monitors[mi].workspaces[ws_i].columns[ci].windows[0];
         let g = geom_of(&engine, win);
-        assert!(inside_wa(&engine, mi, g), "win {win} must fit reserved workarea: {g:?}");
+        assert!(g.w > 0 && g.h > 0, "win {win} must have a real rect: {g:?}");
+        // In a scrolling ribbon, non-focused columns legitimately scroll off the
+        // edges; only windows whose centre is on-screen must sit inside the
+        // (possibly dock-inset) workarea.
+        let cx = g.x + g.w as i32 / 2;
+        let cy = g.y + g.h as i32 / 2;
+        let on_screen =
+            cx >= wa.x && cx < wa.x + wa.w as i32 && cy >= wa.y && cy < wa.y + wa.h as i32;
+        if on_screen {
+            assert!(
+                inside_wa(&engine, mi, g),
+                "win {win} on-screen must fit workarea: {g:?}"
+            );
+        }
     }
     assert_all_tiled_match_settled(&engine, mi, &proj);
 }
@@ -534,10 +691,25 @@ fn settled_follows_target_at_rest() {
     // (here: apply_settled) must equal projection(camera.target).
     let win = engine.state.monitors[mi].workspaces[ws_i].columns[1].windows[0];
     let mut settled = Vec::new();
-    arrange(&engine.state, mi, &engine.cfg, &registry, Phase::Settled, &mut settled, &mut RibbonScratch::default());
-    let gs = settled.iter().find(|(w, _, _)| *w == win).map(|(_, r, _)| *r).unwrap();
+    arrange(
+        &engine.state,
+        mi,
+        &engine.cfg,
+        &registry,
+        Phase::Settled,
+        &mut settled,
+        &mut RibbonScratch::default(),
+    );
+    let gs = settled
+        .iter()
+        .find(|(w, _, _)| *w == win)
+        .map(|(_, r, _)| *r)
+        .unwrap();
     let gclient = geom_of(&engine, win);
-    assert!(rect_eq(gclient, gs), "client.geom must equal settled projection: {gclient:?} vs {gs:?}");
+    assert!(
+        rect_eq(gclient, gs),
+        "client.geom must equal settled projection: {gclient:?} vs {gs:?}"
+    );
 }
 
 #[test]
@@ -554,9 +726,21 @@ fn live_differs_mid_animation_then_converges() {
     engine.state.monitors[mi].workspaces[ws_i].camera.velocity = 0.0;
 
     let mut live = Vec::new();
-    arrange(&engine.state, mi, &engine.cfg, &registry, Phase::Live, &mut live, &mut RibbonScratch::default());
+    arrange(
+        &engine.state,
+        mi,
+        &engine.cfg,
+        &registry,
+        Phase::Live,
+        &mut live,
+        &mut RibbonScratch::default(),
+    );
     let win = engine.state.monitors[mi].workspaces[ws_i].columns[1].windows[0];
-    let gl = live.iter().find(|(w, _, _)| *w == win).map(|(_, r, _)| *r).unwrap();
+    let gl = live
+        .iter()
+        .find(|(w, _, _)| *w == win)
+        .map(|(_, r, _)| *r)
+        .unwrap();
     let grest = geom_of(&engine, win);
     assert!(
         (gl.x - grest.x).abs() > 100 || (gl.y - grest.y).abs() > 100,
@@ -565,26 +749,60 @@ fn live_differs_mid_animation_then_converges() {
 
     // Now let the spring settle; Live must converge to the at-rest geometry.
     for _ in 0..2000 {
-        let moving = engine.state.monitors[mi].workspaces[ws_i].camera.step(1.0 / 60.0);
+        let moving = engine.state.monitors[mi].workspaces[ws_i]
+            .camera
+            .step(1.0 / 60.0);
         if !moving {
             break;
         }
     }
     let cam = engine.state.monitors[mi].workspaces[ws_i].camera;
-    assert!((cam.position - cam.target).abs() < 0.5, "camera must converge: pos {} target {}", cam.position, cam.target);
+    assert!(
+        (cam.position - cam.target).abs() < 0.5,
+        "camera must converge: pos {} target {}",
+        cam.position,
+        cam.target
+    );
 
     // Snap ALL animated factors (boost/zoom are still live) to their rest values,
     // then both Live and Settled projections read the same numbers and must match.
     snap_all(&mut engine, mi, ws_i);
 
     let mut rest_now = Vec::new();
-    arrange(&engine.state, mi, &engine.cfg, &registry, Phase::Settled, &mut rest_now, &mut RibbonScratch::default());
-    let grest_now = rest_now.iter().find(|(w, _, _)| *w == win).map(|(_, r, _)| *r).unwrap();
+    arrange(
+        &engine.state,
+        mi,
+        &engine.cfg,
+        &registry,
+        Phase::Settled,
+        &mut rest_now,
+        &mut RibbonScratch::default(),
+    );
+    let grest_now = rest_now
+        .iter()
+        .find(|(w, _, _)| *w == win)
+        .map(|(_, r, _)| *r)
+        .unwrap();
 
     let mut live2 = Vec::new();
-    arrange(&engine.state, mi, &engine.cfg, &registry, Phase::Live, &mut live2, &mut RibbonScratch::default());
-    let gl2 = live2.iter().find(|(w, _, _)| *w == win).map(|(_, r, _)| *r).unwrap();
-    assert!(rect_eq(gl2, grest_now), "live must converge to at-rest geom: {gl2:?} vs {grest_now:?}");
+    arrange(
+        &engine.state,
+        mi,
+        &engine.cfg,
+        &registry,
+        Phase::Live,
+        &mut live2,
+        &mut RibbonScratch::default(),
+    );
+    let gl2 = live2
+        .iter()
+        .find(|(w, _, _)| *w == win)
+        .map(|(_, r, _)| *r)
+        .unwrap();
+    assert!(
+        rect_eq(gl2, grest_now),
+        "live must converge to at-rest geom: {gl2:?} vs {grest_now:?}"
+    );
 }
 
 #[test]
@@ -621,16 +839,34 @@ fn focus_none_is_safe() {
 
     let raised = {
         let mut placements = Vec::new();
-        arrange(&engine.state, mi, &engine.cfg, &registry, Phase::Settled, &mut placements, &mut RibbonScratch::default());
+        arrange(
+            &engine.state,
+            mi,
+            &engine.cfg,
+            &registry,
+            Phase::Settled,
+            &mut placements,
+            &mut RibbonScratch::default(),
+        );
         // Capture the projection before `present` mutates the camera target.
-        let proj: std::collections::HashMap<WindowId, (Rect, u32)> = placements
-            .iter()
-            .map(|(w, r, b)| (*w, (*r, *b)))
-            .collect();
+        let proj: std::collections::HashMap<WindowId, (Rect, u32)> =
+            placements.iter().map(|(w, r, b)| (*w, (*r, *b))).collect();
         let raised = present(&engine.state, &engine.state.monitors[mi], &mut placements);
         (raised, proj)
     };
-    assert!(raised.0.is_empty(), "with no focus, no overlay is presented");
+    assert!(
+        raised.0.is_empty(),
+        "with no focus, no overlay is presented"
+    );
+    // The backend writes each placement's rect back into `client.geom` (see
+    // `apply_settled` / `apply_geom`); the pure harness mirrors that so the
+    // invariant (geom == settled projection) can be checked.
+    for (win, (rect, b)) in &raised.1 {
+        if let Some(c) = engine.state.clients.get_mut(win) {
+            c.geom = *rect;
+            c.border_w = *b;
+        }
+    }
     assert_all_tiled_match_settled(&engine, mi, &raised.1);
 }
 
@@ -646,7 +882,13 @@ fn border_w_is_part_of_geom() {
         engine.state.add_client(Client::new(win, mi, ws_i));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, engine.cfg.column_width);
         if ci == 0 {
-            engine.state.clients.get_mut(&win).unwrap().flags.set(WinFlags::FULLSCREEN);
+            engine
+                .state
+                .clients
+                .get_mut(&win)
+                .unwrap()
+                .flags
+                .set(WinFlags::FULLSCREEN);
         }
     }
     let a = 1u32;
@@ -657,7 +899,11 @@ fn border_w_is_part_of_geom() {
     let proj = settle_on_column(&mut engine, mi, ws_i, 0, &registry);
     let ca = engine.state.clients.get(&a).unwrap();
     assert_eq!(ca.border_w, 0, "fullscreen border must be 0");
-    assert!(rect_eq(ca.geom, screen), "fullscreen geom must equal screen: {:?}", ca.geom);
+    assert!(
+        rect_eq(ca.geom, screen),
+        "fullscreen geom must equal screen: {:?}",
+        ca.geom
+    );
 
     if let Some(c) = engine.state.clients.get_mut(&a) {
         c.flags.clear(WinFlags::FULLSCREEN);
@@ -665,7 +911,10 @@ fn border_w_is_part_of_geom() {
     }
     let proj = settle_on_column(&mut engine, mi, ws_i, 0, &registry);
     let ca2 = engine.state.clients.get(&a).unwrap();
-    assert_eq!(ca2.border_w, engine.cfg.border_w, "border restored after fullscreen");
+    assert_eq!(
+        ca2.border_w, engine.cfg.border_w,
+        "border restored after fullscreen"
+    );
 }
 
 #[test]
@@ -689,13 +938,13 @@ fn mouse_and_keyboard_focus_converge() {
     }
     kb.state.monitors[mi].focused = Some(1u32);
     kb.state.monitors[mi].focus_stack = vec![1u32, 2u32, 3u32];
-    focus_step(&mut kb, crate::core::commands::FocusWindow(Some(2u32)), &registry);
-    let kb_map: std::collections::HashMap<WindowId, Rect> = kb
-        .state
-        .clients
-        .iter()
-        .map(|(w, c)| (*w, c.geom))
-        .collect();
+    focus_step(
+        &mut kb,
+        crate::core::commands::FocusWindow(Some(2u32)),
+        &registry,
+    );
+    let kb_map: std::collections::HashMap<WindowId, Rect> =
+        kb.state.clients.iter().map(|(w, c)| (*w, c.geom)).collect();
 
     // Mouse path: pure simulate (retarget + settle + project), no ArrangeMonitor.
     let mut mouse = setup_engine();
@@ -709,10 +958,7 @@ fn mouse_and_keyboard_focus_converge() {
     mouse.state.monitors[mi].focused = Some(1u32);
     mouse.state.monitors[mi].focus_stack = vec![1u32, 2u32, 3u32];
     // Focus window 2 = column 1.
-    let col_of_2 = mouse
-        .state
-        .monitors[mi]
-        .workspaces[ws_i]
+    let col_of_2 = mouse.state.monitors[mi].workspaces[ws_i]
         .columns
         .iter()
         .position(|c| c.windows.contains(&2u32))
@@ -759,7 +1005,13 @@ fn input_hittest_matches_settled_geom() {
     // applies the `cy` vertical centering (active when alpha != 1, e.g. the
     // accordion-boosted focused column). Reconstruct the full rect with the
     // same projection `ribbon_geom` uses.
-    let g = ribbon_geom(ws, &engine.cfg, wa, true, &fs_ctx(&engine.state.clients, ws, engine.state.monitors[mi].screen));
+    let g = ribbon_geom(
+        ws,
+        &engine.cfg,
+        wa,
+        true,
+        &fs_ctx(&engine.state.clients, ws, engine.state.monitors[mi].screen),
+    );
     let cols = &ws.columns;
     for (ci, col) in cols.iter().enumerate() {
         let (l, r) = extents[ci];
@@ -795,4 +1047,258 @@ fn engine_with_columns(n_cols: usize, rows: usize) -> Engine {
         engine.state.monitors[mi].workspaces[ws_i].columns.push(col);
     }
     engine
+}
+
+/// Retarget the camera onto the focused column (what the backend does in its
+/// render loop before projecting), snap all animated factors to rest, then run
+/// the settled projection + `present` and write `client.geom`.
+fn retarget_and_settle(
+    engine: &mut Engine,
+    mi: usize,
+    ws_i: usize,
+    registry: &LayoutRegistry,
+) -> std::collections::HashMap<WindowId, (Rect, u32)> {
+    let wa = engine.state.monitors[mi].workarea;
+    let fs = fs_ctx(
+        &engine.state.clients,
+        &engine.state.monitors[mi].workspaces[ws_i],
+        engine.state.monitors[mi].screen,
+    );
+    {
+        let ws = &mut engine.state.monitors[mi].workspaces[ws_i];
+        ws.camera.target = ideal_scroll(ws, &engine.cfg, wa, fs);
+    }
+    snap_all(engine, mi, ws_i);
+    apply_settled(engine, mi, registry)
+}
+
+// ─── lifecycle / focus-pointer regression tests ─────────────────────────────
+
+/// The original bug: closing a window *before* the focused window left
+/// `Workspace::focus.column_idx` pointing at a different column, so the camera
+/// centred on a neighbour and `best_focus()`/`focused_win()` stole input from
+/// the logical focus (`mon.focused`).
+#[test]
+fn close_window_before_focus_realigns_pointer_and_geometry() {
+    let registry = default_registry();
+    let mut engine = engine_with_columns(4, 1);
+    let mi = engine.state.sel_mon;
+    let ws_i = engine.state.monitors[mi].active_ws;
+
+    // Focus window 3 (column index 2).
+    engine.state.monitors[mi].focused = Some(3);
+    engine.state.monitors[mi].focus_stack = vec![3, 2, 1, 4];
+    engine.state.monitors[mi].workspaces[ws_i].focus.column_idx = 2;
+
+    // Close window 1 (column 0, BEFORE the focused column).
+    let removed = engine.state.remove_client(1);
+    assert!(removed.is_some(), "window 1 must be removed");
+
+    let ws = &engine.state.monitors[mi].workspaces[ws_i];
+    assert_eq!(
+        ws.focus.column_idx, 1,
+        "focus pointer must shift left by the number of removed columns before it"
+    );
+    assert_eq!(
+        ws.focused_win(),
+        Some(3),
+        "logical focus must remain on window 3"
+    );
+    assert_eq!(
+        engine.state.monitors[mi].focused,
+        Some(3),
+        "mon.focused must be untouched by removal"
+    );
+
+    let proj = retarget_and_settle(&mut engine, mi, ws_i, &registry);
+    assert_all_tiled_match_settled(&engine, mi, &proj);
+    // The focused window must actually be on-screen at rest.
+    let g = geom_of(&engine, 3);
+    assert!(g.w > 0 && g.h > 0, "focused window must have a real rect");
+    assert!(
+        inside_wa(&engine, mi, g),
+        "focused window must lie inside the workarea: {g:?}"
+    );
+}
+
+/// Closing the focused window itself must re-point `ws.focus` to the new
+/// logical focus (`mon.focused`), never leave it dangling on a now-empty slot.
+#[test]
+fn close_focused_window_repoints_focus_to_neighbour() {
+    let registry = default_registry();
+    let mut engine = engine_with_columns(4, 1);
+    let mi = engine.state.sel_mon;
+    let ws_i = engine.state.monitors[mi].active_ws;
+
+    engine.state.monitors[mi].focused = Some(2);
+    engine.state.monitors[mi].focus_stack = vec![2, 1, 3, 4];
+    engine.state.monitors[mi].workspaces[ws_i].focus.column_idx = 1;
+
+    // Close the focused window 2.
+    let removed = engine.state.remove_client(2);
+    assert!(removed.is_some());
+
+    // `mon.focused` must move to the most-recently-focused surviving window.
+    assert_ne!(
+        engine.state.monitors[mi].focused,
+        Some(2),
+        "mon.focused must leave the closed window"
+    );
+    let new_focus = engine.state.monitors[mi].focused.unwrap();
+    let ws = &engine.state.monitors[mi].workspaces[ws_i];
+    assert_eq!(
+        ws.focused_win(),
+        Some(new_focus),
+        "ws.focus must point at the same window as mon.focused"
+    );
+    assert_eq!(
+        ws.index_of_window(new_focus),
+        Some((ws.focus.column_idx, ws.columns[ws.focus.column_idx].focused)),
+        "derived pointer must index the logical focus"
+    );
+
+    let proj = retarget_and_settle(&mut engine, mi, ws_i, &registry);
+    assert_all_tiled_match_settled(&engine, mi, &proj);
+    let g = geom_of(&engine, new_focus);
+    assert!(inside_wa(&engine, mi, g), "new focus must be on-screen");
+}
+
+/// Closing a window *after* the focused column must NOT shift the focus pointer.
+#[test]
+fn close_window_after_focus_keeps_focus_column() {
+    let registry = default_registry();
+    let mut engine = engine_with_columns(4, 1);
+    let mi = engine.state.sel_mon;
+    let ws_i = engine.state.monitors[mi].active_ws;
+
+    engine.state.monitors[mi].focused = Some(2);
+    engine.state.monitors[mi].focus_stack = vec![2, 1, 3, 4];
+    engine.state.monitors[mi].workspaces[ws_i].focus.column_idx = 1;
+
+    // Close window 4 (column 3, AFTER the focused column).
+    let removed = engine.state.remove_client(4);
+    assert!(removed.is_some());
+
+    let ws = &engine.state.monitors[mi].workspaces[ws_i];
+    assert_eq!(
+        ws.focus.column_idx, 1,
+        "closing a later column must not move the focus pointer"
+    );
+    assert_eq!(ws.focused_win(), Some(2));
+    let proj = retarget_and_settle(&mut engine, mi, ws_i, &registry);
+    assert_all_tiled_match_settled(&engine, mi, &proj);
+}
+
+/// Closing a window in a row *before* the focused row inside the same column
+/// must shift that column's `focused` pointer up, not leave it on a hole.
+#[test]
+fn close_row_before_focus_shifts_focused_row() {
+    let registry = default_registry();
+    let mut engine = engine_with_columns(2, 3);
+    let mi = engine.state.sel_mon;
+    let ws_i = engine.state.monitors[mi].active_ws;
+
+    // Column 0 has windows [1, 2, 3]; focus row 1 (window 2).
+    engine.state.monitors[mi].focused = Some(2);
+    engine.state.monitors[mi].focus_stack = vec![2, 1, 3];
+    engine.state.monitors[mi].workspaces[ws_i].columns[0].focused = 1;
+    engine.state.monitors[mi].workspaces[ws_i].focus.column_idx = 0;
+
+    // Close window 1 (row 0, before the focused row).
+    let removed = engine.state.remove_client(1);
+    assert!(removed.is_some());
+
+    let col = &engine.state.monitors[mi].workspaces[ws_i].columns[0];
+    assert_eq!(
+        col.focused, 0,
+        "focused row must shift up after removing a prior row"
+    );
+    assert_eq!(
+        col.windows[col.focused], 2,
+        "logical focus stays on window 2"
+    );
+    assert_eq!(
+        engine.state.monitors[mi].workspaces[ws_i].focused_win(),
+        Some(2)
+    );
+}
+
+/// Switching layout while the camera is displaced off the focused column must
+/// deterministically re-centre the camera on the focused column (no drift,
+/// no stale offset accumulating across switches).
+#[test]
+fn layout_switch_with_displaced_camera_recenters_focused_column() {
+    let registry = default_registry();
+    let mut engine = engine_with_columns(4, 1);
+    let mi = engine.state.sel_mon;
+    let ws_i = engine.state.monitors[mi].active_ws;
+
+    engine.state.monitors[mi].focused = Some(3);
+    engine.state.monitors[mi].focus_stack = vec![3, 2, 1, 4];
+    engine.state.monitors[mi].workspaces[ws_i].focus.column_idx = 2;
+
+    // Displace the camera manually (e.g. mid-animation / external scroll).
+    engine.state.monitors[mi].workspaces[ws_i].camera.target = -400.0;
+    engine.state.monitors[mi].workspaces[ws_i].camera.position = -400.0;
+
+    // Cycle layout: the command must reset camera.target to ideal_scroll.
+    let fs = fs_ctx(
+        &engine.state.clients,
+        &engine.state.monitors[mi].workspaces[ws_i],
+        engine.state.monitors[mi].screen,
+    );
+    let wa = engine.state.monitors[mi].workarea;
+    let expected = ideal_scroll(
+        &engine.state.monitors[mi].workspaces[ws_i],
+        &engine.cfg,
+        wa,
+        fs,
+    );
+    let _proj = focus_step(&mut engine, crate::core::commands::CycleLayout, &registry);
+
+    let cam = engine.state.monitors[mi].workspaces[ws_i].camera.target;
+    assert!(
+        (cam - expected).abs() < 0.5,
+        "camera.target must be recentered to ideal_scroll, got {cam} want {expected}"
+    );
+
+    // The recently-centered camera must keep the focused column on-screen.
+    let proj = retarget_and_settle(&mut engine, mi, ws_i, &registry);
+    assert_all_tiled_match_settled(&engine, mi, &proj);
+    let g = geom_of(&engine, 3);
+    assert!(
+        inside_wa(&engine, mi, g),
+        "focused window must be on-screen"
+    );
+}
+
+/// Closing a window must never move the camera off the focused column: the
+/// focused window stays centred and on-screen.
+#[test]
+fn closing_any_window_keeps_focused_window_centered() {
+    let registry = default_registry();
+    let mut engine = engine_with_columns(5, 1);
+    let mi = engine.state.sel_mon;
+    let ws_i = engine.state.monitors[mi].active_ws;
+
+    engine.state.monitors[mi].focused = Some(3);
+    engine.state.monitors[mi].focus_stack = vec![3, 2, 1, 4, 5];
+    engine.state.monitors[mi].workspaces[ws_i].focus.column_idx = 2;
+
+    // Remove windows one by one, including the focused one, and after each
+    // removal assert the (new) focused window is on-screen and centered.
+    for victim in [1u32, 5, 3] {
+        engine.state.remove_client(victim);
+        let proj = retarget_and_settle(&mut engine, mi, ws_i, &registry);
+        assert_all_tiled_match_settled(&engine, mi, &proj);
+        let f = engine.state.monitors[mi].focused.unwrap();
+        let g = geom_of(&engine, f);
+        assert!(inside_wa(&engine, mi, g), "focused {f} must be on-screen");
+        let wa = engine.state.monitors[mi].workarea;
+        let cx = g.x + g.w as i32 / 2;
+        assert!(
+            (cx - (wa.x + wa.w as i32 / 2)).abs() <= (wa.w as i32) / 2,
+            "focused window must not be shoved entirely off the workarea"
+        );
+    }
 }

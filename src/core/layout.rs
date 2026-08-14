@@ -129,7 +129,37 @@ impl Layout for GridLayout {
         out: &mut Placements,
         _scratch: &mut RibbonScratch,
     ) {
-        arrange_grid(state, mon, cfg, out);
+        let ws = mon.ws();
+        let (placements, _snap) =
+            crate::core::grid::arrange_workspace(ws, cfg, mon, ws.grid_snapshot.as_ref());
+        let bw = cfg.border_w;
+        for (win, rect) in placements {
+            if state.clients.contains_key(&win) {
+                out.push((win, rect, bw));
+            }
+        }
+        // ── floating windows — keep existing geom, clamped to the full workarea ──
+        for &win in &ws.floats {
+            let Some(c) = state.clients.get(&win) else {
+                continue;
+            };
+            let mut g = c.geom;
+            g.x = g.x.clamp(
+                mon.workarea.x,
+                (mon.workarea.x + mon.workarea.w as i32)
+                    .saturating_sub(g.w as i32)
+                    .max(mon.workarea.x),
+            );
+            g.y = g.y.clamp(
+                mon.workarea.y,
+                (mon.workarea.y + mon.workarea.h as i32)
+                    .saturating_sub(g.h as i32)
+                    .max(mon.workarea.y),
+            );
+            g.w = g.w.min(mon.workarea.w);
+            g.h = g.h.min(mon.workarea.h);
+            out.push((win, g, c.border_w));
+        }
     }
 }
 
@@ -302,8 +332,8 @@ pub fn arrange(
 ) {
     let mon = &state.monitors[mon_idx];
     let layout = registry.get(mon.ws().layout);
-    // Always produce a fresh placement set. `out` is the WM's *shared*
-    // `placements_buf`, which the compositor animation path also writes into
+    // Always produce a fresh placement set. `out` is the WM's *shared* `desired`
+    // buffer, which the compositor animation path also writes into
     // (see `compositor::live_placements`). Without this clear, the previous
     // frame's live placements leak in here, get re-applied by `apply_geom`,
     // and physically re-show windows that `hide_offscreen` just moved
@@ -570,7 +600,11 @@ fn arrange_columns(
         // rather than collected into a `Vec`, so the per-frame projection
         // allocates nothing.
         let base_h = if n > 1 { total_h / n as f32 } else { total_h };
-        let extra_last = if n > 1 { total_h - base_h * n as f32 } else { 0.0 };
+        let extra_last = if n > 1 {
+            total_h - base_h * n as f32
+        } else {
+            0.0
+        };
 
         // Map world coords (workarea px, pre-camera, pre-zoom) into screen
         // coords: scale by `alpha` around the workarea center (cx/cy), then
@@ -583,7 +617,11 @@ fn arrange_columns(
                 continue;
             }
 
-            let extra = if n > 1 && ri == n - 1 { extra_last } else { 0.0 };
+            let extra = if n > 1 && ri == n - 1 {
+                extra_last
+            } else {
+                0.0
+            };
             let row_h_world = (base_h + extra).max(1.0);
             let row_y_world = wa.y as f32 + ri as f32 * (base_h + gap_f);
             let screen_h = (row_h_world * alpha).max(1.0) as u32;
@@ -627,85 +665,6 @@ fn arrange_columns(
     }
 }
 
-fn arrange_grid(state: &State, mon: &Monitor, cfg: &Cfg, out: &mut Placements) {
-    let ws = mon.ws();
-    let (gap, gap_outer) = effective_gaps(ws, cfg);
-    let bw = cfg.border_w as i32;
-
-    // Inset the workarea by the outer gap on every edge, exactly like
-    // `ribbon_geom` does for the Column layout, so the two layouts agree on
-    // the outer margin (N5).
-    let wa = Rect::new(
-        mon.workarea.x + gap_outer,
-        mon.workarea.y + gap_outer,
-        mon.workarea.w.saturating_sub((2 * gap_outer) as u32),
-        mon.workarea.h.saturating_sub((2 * gap_outer) as u32),
-    );
-
-    let wins: Vec<WindowId> = ws
-        .columns
-        .iter()
-        .flat_map(|c| c.windows.iter().copied())
-        .collect();
-    let n = wins.len();
-    if n == 0 {
-        return;
-    }
-
-    let cols = (n as f64).sqrt().ceil() as usize;
-    let rows = n.div_ceil(cols);
-    // `(cols - 1)`/`(rows - 1)` gaps sit *between* cells; the outer margin is
-    // the `gap_outer` inset above, matching the Column layout.
-    let cell_w = (wa.w as i32 - gap * (cols as i32 - 1)) / cols as i32;
-    let cell_h = (wa.h as i32 - gap * (rows as i32 - 1)) / rows as i32;
-
-    for (i, &win) in wins.iter().enumerate() {
-        if !state.clients.contains_key(&win) {
-            continue;
-        }
-        let col = i % cols;
-        let row = i / cols;
-        // In X11, ConfigureWindow's x/y mark the outer (border-inclusive)
-        // top-left corner and width/height are content-only (see
-        // arrange_columns). So bw is never added to x/y here — it is only
-        // subtracted from the content width/height, matching the Column
-        // layout. (Adding `+bw` used to shift every Grid tile right/down and
-        // make the last row/column overflow the workarea edge.)
-        let geom = Rect::new(
-            wa.x + col as i32 * (cell_w + gap),
-            wa.y + row as i32 * (cell_h + gap),
-            (cell_w - 2 * bw).max(1) as u32,
-            (cell_h - 2 * bw).max(1) as u32,
-        );
-        out.push((win, geom, cfg.border_w));
-    }
-
-    // ── floating windows — keep existing geom, clamped to the full workarea ──
-    for &win in &ws.floats {
-        if let Some(c) = state.clients.get(&win) {
-            let mut g = c.geom;
-            // Clamp to workarea so the window is never completely off-screen,
-            // matching the Column layout's float handling (N5).
-            g.x = g.x.clamp(
-                mon.workarea.x,
-                (mon.workarea.x + mon.workarea.w as i32)
-                    .saturating_sub(g.w as i32)
-                    .max(mon.workarea.x),
-            );
-            g.y = g.y.clamp(
-                mon.workarea.y,
-                (mon.workarea.y + mon.workarea.h as i32)
-                    .saturating_sub(g.h as i32)
-                    .max(mon.workarea.y),
-            );
-            g.w = g.w.min(mon.workarea.w);
-            g.h = g.h.min(mon.workarea.h);
-            // Use the client's own border_w so Rule::border_w overrides take effect.
-            out.push((win, g, c.border_w));
-        }
-    }
-}
-
 // ─── Scroll helpers ───────────────────────────────────────────────────────────
 
 /// Horizontal extents (in SCREEN space) of each column, using the exact same
@@ -721,9 +680,21 @@ pub(crate) fn column_screen_extents(
     let g = ribbon_geom(ws, cfg, workarea, false, fs);
     g.cols
         .iter()
-        .map(|&(x, w)| {
+        .enumerate()
+        .map(|(i, &(x, w))| {
+            // Match `arrange_columns`' geometry exactly: the right edge is the
+            // *inner* (border-exclusive) width, so the hit-test extent agrees
+            // with the `client.geom` X11 hit-tests against (invariant A). A
+            // fullscreen column is drawn with border 0, so it contributes no
+            // border to subtract; tiled columns use `cfg.border_w`.
+            let bw = if fs.cols.contains(&i) {
+                0.0
+            } else {
+                cfg.border_w as f32
+            };
             let l = g.wa.x as f32 + (x - ws.camera.position) * g.alpha + g.cx;
-            (l, l + w * g.alpha)
+            let inner_w = (w * g.alpha - 2.0 * bw).max(1.0);
+            (l, l + inner_w)
         })
         .collect()
 }
@@ -815,7 +786,14 @@ mod tests {
         state.monitors[0].workspaces[0].camera.target = scroll;
         let mut out = Placements::new();
         let mut scratch = RibbonScratch::default();
-        arrange_columns(state, &state.monitors[0], cfg, Phase::Live, &mut out, &mut scratch);
+        arrange_columns(
+            state,
+            &state.monitors[0],
+            cfg,
+            Phase::Live,
+            &mut out,
+            &mut scratch,
+        );
         out
     }
 

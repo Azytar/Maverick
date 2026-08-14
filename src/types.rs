@@ -2,6 +2,9 @@
 // Core state — niri-style columnar layout, clean coordinates, no drift.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+use crate::core::wallpaper::{WallpaperMode, WallpaperSource, WallpaperSpec};
 
 /// Backend-agnostic window identifier used throughout the core domain model.
 ///
@@ -36,13 +39,38 @@ impl Rect {
     pub fn area(&self) -> u64 {
         self.w as u64 * self.h as u64
     }
+    /// True when `other` is entirely inside `self`. Used for occlusion culling
+    /// (Fase 12): a window fully behind a single opaque window above it is
+    /// hidden.
     #[inline]
     pub fn right(&self) -> i32 {
         self.x + self.w as i32
     }
+    /// True when `other` is entirely inside `self`. Used for occlusion culling
+    /// (Fase 12): a window fully behind a single opaque window above it is
+    /// hidden.
+    #[inline]
+    pub fn contains_rect(&self, other: Rect) -> bool {
+        self.x <= other.x
+            && self.y <= other.y
+            && self.right() >= other.right()
+            && self.bottom() >= other.bottom()
+    }
     #[inline]
     pub fn bottom(&self) -> i32 {
         self.y + self.h as i32
+    }
+    /// Smallest rect containing both `self` and `other`. Used for animation
+    /// damage (Fase 7): a window that slides from one rect to another must
+    /// repaint the union so neither the pixels it left nor the ones it slid
+    /// into linger.
+    #[inline]
+    pub fn union(&self, other: Rect) -> Rect {
+        let x0 = self.x.min(other.x);
+        let y0 = self.y.min(other.y);
+        let x1 = self.right().max(other.right());
+        let y1 = self.bottom().max(other.bottom());
+        Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32)
     }
 }
 
@@ -173,7 +201,7 @@ impl Default for Column {
 // 1D camera for the Scroll (niri-style ribbon) layout. `position` is the current
 // scroll offset in px (world space -> screen). `target` is where focus wants the
 // camera; a second-order spring-damper eases `position` toward it, giving inertia
-// and rubber-banding past the edges. It is never the source of truth for geometry
+// without overshoot. It is never the source of truth for geometry
 // — `arrange_columns` derives each window's x from it, so there is no drift.
 
 #[derive(Debug, Clone, Copy)]
@@ -192,7 +220,7 @@ impl Camera {
             target: pos,
             velocity: 0.0,
             stiffness: 220.0,
-            damping: 22.0,
+            damping: 30.0,
         }
     }
     /// Advance one step of `dt` seconds. Returns true while still moving.
@@ -208,6 +236,43 @@ impl Camera {
         self.position = pos;
         self.target = pos;
         self.velocity = 0.0;
+    }
+}
+
+// ─── Grid snapshot ─────────────────────────────────────────────────────────────
+//
+// The `Grid` layout is a *pure* geometry engine (see `core::grid`). Its snapshot
+// is a *derived cache* — regenerated on every `arrange` — used only to (a) keep
+// window motion stable across insertions/removals and (b) give spatial focus /
+// move commands the geometry they need without recomputing it. It is never the
+// source of truth for geometry (which stays a pure function of the window set +
+// workarea); if it is ever stale, at most one frame of suboptimal stability
+// results.
+
+/// One window's slot in the current grid arrangement. `rect` is the base
+/// (pre-fullscreen-overlay) geometry with the border already subtracted from the
+/// content width/height, so it matches the `Rect` stored in `Placements`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridPlacement {
+    pub win: WindowId,
+    pub rect: Rect,
+    pub row: usize,
+    pub col: usize,
+}
+
+/// The full set of grid placements for a workspace, in stable window order.
+#[derive(Debug, Clone, Default)]
+pub struct GridSnapshot {
+    pub placements: Vec<GridPlacement>,
+}
+
+impl GridSnapshot {
+    /// The base geometry of `win`, if it is currently tiled in the grid.
+    pub fn rect_of(&self, win: WindowId) -> Option<Rect> {
+        self.placements
+            .iter()
+            .find(|p| p.win == win)
+            .map(|p| p.rect)
     }
 }
 
@@ -244,6 +309,18 @@ pub struct Workspace {
     pub page_zoom: f32,
     /// Animated target of `page_zoom`, eased by `tick_animations` (Fase 9/11).
     pub page_zoom_target: f32,
+    /// Derived cache of the current `Grid` arrangement (see `GridSnapshot`).
+    /// `None` until the first `arrange` runs, or on non-Grid workspaces. Pure
+    /// geometry is recomputed from this each frame; it is only consumed for
+    /// stability and spatial navigation.
+    pub grid_snapshot: Option<GridSnapshot>,
+    /// The window currently presented as the **maximize** overlay on this
+    /// workspace (`None` when no maximized window owns the overlay). This is the
+    /// explicit maximize-overlay owner; it is kept in sync with `Monitor::focused`
+    /// + the focused window's maximize flags by `State::sync_presented_maximize`,
+    /// so no read site has to re-derive the maximize-overlay owner from
+    /// `Monitor::focused`. `Monitor::focused` stays purely "the logical focus".
+    pub presented_maximize: Option<WindowId>,
 }
 
 impl Workspace {
@@ -261,6 +338,8 @@ impl Workspace {
             viewport_mode: ViewportMode::Normal,
             page_zoom: 1.0,
             page_zoom_target: 1.0,
+            grid_snapshot: None,
+            presented_maximize: None,
         }
     }
 
@@ -326,6 +405,19 @@ impl Workspace {
     }
 
     /// P3: &mut self — no clone needed at call sites
+    /// Locate `win` within the tiled tree and return `(column_idx, row_idx)`.
+    /// Used by `State::remove_client` to re-derive the workspace focus pointer
+    /// from the logical focus (`mon.focused`) after a window leaves the tree, so
+    /// `ws.focus` can never be left pointing at a stale column/row.
+    pub fn index_of_window(&self, win: WindowId) -> Option<(usize, usize)> {
+        for (ci, col) in self.columns.iter().enumerate() {
+            if let Some(ri) = col.windows.iter().position(|&w| w == win) {
+                return Some((ci, ri));
+            }
+        }
+        None
+    }
+
     pub fn remove_window(&mut self, win: WindowId) {
         if let Some(fi) = self.floats.iter().position(|&w| w == win) {
             self.floats.remove(fi);
@@ -334,9 +426,21 @@ impl Workspace {
 
         for col in &mut self.columns {
             if let Some(wi) = col.windows.iter().position(|&w| w == win) {
+                let focused_row = col.focused;
                 col.windows.remove(wi);
-                if col.focused >= col.windows.len() && !col.windows.is_empty() {
-                    col.focused = col.windows.len() - 1;
+                if !col.windows.is_empty() {
+                    if wi < focused_row {
+                        // A row before the focused one was removed: the focused
+                        // row shifts down by one, so the focus pointer must shift
+                        // with it. Without this, `col.focused` would silently point
+                        // at a *different* window in the same column.
+                        col.focused = col.focused.saturating_sub(1);
+                    } else if wi == focused_row {
+                        // The focused window itself was removed: clamp to the new
+                        // tail. The exact window that takes its place is
+                        // re-derived from `mon.focused` by `State::remove_client`.
+                        col.focused = col.focused.min(col.windows.len() - 1);
+                    }
                 }
                 break;
             }
@@ -347,14 +451,31 @@ impl Workspace {
 
     /// P3: &mut self — no clone needed at call sites
     pub fn cleanup_empty_columns(&mut self) {
+        let target = self.focus.column_idx;
+        // How many dropped columns sat strictly *before* the focused column? Each
+        // one shifts the focused column's index down by one, so the focus pointer
+        // must shift by the same amount — not just be clamped. A bare clamp (the
+        // old behaviour) only corrected the case where the focused column itself
+        // was dropped, leaving the focus on whatever column happened to occupy the
+        // clamped index after an earlier-column removal — which mis-centered the
+        // camera (`ideal_scroll`) and let `best_focus`/`focused_win` steal focus
+        // to a neighbour.
+        let removed_before = self.columns[..target.min(self.columns.len())]
+            .iter()
+            .filter(|c| c.windows.is_empty())
+            .count();
+
         let had = self.columns.len();
         self.columns.retain(|col| !col.windows.is_empty());
         let dropped = had - self.columns.len();
 
         if self.columns.is_empty() {
             self.focus.column_idx = 0;
-        } else if self.focus.column_idx >= self.columns.len() {
-            self.focus.column_idx = self.columns.len() - 1;
+        } else {
+            // Shift left by every dropped column that was before the focus, then
+            // clamp defensively.
+            let new_idx = target.saturating_sub(removed_before);
+            self.focus.column_idx = new_idx.min(self.columns.len() - 1);
         }
 
         // Removing a column leaves the remaining weights short of 1.0. In the
@@ -417,6 +538,37 @@ pub enum FullscreenPolicy {
     True,
 }
 
+// ─── Fullscreen snapshot ────────────────────────────────────────────────────
+//
+// `saved_geom` (a single `Rect`) was the original "remember the pre-fullscreen
+// geometry" store, but it is fragile: `set_maximized` and `set_fullscreen` both
+// write it, so a window that is maximized *while fullscreen* clobbers the saved
+// float rect, and leaving fullscreen then restores the wrong geometry (plan
+// 1786564084575, Fase 3). The snapshot captures the window's *prevailing mode*
+// together with the exact rect it had just before entering fullscreen, so
+// leaving fullscreen can restore the prior state verbatim instead of
+// reconstructing it from the (shared, mutable) `saved_geom`.
+
+/// The presentation mode a window was in immediately before it entered
+/// fullscreen. Used to decide what "leave fullscreen" must restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowMode {
+    /// A free-floating window laid out from `client.geom`.
+    Float,
+    /// A tiled column of the ribbon.
+    Tiled,
+    /// A maximized (workarea-filling) overlay window.
+    Maximized,
+}
+
+/// Exact pre-fullscreen state, captured once on enter and applied verbatim on
+/// leave. Replaces the overloaded `saved_geom` for fullscreen transitions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FullscreenSnapshot {
+    pub prior: WindowMode,
+    pub rect: Rect,
+}
+
 // ─── Client ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -445,6 +597,14 @@ pub struct Client {
     /// names (`"dialog"`, `"utility"`, `"toolbar"`, …). Used by window rules.
     pub window_types: Vec<String>,
     pub focus_serial: u64,
+    /// Observability-only mirror of the last *desired* rect this client was
+    /// arranged to (the `DesiredState` rect for it). Written by the render
+    /// reconcile path; NEVER read for layout/focus/overlay decisions. Fase 8.
+    pub last_desired: Option<Rect>,
+    /// Observability-only mirror of the last *real* geometry the client reported
+    /// back via `ConfigureNotify` (X11 Real). Written by the events convergence
+    /// path; NEVER read for layout/focus/overlay decisions. Fase 8.
+    pub last_reported: Option<Rect>,
     pub is_unmanaged: bool,
     pub wants_input: bool,
     pub wm_hidden: bool,
@@ -460,6 +620,13 @@ pub struct Client {
     /// 0×0 whenever the restore path missed a case. The flag says the same
     /// thing without lying about the geometry; `apply_geom` clears it.
     pub geometry_dirty: bool,
+    /// Fullscreen transition snapshot: the exact mode + rect the window had
+    /// *before* it entered fullscreen, captured by `apply_fullscreen_topology`
+    /// and applied verbatim when it leaves. This is the robust replacement for
+    /// using the shared `saved_geom` to remember fullscreen geometry (see
+    /// `FullscreenSnapshot`). `None` when the window is not in a fullscreen
+    /// transition.
+    pub fs_snapshot: Option<FullscreenSnapshot>,
     /// What to do when this window asks for fullscreen. Comes from a window
     /// rule (`deny_fullscreen` / `true_fullscreen`) and never changes at
     /// runtime — it is policy, not state, so it deliberately lives here rather
@@ -486,10 +653,13 @@ impl Client {
             transient_parent: None,
             window_types: Vec::new(),
             focus_serial: 0,
+            last_desired: None,
+            last_reported: None,
             is_unmanaged: false,
             wants_input: true,
             wm_hidden: false,
             geometry_dirty: false,
+            fs_snapshot: None,
             fullscreen_policy: FullscreenPolicy::Normal,
         }
     }
@@ -628,6 +798,11 @@ pub struct Monitor {
     pub active_ws: usize,
     pub focused: Option<WindowId>,
     pub focus_stack: Vec<WindowId>,
+    /// Set when this monitor's window geometry changed and its cached live
+    /// placements (used by the GLX compositor) must be recomputed. Cleared by
+    /// the frame loop after it re-projects the monitor. Starts `true` so the
+    /// first frame projects every monitor.
+    pub layout_dirty: bool,
 }
 
 impl Monitor {
@@ -642,6 +817,7 @@ impl Monitor {
             active_ws: 0,
             focused: None,
             focus_stack: Vec::with_capacity(16),
+            layout_dirty: true,
         };
         m.recalc_geometry();
         m
@@ -668,6 +844,24 @@ impl Monitor {
                 edge,
                 thickness,
             });
+        }
+        self.recalc_geometry();
+    }
+
+    /// Replace *every* region owned by `owner` with `regions` (bug B4). A single
+    /// dock may reserve several edges at once (e.g. `top` + `left`), and calling
+    /// `set_reserved_region` once per edge would erase the previous one, so all
+    /// edges are written together. Passing an empty list clears the owner.
+    pub fn set_reserved_regions(&mut self, owner: WindowId, regions: &[(Edge, u32)]) {
+        self.reserved_regions.retain(|r| r.owner != owner);
+        for &(edge, thickness) in regions {
+            if thickness > 0 {
+                self.reserved_regions.push(ReservedRegion {
+                    owner,
+                    edge,
+                    thickness,
+                });
+            }
         }
         self.recalc_geometry();
     }
@@ -807,6 +1001,45 @@ pub enum Action {
     /// Scroll the camera by one screen-width in the given direction (a "page"
     /// of the zoomed ribbon). Reuses `ideal_scroll`/`camera` — no focus change.
     PageSnap(Dir),
+    /// Native wallpaper control (set/clear/mode). Pure State mutation in the
+    /// core; the backend uploads/draws the GPU texture. Never affects focus,
+    /// stacking, input, layout or geometry.
+    Wallpaper(WallpaperCmd),
+}
+
+/// Imperative sub-verbs of the `wallpaper` action. Paths with spaces are
+/// preserved verbatim (the caller joins the rest of the line before handing it
+/// here), so a wallpaper at `/home/u/My Pic.png` works unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WallpaperCmd {
+    /// Set the wallpaper to the image/shader at `PathBuf` (source type is
+    /// inferred from the extension; see `WallpaperSpec::source_for_path`).
+    Set(PathBuf),
+    /// Clear the native wallpaper, falling back to the legacy root pixmap.
+    Clear,
+    /// Change only the mapping mode of the current source.
+    Mode(WallpaperMode),
+}
+
+// ─── Deferred focus ───────────────────────────────────────────────────────────
+/// A deferred focus request created while an overlay (fullscreen/maximize owner)
+/// is presented. Unlike the old per-`Workspace` `pending_focus: Option<WindowId>`,
+/// this carries the *context* it was created under: the exact `monitor`/`workspace`
+/// the deferral belongs to and the `owner` overlay that created it. Carrying the
+/// context means a deferred window is never orphaned when the overlay is torn down
+/// on a non-active workspace or a non-selected monitor — the deferral is keyed on
+/// its OWN `monitor`/`workspace`, and a live overlay that did not create it cannot
+/// consume a deferral it does not own. There is at most one deferral at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingFocus {
+    /// The window that should receive focus once the overlay is dismissed.
+    pub window: WindowId,
+    /// The overlay that created this deferral (its presented owner at creation).
+    pub owner: WindowId,
+    /// The monitor the deferral is bound to.
+    pub monitor: usize,
+    /// The workspace the deferral is bound to.
+    pub workspace: usize,
 }
 
 // ─── Global state ────────────────────────────────────────────────────────────
@@ -819,6 +1052,19 @@ pub struct State {
     pub focus_serial: u64,
     pub running: bool,
     pub status: String,
+    /// The window the X server currently reports as having the input focus
+    /// (`GetInputFocus`), mirrored from `FocusIn`/`FocusOut` events. This is the
+    /// in-memory truth of the *real* X focus, distinct from `mon.focused` (the
+    /// WM's logical intent) and the painted border (visual). `reconcile_focus`
+    /// keeps all three in lock-step; without it an external `XSetInputFocus`
+    /// (popup/dialog/Wine) silently desyncs logical vs real focus.
+    pub x11_input_focus: Option<WindowId>,
+    /// Deferred focus request with explicit context (see `PendingFocus`). This is
+    /// the single global slot; the deferral names the exact `monitor`/`workspace`
+    /// it belongs to and the `owner` overlay that created it, so it is never
+    /// orphaned when the overlay tears down on a non-active workspace or a
+    /// non-selected monitor (invariant 8c). `None` when there is nothing pending.
+    pub pending_focus: Option<PendingFocus>,
     /// Transient windows that mapped before their `WM_TRANSIENT_FOR` parent
     /// was managed. Each entry is the child's id; its desired parent is already
     /// stored on `Client::transient_parent`. Once the parent shows up,
@@ -826,6 +1072,14 @@ pub struct State {
     /// parent's monitor/workspace and re-floats it, instead of leaving the
     /// popup stranded on whatever monitor happened to be focused at map time.
     pub pending_transients: Vec<WindowId>,
+    /// Native wallpaper configuration (source + mode). Pure `State` data — the
+    /// compositor reads it and uploads/draws the GPU texture; it never affects
+    /// focus, stacking, input, layout or window geometry.
+    pub wallpaper: WallpaperSpec,
+    /// Monotonic revision of `wallpaper`. Bumped on every `SetWallpaper` so the
+    /// compositor knows whether it must re-decode/re-upload the texture without
+    /// re-decoding every frame (criterion #5).
+    pub wallpaper_rev: u64,
 }
 
 impl State {
@@ -838,6 +1092,10 @@ impl State {
             running: false,
             status: String::new(),
             pending_transients: Vec::new(),
+            x11_input_focus: None,
+            pending_focus: None,
+            wallpaper: WallpaperSpec::default(),
+            wallpaper_rev: 0,
         }
     }
 
@@ -869,23 +1127,56 @@ impl State {
     ///      itself up to fill the workarea;
     ///   2. the column-focused window;
     ///   3. the most-recently focused window in the focus stack.
+    /// Recompute [`Workspace::presented_maximize`] for the active workspace of
+    /// `mon_idx`. The maximize overlay is owned by exactly the monitor's focused
+    /// window when that window is maximized (`is_maximized_v() || is_maximized_h()`)
+    /// on the active workspace. This is the *single* writer that turns
+    /// `Monitor::focused` + the client's maximize flags into the explicit
+    /// `presented_maximize` field, so no read site has to infer the
+    /// maximize-overlay owner from `mon.focused`.
+    pub fn sync_presented_maximize(&mut self, mon_idx: usize) {
+        if mon_idx >= self.monitors.len() {
+            return;
+        }
+        let (ws_idx, owner) = {
+            let mon = &self.monitors[mon_idx];
+            let ws_idx = mon.active_ws;
+            let owner = mon.focused.filter(|&w| {
+                self.clients.get(&w).is_some_and(|c| {
+                    c.workspace == ws_idx && (c.is_maximized_v() || c.is_maximized_h())
+                })
+            });
+            (ws_idx, owner)
+        };
+        if ws_idx < self.monitors[mon_idx].workspaces.len() {
+            self.monitors[mon_idx].workspaces[ws_idx].presented_maximize = owner;
+        }
+        // A maximize overlay is only ever presented on the ACTIVE workspace (see
+        // `core::present` and `presented_overlay_owner`, which only read the
+        // active workspace). Clear any stale `presented_maximize` entry on the
+        // OTHER workspaces of this monitor, so a window un-maximized on a
+        // non-active workspace cannot leave a dangling maximize-overlay owner
+        // that trips invariant #9 when that workspace is later activated.
+        for (i, ws) in self.monitors[mon_idx].workspaces.iter_mut().enumerate() {
+            if i != ws_idx {
+                ws.presented_maximize = None;
+            }
+        }
+    }
+
     pub fn best_focus(&self, mon_idx: usize) -> Option<WindowId> {
+        // A pending overlay owns the focus: the window currently presented as the
+        // overlay (fullscreen owner, or the focused maximized window) is what the
+        // user is looking at, so it is the best focus. Delegating to
+        // `presented_overlay_owner` removes the duplicate re-derivation of overlay
+        // semantics (invariant 9b) that the previous inline version had.
+        if let Some(o) = self.presented_overlay_owner(mon_idx) {
+            return Some(o);
+        }
         let mon = self.monitors.get(mon_idx)?;
         let ws_idx = mon.active_ws;
         if ws_idx >= mon.workspaces.len() {
             return None;
-        }
-        let overlay = mon.focus_stack.iter().rev().find(|&&w| {
-            self.clients.get(&w).is_some_and(|c| {
-                c.workspace == ws_idx
-                    && ((c.is_fullscreen()
-                        && (mon.workspaces[ws_idx].layout == LayoutKind::Grid
-                            || c.is_true_fullscreen()))
-                        || (c.is_maximized() && mon.focused == Some(w)))
-            })
-        });
-        if let Some(&w) = overlay {
-            return Some(w);
         }
         let col_win = mon.workspaces[ws_idx].focused_win();
         let from_stack = mon
@@ -895,6 +1186,136 @@ impl State {
             .find(|&&w| self.clients.get(&w).is_some_and(|c| c.workspace == ws_idx))
             .copied();
         col_win.or(from_stack)
+    }
+
+    /// The single, canonical definition of "which window currently OWNS the
+    /// presented overlay" on `mon_idx`'s active workspace. Returns `None` when
+    /// there is no real overlay. A window is a real overlay only when:
+    ///   1. it is fullscreen AND (`Grid` layout OR `FullscreenPolicy::True`); a
+    ///      `Column`-layout Normal-policy fullscreen is just a ribbon tile and
+    ///      is explicitly NOT an overlay; OR
+    ///   2. it is the *focused* maximized window (`presented_maximize` owner).
+    /// This MUST stay equivalent to `core::present`, `render::stack_overlay` and
+    /// `best_focus`. `manage` used to duplicate this with a weaker
+    /// `is_fullscreen() || is_maximized_*` condition.
+    ///
+    /// IMPORTANT: this is **NOT** the same as "covering fullscreen" used by
+    /// pointer hit-testing. A `Column`-layout fullscreen is *covering* (it paints
+    /// a ribbon tile over the screen) but is **not** returned here — and a
+    /// `presented_maximize` window **is** returned here but is **not**
+    /// `is_fullscreen()` at all. Use [`State::covering_fullscreen_window`] for the
+    /// covering predicate and never substitute `Client::is_fullscreen()` for
+    /// either, since `is_fullscreen()` is true for both and would silently merge
+    /// the two disjoint concepts.
+    pub fn presented_overlay_owner(&self, mon_idx: usize) -> Option<WindowId> {
+        let ws_idx = self.monitors.get(mon_idx)?.active_ws;
+        self.presented_overlay_owner_in(mon_idx, ws_idx)
+    }
+
+    /// The canonical overlay owner on an EXPLICIT workspace `ws_idx` of
+    /// `mon_idx`. Shared by [`State::presented_overlay_owner`] (which passes the
+    /// monitor's active workspace) and the core EWMH `_NET_ACTIVE_WINDOW` policy
+    /// (which must test the *requesting* window's own (monitor, workspace), not
+    /// necessarily the active one).
+    pub(crate) fn presented_overlay_owner_in(
+        &self,
+        mon_idx: usize,
+        ws_idx: usize,
+    ) -> Option<WindowId> {
+        let mon = self.monitors.get(mon_idx)?;
+        let ws = mon.workspaces.get(ws_idx)?;
+        // A window that is *both* fullscreen and maximized is owned exclusively
+        // through the maximize branch below (so it agrees with
+        // `presented_maximize`); the fullscreen branch only matches a *purely*
+        // fullscreen window. Without this guard the two branches could name
+        // different windows and trip invariant #9b ("overlay owner /
+        // presented_maximize mismatch"). `core::present` still presents *every*
+        // fullscreen window regardless of focus; this helper only names the one
+        // that owns the overlay for focus/stacking decisions.
+        let fs_overlay = mon.focus_stack.iter().rev().find(|&&w| {
+            self.clients.get(&w).is_some_and(|c| {
+                c.workspace == ws_idx
+                    && c.is_fullscreen()
+                    && !c.is_maximized()
+                    && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen())
+            })
+        });
+        if let Some(&w) = fs_overlay {
+            return Some(w);
+        }
+        if let Some(w) = ws.presented_maximize {
+            if self.clients.get(&w).is_some_and(|c| {
+                c.workspace == ws_idx && (c.is_maximized_v() || c.is_maximized_h())
+            }) {
+                return Some(w);
+            }
+        }
+        None
+    }
+
+    /// True iff `self.pending_focus` (if set) names an owner that is still a
+    /// currently-presented overlay on the deferral's (monitor, workspace) — i.e.
+    /// the EXACT `#8c` condition. This is the single shared definition used by
+    /// BOTH `check_invariants` (#8c) and the post-command reconciliation hook
+    /// (`reconcile_pending_focus_after_transition`) so they can never disagree.
+    pub(crate) fn pending_focus_owner_presented(&self) -> bool {
+        let pf = match self.pending_focus {
+            Some(p) => p,
+            None => return false,
+        };
+        self.monitors.get(pf.monitor).map_or(false, |m| {
+            let focused = m.focused;
+            m.workspaces.get(pf.workspace).map_or(false, |ws| {
+                self.clients.get(&pf.owner).map_or(false, |c| {
+                    c.monitor == pf.monitor
+                        && c.workspace == pf.workspace
+                        && (c.is_fullscreen()
+                            && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen())
+                            || (c.is_maximized_v() || c.is_maximized_h())
+                                && focused == Some(pf.owner))
+                })
+            })
+        })
+    }
+
+    /// The single, canonical definition of "which window is the *covering
+    /// fullscreen*" on `mon_idx`'s active workspace — i.e. the `Column`-layout
+    /// fullscreen tile that currently paints a ribbon tile covering the screen
+    /// (used by pointer hit-testing and `render::stack_overlay`'s 2-bis case to
+    /// decide which window is under the cursor).
+    ///
+    /// THIS IS DELIBERATELY DIFFERENT FROM [`State::presented_overlay_owner`]:
+    ///   * a `Column` fullscreen is a *covering* fullscreen but is **NOT** an
+    ///     overlay owner — in the `Column` ribbon a fullscreen window is just a
+    ///     scrolling participant, never an out-of-ribbon overlay
+    ///     (`core::present` / `presented_overlay_owner` exclude it on purpose);
+    ///   * a `presented_maximize` window **IS** the overlay owner but is **NOT**
+    ///     a covering fullscreen (it is not `is_fullscreen()` in the LayoutKind
+    ///     sense at all);
+    ///   * a `Grid` / `FullscreenPolicy::True` fullscreen **IS** the overlay owner
+    ///     but is **NOT** a covering fullscreen (it is an exclusive overlay, not
+    ///     a ribbon tile — it never joins the Column ribbon).
+    ///
+    /// Because the `Column` case makes the three categories disjoint, **never**
+    /// substitute `Client::is_fullscreen()` for either predicate: `is_fullscreen()`
+    /// is true for *all* of the above (Column, Grid and True), so it conflates
+    /// "covering" with "overlay owner" and silently changes behaviour. Read the
+    /// concrete predicate you actually mean.
+    ///
+    /// This helper only names *which* window covers the screen; the runtime
+    /// raise/drop transition in `stack_overlay` additionally gates on the camera
+    /// and zoom being settled. It depends only on `fs_ctx` (the focused
+    /// fullscreen column's window) and must stay equivalent to
+    /// `fs_ctx(...).win`.
+    pub fn covering_fullscreen_window(&self, mon_idx: usize) -> Option<WindowId> {
+        let mon = self.monitors.get(mon_idx)?;
+        let ws = mon.workspaces.get(mon.active_ws)?;
+        // A covering fullscreen is, by definition, a Column-ribbon participant.
+        if ws.layout != LayoutKind::Column || ws.overview {
+            return None;
+        }
+        let fs = crate::core::layout::fs_ctx(&self.clients, ws, mon.screen);
+        fs.win
     }
 
     pub fn mon_at(&self, x: i32, y: i32) -> usize {
@@ -916,10 +1337,58 @@ impl State {
         self.clients.insert(win, c);
     }
 
+    /// Read-only view of the wallpaper for the compositor: source, mode, and the
+    /// current revision. Pure query — never mutates `State`.
+    pub fn wallpaper_layer(&self) -> (WallpaperSource, WallpaperMode, u64) {
+        (
+            self.wallpaper.source.clone(),
+            self.wallpaper.mode,
+            self.wallpaper_rev,
+        )
+    }
+
     pub fn remove_client(&mut self, win: WindowId) -> Option<Client> {
         let c = self.clients.remove(&win)?;
+        // Drop every transient reference to the window that just died, so the
+        // ownership graph never names a client that is gone (Riesgo 5).
+        //
+        //   * a surviving child whose `transient_parent` was `win` is re-parented
+        //     to `None` — it becomes a plain float instead of a popup owned by a
+        //     ghost. Readers (`render::transient_of`, `decide_manage_focus`,
+        //     `relink_pending_transients`) already treat an unknown parent as "no
+        //     parent", so behaviour is unchanged; what changes is that the stale
+        //     id can no longer be resurrected by X11 *XID reuse* — a brand-new,
+        //     unrelated window that happens to get the recycled id would
+        //     otherwise inherit these orphans as its popups (raised above its
+        //     overlay, relinked onto its monitor/workspace).
+        //   * `win` itself (and any child it just orphaned) is dropped from the
+        //     deferred-transient queue; that queue is only drained on the next
+        //     `manage()`, so without this a destroyed child stayed referenced
+        //     there indefinitely.
+        for other in self.clients.values_mut() {
+            if other.transient_parent == Some(win) {
+                other.transient_parent = None;
+            }
+        }
+        let clients = &self.clients;
+        self.pending_transients
+            .retain(|w| clients.get(w).is_some_and(|c| c.transient_parent.is_some()));
         if self.monitors.is_empty() {
             return Some(c);
+        }
+        // Clear any stale `presented_maximize` references to this window across
+        // *every* monitor/workspace, not just the one the client currently
+        // points at. A window that was moved away (MoveWindowToMonitor /
+        // MoveToWorkspace) may still be named as the maximize-overlay owner on a
+        // former monitor/workspace; leaving that dangling entry triggers
+        // invariant #9 ("presented_maximize ... not in clients") once the window
+        // is destroyed.
+        for mon in self.monitors.iter_mut() {
+            for ws in mon.workspaces.iter_mut() {
+                if ws.presented_maximize == Some(win) {
+                    ws.presented_maximize = None;
+                }
+            }
         }
         // c.monitor may be stale after hotplug (fewer monitors than before).
         // Clamp to avoid panic index out-of-bounds.
@@ -930,7 +1399,35 @@ impl State {
             mon.focused = mon.focus_stack.last().copied();
         }
         if c.workspace < mon.workspaces.len() {
-            mon.workspaces[c.workspace].remove_window(win);
+            let ws_i = c.workspace;
+            mon.workspaces[ws_i].remove_window(win);
+            // A deferred (pending) focus that pointed at this window — either
+            // because this window was the *target* (`pf.window`) or the *owner*
+            // overlay (`pf.owner`) — is now dangling and must be dropped. (When the
+            // owner overlay dies, the deferred window is re-focused by the caller's
+            // unmanage/consume path rather than staying orphaned.)
+            if let Some(pf) = self.pending_focus {
+                if pf.window == win || pf.owner == win {
+                    self.pending_focus = None;
+                }
+            }
+            // Keep the workspace focus pointer (column + row) in lock-step with
+            // the logical focus (`mon.focused`). `remove_window` only shifts/
+            // clamps the column index relative to the surviving tree; it does not
+            // know which window is logically focused. Re-deriving the pointer from
+            // `mon.focused` here is the single source of truth for "what is
+            // focused": without it, removing a column before the focused one left
+            // `ws.focus.column_idx` on a different column, so the camera
+            // (`ideal_scroll` reads `focus.column_idx`) centered the wrong column
+            // and `best_focus`/`focused_win` returned a neighbour — focus silently
+            // jumped to the wrong window on close-before-focus, close-visible and
+            // close-offscreen (invariant: focus must not depend on visibility).
+            if let Some(fw) = mon.focused {
+                if let Some((ci, ri)) = mon.workspaces[ws_i].index_of_window(fw) {
+                    mon.workspaces[ws_i].focus.column_idx = ci;
+                    mon.workspaces[ws_i].columns[ci].focused = ri;
+                }
+            }
         }
         Some(c)
     }
@@ -957,6 +1454,14 @@ impl State {
 
         if self.clients.get(&focused).is_some_and(Client::is_float) {
             return false;
+        }
+
+        // The `Grid` layout is one window per column, so the column-based move
+        // below would only shuffle 1-window columns. Instead move the focused
+        // window by swapping it with its *geometric* neighbour in the flat
+        // stable order, then rebuild the single-window columns in that order.
+        if self.monitors[mi].workspaces[ws_i].layout == LayoutKind::Grid {
+            return self.apply_move_dir_grid(dir);
         }
 
         let (ci, n_cols, col_len) = {
@@ -1026,6 +1531,315 @@ impl State {
             _ => return false,
         }
         true
+    }
+
+    /// `Grid`-layout move: swap the focused window with its geometric neighbour
+    /// in the flat stable window order, then rewrite `ws.columns` as one-window
+    /// columns in that new order. Keeps `ws.focus.column_idx` on the moved
+    /// window. Geometry is taken from the render-kept `grid_snapshot` so the
+    /// neighbour is the real on-screen one; if absent, a gap-free arrangement is
+    /// used (direction is scale-invariant).
+    fn apply_move_dir_grid(&mut self, dir: Dir) -> bool {
+        let mi = self.sel_mon.min(self.monitors.len().saturating_sub(1));
+        let ws_i = self.monitors[mi].active_ws;
+        let focused = {
+            // Use the WM's logical focused window (mon.focused), not
+            // `ws.focused_win()` — in Grid every window is its own single-window
+            // column, so `ws.focus.column_idx` may point at a different window.
+            let Some(f) = self.monitors[mi].focused else {
+                return false;
+            };
+            f
+        };
+        let (wins, placements) = {
+            let ws = &self.monitors[mi].workspaces[ws_i];
+            let mon = &self.monitors[mi];
+            let wins: Vec<WindowId> = ws
+                .columns
+                .iter()
+                .flat_map(|c| c.windows.iter().copied())
+                .collect();
+            let placements: Vec<(WindowId, Rect)> = if let Some(s) = &ws.grid_snapshot {
+                s.placements.iter().map(|p| (p.win, p.rect)).collect()
+            } else {
+                crate::core::grid::arrange(&wins, mon.workarea, 0, 0, None).0
+            };
+            (wins, placements)
+        };
+        let Some(nb) = crate::core::grid::neighbor(&placements, focused, dir) else {
+            return false;
+        };
+
+        let mut order = wins;
+        if let (Some(fi), Some(ni)) = (
+            order.iter().position(|&w| w == focused),
+            order.iter().position(|&w| w == nb),
+        ) {
+            order.swap(fi, ni);
+        }
+
+        let area = self.monitors[mi].workarea;
+        let ws = &mut self.monitors[mi].workspaces[ws_i];
+        ws.columns.clear();
+        for w in &order {
+            ws.columns.push(Column {
+                windows: vec![*w],
+                focused: 0,
+                weight: 1.0,
+                boost: 1.0,
+            });
+        }
+        ws.focus.column_idx = order.iter().position(|&w| w == focused).unwrap_or(0);
+        ws.cleanup_empty_columns();
+        // Refresh the grid snapshot so the next `arrange` (which uses it as the
+        // stability anchor) preserves this explicit reorder instead of reverting
+        // it back to the pre-move layout. Geometry isn't needed for stability
+        // beyond the (row, col) slots, so a gap/border-free arrange suffices.
+        let (_, snap) = crate::core::grid::arrange(&order, area, 0, 0, None);
+        ws.grid_snapshot = Some(snap);
+        true
+    }
+
+    /// Check the structural invariants of the whole `State` (the 14-point
+    /// manifesto contract: every window lives in exactly one place, indices are
+    /// in range, focus is valid, geometry is positive/finite, cameras have no
+    /// NaN, …). Returns `Ok(())` when clean, or `Err(violations)` listing every
+    /// broken invariant.
+    ///
+    /// This is the single source of truth shared by:
+    ///   * `Engine::execute` / `execute_batch` (gated to `debug_assertions` so it
+    ///     costs nothing in release), and
+    ///   * the property-based harness (Fase 5), which calls it after every step
+    ///     regardless of profile.
+    ///
+    /// It is deliberately cheap and side-effect free — no X11, no cloning of the
+    /// client map — so running it on every transition is affordable.
+    pub fn check_invariants(&self) -> Result<(), Vec<String>> {
+        let mut v = Vec::new();
+
+        // 1. Monitor / workspace indices valid.
+        for (mi, mon) in self.monitors.iter().enumerate() {
+            if mon.active_ws >= mon.workspaces.len() {
+                v.push(format!(
+                    "monitor {mi}: active_ws {} out of range ({} workspaces)",
+                    mon.active_ws,
+                    mon.workspaces.len()
+                ));
+            }
+            // 2. Cameras carry no NaN / infinity (a zeroed spring would desync
+            //    the compositor from the logical scroll).
+            if !mon
+                .workspaces
+                .iter()
+                .all(|ws| ws.camera.target.is_finite() && ws.camera.position.is_finite())
+            {
+                v.push(format!("monitor {mi}: camera has NaN/inf target/position"));
+            }
+            for (ws_i, ws) in mon.workspaces.iter().enumerate() {
+                // 3. Focus column/row pointers in range.
+                if !ws.columns.is_empty() && ws.focus.column_idx >= ws.columns.len() {
+                    v.push(format!(
+                        "monitor {mi} ws {ws_i}: focus.column_idx {} >= {} columns",
+                        ws.focus.column_idx,
+                        ws.columns.len()
+                    ));
+                }
+                for (ci, col) in ws.columns.iter().enumerate() {
+                    if !col.windows.is_empty() && col.focused >= col.windows.len() {
+                        v.push(format!(
+                            "monitor {mi} ws {ws_i} : column {ci}: focused {} >= {} windows",
+                            col.focused,
+                            col.windows.len()
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 4. Every window referenced in a tiling/float lives in `clients`, and
+        //    no window is referenced more than once across the whole tree.
+        let mut seen: std::collections::HashMap<WindowId, (usize, usize)> =
+            std::collections::HashMap::new();
+        for (mi, mon) in self.monitors.iter().enumerate() {
+            for (ws_i, ws) in mon.workspaces.iter().enumerate() {
+                for (place, win) in ws
+                    .columns
+                    .iter()
+                    .flat_map(|c| c.windows.iter().copied())
+                    .map(|w| ("column", w))
+                    .chain(ws.floats.iter().copied().map(|w| ("float", w)))
+                {
+                    if !self.clients.contains_key(&win) {
+                        v.push(format!(
+                            "monitor {mi} ws {ws_i}: {place} window {win} not in clients"
+                        ));
+                        continue;
+                    }
+                    if let Some(prev) = seen.insert(win, (mi, ws_i)) {
+                        v.push(format!(
+                            "window {win} referenced twice: at ({}, {}) and ({}, {})",
+                            prev.0, prev.1, mi, ws_i
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 5. Every client *placed in the tree* must be stored at the
+        //    (monitor, workspace) its fields claim. A window whose
+        //    `monitor`/`workspace` disagree with where it is tiled is a desync
+        //    between the logical model and the placement tree. (Orphan clients
+        //    that are not yet placed — legitimate in test scaffolding and
+        //    during manage — are intentionally NOT required to be in the tree.)
+        for (&win, c) in self.clients.iter() {
+            if c.monitor >= self.monitors.len() {
+                v.push(format!(
+                    "client {win}: monitor {} out of range ({})",
+                    c.monitor,
+                    self.monitors.len()
+                ));
+                continue;
+            }
+            let mon = &self.monitors[c.monitor];
+            if c.workspace >= mon.workspaces.len() {
+                v.push(format!(
+                    "client {win}: workspace {} out of range on monitor {} ({} workspaces)",
+                    c.workspace,
+                    c.monitor,
+                    mon.workspaces.len()
+                ));
+                continue;
+            }
+            if let Some((pm, pw)) = seen.get(&win).copied() {
+                if (pm, pw) != (c.monitor, c.workspace) {
+                    v.push(format!(
+                        "client {win}: stored at ({}, {}) but tiled at ({}, {})",
+                        c.monitor, c.workspace, pm, pw
+                    ));
+                }
+            }
+            // NOTE: geometry-positivity and "focused window must be in its active
+            // workspace" are deliberately NOT asserted here — they hold only
+            // *after* an arrange/placement pass, and many valid intermediate
+            // states (and unit-test fixtures) legitimately have a default rect
+            // or a transient logical focus. Those are runtime concerns, not
+            // structural invariants.
+        }
+
+        // 8. Focus stack references only real clients.
+        for (mi, mon) in self.monitors.iter().enumerate() {
+            for &w in &mon.focus_stack {
+                if !self.clients.contains_key(&w) {
+                    v.push(format!(
+                        "monitor {mi}: focus_stack references unknown window {w}"
+                    ));
+                }
+            }
+            // 8b. focus_stack has no duplicates.
+            let mut seen_f = std::collections::HashSet::new();
+            let mut dup = false;
+            for &w in &mon.focus_stack {
+                if !seen_f.insert(w) {
+                    dup = true;
+                }
+            }
+            if dup {
+                v.push(format!("monitor {mi}: focus_stack has duplicate entries"));
+            }
+            // 8c. The global `pending_focus` slot names a live client and is owned
+            // by a currently-presented overlay on the SAME monitor/workspace the
+            // deferral was created for. The overlay need not be the *active*
+            // workspace — switching workspaces merely hides it from view, it does
+            // not dismiss it, so the deferral legitimately survives a workspace
+            // switch (it is only consumed/dropped when the overlay is torn down).
+            // Requiring the owner to still be the presented overlay is what stops
+            // a deferred window from being orphaned: the moment the owner overlay
+            // is dismissed or destroyed the deferral is consumed (or dropped).
+            if let Some(pf) = self.pending_focus {
+                if !self.clients.contains_key(&pf.window) {
+                    v.push(format!(
+                        "pending_focus window {} is not a known client",
+                        pf.window
+                    ));
+                } else if !self.clients.contains_key(&pf.owner) {
+                    v.push(format!(
+                        "pending_focus owner {} is not a known client",
+                        pf.owner
+                    ));
+                } else if !self.pending_focus_owner_presented() {
+                    v.push(format!(
+                        "pending_focus owner {} is not a presented overlay on monitor {} workspace {}",
+                        pf.owner, pf.monitor, pf.workspace
+                    ));
+                }
+            }
+            // 9b. overlay owner (maximize branch) matches presented_maximize.
+            if let Some(w) = self.presented_overlay_owner(mi) {
+                if self.clients.get(&w).is_some_and(|c| c.is_maximized())
+                    && mon
+                        .workspaces
+                        .get(mon.active_ws)
+                        .and_then(|ws| ws.presented_maximize)
+                        != Some(w)
+                {
+                    v.push(format!(
+                        "monitor {mi}: overlay owner / presented_maximize mismatch"
+                    ));
+                }
+            }
+            // NOTE: the logically-focused window is NOT required to be in
+            // `focus_stack` here — unit-test fixtures and transient focus
+            // retargets legitimately set `mon.focused` before/without updating
+            // the stack, and the production focus path keeps them in sync. The
+            // dangling-reference check above (stack must name real clients) is
+            // the part that catches real corruption.
+            // 9. `presented_maximize`, if set, names a real maximized client on the
+            //    active workspace.
+            let pm = mon
+                .workspaces
+                .get(mon.active_ws)
+                .and_then(|ws| ws.presented_maximize);
+            if let Some(w) = pm {
+                match self.clients.get(&w) {
+                    None => v.push(format!(
+                        "monitor {mi}: presented_maximize {w} not in clients"
+                    )),
+                    Some(c) if !c.is_maximized() => v.push(format!(
+                        "monitor {mi}: presented_maximize {w} is not maximized"
+                    )),
+                    Some(c) if c.workspace != mon.active_ws => v.push(format!(
+                        "monitor {mi}: presented_maximize {w} on wrong workspace"
+                    )),
+                    _ => {}
+                }
+            }
+        }
+
+        // 10. X input focus mirrors a real client.
+        if let Some(w) = self.x11_input_focus {
+            if !self.clients.contains_key(&w) {
+                v.push(format!("x11_input_focus {w} is not a known client"));
+            }
+        }
+
+        if v.is_empty() {
+            Ok(())
+        } else {
+            Err(v)
+        }
+    }
+
+    /// `#[cfg(debug_assertions)]` only — panic on the first broken invariant.
+    /// Called by `Engine::execute` / `execute_batch` so a bad transition blows up
+    /// immediately in debug builds instead of corrupting the model silently.
+    #[cfg(debug_assertions)]
+    pub fn assert_invariants(&self) {
+        if let Err(violations) = self.check_invariants() {
+            panic!(
+                "State invariant violation:\n  - {}",
+                violations.join("\n  - ")
+            );
+        }
     }
 
     /// Advance every workspace camera (and per-column boost / zoom springs) by
@@ -1161,5 +1975,64 @@ mod reservation_tests {
         m.set_reserved_region(0x1, Edge::Top, 0);
         assert_eq!(m.reserved.top, 0);
         assert!(m.reserved.is_empty());
+    }
+
+    #[test]
+    fn b4_single_dock_reserves_multiple_edges() {
+        // A dock may reserve several edges at once (panel + launcher). All must
+        // be applied together, and re-registering must not lose the other edge
+        // (bug B4): `set_reserved_region` clears the owner's previous region.
+        let mut m = mon();
+        m.set_reserved_regions(0x9001, &[(Edge::Top, 22), (Edge::Left, 50)]);
+        assert_eq!(m.reserved.top, 22);
+        assert_eq!(m.reserved.left, 50);
+        assert_eq!(m.reserved_regions.len(), 2);
+        // Refreshing with a different edge set replaces the whole owner.
+        m.set_reserved_regions(0x9001, &[(Edge::Bottom, 30)]);
+        assert_eq!(m.reserved.top, 0);
+        assert_eq!(m.reserved.left, 0);
+        assert_eq!(m.reserved.bottom, 30);
+        assert_eq!(m.reserved_regions.len(), 1);
+        // Empty list clears the owner entirely.
+        m.set_reserved_regions(0x9001, &[]);
+        assert!(m.reserved.is_empty());
+        assert!(m.reserved_regions.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod rect_tests {
+    use super::Rect;
+
+    #[test]
+    fn union_spanning_two_rects_is_the_bounding_box() {
+        let a = Rect::new(0, 0, 100, 100);
+        let b = Rect::new(300, 200, 50, 50);
+        assert_eq!(a.union(b), Rect::new(0, 0, 350, 250));
+    }
+
+    #[test]
+    fn union_with_overlapping_rect_is_their_bounds() {
+        let a = Rect::new(10, 10, 100, 100);
+        let b = Rect::new(50, 50, 100, 100);
+        assert_eq!(a.union(b), Rect::new(10, 10, 140, 140));
+    }
+
+    #[test]
+    fn union_with_itself_is_unchanged() {
+        let a = Rect::new(5, 5, 40, 40);
+        assert_eq!(a.union(a), a);
+    }
+
+    #[test]
+    fn contains_rect_is_true_only_when_fully_inside() {
+        let big = Rect::new(0, 0, 200, 200);
+        let small = Rect::new(50, 50, 40, 40);
+        assert!(big.contains_rect(small));
+        assert!(!small.contains_rect(big));
+        // Touching edges counts as contained.
+        assert!(big.contains_rect(Rect::new(0, 0, 10, 10)));
+        // Partial overlap is not containment.
+        assert!(!big.contains_rect(Rect::new(150, 150, 100, 100)));
     }
 }

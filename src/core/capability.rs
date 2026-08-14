@@ -56,7 +56,9 @@ impl<'a> Query<'a> {
     }
 
     pub fn selected_monitor(&self) -> usize {
-        self.state.sel_mon.min(self.monitor_count().saturating_sub(1))
+        self.state
+            .sel_mon
+            .min(self.monitor_count().saturating_sub(1))
     }
 
     // ── Workspace activo ────────────────────────────────────────────────────
