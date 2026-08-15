@@ -1846,8 +1846,22 @@ impl State {
     /// `dt` seconds. Returns true if any animation is still in flight, so the
     /// backend can keep ticking at a high frame rate.
     pub fn tick_animations(&mut self, dt: f32) -> bool {
-        let mut anim = false;
-        for mon in &mut self.monitors {
+        let mut scratch = Vec::new();
+        self.tick_animations_multi(dt, &mut scratch)
+    }
+
+    /// Like [`State::tick_animations`] but also reports, per monitor, whether that
+    /// monitor still has a moving spring (camera, accordion `boost`, or zoom).
+    ///
+    /// The per-monitor flag lets the frame loop recompute the live layout for
+    /// *only* the monitors that are actually animating, instead of (as the global
+    /// `bool` did) recomputing every monitor's projection on every animation
+    /// frame. An idle monitor whose layout is unchanged keeps its cached
+    /// projection (see `WindowManager::run_once`).
+    pub fn tick_animations_multi(&mut self, dt: f32, per_monitor: &mut [bool]) -> bool {
+        let mut any = false;
+        for (mi, mon) in self.monitors.iter_mut().enumerate() {
+            let mut anim = false;
             for ws in &mut mon.workspaces {
                 if ws.layout == LayoutKind::Column {
                     anim |= ws.camera.step(dt);
@@ -1881,8 +1895,12 @@ impl State {
                     }
                 }
             }
+            if mi < per_monitor.len() {
+                per_monitor[mi] = anim;
+            }
+            any |= anim;
         }
-        anim
+        any
     }
 }
 
