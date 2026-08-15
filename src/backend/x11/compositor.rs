@@ -46,8 +46,8 @@ use maverick_gl::{
 use maverick_img::Rgba8;
 
 use crate::core::wallpaper::{
-    compute_wallpaper_rects, GpuImage, ShaderId, WallpaperGpu, WallpaperMode, WallpaperSource,
-    WallpaperSpec,
+    compute_wallpaper_rects, shader_is_animated, GpuImage, ShaderId, WallpaperGpu, WallpaperMode,
+    WallpaperSource, WallpaperSpec,
 };
 use crate::log;
 use x11rb::connection::Connection;
@@ -390,14 +390,16 @@ pub struct Compositor {
     wallpaper_img_h: u32,
     /// Mapping mode for the native image.
     wallpaper_mode: WallpaperMode,
-    /// The active native source (Image/Shader), used to decide animation.
-    wallpaper_active: Option<WallpaperSource>,
     /// Outputs the wallpaper is laid out across (screen-space rects).
     wallpaper_outputs: Vec<Rect>,
     /// Monotonic wallpaper clock advanced by `tick_wallpaper` (seconds).
     wallpaper_clock: f32,
     /// Whether the wallpaper is currently animating (shader source active).
     wallpaper_animating: bool,
+    /// Whether the active wallpaper shader actually depends on time
+    /// (`u_time`/`u_delta_time`). A static shader is drawn once and must then let
+    /// the loop idle instead of forcing a frame every turn (idle CPU burn).
+    wallpaper_animated: bool,
     /// `dt` of the most recent `tick_wallpaper`, passed to the shader.
     wallpaper_last_dt: f32,
     /// True while at least one frame is queued/needed.
@@ -677,13 +679,13 @@ impl Compositor {
             wallpaper_pixmap: None,
             wallpaper_clock: 0.0,
             wallpaper_animating: false,
+            wallpaper_animated: false,
             wallpaper_last_dt: 0.0,
             wallpaper_native: None,
             wallpaper_shader: None,
             wallpaper_img_w: 0,
             wallpaper_img_h: 0,
             wallpaper_mode: WallpaperMode::Fill,
-            wallpaper_active: None,
             wallpaper_outputs: Vec::new(),
             dirty: true,
             dirty_reasons: DirtyReason::GEOMETRY,
@@ -1037,8 +1039,8 @@ impl Compositor {
             self.renderer.destroy_raw(TextureHandle(t.0));
         }
         self.wallpaper_shader = None;
-        self.wallpaper_active = None;
         self.wallpaper_animating = false;
+        self.wallpaper_animated = false;
         self.wallpaper_clock = 0.0;
 
         match &spec.source {
@@ -1050,7 +1052,6 @@ impl Compositor {
                         self.wallpaper_img_w = img.w;
                         self.wallpaper_img_h = img.h;
                         self.wallpaper_mode = spec.mode;
-                        self.wallpaper_active = Some(spec.source.clone());
                     }
                     Err(e) => log::warn!("wallpaper: upload failed: {e}"),
                 },
@@ -1061,9 +1062,12 @@ impl Compositor {
                     Ok(prog) => {
                         self.wallpaper_shader = Some(prog);
                         self.wallpaper_mode = spec.mode;
-                        self.wallpaper_active = Some(spec.source.clone());
                         self.wallpaper_clock = 0.0;
-                        self.wallpaper_animating = true;
+                        // Only a shader that actually depends on time must keep
+                        // the loop awake; a static shader is drawn once (via the
+                        // WALLPAPER dirty reason) and then idles.
+                        self.wallpaper_animated = shader_is_animated(&src);
+                        self.wallpaper_animating = self.wallpaper_animated;
                     }
                     Err(e) => log::warn!("wallpaper: shader compile failed: {e}"),
                 },
@@ -1101,12 +1105,13 @@ impl Compositor {
     }
 
     /// Advance the wallpaper animation clock by `dt` (the same clamped dt the WM
-    /// uses for its own springs — no separate timer). Only a `Shader` source
-    /// animates; a static image or `None` leaves `wallpaper_animating` false so the
-    /// loop goes idle (criterio #4).
+    /// uses for its own springs — no separate timer). Only a shader that actually
+    /// depends on time animates; a static shader, a still image or `None` leaves
+    /// `wallpaper_animating` false so the loop goes idle (criterio #4). This is
+    /// what stops the compositor from presenting at vsync forever on a static
+    /// shader wallpaper.
     pub fn tick_wallpaper(&mut self, dt: f32) {
-        let anim = matches!(self.wallpaper_active, Some(WallpaperSource::Shader(_)));
-        if anim {
+        if self.wallpaper_animated {
             self.wallpaper_clock += dt;
             self.wallpaper_last_dt = dt;
             self.wallpaper_animating = true;

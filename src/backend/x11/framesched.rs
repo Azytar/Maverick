@@ -384,6 +384,43 @@ mod tests {
         assert_eq!(idle.timeout_ms(), 100);
     }
 
+    /// Regression for the idle-wallpaper-CPU-burn bug: a *static* shader
+    /// wallpaper must yield exactly one frame (driven by the WALLPAPER dirty
+    /// reason, mapped to `Geometry`) and then idle — it must never report
+    /// `wallpaper_animating` on its own. Only a shader that actually depends on
+    /// time (`wallpaper_animating == true`) is allowed to keep requesting frames.
+    #[test]
+    fn static_wallpaper_shader_does_not_request_frames() {
+        // `wallpaper_animating == false` is exactly what the compositor now
+        // reports for a static shader (one that does not reference u_time /
+        // u_delta_time).
+        let s = FrameScheduler::from_compositor(false, false, DirtyReason::NONE);
+        assert!(
+            !s.needs_frame(),
+            "a static shader wallpaper must not keep the loop awake"
+        );
+        assert!(!s.has(FrameReason::WallpaperAnimation));
+        assert_eq!(s.timeout_ms(), 100);
+    }
+
+    #[test]
+    fn animated_wallpaper_shader_requests_frames() {
+        // `wallpaper_animating == true` is what the compositor reports for a
+        // shader that depends on time.
+        let mut s = FrameScheduler::from_compositor(false, true, DirtyReason::NONE);
+        assert!(s.needs_frame());
+        assert!(s.has(FrameReason::WallpaperAnimation));
+        assert_eq!(s.timeout_ms(), 0);
+        // A present consumes the dirty (one-shot) reasons but the animated
+        // wallpaper survives, so the loop keeps ticking…
+        s.clear_dirty();
+        assert!(s.needs_frame());
+        // …until the compositor stops reporting it (shader removed / static).
+        let stopped = FrameScheduler::from_compositor(false, false, DirtyReason::NONE);
+        assert!(!stopped.needs_frame());
+        assert_eq!(stopped.timeout_ms(), 100);
+    }
+
     /// The idle→animating edge must never hand the integrator an absurd `dt`.
     #[test]
     fn idle_to_animating_produces_no_absurd_dt() {

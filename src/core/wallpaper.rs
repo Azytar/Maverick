@@ -74,6 +74,58 @@ impl Default for WallpaperSpec {
     }
 }
 
+/// Whether a wallpaper fragment shader actually depends on time, and therefore
+/// requires a fresh frame every turn.
+///
+/// The compositor's fixed uniform contract supplies `u_time` (float) and
+/// `u_delta_time` (float); a shader that references neither produces an identical
+/// image every frame, so it is "static" and must not keep the frame scheduler
+/// awake (which would otherwise make the compositor present at vsync forever on
+/// idle, burning a CPU core for nothing). GLSL comments are ignored so a
+/// `u_time` mention inside a comment cannot misclassify a static shader.
+pub fn shader_is_animated(src: &str) -> bool {
+    let stripped = strip_glsl_comments(src);
+    stripped
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|tok| tok == "u_time" || tok == "u_delta_time")
+}
+
+/// Drop GLSL `//` line comments and `/* … */` block comments from `src` so the
+/// shader-animation probe cannot be fooled by an identifier that only appears in
+/// a comment. Input is expected to be ASCII (GLSL source); non-ASCII bytes are
+/// copied through unchanged.
+fn strip_glsl_comments(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0usize;
+    let mut block = false;
+    while i < bytes.len() {
+        if block {
+            if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                block = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            block = true;
+            i += 2;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 impl WallpaperSource {
     /// Infer the source kind from a path's extension. Shader fragments use a
     /// known GLSL suffix (`.glsl`/`.frag`/`.vert`/`.shader`/`.fs`); everything
@@ -312,5 +364,40 @@ mod tests {
             s,
             WallpaperSource::Video(std::path::PathBuf::from("/tmp/x.mp4"))
         );
+    }
+
+    #[test]
+    fn static_shader_is_not_animated() {
+        let src = "void main() { vec3 c = vec3(0.1, 0.2, 0.3); gl_FragColor = vec4(c, 1.0); }";
+        assert!(!shader_is_animated(src));
+    }
+
+    #[test]
+    fn shader_using_u_time_is_animated() {
+        let src = "void main() { float t = u_time; gl_FragColor = vec4(t, 0.0, 0.0, 1.0); }";
+        assert!(shader_is_animated(src));
+    }
+
+    #[test]
+    fn shader_using_u_delta_time_is_animated() {
+        let src = "void main() { float d = u_delta_time; gl_FragColor = vec4(d, 0.0, 1.0, 1.0); }";
+        assert!(shader_is_animated(src));
+    }
+
+    #[test]
+    fn u_time_in_comment_is_not_animated() {
+        // A mention of `u_time` only inside a comment must not count.
+        let src = "// drives nothing: u_time\nvoid main() { gl_FragColor = vec4(0.0); }";
+        assert!(!shader_is_animated(src));
+        let block = "/* u_time u_delta_time */ void main() { gl_FragColor = vec4(1.0); }";
+        assert!(!shader_is_animated(block));
+    }
+
+    #[test]
+    fn near_miss_identifiers_are_not_animated() {
+        // `u_time` must be a whole identifier, not a prefix/suffix of another.
+        assert!(!shader_is_animated("float utime = 1.0;"));
+        assert!(!shader_is_animated("float u_timex = 1.0;"));
+        assert!(!shader_is_animated("float xu_time = 1.0;"));
     }
 }
