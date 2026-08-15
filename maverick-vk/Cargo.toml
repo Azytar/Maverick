@@ -1,0 +1,28 @@
+[package]
+name = "maverick-vk"
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.82"
+authors = ["azytar"]
+description = "Isolated Vulkan/X11 bootstrap backend for Maverick (Phase 1, not yet wired into the compositor)"
+license = "GPL-3.0"
+repository = "https://github.com/azytar/Maverick"
+categories = ["os::unix-apis", "rendering"]
+keywords = ["window-manager", "x11", "vulkan", "compositor"]
+
+[dependencies]
+# Pure-Rust Vulkan loader. `Entry::loaded()` dlopens `libvulkan.so.1` at
+# runtime, so a machine without a Vulkan driver yields a clean `VkError::Loader`
+# instead of crashing — the same philosophy as `maverick_gl::probe`. We keep the
+# runtime deps to just `ash` on purpose: this crate must not drag `maverick-gl`
+# or `x11rb` into the library graph.
+ash = "0.38"
+
+[dev-dependencies]
+# Reuse `maverick-gl::open_x()` in the smoke test to obtain the shared XCB
+# connection and to build a throwaway override-redirect window. The live
+# compositor's overlay is never touched.
+maverick-gl = { path = "../maverick-gl" }
+x11rb = { version = "0.13", default-features = false, features = [
+    "allow-unsafe-code",
+] }

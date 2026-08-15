@@ -6,6 +6,7 @@ members = [
     "maverick-toml",
     "maverick-installer",
     "maverick-img",
+    "maverick-vk",
 ]
 exclude = []
 resolver = "2"
