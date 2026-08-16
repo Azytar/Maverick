@@ -54,17 +54,13 @@ impl WindowManager {
             c.on_unmap(e.window);
         }
         // Drop the duplicate `UnmapNotify` the X server delivers to the root
-        // (SubstructureNotify) for an unmap the WM itself performed. Only the
-        // variant targeted at the window itself (`e.event == e.window`)
-        // reflects a real client unmap; the root-targeted one is just our own
-        // reflection and must never unmanage.
+        // (SubstructureNotify) for an unmap it forwards on behalf of the client:
+        // only the variant targeted at the window itself (`e.event == e.window`)
+        // reflects a real client unmap, and the root-targeted copy is just the
+        // server's own broadcast of the same event. The WM never unmaps managed
+        // windows itself today (it culls off-screen ones via ConfigureNotify),
+        // so there is no self-unmap to ignore here.
         if e.event == self.root {
-            if let Some(n) = self.ignore_unmaps.get_mut(&e.window) {
-                *n = n.saturating_sub(1);
-                if *n == 0 {
-                    self.ignore_unmaps.remove(&e.window);
-                }
-            }
             return Ok(());
         }
 
@@ -751,10 +747,26 @@ impl WindowManager {
     /// on every client (manage.rs), so the server tells us the real X input
     /// focus moved. Mirror it into `state.x11_input_focus` and let `reconcile_focus`
     /// re-affirm the WM's logical intent if the two have drifted.
+    ///
+    /// Only a *real* focus change counts. A `mode` other than `Normal` (a
+    /// keyboard grab, e.g. a menu or drag, or an explicit `XSetInputFocus`
+    /// triggered while a grab is active) must not be treated as a focus move, and
+    /// a `detail` of `Inferior` (focus merely moved to a child sub-window, which
+    /// clients such as Gecko do constantly between their internal windows) means
+    /// the top-level focus has not actually changed. Ignoring both prevents the
+    /// spurious `reconcile_focus` churn that fights clients with child windows
+    /// and causes focus ping-pong (INV-C).
     pub(super) fn on_focus_in(
         &mut self,
         e: FocusInEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if e.mode != NotifyMode::NORMAL {
+            return Ok(());
+        }
+        if e.detail == NotifyDetail::INFERIOR || e.detail == NotifyDetail::POINTER
+        {
+            return Ok(());
+        }
         self.engine.state.x11_input_focus = if e.event == self.root {
             None
         } else {
@@ -770,10 +782,22 @@ impl WindowManager {
     /// an external `XSetInputFocus`). Clear our mirror if it pointed here and let
     /// `reconcile_focus` re-assert the logical focus so the WM stays authoritative
     /// and the border colors track reality.
+    ///
+    /// As with `on_focus_in`, ignore grab-mode and `Inferior` transitions: a
+    /// child-window `FocusOut` is not the top-level window losing focus, and a
+    /// grab-induced `FocusOut` (which will be paired with a `FocusIn` on
+    /// ungrab) must not clear our mirror nor trigger a spurious repair (INV-C).
     pub(super) fn on_focus_out(
         &mut self,
         e: FocusOutEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if e.mode != NotifyMode::NORMAL {
+            return Ok(());
+        }
+        if e.detail == NotifyDetail::INFERIOR || e.detail == NotifyDetail::POINTER
+        {
+            return Ok(());
+        }
         if self.engine.state.x11_input_focus == Some(e.event) {
             self.engine.state.x11_input_focus = None;
         }
