@@ -52,6 +52,13 @@ overview_zoom_min = 0.25
 # to manage all workspace switching yourself (default true).
 auto_workspace_binds = true
 
+# Normalize the `_NET_WM_STATE_MAXIMIZED_*` / `_NET_WM_STATE_FULLSCREEN` a
+# window requests at map time, so every new client opens as a normal tile
+# regardless of `WM_CLASS` (Firefox, Zen and forks included). Set to true to
+# honour a window's launch maximized/fullscreen state; a single app can opt in
+# via `[[rules]] honor_initial_state = true`.
+honor_initial_state = false
+
 # Focus follows the mouse pointer.
 focus_mouse = false
 # Warp the cursor to the center of the newly focused window.
@@ -232,13 +239,13 @@ action = "page_snap:left"         # …and left
 # ── Rules ────────────────────────────────────────────────────────────────────
 # Match windows by class / instance / window_type / title (substring,
 # case-insensitive). Multiple criteria in one rule are ANDed.
-
-# Firefox: refuse its own runtime fullscreen request (the F11/EWMH one) but
-# keep Mod4+Shift+f working (that path is never filtered).
-[[rules]]
-class = "firefox"
-deny_fullscreen = true
-ignore_initial_state = true
+#
+# A note on client-requested maximized/fullscreen: by default Maverick
+# NORMALIZES the `_NET_WM_STATE_MAXIMIZED_*` / `_NET_WM_STATE_FULLSCREEN` a
+# window asks for at map time, so every new client opens as a normal tile
+# regardless of `WM_CLASS` (Firefox, Zen and its forks included). Set
+# `honor_initial_state = true` here to let a window keep its launch state, or
+# opt a single app in with `[[rules]] honor_initial_state = true`.
 
 # A game that should get a real, exclusive fullscreen overlay (bypasses the
 # compositor, lives outside the scrolling ribbon, in any layout).
@@ -276,7 +283,5 @@ sticky = true
 # A grid (list of string lists); each inner list is one command + its args.
 [autostart]
 commands = [
-  ["picom"],
   ["xrandr", "--dpi", "96"],
-  ["nm-applet"],
 ]

@@ -699,8 +699,21 @@ impl WindowManager {
     }
 
     pub(super) fn apply_rules(&self, c: &mut Client) {
+        // Global invariant (INV-B): a window's map-time `_NET_WM_STATE` is
+        // normalized away unless it is explicitly honoured. The default is to
+        // open as a normal tile — only an app that genuinely must launch
+        // maximized/fullscreen opts in, either globally via
+        // `[general].honor_initial_state = true` or per-window via a rule's
+        // `honor_initial_state`. This is what keeps apps that "remember" their
+        // last maximized/fullscreen geometry (Firefox and its forks included)
+        // from opening as a fullscreen/maximized window the WM did not authorise,
+        // and it removes the need for per-`WM_CLASS` rules.
+        let mut honor_initial = self.engine.cfg.honor_initial_state;
         for rule in &self.engine.cfg.rules {
             if rule.matches(&c.class, &c.instance, &c.window_types, &c.name) {
+                if let Some(h) = rule.honor_initial_state {
+                    honor_initial = h;
+                }
                 if rule.float {
                     c.flags.set(WinFlags::FLOAT);
                 }
@@ -711,77 +724,56 @@ impl WindowManager {
                     c.flags.set(WinFlags::STICKY);
                 }
                 if rule.ignore_initial_state {
-                    // Undo whatever `_NET_WM_STATE_MAXIMIZED_*`/`_FULLSCREEN`
-                    // manage() already set from the window's own map-time
-                    // request (see the property-parsing pass above, which
-                    // runs before apply_rules). The window falls back to a
-                    // normal tile like every other new client.
-                    c.flags.clear(WinFlags::MAXIMIZED_V);
-                    c.flags.clear(WinFlags::MAXIMIZED_H);
-                    c.flags.clear(WinFlags::FULLSCREEN);
-                    // `c` isn't in `state.clients` yet at this point in
-                    // manage() (added further down), so `write_net_wm_state`
-                    // — which reads flags back out of `state.clients` — can't
-                    // be used here. Strip the atoms directly instead, so the
-                    // window's own `_NET_WM_STATE` matches the tile we're
-                    // about to give it rather than still claiming maximized.
-                    let mut atoms: Vec<u32> = self
-                        .conn
-                        .get_property(
-                            false,
-                            c.window,
-                            self.atoms.net_wm_state,
-                            AtomEnum::ATOM,
-                            0,
-                            32,
-                        )
-                        .ok()
-                        .and_then(|ck| ck.reply().ok())
-                        .map(|r| {
-                            r.value32()
-                                .map(Iterator::collect::<Vec<u32>>)
-                                .unwrap_or_default()
-                        })
-                        .unwrap_or_default();
-                    atoms.retain(|&a| {
-                        a != self.atoms.net_wm_state_fullscreen
-                            && a != self.atoms.net_wm_state_maximized_vert
-                            && a != self.atoms.net_wm_state_maximized_horiz
-                    });
-                    let _ = self.conn.change_property32(
-                        PropMode::REPLACE,
-                        c.window,
-                        self.atoms.net_wm_state,
-                        AtomEnum::ATOM,
-                        &atoms,
-                    );
-                }
-                if let Some(ws) = rule.ws {
-                    let mi = c.monitor;
-                    if mi < self.engine.state.monitors.len()
-                        && ws < self.engine.state.monitors[mi].workspaces.len()
-                    {
-                        c.workspace = ws;
-                    }
-                }
-                // Fullscreen *policy* (what to do with future requests), as
-                // opposed to `ignore_initial_state`, which only strips the
-                // state the window asked for at map time. `true_fullscreen`
-                // wins over `deny_fullscreen`: asking for a real exclusive
-                // fullscreen and also refusing fullscreen is contradictory, and
-                // the permissive-but-explicit reading is the useful one.
-                if rule.true_fullscreen {
-                    c.fullscreen_policy = FullscreenPolicy::True;
-                } else if rule.deny_fullscreen && c.fullscreen_policy != FullscreenPolicy::True {
-                    c.fullscreen_policy = FullscreenPolicy::Deny;
-                }
-                if let Some(bw) = rule.border_w {
-                    c.border_w = bw;
-                }
-                if let Some(op) = rule.opacity {
-                    c.opacity = Some(op.clamp(0.0, 1.0));
+                    // A rule can still force the old behaviour explicitly.
+                    honor_initial = false;
                 }
             }
+        }
+        if !honor_initial {
+            // Undo whatever `_NET_WM_STATE_MAXIMIZED_*`/`_FULLSCREEN`
+            // manage() already set from the window's own map-time
+            // request (see the property-parsing pass above, which
+            // runs before apply_rules). The window falls back to a
+            // normal tile like every other new client.
+            c.flags.clear(WinFlags::MAXIMIZED_V);
+            c.flags.clear(WinFlags::MAXIMIZED_H);
+            c.flags.clear(WinFlags::FULLSCREEN);
+            // `c` isn't in `state.clients` yet at this point in
+            // manage() (added further down), so `write_net_wm_state`
+            // — which reads flags back out of `state.clients` — can't
+            // be used here. Strip the atoms directly instead, so the
+            // window's own `_NET_WM_STATE` matches the tile we're
+            // about to give it rather than still claiming maximized.
+            let mut atoms: Vec<u32> = self
+                .conn
+                .get_property(
+                    false,
+                    c.window,
+                    self.atoms.net_wm_state,
+                    AtomEnum::ATOM,
+                    0,
+                    32,
+                )
+                .ok()
+                .and_then(|ck| ck.reply().ok())
+                .map(|r| {
+                    r.value32()
+                        .map(Iterator::collect::<Vec<u32>>)
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            atoms.retain(|&a| {
+                a != self.atoms.net_wm_state_fullscreen
+                    && a != self.atoms.net_wm_state_maximized_vert
+                    && a != self.atoms.net_wm_state_maximized_horiz
+            });
+            let _ = self.conn.change_property32(
+                PropMode::REPLACE,
+                c.window,
+                self.atoms.net_wm_state,
+                AtomEnum::ATOM,
+                &atoms,
+            );
         }
     }
 

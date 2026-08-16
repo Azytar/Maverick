@@ -106,6 +106,10 @@ struct GeneralCfg {
     focus_mouse: Option<bool>,
     warp_cursor: Option<bool>,
     tag_names: Option<Vec<String>>,
+    /// Global policy for the client's map-time `_NET_WM_STATE`. `false` (the
+    /// default) normalizes away a window's initial maximized/fullscreen request
+    /// so it opens as a normal tile; `true` honours it. See `Cfg::honor_initial_state`.
+    honor_initial_state: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -143,6 +147,10 @@ struct RuleEntry {
     /// maximized/fullscreen state at map time, forcing it to open as a
     /// normal tile. See `config::Rule::ignore_initial_state`.
     ignore_initial_state: bool,
+    /// Per-rule override of the global `honor_initial_state` policy. `Some(true)`
+    /// honours this window's map-time state; `Some(false)` normalizes it away;
+    /// `None` defers to the global config. See `config::Rule::honor_initial_state`.
+    honor_initial_state: Option<bool>,
     /// Refuse the app's own runtime fullscreen requests (F11 / EWMH).
     /// `Mod4+F` is unaffected. See `config::Rule::deny_fullscreen`.
     deny_fullscreen: bool,
@@ -318,6 +326,7 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         "auto_workspace_binds" => set_bool(&mut g.auto_workspace_binds, key, value, diag),
         "focus_mouse" => set_bool(&mut g.focus_mouse, key, value, diag),
         "warp_cursor" => set_bool(&mut g.warp_cursor, key, value, diag),
+        "honor_initial_state" => set_bool(&mut g.honor_initial_state, key, value, diag),
         "compositor_enabled" => set_bool(&mut g.compositor_enabled, key, value, diag),
         "camera_stiffness" => set_f32(&mut g.camera_stiffness, key, value, diag),
         "camera_damping" => set_f32(&mut g.camera_damping, key, value, diag),
@@ -646,6 +655,9 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
             cfg.tag_names = names;
         }
     }
+    if let Some(v) = general.honor_initial_state {
+        cfg.honor_initial_state = v;
+    }
 }
 
 fn apply_colors(cfg: &mut Cfg, colors: ColorsCfg, _diag: &mut Diagnostics) {
@@ -759,6 +771,7 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
                 ignore_initial_state: entry.ignore_initial_state,
                 deny_fullscreen: entry.deny_fullscreen,
                 true_fullscreen: entry.true_fullscreen,
+                honor_initial_state: entry.honor_initial_state,
             })
         })
         .collect()
@@ -1407,16 +1420,23 @@ border_width = 0
         // with deny/true fullscreen, autostart grid).
         let (cfg, _diag) = load_from_path(Path::new("config/config.toml"));
         assert!(!cfg.keybinds.is_empty(), "keybindings must parse");
-        assert!(cfg
+        // Normalization of client map-time state is now a global invariant, so
+        // the example neither ships a per-firefox `deny_fullscreen` rule nor a
+        // `firefox` rule at all; it must instead leave `honor_initial_state`
+        // at its default (false) and still carry the exclusive-fullscreen rule.
+        assert!(!cfg.honor_initial_state, "default must normalize initial state");
+        assert!(!cfg
             .rules
             .iter()
-            .any(|r| r.class.as_deref() == Some("firefox") && r.deny_fullscreen));
+            .any(|r| r.class.as_deref() == Some("firefox")));
         assert!(cfg
             .rules
             .iter()
             .any(|r| r.class.as_deref() == Some("steam") && r.true_fullscreen));
         assert_eq!(cfg.col_focused, 0x89b4fa);
-        assert!(cfg
+        // The example must NOT autostart a second compositor alongside the
+        // built-in one (that combination breaks compositing).
+        assert!(!cfg
             .autostart
             .iter()
             .any(|c| c.first().is_some_and(|b| b == "picom")));

@@ -54,6 +54,17 @@ pub struct Cfg {
     /// portals — maverick doesn't orchestrate any external tool specially,
     /// they're all just autostart entries.
     pub autostart: Vec<Vec<String>>,
+
+    /// Global policy for the client's map-time `_NET_WM_STATE`. When `false`
+    /// (the default), every newly managed window's `_NET_WM_STATE_MAXIMIZED_*`
+    /// / `_NET_WM_STATE_FULLSCREEN` set at map time is normalized away and the
+    /// window opens as a normal tile. This is a WM invariant, not a per-app
+    /// rule: it is what keeps apps that "remember" their last maximized/
+    /// fullscreen geometry (and even unrelated clients such as Firefox forks)
+    /// from opening as a fullscreen/maximized window the WM did not authorise.
+    /// Set to `true` to honour whatever the client asks for at map time; a
+    /// single rule may override this per-window via `Rule::honor_initial_state`.
+    pub honor_initial_state: bool,
 }
 
 impl Default for Cfg {
@@ -81,6 +92,7 @@ impl Default for Cfg {
             keybinds: vec![],
             rules: vec![],
             autostart: vec![],
+            honor_initial_state: false,
         }
     }
 }
@@ -164,6 +176,12 @@ pub struct Rule {
     /// you tiled last." Apple's `WindowServer` never lets an app dictate its
     /// own launch geometry like that; this rule does the same.
     pub ignore_initial_state: bool,
+    /// Override the global default for this specific window. When `true`, the
+    /// window's map-time `_NET_WM_STATE_MAXIMIZED_*` / `_NET_WM_STATE_FULLSCREEN`
+    /// is honoured (the old per-app opt-back-in). When unset, the global
+    /// `honor_initial_state` config decides. This is the escape hatch for a
+    /// legitimate app that genuinely must launch fullscreen/maximized.
+    pub honor_initial_state: Option<bool>,
     /// Refuse this app's *own* fullscreen requests at runtime. An EWMH
     /// `_NET_WM_STATE_FULLSCREEN` client message — what a browser's F11 sends —
     /// is dropped; the window stays tiled. `Mod4+F` is unaffected and still
@@ -326,21 +344,36 @@ pub fn compiled_config() -> Cfg {
             // remembers being maximized/fullscreen from the last session and
             // demands that state right back at map time — on a tiling WM
             // that just means "fill the workarea, no gaps, whatever else is
-            // there." Apple's WindowServer never lets an app dictate its own
-            // launch geometry like that, so neither do we: force it to open
-            // tiled like everything else. Add more `class`es here (or via
-            // `[[rules]] ignore_initial_state = true` in config.toml) for
-            // other repeat offenders.
+            // there." The WM now normalizes map-time `_NET_WM_STATE` for
+            // *every* client by default (see `Cfg::honor_initial_state`), so
+            // a per-class rule is no longer needed: Firefox, Zen and any
+            // other fork all open as normal tiles. If you specifically want
+            // a client's launch fullscreen/maximize to stick, set
+            // `honor_initial_state = true` globally in `[general]`, or opt in
+            // a single app via `[[rules]] honor_initial_state = true`.
             //
-            // `deny_fullscreen` is the runtime half of the same idea: F11 (an
-            // EWMH `_NET_WM_STATE_FULLSCREEN` client message) is refused, so
-            // Firefox cannot yank itself out of the ribbon on its own. The
-            // user's `Mod4+F` still works and gives a normal tiled fullscreen
-            // — the rule rejects the app's opinion, not yours.
+            // Runtime fullscreen is likewise honoured by default; the old
+            // `deny_fullscreen` knob remains available as an explicit opt-in
+            // for apps whose own F11/EWMH fullscreen you want to refuse while
+            // keeping `Mod4+Shift+F` working.
             Rule {
-                class: Some("firefox".into()),
-                ignore_initial_state: true,
-                deny_fullscreen: true,
+                class: Some("xdg-desktop-portal".into()),
+                title: None,
+                float: true,
+                ws: None,
+                ..Default::default()
+            },
+            Rule {
+                class: Some("gpick".into()),
+                title: None,
+                float: true,
+                ws: None,
+                ..Default::default()
+            },
+            Rule {
+                class: Some("pinentry".into()),
+                title: None,
+                float: true,
                 ws: None,
                 ..Default::default()
             },
@@ -512,15 +545,22 @@ mod rule_tests {
     }
 
     #[test]
-    fn compiled_config_ignores_firefox_initial_state() {
-        let firefox_rule = super::compiled_config()
+    fn compiled_config_normalizes_initial_state_for_all_clients() {
+        // A firefox/fork rule is no longer shipped; instead the compiled
+        // default treats map-time `_NET_WM_STATE` as something to normalize
+        // away for every client (see `Cfg::honor_initial_state` and
+        // `manage::apply_rules`). The invariant is global, not per-`WM_CLASS`.
+        let has_firefox = super::compiled_config()
             .rules
             .into_iter()
-            .find(|r| r.class.as_deref() == Some("firefox"));
+            .any(|r| r.class.as_deref() == Some("firefox"));
         assert!(
-            firefox_rule.is_some_and(|r| r.ignore_initial_state),
-            "compiled default rules must force Firefox to ignore its own \
-             requested maximized/fullscreen state at map time",
+            !has_firefox,
+            "no per-application hack: normalization is a global invariant",
+        );
+        assert!(
+            !super::compiled_config().honor_initial_state,
+            "compiled default must normalize map-time client state",
         );
     }
 }
