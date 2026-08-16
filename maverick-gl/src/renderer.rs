@@ -1381,8 +1381,15 @@ impl Renderer {
     }
 
     fn tfp_config(&mut self, visual: VisualFormat) -> Result<TfpConfig, String> {
-        if let Some(hit) = self.tfp_cache.get(&visual.id) {
-            return hit.clone();
+        // NOTE: a *failed* lookup is intentionally NOT cached. A visual whose
+        // fbconfig negotiation fails once (a transient `BadMatch`, an X server
+        // that was still initialising, a GLX race during a resize storm) must
+        // be retried on the next pixmap, not frozen into a permanent negative
+        // cache that silently drops every window of that visual (which is what
+        // a cached `Err` would do — see the compositor retry path in
+        // `Compositor::rename_and_bind`). Only a *successful* config is cached.
+        if let Some(Ok(hit)) = self.tfp_cache.get(&visual.id) {
+            return Ok(*hit);
         }
         let found = choose_tfp_fbconfig(
             &self.glx,
@@ -1391,7 +1398,9 @@ impl Renderer {
             &self.visuals,
             visual,
         );
-        self.tfp_cache.insert(visual.id, found.clone());
+        if found.is_ok() {
+            self.tfp_cache.insert(visual.id, found.clone());
+        }
         found
     }
 

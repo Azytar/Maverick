@@ -80,6 +80,12 @@ struct CompWin {
     pixmap: Option<Pixmap>,
     /// Pending damage: rebind the texture before next draw.
     damaged: bool,
+    /// A previous `rename_and_bind` (re)named the pixmap but failed to bind it to
+    /// a GL texture (e.g. an asynchronous `BadMatch`/`BadDrawable` swallowed by
+    /// the shared Xlib error handler, or a transient GLX failure during a resize
+    /// storm). We keep the named pixmap around and retry on the next damage
+    /// instead of dropping the window into a permanent hole — see `rename_and_bind`.
+    needs_rebind: bool,
     /// Mapped + redirected?
     mapped: bool,
     /// Hidden by the WM because it belongs to a non-active workspace (see
@@ -131,6 +137,7 @@ impl CompWin {
             tex: None,
             pixmap: None,
             damaged: true,
+            needs_rebind: false,
             mapped: false,
             hidden: false,
             format,
@@ -851,7 +858,7 @@ impl Compositor {
             };
             cw.mapped = true;
         }
-        self.rename_and_bind(win);
+        self.rename_and_bind(win, false);
         if !self.ignored.contains(&win) && !self.stack.contains(&win) {
             self.stack_dirty = true;
         }
@@ -921,7 +928,7 @@ impl Compositor {
             let _ = self.conn.free_pixmap(pm);
         }
         if resized && mapped {
-            self.rename_and_bind(win);
+            self.rename_and_bind(win, false);
         }
         self.mark_full(DirtyReason::GEOMETRY);
     }
@@ -1244,10 +1251,22 @@ impl Compositor {
         }
 
         // ── pass 2 (bottom→top): build the scene, skipping occluded windows.
-        for &win in &self.stack {
+        // Snapshot the stack order so we can mutate `self` (for a pending rebind)
+        // while iterating without holding an immutable borrow of `self.stack`.
+        let stack = self.stack.clone();
+        for &win in &stack {
             // No `ignored` probe here: `track` refuses to record an ignored
             // window, so `wins` can never contain one and this lookup is the
             // filter. That is one hash per stack entry saved every frame.
+            let needs_fixup = match self.wins.get(&win) {
+                Some(cw) if !cw.mapped || cw.hidden || cw.occluded => false,
+                Some(cw) => cw.tex.is_none() || cw.needs_rebind,
+                None => false,
+            };
+            if needs_fixup {
+                let has_pix = self.wins.get(&win).and_then(|cw| cw.pixmap).is_some();
+                self.rename_and_bind(win, has_pix);
+            }
             let Some(cw) = self.wins.get_mut(&win) else {
                 continue;
             };
@@ -1750,7 +1769,14 @@ impl Compositor {
     }
 
     /// Name the window's off-screen pixmap and wrap it as a GL texture.
-    fn rename_and_bind(&mut self, win: Window) {
+    ///
+    /// On a bind failure this keeps the named pixmap (when `keep_pixmap` and one
+    /// already exists) and sets `needs_rebind`, so `compute_scene` retries the
+    /// bind on the next damage report rather than leaving the window as a
+    /// permanent hole in the frame. The TFP spec leaves the texture contents
+    /// undefined after a rebind, so a freshly (re)bound window is always marked
+    /// `damaged` and repainted from the client's next draw.
+    fn rename_and_bind(&mut self, win: Window, keep_pixmap: bool) {
         let Some(cw) = self.wins.get(&win) else {
             return;
         };
@@ -1763,18 +1789,36 @@ impl Compositor {
         } else {
             (cw.outer.w as u16, cw.outer.h as u16)
         };
-        let Ok(pixmap) = self.conn.generate_id() else {
-            return;
+        // Reuse the existing named pixmap when retrying a failed bind, so we do
+        // not leak a new server-side allocation on every damage repaint.
+        let pixmap = if keep_pixmap {
+            match cw.pixmap {
+                Some(p) => p,
+                None => {
+                    let Ok(p) = self.conn.generate_id() else {
+                        return;
+                    };
+                    p
+                }
+            }
+        } else {
+            let Ok(p) = self.conn.generate_id() else {
+                return;
+            };
+            p
         };
-        if self.conn.composite_name_window_pixmap(win, pixmap).is_err() {
-            return;
+        if !keep_pixmap || cw.pixmap != Some(pixmap) {
+            if self.conn.composite_name_window_pixmap(win, pixmap).is_err() {
+                return;
+            }
         }
         match self.renderer.texture_from_pixmap(pixmap, format, w, h) {
             Ok(t) => {
                 if let Some(cw) = self.wins.get_mut(&win) {
                     cw.tex = Some(t);
                     cw.pixmap = Some(pixmap);
-                    cw.damaged = false;
+                    cw.damaged = true;
+                    cw.needs_rebind = false;
                 } else {
                     // The window vanished while we were binding.
                     self.renderer.destroy_texture(t);
@@ -1782,12 +1826,16 @@ impl Compositor {
                 }
             }
             Err(e) => {
-                let _ = self.conn.free_pixmap(pixmap);
-                // Once per visual: this is the difference between "that app
-                // draws nothing" and "the compositor cannot represent that
-                // app's pixel format on this screen".
                 if self.warned_visuals.insert(format.id) {
                     log::warn!("compositor: cannot texture windows of {format}: {e}");
+                }
+                // Keep the named pixmap and retry on the next damage instead of
+                // dropping the window into a permanent hole (RC-1).
+                if let Some(cw) = self.wins.get_mut(&win) {
+                    cw.needs_rebind = true;
+                    if !keep_pixmap || cw.pixmap != Some(pixmap) {
+                        cw.pixmap = Some(pixmap);
+                    }
                 }
             }
         }
