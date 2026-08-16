@@ -243,13 +243,6 @@ pub struct WindowManager {
     /// True while any camera/zoom/accordion spring is still moving; drives the
     /// frame-clock timeout (high rate while animating, idle 100ms otherwise).
     animating: bool,
-    /// Count of unmap operations the WM itself initiated. X11 delivers the WM
-    /// its own `UnmapNotify` back (`SubstructureNotify` on root), and without
-    /// this counter `on_unmap` would treat that self-unmap as the client
-    /// withdrawing and unmanage the window — permanently deleting it (see bug
-    /// C1). Incremented before every `unmap_window` the WM performs;
-    /// consumed in `on_unmap`.
-    ignore_unmaps: std::collections::HashMap<Window, u32>,
     /// Per-monitor cached stacking order (top-to-bottom) so `stack_overlay`
     /// only re-issues `raise()` when the order actually changed, instead of
     /// re-raising every float/popup on every animation frame (bug C6).
@@ -863,7 +856,6 @@ impl WindowManager {
             drag_target: None,
             last_frame: std::time::Instant::now(),
             animating: false,
-            ignore_unmaps: std::collections::HashMap::new(),
             last_stack_order: std::collections::HashMap::new(),
             fs_covering: std::collections::HashMap::new(),
             compositor,
