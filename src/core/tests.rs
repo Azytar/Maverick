@@ -1965,6 +1965,105 @@ mod unit_tests {
         engine.state.monitors[mi].workspaces[0].layout = LayoutKind::Grid;
         assert_eq!(engine.state.best_focus(mi), Some(1));
     }
+
+    // ─── Bug: workspace switch must keep the focused window Maverick considers
+    //     focused (lost keyboard focus on return) ──────────────────────────────
+    //
+    // Repro of the reported bug: Alacritty focused on ws0, switch to ws1, switch
+    // back to ws0 — Alacritty is visible again but the real X input focus is gone
+    // until `h`/`l` is pressed. The state-level invariant this test locks: the
+    // window Maverick *considers* focused (`best_focus`, which `ViewWorkspace`
+    // uses to pick its `FocusWindow` target) must survive the trip away and back,
+    // and `ViewWorkspace` must keep emitting `FocusWindow` for that same window.
+    //
+    // The actual desync is in the X11 backend: `Backend::focus` set the real X
+    // input focus and then ran `reconcile_focus()` *before* committing the
+    // logical `mon.focused`, so when a command (like `ViewWorkspace`) did not
+    // pre-write `mon.focused` the reconcile re-asserted focus onto the
+    // previously-focused, now-hidden window (fixed in `backend/x11/render.rs` by
+    // committing `mon.focused` before `reconcile_focus`). This state/effect test
+    // guards the core contract that fix depends on; the X-level reconciliation
+    // itself is validated under Xephyr via the `input-trace` diagnostics.
+    #[test]
+    fn view_workspace_round_trip_keeps_focused_window() {
+        use crate::core::commands::ViewWorkspace;
+        use crate::core::effect::Effect;
+        use crate::types::{Client, Column, Focus};
+
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+
+        // ws0: Alacritty (1) focused, plus a neighbour (2).
+        {
+            let ws = &mut engine.state.monitors[mi].workspaces[0];
+            ws.columns.push(Column {
+                windows: vec![1],
+                focused: 0,
+                weight: 0.5,
+                boost: 1.0,
+            });
+            ws.columns.push(Column {
+                windows: vec![2],
+                focused: 0,
+                weight: 0.5,
+                boost: 1.0,
+            });
+            ws.focus = Focus { column_idx: 0 };
+        }
+        engine.state.add_client(Client::new(1, mi, 0));
+        engine.state.add_client(Client::new(2, mi, 0));
+
+        // ws1: a different window (3) of its own.
+        {
+            let ws = &mut engine.state.monitors[mi].workspaces[1];
+            ws.columns.push(Column {
+                windows: vec![3],
+                focused: 0,
+                weight: 1.0,
+                boost: 1.0,
+            });
+            ws.focus = Focus { column_idx: 0 };
+        }
+        engine.state.add_client(Client::new(3, mi, 1));
+
+        engine.state.monitors[mi].focused = Some(1);
+        engine.state.monitors[mi].focus_stack = vec![1, 2];
+
+        // Alacritty is the window Maverick considers focused on ws0.
+        assert_eq!(engine.state.best_focus(mi), Some(1));
+
+        // Switch to ws1.
+        let eff1 = engine.execute(ViewWorkspace(1));
+        let fw1 = eff1
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Effect::FocusWindow(w) => Some(*w),
+                _ => None,
+            })
+            .expect("ViewWorkspace(1) must emit FocusWindow");
+        assert_eq!(fw1, Some(3), "ws1's only window must be focused on switch");
+
+        // Switch back to ws0 — Alacritty must still be the focused window and the
+        // effect that re-syncs focus must target it.
+        let eff0 = engine.execute(ViewWorkspace(0));
+        let fw0 = eff0
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Effect::FocusWindow(w) => Some(*w),
+                _ => None,
+            })
+            .expect("ViewWorkspace(0) must emit FocusWindow");
+        assert_eq!(fw0, Some(1), "returning to ws0 must re-focus Alacritty");
+        assert_eq!(
+            engine.state.best_focus(mi),
+            Some(1),
+            "the focused window Maverick considers focused must survive the \
+             workspace round trip (precondition for the X backend to keep real \
+             input focus on the visible window)"
+        );
+    }
     // ── GrowColumn clamp panic regression (bug C2) ──────────────────────────────
     //
     // With many columns the old `1.0 - 0.05*(n-1)` upper bound drops below the

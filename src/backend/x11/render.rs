@@ -796,6 +796,29 @@ impl WindowManager {
             if self.has_protocol(w, self.atoms.wm_take_focus)? {
                 self.send_proto(w, self.atoms.wm_take_focus, self.last_event_time)?;
             }
+            // Commit the logical focus to `State` *before* reconciling against the
+            // real X input focus below. `reconcile_focus()` compares the real X
+            // focus (`get_input_focus`) to `mon.focused`; if `mon.focused` were
+            // only written *after* that compare (its previous position, near the
+            // end of this function), a focus request whose caller never updated
+            // `mon.focused` first would leave it naming the window that was
+            // focused on the just-left workspace. `ViewWorkspace` is the prime
+            // example: it emits `FocusWindow(best_focus(mi))` but does not write
+            // `mon.focused` itself (unlike `FocusDirection`). `reconcile_focus`
+            // would then see logical != real and re-assert input focus onto that
+            // previous, now hidden-but-viewable window — desyncing real focus from
+            // the visible window (the reported "focus lost after returning to a
+            // workspace" bug, only recoverable with h/l). Writing `mon.focused`
+            // here makes logical == real for our own focus request, so the
+            // reconcile is a no-op and the real focus stays on the intended
+            // window. This matches the ordering already used by the `focus(None)`
+            // branch, which writes `mon.focused` before its `reconcile_focus`.
+            {
+                let mon = &mut self.engine.state.monitors[mon_i];
+                mon.focused = Some(w);
+                mon.focus_stack.retain(|&x| x != w);
+                mon.focus_stack.push(w);
+            }
             // Verify the server accepted the focus (and fix it if an external
             // XSetInputFocus raced us). No polling: this runs only on a focus
             // action we just issued.
@@ -830,16 +853,11 @@ impl WindowManager {
                 self.write_net_wm_state(w);
             }
 
-            let mon = &mut self.engine.state.monitors[mon_i];
-            mon.focused = Some(w);
-            mon.focus_stack.retain(|&x| x != w);
-            mon.focus_stack.push(w);
-
             #[cfg(feature = "input-trace")]
             itrace!(
                 "focus() SET mon[{}].focused={:?} (was {:?}); x11_input_focus={:?}",
                 mon_i,
-                mon.focused,
+                self.engine.state.monitors[mon_i].focused,
                 prev_focused,
                 self.engine.state.x11_input_focus
             );
