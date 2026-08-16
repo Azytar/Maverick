@@ -51,12 +51,8 @@ impl ControlServer {
         // Ensure the per-session dir exists (bind won't create parent dirs) and
         // is private (0700) so other UIDs can't interfere.
         let dir = identity::session_dir(name);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            return Err(e);
-        }
-        if let Err(e) = identity::set_private_dir(&dir) {
-            return Err(e);
-        }
+        std::fs::create_dir_all(&dir)?;
+        identity::set_private_dir(&dir)?;
         // Stale socket from a previous crashed instance: unlink so bind works.
         // Defend against TOCTOU symlink attacks: only remove if it's a socket.
         if path.exists() {
