@@ -28,7 +28,7 @@ use crate::backend::x11::compositor::DirtyReason;
 pub(crate) enum FrameReason {
     /// A camera/spring is still moving (scroll, zoom, accordion).
     Animation,
-    /// A client repainted (XDamage).
+    /// A client repainted (`XDamage`).
     Damage,
     /// A window's geometry changed (configure, opacity, hide, wallpaper).
     Geometry,
@@ -152,7 +152,7 @@ impl FrameScheduler {
     }
 
     /// Whether any reason is pending — i.e. a frame must be produced this turn.
-    /// This is the single NEED_FRAME / NO_FRAME decision; both the render gate
+    /// This is the single `NEED_FRAME` / `NO_FRAME` decision; both the render gate
     /// and the wait timeout read it, so no subsystem can request a redundant
     /// render in the same turn.
     #[inline]
@@ -260,7 +260,7 @@ mod tests {
         let mut s = FrameScheduler::new();
         s.mark(FrameReason::Geometry);
         s.mark(FrameReason::SurfaceChange);
-        let tags: Vec<&str> = s.reasons().map(|r| r.as_str()).collect();
+        let tags: Vec<&str> = s.reasons().map(super::FrameReason::as_str).collect();
         assert_eq!(tags, vec!["geometry", "surface"]);
     }
 
@@ -422,6 +422,8 @@ mod tests {
     }
 
     /// The idle→animating edge must never hand the integrator an absurd `dt`.
+    // Exact, deterministic comparisons against known clamp outputs.
+    #[allow(clippy::float_cmp)]
     #[test]
     fn idle_to_animating_produces_no_absurd_dt() {
         // Long idle gap: a 5 s raw delta is seeded to at most one refresh.

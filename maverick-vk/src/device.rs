@@ -96,8 +96,7 @@ impl Device {
             }
         }
 
-        let (p, graphics_family, present_family, _score) =
-            best.ok_or(VkError::NoPhysicalDevice)?;
+        let (p, graphics_family, present_family, _score) = best.ok_or(VkError::NoPhysicalDevice)?;
 
         // Logical device: enable swapchain. Validation is instance-level, so no
         // device layers are requested here.
@@ -173,8 +172,7 @@ impl Device {
             return Ok(None);
         }
 
-        let queue_families =
-            unsafe { instance.get_physical_device_queue_family_properties(p) };
+        let queue_families = unsafe { instance.get_physical_device_queue_family_properties(p) };
 
         // First graphics family, and a present-capable family (prefer the same
         // one if it can also present).

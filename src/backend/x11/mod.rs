@@ -77,11 +77,7 @@ fn proj_signature(ws: &Workspace, cfg: &Cfg) -> ProjSig {
         zoom_target: ws.zoom_target,
         page_zoom: ws.page_zoom,
         page_zoom_target: ws.page_zoom_target,
-        eff_boost: ws
-            .columns
-            .iter()
-            .map(|c| total_boost * c.boost)
-            .collect(),
+        eff_boost: ws.columns.iter().map(|c| total_boost * c.boost).collect(),
     }
 }
 
@@ -493,7 +489,10 @@ impl WindowManager {
                 comp.dirty_reasons(),
             );
             if log::enabled(log::DEBUG) {
-                let why: Vec<&str> = sched.reasons().map(|r| r.as_str()).collect();
+                let why: Vec<&str> = sched
+                    .reasons()
+                    .map(framesched::FrameReason::as_str)
+                    .collect();
                 log::debug!(
                     "compositor: scheduling frame (animating={}, dirty={}): {}",
                     sched.is_animating(),
@@ -560,14 +559,16 @@ impl WindowManager {
                         self.desired.clear();
                         let ws = self.engine.state.monitors[i].ws();
                         for &(win, g, bw) in &self.live_cache[i] {
-                            let stationary = ws.floats.contains(&win)
-                                || self
-                                    .engine
-                                    .state
-                                    .clients
-                                    .get(&win)
-                                    .map_or(false, |c| c.is_maximized() || c.is_true_fullscreen());
-                            let nx = if stationary { g.x } else { g.x.saturating_add(dx) };
+                            let stationary =
+                                ws.floats.contains(&win)
+                                    || self.engine.state.clients.get(&win).is_some_and(|c| {
+                                        c.is_maximized() || c.is_true_fullscreen()
+                                    });
+                            let nx = if stationary {
+                                g.x
+                            } else {
+                                g.x.saturating_add(dx)
+                            };
                             self.desired.push((win, Rect::new(nx, g.y, g.w, g.h), bw));
                         }
                         crate::core::present::present_into(
@@ -582,8 +583,7 @@ impl WindowManager {
                         self.desired.clear();
                         self.desired.extend(self.live_cache[i].iter().copied());
                     }
-                    self.transforms_buf
-                        .extend(self.desired.iter().copied());
+                    self.transforms_buf.extend(self.desired.iter().copied());
                 }
                 comp.set_transforms(&self.transforms_buf);
                 // A GL failure disables the compositor and returns us to the

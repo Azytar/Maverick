@@ -21,12 +21,18 @@ fn format_prefers_bgra8_srgb() {
         fmt(vk::Format::R8G8B8A8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR),
         fmt(vk::Format::B8G8R8A8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR),
     ];
-    assert_eq!(choose_surface_format(&formats).format, vk::Format::B8G8R8A8_SRGB);
+    assert_eq!(
+        choose_surface_format(&formats).format,
+        vk::Format::B8G8R8A8_SRGB
+    );
 }
 
 #[test]
 fn format_undefined_single_allows_any() {
-    let formats = vec![fmt(vk::Format::UNDEFINED, vk::ColorSpaceKHR::SRGB_NONLINEAR)];
+    let formats = vec![fmt(
+        vk::Format::UNDEFINED,
+        vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    )];
     let f = choose_surface_format(&formats);
     assert_eq!(f.format, vk::Format::B8G8R8A8_SRGB);
     assert_eq!(f.color_space, vk::ColorSpaceKHR::SRGB_NONLINEAR);
@@ -34,8 +40,14 @@ fn format_undefined_single_allows_any() {
 
 #[test]
 fn format_falls_back_to_first() {
-    let formats = vec![fmt(vk::Format::R8G8B8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR)];
-    assert_eq!(choose_surface_format(&formats).format, vk::Format::R8G8B8_SRGB);
+    let formats = vec![fmt(
+        vk::Format::R8G8B8_SRGB,
+        vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    )];
+    assert_eq!(
+        choose_surface_format(&formats).format,
+        vk::Format::R8G8B8_SRGB
+    );
 }
 
 #[test]
@@ -58,8 +70,14 @@ fn present_mode_prefers_mailbox_then_fifo() {
 #[test]
 fn extent_clamps_within_bounds() {
     let caps = vk::SurfaceCapabilitiesKHR {
-        min_image_extent: vk::Extent2D { width: 16, height: 16 },
-        max_image_extent: vk::Extent2D { width: 2048, height: 2048 },
+        min_image_extent: vk::Extent2D {
+            width: 16,
+            height: 16,
+        },
+        max_image_extent: vk::Extent2D {
+            width: 2048,
+            height: 2048,
+        },
         current_extent: vk::Extent2D {
             width: u32::MAX,
             height: u32::MAX,
@@ -81,7 +99,13 @@ fn extent_uses_current_when_fixed() {
         ..Default::default()
     };
     let e = clamp_extent(&caps, 10, 10);
-    assert_eq!(e, vk::Extent2D { width: 800, height: 600 });
+    assert_eq!(
+        e,
+        vk::Extent2D {
+            width: 800,
+            height: 600
+        }
+    );
 }
 
 #[test]

@@ -259,8 +259,7 @@ impl WindowManager {
                         .state
                         .clients
                         .get(&e.window)
-                        .map(|c| (c.geom, c.border_w))
-                        .unwrap_or((reported, reported_bw));
+                        .map_or((reported, reported_bw), |c| (c.geom, c.border_w));
                     self.apply_geom(e.window, desired.0, desired.1, true)?;
                 }
             }
@@ -763,8 +762,7 @@ impl WindowManager {
         if e.mode != NotifyMode::NORMAL {
             return Ok(());
         }
-        if e.detail == NotifyDetail::INFERIOR || e.detail == NotifyDetail::POINTER
-        {
+        if e.detail == NotifyDetail::INFERIOR || e.detail == NotifyDetail::POINTER {
             return Ok(());
         }
         self.engine.state.x11_input_focus = if e.event == self.root {
@@ -794,8 +792,7 @@ impl WindowManager {
         if e.mode != NotifyMode::NORMAL {
             return Ok(());
         }
-        if e.detail == NotifyDetail::INFERIOR || e.detail == NotifyDetail::POINTER
-        {
+        if e.detail == NotifyDetail::INFERIOR || e.detail == NotifyDetail::POINTER {
             return Ok(());
         }
         if self.engine.state.x11_input_focus == Some(e.event) {

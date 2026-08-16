@@ -318,8 +318,8 @@ pub struct Workspace {
     /// workspace (`None` when no maximized window owns the overlay). This is the
     /// explicit maximize-overlay owner; it is kept in sync with `Monitor::focused`
     /// + the focused window's maximize flags by `State::sync_presented_maximize`,
-    /// so no read site has to re-derive the maximize-overlay owner from
-    /// `Monitor::focused`. `Monitor::focused` stays purely "the logical focus".
+    ///   so no read site has to re-derive the maximize-overlay owner from
+    ///   `Monitor::focused`. `Monitor::focused` stays purely "the logical focus".
     pub presented_maximize: Option<WindowId>,
 }
 
@@ -1127,6 +1127,7 @@ impl State {
     ///      itself up to fill the workarea;
     ///   2. the column-focused window;
     ///   3. the most-recently focused window in the focus stack.
+    ///
     /// Recompute [`Workspace::presented_maximize`] for the active workspace of
     /// `mon_idx`. The maximize overlay is owned by exactly the monitor's focused
     /// window when that window is maximized (`is_maximized_v() || is_maximized_h()`)
@@ -1195,6 +1196,7 @@ impl State {
     ///      `Column`-layout Normal-policy fullscreen is just a ribbon tile and
     ///      is explicitly NOT an overlay; OR
     ///   2. it is the *focused* maximized window (`presented_maximize` owner).
+    ///
     /// This MUST stay equivalent to `core::present`, `render::stack_overlay` and
     /// `best_focus`. `manage` used to duplicate this with a weaker
     /// `is_fullscreen() || is_maximized_*` condition.
@@ -1263,10 +1265,10 @@ impl State {
             Some(p) => p,
             None => return false,
         };
-        self.monitors.get(pf.monitor).map_or(false, |m| {
+        self.monitors.get(pf.monitor).is_some_and(|m| {
             let focused = m.focused;
-            m.workspaces.get(pf.workspace).map_or(false, |ws| {
-                self.clients.get(&pf.owner).map_or(false, |c| {
+            m.workspaces.get(pf.workspace).is_some_and(|ws| {
+                self.clients.get(&pf.owner).is_some_and(|c| {
                     c.monitor == pf.monitor
                         && c.workspace == pf.workspace
                         && (c.is_fullscreen()
@@ -1290,7 +1292,7 @@ impl State {
     ///     scrolling participant, never an out-of-ribbon overlay
     ///     (`core::present` / `presented_overlay_owner` exclude it on purpose);
     ///   * a `presented_maximize` window **IS** the overlay owner but is **NOT**
-    ///     a covering fullscreen (it is not `is_fullscreen()` in the LayoutKind
+    ///     a covering fullscreen (it is not `is_fullscreen()` in the `LayoutKind`
     ///     sense at all);
     ///   * a `Grid` / `FullscreenPolicy::True` fullscreen **IS** the overlay owner
     ///     but is **NOT** a covering fullscreen (it is an exclusive overlay, not
@@ -1383,8 +1385,8 @@ impl State {
         // former monitor/workspace; leaving that dangling entry triggers
         // invariant #9 ("presented_maximize ... not in clients") once the window
         // is destroyed.
-        for mon in self.monitors.iter_mut() {
-            for ws in mon.workspaces.iter_mut() {
+        for mon in &mut self.monitors {
+            for ws in &mut mon.workspaces {
                 if ws.presented_maximize == Some(win) {
                     ws.presented_maximize = None;
                 }
@@ -1691,7 +1693,7 @@ impl State {
         //    between the logical model and the placement tree. (Orphan clients
         //    that are not yet placed — legitimate in test scaffolding and
         //    during manage — are intentionally NOT required to be in the tree.)
-        for (&win, c) in self.clients.iter() {
+        for (&win, c) in &self.clients {
             if c.monitor >= self.monitors.len() {
                 v.push(format!(
                     "client {win}: monitor {} out of range ({})",
@@ -1775,7 +1777,7 @@ impl State {
             }
             // 9b. overlay owner (maximize branch) matches presented_maximize.
             if let Some(w) = self.presented_overlay_owner(mi) {
-                if self.clients.get(&w).is_some_and(|c| c.is_maximized())
+                if self.clients.get(&w).is_some_and(Client::is_maximized)
                     && mon
                         .workspaces
                         .get(mon.active_ws)

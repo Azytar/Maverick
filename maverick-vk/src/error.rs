@@ -41,7 +41,10 @@ impl fmt::Display for VkError {
             VkError::Instance(s) => write!(f, "vulkan instance: {s}"),
             VkError::Surface(s) => write!(f, "vulkan surface: {s}"),
             VkError::NoPhysicalDevice => {
-                write!(f, "no suitable Vulkan physical device (graphics + present + swapchain)")
+                write!(
+                    f,
+                    "no suitable Vulkan physical device (graphics + present + swapchain)"
+                )
             }
             VkError::Device(s) => write!(f, "vulkan device: {s}"),
             VkError::Swapchain(s) => write!(f, "vulkan swapchain: {s}"),

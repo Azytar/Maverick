@@ -266,7 +266,7 @@ pub(crate) enum FrameMode {
 pub(crate) struct DirtyReason(u8);
 impl DirtyReason {
     pub const NONE: DirtyReason = DirtyReason(0);
-    /// A client repainted (XDamage) — only its own area is dirty.
+    /// A client repainted (`XDamage`) — only its own area is dirty.
     pub const DAMAGE: DirtyReason = DirtyReason(1 << 0);
     /// A window's geometry changed (configure, opacity, hide, wallpaper).
     pub const GEOMETRY: DirtyReason = DirtyReason(1 << 1);
@@ -572,18 +572,17 @@ impl Compositor {
         // The overlay window: our drawing surface. It already sits above
         // everything; we only need to make its *input* shape empty so clicks
         // fall through to the real windows.
-        let overlay = match conn
+        let overlay = if let Some(reply) = conn
             .composite_get_overlay_window(root)
             .ok()
             .and_then(|c| c.reply().ok())
         {
-            Some(reply) => reply.overlay_win,
-            None => {
-                log::warn!("compositor: CompositeGetOverlayWindow failed");
-                let _ = conn.composite_unredirect_subwindows(root, Redirect::MANUAL);
-                let _ = conn.set_selection_owner(x11rb::NONE, cm_atom, x11rb::CURRENT_TIME);
-                return None;
-            }
+            reply.overlay_win
+        } else {
+            log::warn!("compositor: CompositeGetOverlayWindow failed");
+            let _ = conn.composite_unredirect_subwindows(root, Redirect::MANUAL);
+            let _ = conn.set_selection_owner(x11rb::NONE, cm_atom, x11rb::CURRENT_TIME);
+            return None;
         };
 
         // Empty input region → the overlay passes all pointer events through.
@@ -800,7 +799,7 @@ impl Compositor {
         }
     }
 
-    /// Window appeared (CreateNotify). A freshly created window is placed on
+    /// Window appeared (`CreateNotify`). A freshly created window is placed on
     /// top of its siblings by the server, so that is where it enters the stack.
     pub fn on_create(&mut self, win: Window) {
         self.track(win);
@@ -830,7 +829,7 @@ impl Compositor {
         self.mark_full(DirtyReason::FOCUS);
     }
 
-    /// Window destroyed (DestroyNotify).
+    /// Window destroyed (`DestroyNotify`).
     pub fn on_destroy(&mut self, win: Window) {
         if let Some(cw) = self.wins.remove(&win) {
             self.release_texture(cw);
@@ -842,7 +841,7 @@ impl Compositor {
         self.mark_full(DirtyReason::SURFACE);
     }
 
-    /// Window mapped (MapNotify). Name its off-screen pixmap and bind a texture.
+    /// Window mapped (`MapNotify`). Name its off-screen pixmap and bind a texture.
     ///
     /// Mapping does **not** restack in X — an unmapped window keeps its place
     /// in the sibling order — so this deliberately does not touch `stack`. It
@@ -865,7 +864,7 @@ impl Compositor {
         self.mark_full(DirtyReason::SURFACE);
     }
 
-    /// Window unmapped (UnmapNotify). Drop the texture (the pixmap is gone).
+    /// Window unmapped (`UnmapNotify`). Drop the texture (the pixmap is gone).
     ///
     /// The window keeps its slot in `stack`: X does not restack on unmap, and
     /// `render` already skips unmapped windows. Dropping and re-adding it would
@@ -896,7 +895,7 @@ impl Compositor {
         }
     }
 
-    /// Geometry change (ConfigureNotify for a tracked, non-root window).
+    /// Geometry change (`ConfigureNotify` for a tracked, non-root window).
     pub fn on_configure(&mut self, win: Window, x: i32, y: i32, w: u32, h: u32, bw: u32) {
         let (resized, mapped, stale) = {
             let Some(cw) = self.wins.get_mut(&win) else {
@@ -933,7 +932,7 @@ impl Compositor {
         self.mark_full(DirtyReason::GEOMETRY);
     }
 
-    /// Damage reported (DamageNotify). Re-arm and mark dirty; the texture is
+    /// Damage reported (`DamageNotify`). Re-arm and mark dirty; the texture is
     /// rebound right before drawing.
     pub fn on_damage(&mut self, win: Window) {
         if let Some(dmg) = self.damages.get(&win) {
@@ -946,7 +945,7 @@ impl Compositor {
         self.dirty_reasons.insert(DirtyReason::DAMAGE);
     }
 
-    /// `_NET_WM_WINDOW_OPACITY` changed (PropertyNotify).
+    /// `_NET_WM_WINDOW_OPACITY` changed (`PropertyNotify`).
     pub fn on_opacity(&mut self, win: Window, opacity: f32) {
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.opacity = opacity.clamp(0.0, 1.0);
@@ -954,7 +953,7 @@ impl Compositor {
         self.mark_full(DirtyReason::GEOMETRY);
     }
 
-    /// Client changed its own X shape (ShapeNotify). We never clobber the
+    /// Client changed its own X shape (`ShapeNotify`). We never clobber the
     /// client's shape with our own X Shape mask, so this is just a redraw
     /// hint; the SDF/vs shader path already handles corner rounding, and an
     /// arbitrary client shape is respected because we don't overwrite it.
@@ -1090,8 +1089,8 @@ impl Compositor {
     }
 
     /// Sync the wallpaper's output layout from the WM's monitors. Called at init and
-    /// on RandR change. Also refreshes `screen_w/h` from the union of outputs so the
-    /// wallpaper keeps covering the whole screen after a resize (RandR edge case).
+    /// on `RandR` change. Also refreshes `screen_w/h` from the union of outputs so the
+    /// wallpaper keeps covering the whole screen after a resize (`RandR` edge case).
     pub fn set_outputs(&mut self, outputs: &[Rect]) {
         self.wallpaper_outputs = outputs.to_vec();
         if !outputs.is_empty() {
@@ -1757,8 +1756,7 @@ impl Compositor {
                     .get_window_attributes(win)
                     .ok()
                     .and_then(|c| c.reply().ok())
-                    .map(|a| a.map_state == MapState::VIEWABLE)
-                    .unwrap_or(false);
+                    .is_some_and(|a| a.map_state == MapState::VIEWABLE);
                 if viewable {
                     self.on_map(win);
                 } else {
@@ -1792,14 +1790,13 @@ impl Compositor {
         // Reuse the existing named pixmap when retrying a failed bind, so we do
         // not leak a new server-side allocation on every damage repaint.
         let pixmap = if keep_pixmap {
-            match cw.pixmap {
-                Some(p) => p,
-                None => {
-                    let Ok(p) = self.conn.generate_id() else {
-                        return;
-                    };
-                    p
-                }
+            if let Some(p) = cw.pixmap {
+                p
+            } else {
+                let Ok(p) = self.conn.generate_id() else {
+                    return;
+                };
+                p
             }
         } else {
             let Ok(p) = self.conn.generate_id() else {
@@ -1807,10 +1804,10 @@ impl Compositor {
             };
             p
         };
-        if !keep_pixmap || cw.pixmap != Some(pixmap) {
-            if self.conn.composite_name_window_pixmap(win, pixmap).is_err() {
-                return;
-            }
+        if (!keep_pixmap || cw.pixmap != Some(pixmap))
+            && self.conn.composite_name_window_pixmap(win, pixmap).is_err()
+        {
+            return;
         }
         match self.renderer.texture_from_pixmap(pixmap, format, w, h) {
             Ok(t) => {
@@ -1874,15 +1871,16 @@ fn stack_restack(stack: &mut Vec<Window>, win: Window, above: Option<Window>) ->
     let target = match above {
         None => 0,
         Some(sib) if sib == win => return true, // nonsense; leave the order alone
-        Some(sib) => match stack.iter().position(|&w| w == sib) {
-            Some(i) => i + 1,
-            None => {
+        Some(sib) => {
+            if let Some(i) = stack.iter().position(|&w| w == sib) {
+                i + 1
+            } else {
                 // Drop any stale entry so the resync starts from a consistent
                 // state rather than a duplicate.
                 stack.retain(|&w| w != win);
                 return false;
             }
-        },
+        }
     };
     match stack.iter().position(|&w| w == win) {
         Some(cur) => {
@@ -1906,7 +1904,7 @@ fn stack_add_top(stack: &mut Vec<Window>, win: Window) {
     stack.push(win);
 }
 
-/// Forget `win` entirely (DestroyNotify).
+/// Forget `win` entirely (`DestroyNotify`).
 fn stack_remove(stack: &mut Vec<Window>, win: Window) {
     stack.retain(|&w| w != win);
 }
@@ -2453,7 +2451,7 @@ mod bench {
         // Print a small table so `cargo test` output is the schedule/benchmark.
         eprintln!("projection bench (ns/frame, 0 allocs expected):");
         for (n, ns, _a) in &results {
-            eprintln!("  N={n:>5}  {:.1} ns/frame", ns);
+            eprintln!("  N={n:>5}  {ns:.1} ns/frame");
         }
     }
 
@@ -2487,10 +2485,7 @@ mod bench {
             ns < 50_000.0,
             "{ns:.0} ns/frame in the damage + plan path exceeds 50 µs"
         );
-        eprintln!(
-            "damage+plan bench: {:.1} ns/frame, {allocs} allocs/frame (Partial expected)",
-            ns
-        );
+        eprintln!("damage+plan bench: {ns:.1} ns/frame, {allocs} allocs/frame (Partial expected)");
         // Sanity: the policy the bench exercised resolves to a partial redraw.
         assert_eq!(decide_redraw(true, false, true), FrameMode::Partial);
     }
@@ -2507,9 +2502,7 @@ mod bench {
         // A tiled ribbon: 1000 opaque, on-screen columns stacked left→right; the
         // inner window sits at the far right, fully covered by a single one of
         // them. Mirrors the worst case the pass walks every frame.
-        let occluders: Vec<Rect> = (0..1000)
-            .map(|i| Rect::new((i * 2) as i32, 0, 100, 1080))
-            .collect();
+        let occluders: Vec<Rect> = (0..1000).map(|i| Rect::new(i * 2, 0, 100, 1080)).collect();
         let target = Rect::new(1990, 100, 40, 40);
         let iters: u64 = 20_000;
         let counter = CountAllocs::start();
@@ -2529,9 +2522,6 @@ mod bench {
             ns < 200_000.0,
             "{ns:.0} ns/frame in the occlusion pass exceeds 200 µs (1000 occluders)"
         );
-        eprintln!(
-            "occlusion bench: {:.1} ns/frame, {allocs} allocs/frame (1000 occluders)",
-            ns
-        );
+        eprintln!("occlusion bench: {ns:.1} ns/frame, {allocs} allocs/frame (1000 occluders)");
     }
 }

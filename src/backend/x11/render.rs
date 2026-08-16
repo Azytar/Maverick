@@ -700,8 +700,7 @@ impl WindowManager {
             .state
             .clients
             .get(&win)
-            .map(|c| c.geometry_dirty)
-            .unwrap_or(false);
+            .is_some_and(|c| c.geometry_dirty);
         // The Reconciler is the single owner of "what geometry is already
         // applied to X11" (Fase 1, plan 1786564084575). Diff the desired
         // placement against `AppliedState`; only emit `configure_window` when it
@@ -924,13 +923,7 @@ impl WindowManager {
                 // position; warp onto *that* (not the stale pre-scroll `geom`
                 // captured at the top), so the warped pointer lands on the
                 // window we actually focused rather than wherever it slid from.
-                let g = self
-                    .engine
-                    .state
-                    .clients
-                    .get(&w)
-                    .map(|c| c.geom)
-                    .unwrap_or(geom);
+                let g = self.engine.state.clients.get(&w).map_or(geom, |c| c.geom);
                 let _ = self.conn.warp_pointer(
                     x11rb::NONE,
                     w,

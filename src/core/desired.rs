@@ -13,13 +13,13 @@ pub struct DesiredWindow {
 
 /// The explicit, pure desired state for one monitor's arrange cycle.
 /// This is the single desired representation in the pipeline:
-///   State -> layout::arrange -> Placements (internal scratch)
-///        -> present::present_into
-///        -> DesiredState (explicit) -> Reconciler -> AppliedState -> X11
+///   State -> `layout::arrange` -> Placements (internal scratch)
+///        -> `present::present_into`
+///        -> `DesiredState` (explicit) -> Reconciler -> `AppliedState` -> X11
 #[derive(Debug, Default)]
 pub struct DesiredState {
     pub windows: Vec<DesiredWindow>,
-    /// Bottom->top stacking order as produced by present_into.
+    /// Bottom->top stacking order as produced by `present_into`.
     pub raise: Vec<WindowId>,
 }
 

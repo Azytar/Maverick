@@ -375,7 +375,7 @@ fn fullscreen_then_neighbor_settled_geometry() {
     engine.state.monitors[mi].focus_stack = vec![first];
 
     // focus A → A fills the screen (tiled fullscreen is a screen-wide ribbon tile).
-    let proj = settle_on_column(&mut engine, mi, ws_i, 0, &registry);
+    let _proj = settle_on_column(&mut engine, mi, ws_i, 0, &registry);
     let ga = geom_of(&engine, a);
     assert!(
         rect_eq(ga, screen),
@@ -394,7 +394,7 @@ fn fullscreen_then_neighbor_settled_geometry() {
     );
 
     // focus A again → A fills the screen once more.
-    let proj = settle_on_column(&mut engine, mi, ws_i, 0, &registry);
+    let _proj = settle_on_column(&mut engine, mi, ws_i, 0, &registry);
     let ga3 = geom_of(&engine, a);
     assert!(
         rect_eq(ga3, screen),
@@ -416,7 +416,7 @@ fn toggle_maximize_focused_only() {
 
     // Maximize the focused window (keyboard command returns the effect; the
     // backend applies it, so emulate the flag write the backend performs).
-    let proj = focus_step(&mut engine, ToggleMaximize(Some(first)), &registry);
+    let _proj = focus_step(&mut engine, ToggleMaximize(Some(first)), &registry);
     if let Some(c) = engine.state.clients.get_mut(&first) {
         c.flags.set(WinFlags::MAXIMIZED_V);
         c.flags.set(WinFlags::MAXIMIZED_H);
@@ -425,7 +425,7 @@ fn toggle_maximize_focused_only() {
     // in sync with the focused maximized window — `present` reads it from there.
     engine.state.sync_presented_maximize(mi);
     snap_all(&mut engine, mi, ws_i);
-    let proj = apply_settled(&mut engine, mi, &registry);
+    let _proj = apply_settled(&mut engine, mi, &registry);
 
     let gf = geom_of(&engine, first);
     assert_eq!(
@@ -686,7 +686,7 @@ fn settled_follows_target_at_rest() {
     let mi = engine.state.sel_mon;
     let ws_i = engine.state.monitors[mi].active_ws;
 
-    let proj = settle_on_column(&mut engine, mi, ws_i, 1, &registry);
+    let _proj = settle_on_column(&mut engine, mi, ws_i, 1, &registry);
     // At rest position==target, so the projection the backend writes to X11
     // (here: apply_settled) must equal projection(camera.target).
     let win = engine.state.monitors[mi].workspaces[ws_i].columns[1].windows[0];
@@ -718,7 +718,7 @@ fn live_differs_mid_animation_then_converges() {
     let mut engine = engine_with_columns(3, 1);
     let mi = engine.state.sel_mon;
     let ws_i = engine.state.monitors[mi].active_ws;
-    let proj = settle_on_column(&mut engine, mi, ws_i, 1, &registry);
+    let _proj = settle_on_column(&mut engine, mi, ws_i, 1, &registry);
 
     // Mid-animation: bump the live position far away. Live must follow it and
     // differ from the at-rest (target) projection.
@@ -896,7 +896,7 @@ fn border_w_is_part_of_geom() {
     engine.state.monitors[mi].focused = Some(first);
     engine.state.monitors[mi].focus_stack = vec![first];
 
-    let proj = settle_on_column(&mut engine, mi, ws_i, 0, &registry);
+    let _proj = settle_on_column(&mut engine, mi, ws_i, 0, &registry);
     let ca = engine.state.clients.get(&a).unwrap();
     assert_eq!(ca.border_w, 0, "fullscreen border must be 0");
     assert!(
@@ -909,7 +909,7 @@ fn border_w_is_part_of_geom() {
         c.flags.clear(WinFlags::FULLSCREEN);
         c.border_w = engine.cfg.border_w;
     }
-    let proj = settle_on_column(&mut engine, mi, ws_i, 0, &registry);
+    let _proj = settle_on_column(&mut engine, mi, ws_i, 0, &registry);
     let ca2 = engine.state.clients.get(&a).unwrap();
     assert_eq!(
         ca2.border_w, engine.cfg.border_w,
@@ -991,7 +991,7 @@ fn input_hittest_matches_settled_geom() {
     engine.state.monitors[mi].focused = Some(first);
     engine.state.monitors[mi].focus_stack = vec![1u32, 2u32, 3u32];
 
-    let proj = focus_window(&mut engine, 2, &registry);
+    let _proj = focus_window(&mut engine, 2, &registry);
     // At rest, `find_client`'s hit-test extent must equal the geom X11 uses.
     let ws = &engine.state.monitors[mi].workspaces[ws_i];
     let wa = engine.state.monitors[mi].workarea;
@@ -1005,7 +1005,7 @@ fn input_hittest_matches_settled_geom() {
     // applies the `cy` vertical centering (active when alpha != 1, e.g. the
     // accordion-boosted focused column). Reconstruct the full rect with the
     // same projection `ribbon_geom` uses.
-    let g = ribbon_geom(
+    let _g = ribbon_geom(
         ws,
         &engine.cfg,
         wa,
@@ -1193,7 +1193,7 @@ fn close_window_after_focus_keeps_focus_column() {
 /// must shift that column's `focused` pointer up, not leave it on a hole.
 #[test]
 fn close_row_before_focus_shifts_focused_row() {
-    let registry = default_registry();
+    let _registry = default_registry();
     let mut engine = engine_with_columns(2, 3);
     let mi = engine.state.sel_mon;
     let ws_i = engine.state.monitors[mi].active_ws;

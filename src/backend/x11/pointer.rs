@@ -221,47 +221,7 @@ impl WindowManager {
             }
         } else if let Some(fw) = self.engine.state.monitors[mi].focused {
             if let Some(cw) = client_win {
-                if fw != cw {
-                    // Clicking something other than the presented window. Two
-                    // cases:
-                    //  • A popup/dialog that *belongs* to the presented app — its
-                    //    transient chain reaches `fw`. The overlay's popups are
-                    //    deliberately raised above the fullscreen layer (see
-                    //    `stack_overlay`); dropping the overlay here would break
-                    //    that and close the app's own menu/save-dialog. So we
-                    //    keep the overlay, just focus the popup so it also
-                    //    receives keyboard input. The click is replayed to it.
-                    //  • A genuinely different window: drop the overlay so the
-                    //    tile becomes usable, then focus it (niri-style "sticky"
-                    //    fullscreen/maximize: the window itself never exits on
-                    //    click unless it is part of another app). For a maximized
-                    //    window this also clears its `MAXIMIZED_*` flags and
-                    //    rewrites `_NET_WM_STATE`, keeping EWMH state consistent
-                    //    (bug B3).
-                    if self.transient_of(cw, &[fw]) {
-                        self.focus(Some(cw))?;
-                    } else if self
-                        .engine
-                        .state
-                        .clients
-                        .get(&fw)
-                        .is_some_and(crate::types::Client::is_fullscreen)
-                    {
-                        // Route through the `ToggleFullscreen` Command (single
-                        // funnel) instead of mutating state directly here.
-                        let effects = self
-                            .engine
-                            .execute(crate::core::commands::ToggleFullscreen(Some(fw)));
-                        self.run_effects(effects)?;
-                        self.focus(Some(cw))?;
-                    } else {
-                        let effects = self
-                            .engine
-                            .execute(crate::core::commands::ToggleMaximize(Some(fw)));
-                        self.run_effects(effects)?;
-                        self.focus(Some(cw))?;
-                    }
-                } else {
+                if fw == cw {
                     // Click landed on the overlay itself (it is on top, so the
                     // event window resolves to `fw`). Normally this keeps the
                     // overlay so the user can interact with the fullscreen app.
@@ -322,6 +282,46 @@ impl WindowManager {
                         replay_event = false;
                     }
                     // else: genuine click on the overlay's own content → keep it.
+                } else {
+                    // Clicking something other than the presented window. Two
+                    // cases:
+                    //  • A popup/dialog that *belongs* to the presented app — its
+                    //    transient chain reaches `fw`. The overlay's popups are
+                    //    deliberately raised above the fullscreen layer (see
+                    //    `stack_overlay`); dropping the overlay here would break
+                    //    that and close the app's own menu/save-dialog. So we
+                    //    keep the overlay, just focus the popup so it also
+                    //    receives keyboard input. The click is replayed to it.
+                    //  • A genuinely different window: drop the overlay so the
+                    //    tile becomes usable, then focus it (niri-style "sticky"
+                    //    fullscreen/maximize: the window itself never exits on
+                    //    click unless it is part of another app). For a maximized
+                    //    window this also clears its `MAXIMIZED_*` flags and
+                    //    rewrites `_NET_WM_STATE`, keeping EWMH state consistent
+                    //    (bug B3).
+                    if self.transient_of(cw, &[fw]) {
+                        self.focus(Some(cw))?;
+                    } else if self
+                        .engine
+                        .state
+                        .clients
+                        .get(&fw)
+                        .is_some_and(crate::types::Client::is_fullscreen)
+                    {
+                        // Route through the `ToggleFullscreen` Command (single
+                        // funnel) instead of mutating state directly here.
+                        let effects = self
+                            .engine
+                            .execute(crate::core::commands::ToggleFullscreen(Some(fw)));
+                        self.run_effects(effects)?;
+                        self.focus(Some(cw))?;
+                    } else {
+                        let effects = self
+                            .engine
+                            .execute(crate::core::commands::ToggleMaximize(Some(fw)));
+                        self.run_effects(effects)?;
+                        self.focus(Some(cw))?;
+                    }
                 }
             }
         }
@@ -624,7 +624,7 @@ impl WindowManager {
                         c.map(|c| c.monitor)
                             .filter(|&m| m < self.engine.state.monitors.len())
                             .unwrap_or(0),
-                        c.map(|c| c.border_w).unwrap_or(0),
+                        c.map_or(0, |c| c.border_w),
                     )
                 };
                 let hints = self

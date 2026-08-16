@@ -71,7 +71,12 @@ fn smoke_init_and_present() {
             panic!("Vulkan::new failed: {e}");
         }
     };
-    println!("smoke: {}\nformat={:?} extent={:?}", vk.report(), vk.format(), vk.extent());
+    println!(
+        "smoke: {}\nformat={:?} extent={:?}",
+        vk.report(),
+        vk.format(),
+        vk.extent()
+    );
 
     let frames = 3;
     for i in 0..frames {

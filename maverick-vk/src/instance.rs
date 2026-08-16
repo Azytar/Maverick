@@ -22,18 +22,12 @@ pub(crate) const APP_VERSION: u32 = 0x001204;
 pub(crate) const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
 /// Required instance extensions for an X11 surface.
-pub(crate) const REQUIRED_EXTENSIONS: &[&CStr] = &[
-    vk::KHR_SURFACE_NAME,
-    vk::KHR_XCB_SURFACE_NAME,
-];
+pub(crate) const REQUIRED_EXTENSIONS: &[&CStr] = &[vk::KHR_SURFACE_NAME, vk::KHR_XCB_SURFACE_NAME];
 
 pub struct Instance {
     pub entry: ash::Entry,
     pub handle: ash::Instance,
-    debug: Option<(
-        ash::ext::debug_utils::Instance,
-        vk::DebugUtilsMessengerEXT,
-    )>,
+    debug: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 }
 
 unsafe extern "system" fn debug_callback(
@@ -47,7 +41,8 @@ unsafe extern "system" fn debug_callback(
         let message = CStr::from_ptr(data.p_message)
             .to_str()
             .unwrap_or("<invalid utf-8 debug message>");
-        let severity = if message_severity.intersects(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
+        let severity = if message_severity.intersects(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR)
+        {
             "ERROR"
         } else if message_severity.intersects(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
             "WARN"

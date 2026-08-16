@@ -172,9 +172,7 @@ pub fn apply_fullscreen_geom_restore(
     state: &mut State,
     win: WindowId,
 ) -> Option<crate::types::WindowMode> {
-    let Some(c) = state.clients.get_mut(&win) else {
-        return None;
-    };
+    let c = state.clients.get_mut(&win)?;
     let snap = c.fs_snapshot.take()?;
     c.geom = snap.rect;
     Some(snap.prior)
@@ -210,9 +208,7 @@ pub(crate) fn consume_pending_focus(
                 .monitors
                 .get(mi)
                 .and_then(|m| m.workspaces.get(ws_i))
-                .map_or(false, |_ws| {
-                    state.clients.get(&o).is_some_and(|c| c.workspace == ws_i)
-                });
+                .is_some_and(|_ws| state.clients.get(&o).is_some_and(|c| c.workspace == ws_i));
         if o_presented && pf.owner != o {
             return None;
         }
@@ -237,10 +233,7 @@ pub(crate) fn consume_pending_focus(
 /// the invariant and the existing `consume_pending_focus` calls, it can never
 /// double-resolve (those paths only fire when the owner was already dismissed).
 pub(crate) fn reconcile_pending_focus_after_transition(state: &mut State) -> Option<WindowId> {
-    let pf = match state.pending_focus {
-        Some(p) => p,
-        None => return None,
-    };
+    let pf = state.pending_focus?;
     if state.pending_focus_owner_presented() {
         return None;
     }
@@ -337,8 +330,8 @@ pub(crate) fn decide_active_window(state: &State, win: WindowId) -> ActiveWindow
 }
 
 /// The single logical owner of maximize state (mirrors `apply_fullscreen_topology`).
-/// Decides and mutates MAXIMIZED_V/H, saved_geom, geom, geometry_dirty,
-/// and presented_maximize. The backend `set_maximized` is now X11-only.
+/// Decides and mutates `MAXIMIZED_V/H`, `saved_geom`, geom, `geometry_dirty`,
+/// and `presented_maximize`. The backend `set_maximized` is now X11-only.
 pub fn apply_maximize(state: &mut State, win: WindowId, vert: Option<bool>, horiz: Option<bool>) {
     if let Some(c) = state.clients.get_mut(&win) {
         let was_max = c.is_maximized();
@@ -790,8 +783,7 @@ impl Command for ToggleFloat {
         let ws_i = state
             .clients
             .get(&win)
-            .map(|c| c.workspace)
-            .unwrap_or_else(|| state.monitors[mi].active_ws);
+            .map_or_else(|| state.monitors[mi].active_ws, |c| c.workspace);
         let is_float = state
             .clients
             .get(&win)
@@ -1208,7 +1200,7 @@ impl Command for NewColumn {
         // on its own workspace — otherwise we would splice it into the wrong
         // tree while it is still tiled on its own (cross-workspace duplication,
         // caught by the Fase 5 property harness).
-        let ws_i = state.clients.get(&win).map(|c| c.workspace).unwrap_or(ws_i);
+        let ws_i = state.clients.get(&win).map_or(ws_i, |c| c.workspace);
         if state
             .clients
             .get(&win)
@@ -1744,7 +1736,7 @@ mod tests {
             .any(|e| matches!(e, Effect::SetWallpaper)));
 
         let rev = s.wallpaper_rev;
-        let rep = SetWallpaper(WallpaperCmd::Mode(WallpaperMode::Fit)).execute(&mut s, &mut c);
+        let _rep = SetWallpaper(WallpaperCmd::Mode(WallpaperMode::Fit)).execute(&mut s, &mut c);
         assert_eq!(s.wallpaper.mode, WallpaperMode::Fit);
         assert_eq!(s.wallpaper_rev, rev + 1);
     }

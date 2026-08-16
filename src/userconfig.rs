@@ -1424,7 +1424,10 @@ border_width = 0
         // the example neither ships a per-firefox `deny_fullscreen` rule nor a
         // `firefox` rule at all; it must instead leave `honor_initial_state`
         // at its default (false) and still carry the exclusive-fullscreen rule.
-        assert!(!cfg.honor_initial_state, "default must normalize initial state");
+        assert!(
+            !cfg.honor_initial_state,
+            "default must normalize initial state"
+        );
         assert!(!cfg
             .rules
             .iter()

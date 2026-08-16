@@ -37,23 +37,13 @@ macro_rules! wtrace {
 }
 
 /// One window's last *applied* (written to X11) geometry + border state.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct AppliedWindow {
     pub rect: Rect,
     pub border_w: u32,
     /// False until the first configure has been applied. A freshly-mapped
     /// window has nothing applied yet, so the first diff always emits.
     pub seen: bool,
-}
-
-impl Default for AppliedWindow {
-    fn default() -> Self {
-        Self {
-            rect: Rect::default(),
-            border_w: 0,
-            seen: false,
-        }
-    }
 }
 
 /// The full set of windows the `Reconciler` believes X11 currently shows.
@@ -124,8 +114,7 @@ pub fn reconcile(
         let dirty = state
             .clients
             .get(&dw.window)
-            .map(|c| c.geometry_dirty)
-            .unwrap_or(false);
+            .is_some_and(|c| c.geometry_dirty);
         if let Some((rect, bw)) = applied.diff(dw.window, dw.rect, dw.border, dirty) {
             out.push(GeometryEffect::Configure {
                 win: dw.window,
@@ -607,7 +596,7 @@ mod tests {
         );
         applied.forget(win);
         assert!(
-            applied.windows.get(&win).is_none(),
+            !applied.windows.contains_key(&win),
             "forget must drop the applied record"
         );
         let state = State::new();

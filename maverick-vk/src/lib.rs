@@ -15,9 +15,7 @@ mod swapchain;
 
 pub use device::DeviceReport;
 pub use error::VkError;
-pub use swapchain::{
-    choose_image_count, choose_present_mode, choose_surface_format, clamp_extent,
-};
+pub use swapchain::{choose_image_count, choose_present_mode, choose_surface_format, clamp_extent};
 
 use std::os::raw::c_void;
 
@@ -80,26 +78,21 @@ impl Vulkan {
                 vk::CommandPoolCreateFlags::TRANSIENT
                     | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
             );
-        let command_pool =
-            unsafe { device.handle.create_command_pool(&pool_ci, None) }?;
+        let command_pool = unsafe { device.handle.create_command_pool(&pool_ci, None) }?;
 
         let alloc_ci = vk::CommandBufferAllocateInfo::default()
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
-        let command_buffer =
-            unsafe { device.handle.allocate_command_buffers(&alloc_ci) }?[0];
+        let command_buffer = unsafe { device.handle.allocate_command_buffers(&alloc_ci) }?[0];
 
         let sem_ci = vk::SemaphoreCreateInfo::default();
-        let image_available =
-            unsafe { device.handle.create_semaphore(&sem_ci, None) }?;
-        let render_finished =
-            unsafe { device.handle.create_semaphore(&sem_ci, None) }?;
+        let image_available = unsafe { device.handle.create_semaphore(&sem_ci, None) }?;
+        let render_finished = unsafe { device.handle.create_semaphore(&sem_ci, None) }?;
 
         // FENCE_CREATE_SIGNALED_BIT: the first `wait_for_fences` must not block
         // forever waiting on a fence that was never signaled.
-        let fence_ci = vk::FenceCreateInfo::default()
-            .flags(vk::FenceCreateFlags::SIGNALED);
+        let fence_ci = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         let in_flight = unsafe { device.handle.create_fence(&fence_ci, None) }?;
 
         Ok(Self {

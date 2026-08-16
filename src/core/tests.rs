@@ -227,6 +227,9 @@ mod unit_tests {
     }
 
     // ─── B1: Viewport zoom and Overview are mutually exclusive ─────────────
+    // Exact, deterministic float compares: the code under test drives the
+    // field to exactly `1.0`, so no tolerance is needed.
+    #[allow(clippy::float_cmp)]
     #[test]
     fn b1_viewport_then_overview_resets_viewport() {
         use crate::core::commands::{ToggleOverview, ViewportZoom};
@@ -253,6 +256,9 @@ mod unit_tests {
         );
     }
 
+    // Exact, deterministic float compares: the code under test drives the
+    // field to exactly `1.0`, so no tolerance is needed.
+    #[allow(clippy::float_cmp)]
     #[test]
     fn b1_overview_then_viewport_resets_overview() {
         use crate::core::commands::{ToggleOverview, ViewportZoom};
@@ -270,6 +276,9 @@ mod unit_tests {
         );
     }
 
+    // Exact, deterministic float compares: the code under test drives the
+    // field to exactly `1.0`, so no tolerance is needed.
+    #[allow(clippy::float_cmp)]
     #[test]
     fn b1_viewport_zoom_does_not_corrupt_live_zoom() {
         use crate::core::commands::{ToggleOverview, ViewportZoom};
@@ -1040,7 +1049,7 @@ mod unit_tests {
 
     #[test]
     fn focus_and_arrange_are_consistent() {
-        use crate::core::commands::{Command, FocusDirection};
+        use crate::core::commands::FocusDirection;
         use crate::core::grid;
         use crate::core::layout::{arrange, LayoutRegistry, Placements, RibbonScratch};
         use crate::types::{Client, Dir};
@@ -1092,7 +1101,7 @@ mod unit_tests {
 
     #[test]
     fn grid_move_swaps_with_geometric_neighbour() {
-        use crate::core::commands::{Command, MoveWindow};
+        use crate::core::commands::MoveWindow;
         use crate::core::grid;
         use crate::core::layout::{arrange, LayoutRegistry, Placements, RibbonScratch};
         use crate::types::{Client, Dir};
@@ -2904,7 +2913,7 @@ mod unit_tests {
         use crate::core::layout::{arrange, Phase, Placements, RibbonScratch};
         use crate::types::{Client, Dir, LayoutKind, WinFlags, WindowId};
 
-        const SEED: u64 = 0x5_6ec_73ed_1234_5678;
+        const SEED: u64 = 0x56ec_73ed_1234_5678;
         const STEPS: u32 = 12_000;
         const MAX_WINS: usize = 24;
 
@@ -2944,7 +2953,7 @@ mod unit_tests {
         let mut live: Vec<WindowId> = Vec::new();
         let mut next_win: u32 = 1;
 
-        let mut fresh_window =
+        let fresh_window =
             |engine: &mut Engine, rng: &mut Rng, live: &mut Vec<WindowId>, next: &mut u32| {
                 if live.len() >= MAX_WINS {
                     return false;
@@ -3058,6 +3067,7 @@ mod unit_tests {
             if let Err(v) = engine.state.check_invariants() {
                 // Dump where every window referenced in any tree lives, to
                 // localise a cross-workspace duplication.
+                use std::fmt::Write as _;
                 let mut dump = String::new();
                 for (mi2, mon2) in engine.state.monitors.iter().enumerate() {
                     for (ws2, wsx) in mon2.workspaces.iter().enumerate() {
@@ -3068,11 +3078,12 @@ mod unit_tests {
                             .collect();
                         wins.extend(wsx.floats.iter().copied());
                         if !wins.is_empty() {
-                            dump.push_str(&format!(
-                                "  mon{mi2} ws{ws2} (active={}): {:?}\n",
+                            let _ = writeln!(
+                                dump,
+                                "  mon{mi2} ws{ws2} (active={}): {:?}",
                                 ws2 == mon2.active_ws,
                                 wins
-                            ));
+                            );
                         }
                     }
                 }
@@ -3186,7 +3197,6 @@ mod unit_tests {
     /// window got the focus.
     fn t_manage(engine: &mut Engine, win: WindowId) -> bool {
         t_add(engine, win);
-        let mi = engine.state.sel_mon;
         match crate::core::commands::decide_manage_focus(&engine.state, win) {
             crate::core::commands::ManageFocusIntent::Defer {
                 owner,
@@ -3563,23 +3573,17 @@ mod unit_tests {
             //     so it does not move `sel_mon`).
             for (mi, m) in s.monitors.iter().enumerate() {
                 if let Some(fw) = m.focused {
-                    if !s.clients.contains_key(&fw) {
-                        panic!(
-                            "seed {SEED:#x} step {step} op {op}: monitor {mi} focused {fw:?} is not a live client"
-                        );
-                    }
+                    assert!(s.clients.contains_key(&fw),
+                        "seed {SEED:#x} step {step} op {op}: monitor {mi} focused {fw:?} is not a live client"
+                    );
                 }
             }
             // (2) focus_stack has no duplicates and names only live clients.
             for (mi, m) in s.monitors.iter().enumerate() {
                 let mut seen = std::collections::HashSet::new();
                 for &w in &m.focus_stack {
-                    if !seen.insert(w) {
-                        panic!("seed {SEED:#x} step {step} op {op}: monitor {mi} focus_stack has duplicate {w}");
-                    }
-                    if !s.clients.contains_key(&w) {
-                        panic!("seed {SEED:#x} step {step} op {op}: monitor {mi} focus_stack names dead {w}");
-                    }
+                    assert!(seen.insert(w), "seed {SEED:#x} step {step} op {op}: monitor {mi} focus_stack has duplicate {w}");
+                    assert!(s.clients.contains_key(&w), "seed {SEED:#x} step {step} op {op}: monitor {mi} focus_stack names dead {w}")
                 }
             }
             // (3) pending_focus is not dangling.
@@ -3591,8 +3595,8 @@ mod unit_tests {
                 );
                 assert!(
                     s.presented_overlay_owner(pf.monitor) == Some(pf.owner)
-                        || s.monitors.get(pf.monitor).and_then(|m| m.workspaces.get(pf.workspace)).map_or(false, |ws| {
-                            s.clients.get(&pf.owner).map_or(false, |c| c.monitor == pf.monitor && c.workspace == pf.workspace
+                        || s.monitors.get(pf.monitor).and_then(|m| m.workspaces.get(pf.workspace)).is_some_and(|ws| {
+                            s.clients.get(&pf.owner).is_some_and(|c| c.monitor == pf.monitor && c.workspace == pf.workspace
                                 && (c.is_fullscreen() && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen())
                                     || ((c.is_maximized_v() || c.is_maximized_h()) && s.monitors[pf.monitor].focused == Some(pf.owner))))
                         }),
@@ -3619,7 +3623,10 @@ mod unit_tests {
             // (5) #9b: presented_maximize == presented_overlay_owner when the owner is maximized.
             for (mi, m) in s.monitors.iter().enumerate() {
                 if let Some(w) = s.presented_overlay_owner(mi) {
-                    if s.clients.get(&w).is_some_and(|c| c.is_maximized()) {
+                    if s.clients
+                        .get(&w)
+                        .is_some_and(crate::types::Client::is_maximized)
+                    {
                         assert_eq!(
                             m.workspaces
                                 .get(m.active_ws)
@@ -4349,7 +4356,7 @@ mod unit_tests {
     fn maximize_desired_geometry() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let _ws_i = engine.state.monitors[mi].active_ws;
         t_manage(&mut engine, 1);
         t_focus(&mut engine, 1);
         t_set_maximized(&mut engine, 1);
@@ -4676,7 +4683,11 @@ mod unit_tests {
                 5 => {
                     if !live.is_empty() {
                         let w = live[rng.below(live.len() as u32) as usize];
-                        let is_float = engine.state.clients.get(&w).map_or(false, |c| c.is_float());
+                        let is_float = engine
+                            .state
+                            .clients
+                            .get(&w)
+                            .is_some_and(crate::types::Client::is_float);
                         // Only resize a window that is ALREADY floating: the WM
                         // follows floats, and `ToggleFloat` already placed it
                         // (removed from columns, added to ws.floats) without
@@ -4684,8 +4695,8 @@ mod unit_tests {
                         if is_float {
                             let gx = (rng.below(800) as i32) + 50;
                             let gy = (rng.below(600) as i32) + 50;
-                            let gw = 100 + rng.below(400) as u32;
-                            let gh = 100 + rng.below(300) as u32;
+                            let gw = 100 + rng.below(400);
+                            let gh = 100 + rng.below(300);
                             let g = Rect::new(gx, gy, gw, gh);
                             if let Some(c) = engine.state.clients.get_mut(&w) {
                                 c.geom = g;
@@ -5104,8 +5115,8 @@ mod unit_tests {
         let mut last = g0;
         for i in 0..5 {
             let r = Rect::new(
-                100 + (i as i32 + 1) * 11,
-                100 + (i as i32 + 1) * 11,
+                100 + (i + 1) * 11,
+                100 + (i + 1) * 11,
                 300 + (i as u32 + 1) * 20,
                 200 + (i as u32 + 1) * 20,
             );
@@ -5200,7 +5211,7 @@ mod unit_tests {
         };
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let _ws_i = engine.state.monitors[mi].active_ws;
         t_manage(&mut engine, 1);
         t_focus(&mut engine, 1);
 
@@ -5705,8 +5716,9 @@ mod unit_tests {
             .state
             .clients
             .get(&parent)
-            .map(|p| (p.monitor, p.workspace))
-            .unwrap_or((mi, engine.state.monitors[mi].active_ws));
+            .map_or((mi, engine.state.monitors[mi].active_ws), |p| {
+                (p.monitor, p.workspace)
+            });
         let mut c = Client::new(win, mi, ws_i);
         c.flags.set(WinFlags::FLOAT);
         c.geom = Rect::new(200, 200, 300, 200);
@@ -5743,7 +5755,7 @@ mod unit_tests {
         let live = |w: WindowId| engine.state.clients.contains_key(&w);
 
         // 1. No orphaned transient reference, in either direction.
-        for (&w, c) in engine.state.clients.iter() {
+        for (&w, c) in &engine.state.clients {
             if let Some(p) = c.transient_parent {
                 assert!(live(p), "{ctx}: client {w} points at destroyed parent {p}");
                 assert_ne!(p, w, "{ctx}: client {w} is its own transient parent");
@@ -6175,7 +6187,7 @@ mod unit_tests {
         assert!(engine
             .state
             .pending_focus
-            .map_or(true, |p| p.window != 1 && p.owner != 1));
+            .is_none_or(|p| p.window != 1 && p.owner != 1));
         engine
             .state
             .check_invariants()
@@ -6187,11 +6199,10 @@ mod unit_tests {
     // destroyed (see `remove_client` + `MoveWindowToMonitor`/`MoveToWorkspace`).
     #[test]
     fn audit_p5_multi_monitor_minifuzz() {
-        use crate::backend::x11::reconciler::{reconcile, AppliedState};
+        use crate::backend::x11::reconciler::AppliedState;
         use crate::core::commands::{
-            CycleLayout, FocusDirection, FocusMonitor, MoveResize, MoveToWorkspace,
-            MoveWindowToMonitor, SetLayout, ToggleFloat, ToggleFullscreen, ToggleMaximize,
-            ViewWorkspace,
+            FocusMonitor, MoveResize, MoveToWorkspace, MoveWindowToMonitor, ToggleFloat,
+            ToggleFullscreen, ToggleMaximize, ViewWorkspace,
         };
         use crate::types::{Dir, LayoutKind, WindowId};
 
@@ -6229,16 +6240,6 @@ mod unit_tests {
             live.push(next_win);
             next_win += 1;
         }
-
-        let run_pipeline_all = |engine: &Engine| -> DesiredState {
-            let mut all = DesiredState::default();
-            for mi in 0..engine.state.monitors.len() {
-                let d = pipeline_desired(engine, mi);
-                all.windows.extend(d.windows);
-                all.raise.extend(d.raise);
-            }
-            all
-        };
 
         for step in 0..STEPS {
             let op = rng.below(11);
@@ -6283,12 +6284,16 @@ mod unit_tests {
                     // MoveResize on an existing float.
                     if !live.is_empty() {
                         let w = live[rng.below(live.len() as u32) as usize];
-                        let is_float = engine.state.clients.get(&w).map_or(false, |c| c.is_float());
+                        let is_float = engine
+                            .state
+                            .clients
+                            .get(&w)
+                            .is_some_and(crate::types::Client::is_float);
                         if is_float {
                             let gx = (rng.below(800) as i32) + 50;
                             let gy = (rng.below(600) as i32) + 50;
-                            let gw = 100 + rng.below(400) as u32;
-                            let gh = 100 + rng.below(300) as u32;
+                            let gw = 100 + rng.below(400);
+                            let gh = 100 + rng.below(300);
                             let g = Rect::new(gx, gy, gw, gh);
                             if let Some(c) = engine.state.clients.get_mut(&w) {
                                 c.geom = g;
@@ -6660,8 +6665,8 @@ mod unit_tests {
         let mut iterations = 0u32;
         for i in 0..200 {
             let r = Rect::new(
-                100 + (i as i32 + 1) * 7,
-                100 + (i as i32 + 1) * 7,
+                100 + (i + 1) * 7,
+                100 + (i + 1) * 7,
                 300 + (i as u32 + 1) * 11,
                 200 + (i as u32 + 1) * 11,
             );
@@ -6749,7 +6754,7 @@ mod unit_tests {
         }
     }
 
-    fn run_resistance_seed(SEED: u64, steps: u32) -> ResistanceCounters {
+    fn run_resistance_seed(seed: u64, steps: u32) -> ResistanceCounters {
         use crate::backend::x11::reconciler::{
             classify_configure, reconcile, AppliedState, AppliedWindow, ConfigureObservation,
             GeometryEffect,
@@ -6778,7 +6783,7 @@ mod unit_tests {
                 (self.next() % n as u64) as u32
             }
         }
-        let mut rng = Rng(SEED);
+        let mut rng = Rng(seed);
 
         let mut engine = setup_engine_multi();
         let nmon = engine.state.monitors.len();
@@ -6812,7 +6817,7 @@ mod unit_tests {
         };
 
         let screen0 = engine.state.monitors[0].screen;
-        let mut rrect = |rng: &mut Rng| -> Rect {
+        let rrect = |rng: &mut Rng| -> Rect {
             let x = (rng.below(screen0.w) as i32).clamp(0, screen0.w as i32 - 50);
             let y = (rng.below(screen0.h) as i32).clamp(0, screen0.h as i32 - 50);
             let w = 50 + rng.below(600);
@@ -6827,7 +6832,7 @@ mod unit_tests {
         // must do the same so `check_invariants` (which scans every monitor's
         // `focus_stack`) stays green. No WM core is touched.
         let purge_focus = |engine: &mut Engine, w: WindowId| {
-            for mon in engine.state.monitors.iter_mut() {
+            for mon in &mut engine.state.monitors {
                 mon.focus_stack.retain(|&x| x != w);
                 if mon.focused == Some(w) {
                     mon.focused = mon.focus_stack.last().copied();
@@ -6905,10 +6910,10 @@ mod unit_tests {
             // transient (debug-only) assertion on an intermediate it would
             // otherwise heal by end-of-step.
             if let Some(pf) = engine.state.pending_focus {
-                let owner_presented = engine.state.monitors.get(pf.monitor).map_or(false, |m| {
+                let owner_presented = engine.state.monitors.get(pf.monitor).is_some_and(|m| {
                     let focused = m.focused;
-                    m.workspaces.get(pf.workspace).map_or(false, |ws| {
-                        engine.state.clients.get(&pf.owner).map_or(false, |c| {
+                    m.workspaces.get(pf.workspace).is_some_and(|ws| {
+                        engine.state.clients.get(&pf.owner).is_some_and(|c| {
                             c.monitor == pf.monitor
                                 && c.workspace == pf.workspace
                                 && ((c.is_fullscreen()
@@ -6986,7 +6991,11 @@ mod unit_tests {
                 6 => {
                     if !live.is_empty() {
                         let w = live[rng.below(live.len() as u32) as usize];
-                        let is_float = engine.state.clients.get(&w).map_or(false, |c| c.is_float());
+                        let is_float = engine
+                            .state
+                            .clients
+                            .get(&w)
+                            .is_some_and(crate::types::Client::is_float);
                         if is_float {
                             let g = rrect(&mut rng);
                             if let Some(c) = engine.state.clients.get_mut(&w) {
@@ -7034,9 +7043,22 @@ mod unit_tests {
                             let ok = matches!(obs, ConfigureObservation::Diverged { follow: f } if f == is_float_fs);
                             assert!(
                                 ok,
-                                "seed {SEED:#x} step {step} op ConfigureRequest win {w}: expected Diverged{{follow:{is_float_fs}}} but got a different verdict",
+                                "seed {seed:#x} step {step} op ConfigureRequest win {w}: expected Diverged{{follow:{is_float_fs}}} but got a different verdict",
                             );
-                            if !is_float_fs {
+                            if is_float_fs {
+                                // Float: adopt the reported geometry into the model.
+                                if let Some(cmut) = engine.state.clients.get_mut(&w) {
+                                    cmut.geom = reported;
+                                }
+                                applied.windows.insert(
+                                    w,
+                                    AppliedWindow {
+                                        rect: reported,
+                                        border_w: bw,
+                                        seen: true,
+                                    },
+                                );
+                            } else {
                                 // WM authority: reassert Desired (Applied := Desired).
                                 let dr = run_pipeline_all(&engine)
                                     .windows
@@ -7055,19 +7077,6 @@ mod unit_tests {
                                 }
                                 // Hidden window: leave Applied as the authoritative
                                 // off-screen geometry (reconcile won't touch it).
-                            } else {
-                                // Float: adopt the reported geometry into the model.
-                                if let Some(cmut) = engine.state.clients.get_mut(&w) {
-                                    cmut.geom = reported;
-                                }
-                                applied.windows.insert(
-                                    w,
-                                    AppliedWindow {
-                                        rect: reported,
-                                        border_w: bw,
-                                        seen: true,
-                                    },
-                                );
                             }
                         }
                     }
@@ -7090,7 +7099,7 @@ mod unit_tests {
                                 } else {
                                     ActiveWindowIntent::Focus(w)
                                 },
-                                "seed {SEED:#x} step {step} op ActiveWindow win {w}: intent mismatch (owner {owner:?}, transient_parent {:?})",
+                                "seed {seed:#x} step {step} op ActiveWindow win {w}: intent mismatch (owner {owner:?}, transient_parent {:?})",
                                 c.transient_parent
                             );
                         }
@@ -7115,7 +7124,7 @@ mod unit_tests {
                             .state
                             .clients
                             .get(&lw)
-                            .map_or(false, |c| c.transient_parent.is_some())
+                            .is_some_and(|c| c.transient_parent.is_some())
                     }) {
                         let w = live.remove(pos);
                         t_destroy(&mut engine, w);
@@ -7157,16 +7166,16 @@ mod unit_tests {
                             }
                             3 => {
                                 // Dead window (just destroyed): must be a no-op.
-                                if !pending_forget.is_empty() {
+                                if pending_forget.is_empty() {
+                                    reported_out = Some(rrect(&mut rng));
+                                } else {
                                     let dw = pending_forget
                                         [rng.below(pending_forget.len() as u32) as usize];
-                                    if !engine.state.clients.contains_key(&dw) {
-                                        reported_out = None; // no client ⇒ backend ignores
-                                    } else {
+                                    if engine.state.clients.contains_key(&dw) {
                                         reported_out = Some(rrect(&mut rng));
+                                    } else {
+                                        reported_out = None; // no client ⇒ backend ignores
                                     }
-                                } else {
-                                    reported_out = Some(rrect(&mut rng));
                                 }
                             }
                             _ => {
@@ -7210,10 +7219,22 @@ mod unit_tests {
                                     ConfigureObservation::Diverged { follow } => assert_eq!(
                                         follow,
                                         is_float_fs,
-                                        "seed {SEED:#x} step {step} op ConfigureNotify win {w}: follow {follow} != expected {is_float_fs}"
+                                        "seed {seed:#x} step {step} op ConfigureNotify win {w}: follow {follow} != expected {is_float_fs}"
                                     ),
                                 }
-                                if !is_float_fs {
+                                if is_float_fs {
+                                    if let Some(cmut) = engine.state.clients.get_mut(&w) {
+                                        cmut.geom = reported;
+                                    }
+                                    applied.windows.insert(
+                                        w,
+                                        AppliedWindow {
+                                            rect: reported,
+                                            border_w: bw,
+                                            seen: true,
+                                        },
+                                    );
+                                } else {
                                     let dr = run_pipeline_all(&engine)
                                         .windows
                                         .iter()
@@ -7229,18 +7250,6 @@ mod unit_tests {
                                             },
                                         );
                                     }
-                                } else {
-                                    if let Some(cmut) = engine.state.clients.get_mut(&w) {
-                                        cmut.geom = reported;
-                                    }
-                                    applied.windows.insert(
-                                        w,
-                                        AppliedWindow {
-                                            rect: reported,
-                                            border_w: bw,
-                                            seen: true,
-                                        },
-                                    );
                                 }
                             }
                             // Client gone (dead-window flavor resolved to Some after
@@ -7347,7 +7356,7 @@ mod unit_tests {
             for d in &desired.windows {
                 assert!(
                     engine.state.clients.contains_key(&d.window),
-                    "seed {SEED:#x} step {step}: Desired names unknown client {}",
+                    "seed {seed:#x} step {step}: Desired names unknown client {}",
                     d.window
                 );
             }
@@ -7362,7 +7371,7 @@ mod unit_tests {
             for &rw in &desired.raise {
                 assert!(
                     engine.state.clients.contains_key(&rw),
-                    "seed {SEED:#x} step {step}: raise references unknown window {rw}"
+                    "seed {seed:#x} step {step}: raise references unknown window {rw}"
                 );
             }
 
@@ -7388,18 +7397,17 @@ mod unit_tests {
                     }
                 }
             }
-            if !diverged {
-                if desired
+            if !diverged
+                && (desired
                     .windows
                     .iter()
                     .any(|d| !applied.windows.contains_key(&d.window))
                     || applied
                         .windows
                         .keys()
-                        .any(|aw| !desired.windows.iter().any(|d| d.window == *aw))
-                {
-                    diverged = true;
-                }
+                        .any(|aw| !desired.windows.iter().any(|d| d.window == *aw)))
+            {
+                diverged = true;
             }
             if diverged {
                 x11_real_diverged += 1;
@@ -7416,59 +7424,58 @@ mod unit_tests {
             // Reconcile Desired → Applied; apply the returned effects.
             let effects = reconcile(&desired, &engine.state, &mut applied);
             for eff in &effects {
-                if let GeometryEffect::Configure { win, rect, .. } = eff {
-                    assert!(
-                        engine.state.clients.contains_key(win),
-                        "seed {SEED:#x} step {step}: Configure for unknown window {win}"
-                    );
-                    assert!(
-                        rect.w > 0 && rect.h > 0,
-                        "seed {SEED:#x} step {step}: Configure zero-size rect {rect:?}"
-                    );
-                    // The destroy-before-reconcile race: reconcile must NOT emit
-                    // for a window that is gone from Desired (and thus clients).
-                    assert!(
+                let GeometryEffect::Configure { win, rect, .. } = eff;
+                assert!(
+                    engine.state.clients.contains_key(win),
+                    "seed {seed:#x} step {step}: Configure for unknown window {win}"
+                );
+                assert!(
+                    rect.w > 0 && rect.h > 0,
+                    "seed {seed:#x} step {step}: Configure zero-size rect {rect:?}"
+                );
+                // The destroy-before-reconcile race: reconcile must NOT emit
+                // for a window that is gone from Desired (and thus clients).
+                assert!(
                         !pending_forget.contains(win),
-                        "seed {SEED:#x} step {step}: reconcile emitted effect for destroyed-but-not-forgotten window {win}"
+                        "seed {seed:#x} step {step}: reconcile emitted effect for destroyed-but-not-forgotten window {win}"
                     );
-                    // WM authority convergence: Applied == Desired after reconcile.
-                    let drect = desired
-                        .windows
-                        .iter()
-                        .find(|d| d.window == *win)
-                        .map(|d| d.rect)
-                        .expect("desired must contain the configured window");
-                    assert_eq!(
-                        applied.windows[win].rect, drect,
-                        "seed {SEED:#x} step {step}: applied rect diverged from desired for {win}"
-                    );
-                    // Floats must follow the model (client.geom); overlays are
-                    // excluded (the WM is authoritative for them).
-                    if let Some(c) = engine.state.clients.get(win) {
-                        if c.is_float() && !c.is_fullscreen() {
-                            let mon = &engine.state.monitors[c.monitor];
-                            let ws = &mon.workspaces[c.workspace];
-                            let is_overlay = (c.is_fullscreen()
-                                && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen()))
-                                || ws.presented_maximize == Some(*win);
-                            if !is_overlay {
-                                let wa = mon.workarea;
-                                let g = c.geom;
-                                let fits = g.x >= wa.x
-                                    && g.y >= wa.y
-                                    && g.x + g.w as i32 <= wa.x + wa.w as i32
-                                    && g.y + g.h as i32 <= wa.y + wa.h as i32;
-                                if fits {
-                                    assert_eq!(
+                // WM authority convergence: Applied == Desired after reconcile.
+                let drect = desired
+                    .windows
+                    .iter()
+                    .find(|d| d.window == *win)
+                    .map(|d| d.rect)
+                    .expect("desired must contain the configured window");
+                assert_eq!(
+                    applied.windows[win].rect, drect,
+                    "seed {seed:#x} step {step}: applied rect diverged from desired for {win}"
+                );
+                // Floats must follow the model (client.geom); overlays are
+                // excluded (the WM is authoritative for them).
+                if let Some(c) = engine.state.clients.get(win) {
+                    if c.is_float() && !c.is_fullscreen() {
+                        let mon = &engine.state.monitors[c.monitor];
+                        let ws = &mon.workspaces[c.workspace];
+                        let is_overlay = (c.is_fullscreen()
+                            && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen()))
+                            || ws.presented_maximize == Some(*win);
+                        if !is_overlay {
+                            let wa = mon.workarea;
+                            let g = c.geom;
+                            let fits = g.x >= wa.x
+                                && g.y >= wa.y
+                                && g.x + g.w as i32 <= wa.x + wa.w as i32
+                                && g.y + g.h as i32 <= wa.y + wa.h as i32;
+                            if fits {
+                                assert_eq!(
                                         drect, g,
-                                        "seed {SEED:#x} step {step}: float {win} desired must equal client.geom"
+                                        "seed {seed:#x} step {step}: float {win} desired must equal client.geom"
                                     );
-                                } else {
-                                    assert!(
+                            } else {
+                                assert!(
                                         drect.w <= wa.w && drect.h <= wa.h,
-                                        "seed {SEED:#x} step {step}: float {win} clamped rect {drect:?} exceeds workarea {wa:?}"
+                                        "seed {seed:#x} step {step}: float {win} clamped rect {drect:?} exceeds workarea {wa:?}"
                                     );
-                                }
                             }
                         }
                     }
@@ -7485,10 +7492,10 @@ mod unit_tests {
             // Keep the focus deferral consistent with the backend's teardown
             // policy: if the owning overlay is gone, consume the deferral.
             if let Some(pf) = engine.state.pending_focus {
-                let owner_presented = engine.state.monitors.get(pf.monitor).map_or(false, |m| {
+                let owner_presented = engine.state.monitors.get(pf.monitor).is_some_and(|m| {
                     let focused = m.focused;
-                    m.workspaces.get(pf.workspace).map_or(false, |ws| {
-                        engine.state.clients.get(&pf.owner).map_or(false, |c| {
+                    m.workspaces.get(pf.workspace).is_some_and(|ws| {
+                        engine.state.clients.get(&pf.owner).is_some_and(|c| {
                             c.monitor == pf.monitor
                                 && c.workspace == pf.workspace
                                 && ((c.is_fullscreen()
@@ -7506,7 +7513,7 @@ mod unit_tests {
             // The structural manifesto: full invariants after EVERY step.
             if let Err(v) = engine.state.check_invariants() {
                 panic!(
-                    "seed {SEED:#x} step {step} op {op}: invariant violation: {}",
+                    "seed {seed:#x} step {step} op {op}: invariant violation: {}",
                     v.join("\n  - ")
                 );
             }
@@ -7541,7 +7548,7 @@ mod unit_tests {
             0x600D_F00D_CAFE_BABE,
             0x1111_2222_3333_4444,
             0x9E3779B97F4A7C15,
-            0xABADC0DE_CAFE_BABE,
+            0xABAD_C0DE_CAFE_BABE,
             0x1234_5678_9ABC_DEF0,
         ];
         const STEPS: u32 = 10_000;

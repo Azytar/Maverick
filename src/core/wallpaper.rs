@@ -132,16 +132,12 @@ impl WallpaperSource {
     /// else is treated as a still image. `Video` is never inferred here — it is
     /// reserved and only reachable through its explicit enum variant.
     pub fn from_path(path: PathBuf) -> WallpaperSource {
-        let is_shader = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| {
-                matches!(
-                    e.to_ascii_lowercase().as_str(),
-                    "glsl" | "frag" | "vert" | "shader" | "fs"
-                )
-            })
-            .unwrap_or(false);
+        let is_shader = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "glsl" | "frag" | "vert" | "shader" | "fs"
+            )
+        });
         if is_shader {
             WallpaperSource::Shader(path)
         } else {
@@ -287,6 +283,8 @@ mod tests {
         assert!((src[0] - (1.0 - used_u) / 2.0).abs() < 1e-4);
     }
 
+    // Exact, deterministic UV-rect compares (0.0/1.0 are exactly representable).
+    #[allow(clippy::float_cmp)]
     #[test]
     fn fit_letterboxes_inside_output() {
         let r = compute_wallpaper_rects(200, 100, WallpaperMode::Fit, &[rect(0, 0, 1920, 1080)]);
@@ -298,6 +296,8 @@ mod tests {
         assert_eq!(dst.y, 60); // (1080-960)/2
     }
 
+    // Exact, deterministic UV-rect compares (0.0/1.0 are exactly representable).
+    #[allow(clippy::float_cmp)]
     #[test]
     fn stretch_fills_without_crop() {
         let r =
@@ -307,6 +307,8 @@ mod tests {
         assert_eq!(*src, [0.0, 0.0, 1.0, 1.0]);
     }
 
+    // Exact, deterministic UV-rect compares (0.0/1.0 are exactly representable).
+    #[allow(clippy::float_cmp)]
     #[test]
     fn center_is_native_size_centered() {
         // image smaller than output -> centred 1:1.

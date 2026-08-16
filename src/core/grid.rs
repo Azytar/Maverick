@@ -90,8 +90,7 @@ fn build_cells(rows: &[usize], area: Rect, gap: i32, border: i32) -> Vec<(usize,
     let mut y = area.y;
     for (ri, &len) in rows.iter().enumerate() {
         let mut x = area.x;
-        for ci in 0..len {
-            let cw = col_w[ci];
+        for (ci, &cw) in col_w.iter().enumerate().take(len) {
             let ch = row_h[ri];
             let w = (cw - 2 * border).max(1) as u32;
             let h = (ch - 2 * border).max(1) as u32;
@@ -121,7 +120,7 @@ fn center_y(r: Rect) -> i32 {
 ///   shape) is anchored to the free cell whose previous center is closest.
 /// * New windows fill whatever cells are left, in stable `wins` order.
 ///
-/// Returns the placements plus the sum of movement (|Δcenter_x| + |Δcenter_y| +
+/// Returns the placements plus the sum of movement (|`Δcenter_x`| + |`Δcenter_y`| +
 /// `W_AREA`·|Δarea|) over windows that existed in `prev`.
 fn assign_windows(
     wins: &[WindowId],
@@ -196,9 +195,9 @@ fn assign_windows(
 
     // Pass 3: fill the leftover cells with any remaining (new) windows.
     let mut wi = 0;
-    for i in 0..n {
-        if cell_win[i].is_none() {
-            cell_win[i] = Some(remaining[wi]);
+    for slot in cell_win.iter_mut().take(n) {
+        if slot.is_none() {
+            *slot = Some(remaining[wi]);
             wi += 1;
         }
     }
@@ -264,7 +263,8 @@ pub fn arrange(
     };
     let eps = 1e-9_f64;
 
-    let mut best: Option<(Vec<usize>, f64, Vec<(WindowId, Rect)>, GridSnapshot)> = None;
+    type Best = Option<(Vec<usize>, f64, Vec<(WindowId, Rect)>, GridSnapshot)>;
+    let mut best: Best = None;
 
     for rows in &parts {
         let cells = build_cells(rows, area, gap, border);
@@ -425,12 +425,13 @@ mod tests {
     use crate::config::Cfg;
 
     fn cfg() -> Cfg {
-        let mut c = Cfg::default();
-        c.gaps_inner = 6;
-        c.gaps_outer = 6;
-        c.border_w = 2;
-        c.smart_gaps = false;
-        c
+        Cfg {
+            gaps_inner: 6,
+            gaps_outer: 6,
+            border_w: 2,
+            smart_gaps: false,
+            ..Default::default()
+        }
     }
 
     /// Workarea after the outer-gap inset, matching what `arrange_workspace`
@@ -670,9 +671,8 @@ mod tests {
     fn insertion_preserves_relative_order() {
         // Start from a 2x2 of {A,B,C,D}. Add E. The four originals must keep
         // their pairwise left/right and above/below relationships.
-        let mut snap: Option<GridSnapshot> = None;
         let (p0, s0) = arrange(&wins(4), area(), gap(), border(), None);
-        snap = Some(s0);
+        let snap = Some(s0);
         let (p1, _s1) = arrange(&wins(5), area(), gap(), border(), snap.as_ref());
 
         let rel_before = |a: WindowId, b: WindowId| -> (std::cmp::Ordering, std::cmp::Ordering) {

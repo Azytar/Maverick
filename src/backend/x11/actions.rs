@@ -90,7 +90,7 @@ impl WindowManager {
     /// with, so the new instance reuses the same `--config`, `--name` and
     /// `--replace` (a real hard restart that rebuilds all state from scratch).
     ///
-    /// Before exec we explicitly tear down X11 (key grabs, SubstructureRedirect,
+    /// Before exec we explicitly tear down X11 (key grabs, `SubstructureRedirect`,
     /// EWMH root props, check window) and the IPC socket + identity ficha via
     /// `cleanup()`, and mark the X connection fd `FD_CLOEXEC` so it is closed on
     /// exec — we do NOT rely on the connection layer having set CLOEXEC. `exec`
@@ -175,7 +175,7 @@ impl WindowManager {
         self.shutdown_deadline = Some(std::time::Instant::now() + SHUTDOWN_BUDGET);
     }
 
-    /// Escape hatch: force-kill (X KillClient) every still-managed client.
+    /// Escape hatch: force-kill (X `KillClient`) every still-managed client.
     /// Fire-and-forget — we do NOT wait for them to actually die; Maverick
     /// terminates regardless.
     pub(super) fn force_kill_remaining(&self) {

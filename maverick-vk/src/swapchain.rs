@@ -4,7 +4,6 @@
 // extent / image-count). The helpers are free of any Vulkan handle so they can
 // be unit-tested in `tests/unit.rs` without a GPU or instance.
 
-
 use ash::vk;
 
 use crate::device::Device;
@@ -46,17 +45,16 @@ pub fn choose_present_mode(modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
 
 /// Clamp the requested extent to the surface's min/max. If the surface reports
 /// a *fixed* current extent (`u32::MAX` means "use the window size"), honour it.
-pub fn clamp_extent(
-    caps: &vk::SurfaceCapabilitiesKHR,
-    width: u32,
-    height: u32,
-) -> vk::Extent2D {
+pub fn clamp_extent(caps: &vk::SurfaceCapabilitiesKHR, width: u32, height: u32) -> vk::Extent2D {
     if caps.current_extent.width != u32::MAX {
         return caps.current_extent;
     }
     let w = width.clamp(caps.min_image_extent.width, caps.max_image_extent.width);
     let h = height.clamp(caps.min_image_extent.height, caps.max_image_extent.height);
-    vk::Extent2D { width: w, height: h }
+    vk::Extent2D {
+        width: w,
+        height: h,
+    }
 }
 
 /// Choose the swapchain image count: `min_image_count + 1`, capped at
@@ -148,9 +146,7 @@ impl Swapchain {
             .image_color_space(fmt.color_space)
             .image_extent(extent)
             .image_array_layers(1)
-            .image_usage(
-                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST,
-            )
+            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
             .image_sharing_mode(sharing)
             .queue_family_indices(queue_family_indices)
             .pre_transform(caps.current_transform)

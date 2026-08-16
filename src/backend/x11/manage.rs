@@ -538,18 +538,12 @@ impl WindowManager {
                 wtrace!(
                     "manage() -> FOCUS win={:#x} mon={} ws={} (transient_parent={:?})",
                     win,
+                    self.engine.state.clients.get(&win).map_or(0, |c| c.monitor),
                     self.engine
                         .state
                         .clients
                         .get(&win)
-                        .map(|c| c.monitor)
-                        .unwrap_or(0),
-                    self.engine
-                        .state
-                        .clients
-                        .get(&win)
-                        .map(|c| c.workspace)
-                        .unwrap_or(0),
+                        .map_or(0, |c| c.workspace),
                     self.engine
                         .state
                         .clients
@@ -1090,7 +1084,7 @@ impl WindowManager {
         // mutate `State` at all. The Command has already set the flag (so
         // `write_net_wm_state` below reads it correctly), snapshotted/restored
         // the geometry, retargeted the camera and emitted `ArrangeMonitor`.
-        if self.engine.state.clients.get(&win).is_none() {
+        if !self.engine.state.clients.contains_key(&win) {
             return Ok(());
         }
         // `_NET_WM_BYPASS_COMPOSITOR` = 2 tells an external compositor (picom,
@@ -1131,7 +1125,7 @@ impl WindowManager {
         _vert: Option<bool>,
         _horiz: Option<bool>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.engine.state.clients.get(&win).is_none() {
+        if !self.engine.state.clients.contains_key(&win) {
             return Ok(());
         }
         // Logical state (MAXIMIZED_V/H, saved_geom, geom, geometry_dirty,
