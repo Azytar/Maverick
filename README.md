@@ -425,7 +425,7 @@ float = true
 | `title` | string | Match window title (case-insensitive substring). |
 | `float` | bool | Force floating. |
 | `sticky` | bool | Keep visible across workspaces. |
-| `workspace` / `ws` | int | Send to a 0-based workspace. |
+| `workspace` / `ws` | int (1-based) | Pin the window to this workspace (1 = first). |
 | `size` | [w, h] | Force size for floats. |
 | `position` | [x, y] | Force position for floats. |
 | `opacity` | float | Per-window opacity. |

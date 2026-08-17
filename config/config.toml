@@ -49,8 +49,21 @@ accordion_boost = 0.0
 overview_zoom_min = 0.25
 
 # Auto-generate the Super+1..9 / Super+Shift+1..9 workspace binds. Set to false
-# to manage all workspace switching yourself (default true).
+# to manage all workspace switching yourself (default true). These binds are
+# part of the compiled default too, so they exist even with no config file.
 auto_workspace_binds = true
+
+# Master switch for the built-in OpenGL/GLX compositor. Enabled by.default and
+# falls back automatically to the plain ConfigureWindow path when GL is
+# unavailable or another compositor owns the screen. Disable it to keep the
+# legacy X11 Shape corner-radius path, or to run an external compositor via
+# autostart (see MAVERICK_NO_COMPOSITOR to disable for a single run).
+compositor_enabled = true
+
+# Scroll-camera spring constants (higher stiffness = snappier, higher damping =
+# less overshoot). Defaults 220.0 / 30.0. Only affect the ribbon scroll feel.
+camera_stiffness = 220.0
+camera_damping = 30.0
 
 # Normalize the `_NET_WM_STATE_MAXIMIZED_*` / `_NET_WM_STATE_FULLSCREEN` a
 # window requests at map time, so every new client opens as a normal tile

@@ -331,14 +331,14 @@ autostart: vec![
 ```
 
 El compositor y el wallpaper ya no son entradas de autostart — están
-integrados al WM y se controlan con `[compositor]`/`[wallpaper]` en
-`config.toml` (ver [Compositor y fondo de pantalla](#-compositor-y-fondo-de-pantalla)).
+integrados al WM y se controlan con `compositor_enabled` (bajo `[general]`)
+/ `[wallpaper]` en `config.toml` (ver [Compositor y fondo de pantalla](#-compositor-y-fondo-de-pantalla)).
 Las barras y portales siguen siéndolo: maverick no las orquesta de forma
 especial, simplemente se lanzan una vez que el WM está listo, sin lógica de
 orden/retardo configurable — si una herramienta necesita un momento antes de
 estar usable, eso depende de ella. (Si preferís usar un compositor externo en
-vez del integrado, poné `[compositor] enabled = false` y agregalo a
-`autostart` como antes.)
+vez del integrado, poné `compositor_enabled = false` (bajo `[general]`) y
+agregalo a `autostart` como antes.)
 
 > El `autostart` por defecto también lanza `/usr/lib/xdg-desktop-portal` y
 > `/usr/lib/xdg-desktop-portal-gtk` — sin ellos, los selectores de archivos
@@ -374,8 +374,8 @@ Maverick levanta su propio compositor OpenGL/GLX sobre
 otro compositor dueño de la pantalla, avisa por log y cae en silencio al
 camino clásico `ConfigureWindow` (las esquinas redondeadas vía `Shape` de
 X11 siguen funcionando sin GL). Se puede desactivar explícitamente con
-`[compositor] enabled = false` en `config.toml`, o con la variable de
-entorno `MAVERICK_NO_COMPOSITOR`.
+`compositor_enabled = false` (bajo `[general]`) en `config.toml`, o con la
+variable de entorno `MAVERICK_NO_COMPOSITOR`.
 
 El compositor también gestiona un fondo de pantalla nativo, configurado
 bajo `[wallpaper]`:
@@ -446,7 +446,7 @@ rules: vec![
 | `class` | `Option<String>` | Coincide con `WM_CLASS` (subcadena, distingue mayúsculas/minúsculas) |
 | `title` | `Option<String>` | Coincide con el título de ventana (subcadena, distingue mayúsculas/minúsculas) |
 | `float` | `bool` | Forzar modo flotante |
-| `ws` | `Option<usize>` | Enviar al índice de escritorio (base 0) |
+| `ws` | `Option<usize>` | Fijar la ventana a este escritorio (base 1, 1 = primero) |
 
 ---
 

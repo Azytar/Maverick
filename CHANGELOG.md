@@ -20,7 +20,7 @@ Pending work that is not yet part of a release:
   drivers without it, the compositor falls back to full-frame redraws.
 - The built-in compositor can be disabled per session with the
   `MAVERICK_NO_COMPOSITOR` environment variable or by setting
-  `compositor.enable = false` in the configuration.
+  `compositor_enabled = false` under `[general]` in the configuration.
 
 ## [0.18.4] - 2026-08-13
 
@@ -405,8 +405,8 @@ window), GLX/OpenGL 3.3 rendering with vsync, and texture-from-pixmap
   with `smart_gaps`; named color-theme presets (`catppuccin-mocha`,
   `catppuccin-latte`, `gruvbox`, `nord`, `dracula`, `everforest`,
   `solarized`); per-rule `opacity` and `border_w`; a `[wallpaper]` table
-  (`path` + `mode`); and a `[compositor]` table (enable switch plus camera
-  spring stiffness/damping). `--config <path>` and `--check-config
+  (`path` + `mode`); and `[general]` keys `compositor_enabled` plus
+  `camera_stiffness`/`camera_damping` (scroll-camera spring). `--config <path>` and `--check-config
   [path]` CLI flags were added; automatic workspace bindings can be
   overridden per digit.
 - **Zero-dependency `maverick-toml` crate.** The configuration parser was
