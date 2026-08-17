@@ -14,8 +14,69 @@ impl WindowManager {
     /// carries them out. Fullscreen is presentation-only and tied to focus
     /// (see `core::present`), so every action is safe while fullscreen.
     pub(super) fn do_action(&mut self, action: Action) -> Result<(), Box<dyn std::error::Error>> {
+        let is_toggle = matches!(action, Action::ToggleFloat);
+        let (tw, old_float, old_geom, old_layout, old_dirty, old_reasons) = if is_toggle {
+            let mi = self.engine.state.sel_mon;
+            let (f, g, ld) = if let Some(m) = self.engine.state.monitors.get(mi) {
+                if let Some(w) = m.focused {
+                    if let Some(c) = self.engine.state.clients.get(&w) {
+                        (Some((w, c.is_float())), c.geom, m.layout_dirty)
+                    } else {
+                        (None, Rect::default(), m.layout_dirty)
+                    }
+                } else {
+                    (None, Rect::default(), m.layout_dirty)
+                }
+            } else {
+                (None, Rect::default(), false)
+            };
+            let d = self.compositor.as_ref().map_or(false, |c| c.needs_frame());
+            let r = self
+                .compositor
+                .as_ref()
+                .map_or(0u8, |c| c.dirty_reasons_bits());
+            (f, f.map(|(_, fl)| fl), g, ld, d, r)
+        } else {
+            (None, None, Rect::default(), false, false, 0u8)
+        };
         let effects = self.engine.dispatch(action);
-        self.run_effects(effects)
+        self.run_effects(effects)?;
+        if let Some((w, _old_fl)) = tw {
+            let mi = self.engine.state.sel_mon;
+            let new_float = self
+                .engine
+                .state
+                .clients
+                .get(&w)
+                .map_or(false, |c| c.is_float());
+            let new_geom = self
+                .engine
+                .state
+                .clients
+                .get(&w)
+                .map_or(Rect::default(), |c| c.geom);
+            let new_layout = self
+                .engine
+                .state
+                .monitors
+                .get(mi)
+                .map_or(false, |m| m.layout_dirty);
+            let new_dirty = self.compositor.as_ref().map_or(false, |c| c.needs_frame());
+            let new_reasons = self
+                .compositor
+                .as_ref()
+                .map_or(0u8, |c| c.dirty_reasons_bits());
+            if let Some(comp) = self.compositor.as_ref() {
+                if comp.float_trace {
+                    log::info!(
+                        "[FLOAT] toggle win={:#x} old_floating={} new_floating={} old_geometry={:?} target_geometry={:?} layout_dirty={}->{} comp_dirty={}->{} dirty_reasons={:#x}->{:#x}",
+                        w, old_float.unwrap_or(false), new_float, old_geom, new_geom, old_layout, new_layout,
+                        old_dirty, new_dirty, old_reasons, new_reasons
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Execute a batch of semantic effects emitted by the Engine, in order.
@@ -281,6 +342,9 @@ impl WindowManager {
         }
 
         self.engine.cfg = cfg;
+        // Re-apply the scroll-camera spring constants from the freshly reloaded
+        // config to every workspace camera.
+        self.engine.apply_camera_cfg();
         self.keymap = build_keymap(&self.engine.cfg);
         self.grab_keys()?;
 

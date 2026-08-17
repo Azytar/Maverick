@@ -64,6 +64,40 @@ mod unit_tests {
     }
 
     #[test]
+    fn config_compositor_spring_reaches_camera() {
+        // Regression: `compositor.stiffness` / `compositor.damping` (the
+        // `camera_stiffness` / `camera_damping` config keys) must actually
+        // reach the workspace cameras — previously they were parsed but never
+        // read, leaving the camera hard-coded at 220/30 (a second, ignored
+        // source of truth).
+        let mut cfg = default_cfg();
+        cfg.compositor.stiffness = 999.0;
+        cfg.compositor.damping = 11.0;
+        let mut engine = Engine::new(cfg);
+        engine
+            .state
+            .monitors
+            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 9));
+        // Mirror what the backend does at startup / reload / hotplug.
+        engine.apply_camera_cfg();
+        let cam = &engine.state.monitors[0].workspaces[0].camera;
+        assert_eq!(cam.stiffness, 999.0);
+        assert_eq!(cam.damping, 11.0);
+        // A second monitor/workspace must also be covered by the loop.
+        engine
+            .state
+            .monitors
+            .push(Monitor::new(Rect::new(1920, 0, 1920, 1080), 9));
+        engine.apply_camera_cfg();
+        for mon in &engine.state.monitors {
+            for ws in &mon.workspaces {
+                assert_eq!(ws.camera.stiffness, 999.0);
+                assert_eq!(ws.camera.damping, 11.0);
+            }
+        }
+    }
+
+    #[test]
     fn test_cycle_layout_wraps_around() {
         let mut engine = setup_engine();
 

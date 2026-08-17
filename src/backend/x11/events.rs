@@ -357,6 +357,9 @@ impl WindowManager {
                 // Install the new monitor vec, then remap every surviving
                 // client's monitor index to its matched new index.
                 self.engine.state.monitors = result;
+                // Re-apply the configured scroll-camera spring constants to the
+                // (possibly freshly created) workspace cameras.
+                self.engine.apply_camera_cfg();
                 for c in self.engine.state.clients.values_mut() {
                     let idx = c.monitor;
                     if let Some(Some(ni)) = old_to_new.get(idx).copied() {

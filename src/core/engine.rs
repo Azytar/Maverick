@@ -24,6 +24,25 @@ impl Engine {
         }
     }
 
+    /// Push the configured scroll-camera spring constants
+    /// (`Cfg::compositor.stiffness` / `Cfg::compositor.damping`) into every
+    /// workspace camera. `Camera::new` can't take them at construction — a
+    /// workspace is built from its tag alone and `Monitor::reconcile_workspaces`
+    /// creates fresh ones on hotplug — so the configured values reach the
+    /// runtime scroll physics here. Previously `compositor.stiffness`/`damping`
+    /// were parsed but never read, leaving the camera hard-coded at 220/30 (a
+    /// second, ignored source of truth). Call after every (re)build of the
+    /// monitor/workspace set: startup, config reload, and RandR hotplug.
+    pub fn apply_camera_cfg(&mut self) {
+        let (stiffness, damping) = (self.cfg.compositor.stiffness, self.cfg.compositor.damping);
+        for mon in &mut self.state.monitors {
+            for ws in &mut mon.workspaces {
+                ws.camera.stiffness = stiffness;
+                ws.camera.damping = damping;
+            }
+        }
+    }
+
     /// Subscribe a handler to domain events. This is the seam where bars,
     /// the IPC hub, hooks, and tests observe what changed — without knowing
     /// which command caused it.

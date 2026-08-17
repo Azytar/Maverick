@@ -598,6 +598,20 @@ impl WindowManager {
                     }
                     self.transforms_buf.extend(self.desired.iter().copied());
                 }
+                if comp.float_trace {
+                    let mut fids: Vec<WindowId> = Vec::new();
+                    for (mi, mon) in self.engine.state.monitors.iter().enumerate() {
+                        for ws in &mon.workspaces {
+                            fids.extend(ws.floats.iter().copied());
+                        }
+                        for (&w, c) in &self.engine.state.clients {
+                            if c.monitor == mi && c.is_sticky() && c.is_float() {
+                                fids.push(w);
+                            }
+                        }
+                    }
+                    comp.set_debug_floats(&fids);
+                }
                 comp.set_transforms(&self.transforms_buf);
                 // A GL failure disables the compositor and returns us to the
                 // classic path. `panic = "abort"` means a GL panic would kill
@@ -785,6 +799,10 @@ impl WindowManager {
         let monitors = detect_monitors(&conn, screen, &cfg)?;
         let mut engine = Engine::new(cfg);
         engine.state.monitors = monitors;
+        // Apply the configured scroll-camera spring constants (compositor
+        // stiffness/damping) to every workspace camera, since Monitor::new /
+        // reconcile_workspaces build cameras with hard-coded defaults.
+        engine.apply_camera_cfg();
 
         // Seed the native wallpaper from config: a configured `path` becomes the
         // wallpaper source (image/shader inferred by extension); the compositor
