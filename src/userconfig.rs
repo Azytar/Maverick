@@ -189,10 +189,25 @@ pub fn config_path() -> Option<PathBuf> {
 /// fatal (B10).
 pub fn load_config(path: Option<&Path>) -> Cfg {
     let Some(path) = path.map(Path::to_path_buf).or_else(config_path) else {
-        return compiled_config();
+        return default_config();
     };
     let (cfg, diag) = load_from_path(&path);
     dump_diagnostics(&diag);
+    cfg
+}
+
+/// The complete fail-safe default: the compiled baseline PLUS the auto-generated
+/// numeric workspace keybindings (`Super+1..n` → view, `Super+Shift+1..n` → move).
+///
+/// `compiled_config()` itself stays pure — unit tests build it directly as a
+/// baseline and expect no workspace binds. This helper exists so every fallback
+/// path in the loader (no config file, missing file, unreadable file, or broken
+/// TOML) still produces a WM whose workspaces are actually reachable. Previously
+/// those paths returned `compiled_config()` directly, which ships zero workspace
+/// binds, so the WM booted with `n_tags` workspaces it could never switch to.
+fn default_config() -> Cfg {
+    let mut cfg = compiled_config();
+    append_numeric_keybindings(&mut cfg.keybinds, cfg.n_tags);
     cfg
 }
 
@@ -202,7 +217,7 @@ pub fn load_config(path: Option<&Path>) -> Cfg {
 /// returned with the error recorded; on semantic issues the offending entries
 /// are dropped and reported. Never panics and never returns `None`.
 pub fn load_from_path(path: &Path) -> (Cfg, Diagnostics) {
-    let baseline = compiled_config();
+    let baseline = default_config();
     let mut diag = Diagnostics::default();
 
     let source = match std::fs::read_to_string(path) {
@@ -1116,7 +1131,7 @@ mod tests {
         let path = std::env::temp_dir().join("maverick-config-definitely-missing.toml");
         let _ = std::fs::remove_file(&path);
         let (cfg, _diag) = load_from_path(&path);
-        assert_eq!(cfg.keybinds.len(), compiled_config().keybinds.len());
+        assert_eq!(cfg.keybinds.len(), default_config().keybinds.len());
         assert_eq!(cfg.rules.len(), compiled_config().rules.len());
     }
 
@@ -1124,12 +1139,51 @@ mod tests {
     fn broken_toml_uses_entire_compiled_config() {
         let path = write_temp("[general\ngaps = nope");
         let (cfg, _diag) = load_from_path(&path);
-        let baseline = compiled_config();
+        let baseline = default_config();
         assert_eq!(cfg.gaps_inner, baseline.gaps_inner);
         assert_eq!(cfg.gaps_outer, baseline.gaps_outer);
         assert_eq!(cfg.keybinds.len(), baseline.keybinds.len());
         assert_eq!(cfg.rules.len(), baseline.rules.len());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn fallback_config_has_reachable_workspace_binds() {
+        // Regression: the fail-safe baseline (no config file / missing /
+        // unreadable / broken TOML) must still produce a WM whose workspaces
+        // are reachable. Previously it returned `compiled_config()`, which
+        // contains zero workspace keybindings, so the WM booted with
+        // `n_tags` workspaces it could never switch to.
+        let path = std::env::temp_dir().join(format!(
+            "maverick-config-missing-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (cfg, _diag) = load_from_path(&path);
+        let sup = u16::from(ModMask::M4);
+        let shift_sup = sup | u16::from(ModMask::SHIFT);
+        for i in 0..cfg.n_tags.min(9) {
+            let ksym = b'1' as u32 + i as u32;
+            assert!(
+                cfg.keybinds.iter().any(|(m, k, a)| {
+                    *m == sup && *k == ksym && matches!(a, &Action::View(v) if v == i)
+                }),
+                "fallback config missing View({i}) on Super+{}",
+                i + 1
+            );
+            assert!(
+                cfg.keybinds.iter().any(|(m, k, a)| {
+                    *m == shift_sup
+                        && *k == ksym
+                        && matches!(a, &Action::MoveToWs(v) if v == i)
+                }),
+                "fallback config missing MoveToWs({i}) on Super+Shift+{}",
+                i + 1
+            );
+        }
     }
 
     #[test]
