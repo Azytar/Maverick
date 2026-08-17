@@ -721,6 +721,40 @@ impl WindowManager {
                     // A rule can still force the old behaviour explicitly.
                     honor_initial = false;
                 }
+                // ── Rule fields that used to be parsed but never applied ──
+                // (config audit: they were a "tapadera" — accepted, stored on
+                // `Rule`, and silently ignored at manage time). Wire them to the
+                // client so a `[[rules]]` entry actually does what the example
+                // config promises.
+                //
+                // Pin to a specific workspace. `rule.ws` is already 0-based and
+                // bounds-checked by `parse_rules`, so it is a valid index into
+                // `Monitor::workspaces`. Captured into `ws_i` below and used for
+                // placement (manage sets `_NET_WM_DESKTOP` from it too).
+                if let Some(ws) = rule.ws {
+                    c.workspace = ws;
+                }
+                // Per-rule opacity: copied into the client so the
+                // `_NET_WM_WINDOW_OPACITY` write in manage() (gated on
+                // `client.opacity`) actually fires.
+                if let Some(op) = rule.opacity {
+                    c.opacity = Some(op);
+                }
+                // Per-rule border width — floating windows only, matching the
+                // documented semantics: a tiled column's border is part of its
+                // layout geometry and must stay uniform across the layout.
+                if let Some(bw) = rule.border_w {
+                    if c.is_float() {
+                        c.border_w = bw;
+                    }
+                }
+                // Fullscreen policy. `true_fullscreen` wins over `deny_fullscreen`
+                // when both are set on the same or a later matching rule.
+                if rule.true_fullscreen {
+                    c.fullscreen_policy = FullscreenPolicy::True;
+                } else if rule.deny_fullscreen && c.fullscreen_policy != FullscreenPolicy::True {
+                    c.fullscreen_policy = FullscreenPolicy::Deny;
+                }
             }
         }
         if !honor_initial {
