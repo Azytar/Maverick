@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CString};
 use std::fmt;
 use std::os::raw::{c_int, c_uint, c_ulong};
+use std::sync::OnceLock;
 
 use maverick_img::Rgba8;
 
@@ -41,6 +42,14 @@ use crate::dl::Lib;
 use crate::gl::*;
 use crate::glx::*;
 use crate::xlib::{XDisplay, XID};
+
+/// OPT-IN DIAGNOSTIC: when `MAV_GLX_TRACE` is set, the renderer logs each
+/// GLX texture lifecycle op (create/bind/release/destroy) with the GLXPixmap and
+/// texture ids. Off by default and a no-op when unset — never changes rendering.
+fn glx_trace_enabled() -> bool {
+    static C: OnceLock<bool> = OnceLock::new();
+    *C.get_or_init(|| std::env::var_os("MAV_GLX_TRACE").is_some())
+}
 
 const VERTEX_SRC: &str = r#"#version 330 core
 layout(location = 0) in vec2 a_pos;   // unit quad, 0..1
@@ -1114,12 +1123,30 @@ impl Renderer {
                 attribs.as_ptr(),
             )
         };
+        if glx_trace_enabled() {
+            log::info!(
+                "[GLX] create glxpixmap={} for_x_pixmap={} visual={}",
+                glx_pixmap,
+                pixmap,
+                visual
+            );
+        }
         if verify {
             self.dpy.sync();
             if let Some(code) = crate::xlib::take_x_error() {
-                // Don't destroy: the resource was never created, and the extra
-                // request would only raise a second error.
-                self.verified.remove(&visual.id);
+                // Keep `verified` set: a transient first-bind error must NOT re-open
+                // the sync gate. The old code removed the visual from `verified`,
+                // so every later resize of a window on that visual re-ran
+                // `dpy.sync()` — a blocking X round trip — inside the event handler,
+                // which is exactly the floating-window resize freeze. The fbconfig
+                // decision is retried independently on the next pixmap, so the gate
+                // only needs to fire once.
+                // `glXCreatePixmap` already handed back a (possibly invalid) XID, so
+                // free it to avoid leaking the GLXPixmap; a `0` means creation truly
+                // failed and there is nothing to free.
+                if glx_pixmap != 0 {
+                    unsafe { (self.glx.glXDestroyPixmap)(self.dpy.as_ptr(), glx_pixmap); }
+                }
                 return Err(format!(
                     "glXCreatePixmap for {visual} failed with {} ({})",
                     crate::xlib::x_error_name(code),
@@ -1169,6 +1196,14 @@ impl Renderer {
         };
         let d = self.dpy.as_ptr();
         let handle = t.handle();
+        if glx_trace_enabled() {
+            log::info!(
+                "[GLX] bind glxpixmap={} texture={} was_bound={}",
+                t.glx_pixmap,
+                t.tex,
+                t.bound
+            );
+        }
         unsafe {
             if self.last_tex != handle {
                 (self.gl.glBindTexture)(GL_TEXTURE_2D, t.tex);
@@ -1354,6 +1389,14 @@ impl Renderer {
     }
     pub fn destroy_texture(&mut self, mut t: Texture) {
         let d = self.dpy.as_ptr();
+        if glx_trace_enabled() {
+            log::info!(
+                "[GLX] destroy glxpixmap={} texture={} was_bound={}",
+                t.glx_pixmap,
+                t.tex,
+                t.bound
+            );
+        }
         unsafe {
             if t.bound {
                 if let Some(release) = self.glx.glXReleaseTexImageEXT {
