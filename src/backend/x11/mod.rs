@@ -731,6 +731,22 @@ impl WindowManager {
                 self.compositor.is_some()
             );
         }
+        // OPT-IN DIAGNOSTIC (`MAV_COMP_TRACE`): when the compositor's lifecycle
+        // trace is on, dump the per-window GL resource state once per turn so the
+        // full event→state→damage→render→present pipeline can be correlated. Off
+        // by default and a no-op when unset.
+        if let Some(c) = self.compositor.as_ref() {
+            if c.comp_trace {
+                log::info!(
+                    "[FRAME-DUMP] id={} needs_frame={} animating={} managed={}\n{}",
+                    self.frame_id,
+                    self.frame_needs,
+                    self.animating,
+                    self.engine.state.clients.len(),
+                    c.debug_dump()
+                );
+            }
+        }
 
         // Loop back → flush_client_list() rewrites _NET_CLIENT_LIST at most once per batch.
         Ok(())

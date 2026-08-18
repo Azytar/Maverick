@@ -36,6 +36,7 @@
 //     classic path. This is the entire fallback story.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -149,6 +150,27 @@ impl CompWin {
             prev_visual: None,
             occluded: false,
         }
+    }
+
+    /// Apply a `ConfigureNotify`'s geometry to this window and report whether the
+    /// *size* changed. A size change invalidates the GL texture/pixmap and must
+    /// trigger a rebind; a move-only change does not.
+    ///
+    /// Pure (no X/GL side effects) so it is unit-testable in isolation — the
+    /// actual resource invalidation/recreation is the caller's job and, after the
+    /// floating-freeze fix, happens once per frame in `compute_scene`, never
+    /// synchronously inside the event handler.
+    fn observe_configure(&mut self, x: i32, y: i32, w: u32, h: u32, bw: u32) -> bool {
+        let new_outer = Rect::new(
+            x.saturating_sub(bw as i32),
+            y.saturating_sub(bw as i32),
+            w + 2 * bw,
+            h + 2 * bw,
+        );
+        let resized = new_outer.w != self.outer.w || new_outer.h != self.outer.h;
+        self.outer = new_outer;
+        self.border_w = bw;
+        resized
     }
 
     /// Whether `r` is entirely outside the `[0,0,w,h]` viewport (plus a small
@@ -454,6 +476,25 @@ pub struct Compositor {
     /// path. Reset to empty on every full repaint (structural change, or when
     /// buffer-age is unavailable so we always full-redraw).
     damage_acc: DamageRegion,
+    /// OPT-IN DIAGNOSTIC (`MAV_FLOAT_TRACE`): when set, emit [FLOAT]/[TRANSFORM]/
+    /// [SCENE]/[RENDER]/[PRESENT] trace lines. Never changes rendering behaviour.
+    pub(crate) float_trace: bool,
+    /// OPT-IN DIAGNOSTIC (`MAV_COMP_TRACE`): when set, emit [LIFECYCLE] trace
+    /// lines for every window compositor event (create/map/unmap/configure/
+    /// damage/destroy) carrying the current pixmap/`GLXPixmap`/texture ids and
+    /// geometry, plus render/present begin-end markers. Off by default and a
+    /// no-op when unset (only builds discarded format! strings), so it is safe
+    /// to leave compiled in permanently. Used to isolate compositor-lifecycle
+    /// regressions — e.g. the floating-window freeze, where GLXPixmap/texture
+    /// (re)creation happened in the *event* handler instead of once per frame
+    /// in `compute_scene`.
+    pub(crate) comp_trace: bool,
+    /// OPT-IN DIAGNOSTIC: per-frame id incremented at the top of
+    /// `set_transforms` so TRANSFORM/SCENE/RENDER/PRESENT logs share one id.
+    dbg_frame: u64,
+    /// OPT-IN DIAGNOSTIC: the set of floating `WindowIds`, populated by the WM
+    /// each frame (debug only) so [SCENE] can report only floating windows.
+    dbg_floats: std::collections::HashSet<Window>,
     /// Debug/test hook: when set, pretend buffer-age is unavailable so the
     /// partial-redraw path is never taken (used by the Xephyr harness to
     /// exercise the full-redraw fallback). Set via `MAVERICK_FORCE_FULL_REDRAW`.
@@ -705,6 +746,10 @@ impl Compositor {
             needs_full: false,
             damage_acc: DamageRegion::new(),
             force_full_redraw: std::env::var_os("MAVERICK_FORCE_FULL_REDRAW").is_some(),
+            float_trace: std::env::var_os("MAV_FLOAT_TRACE").is_some(),
+            comp_trace: std::env::var_os("MAV_COMP_TRACE").is_some(),
+            dbg_frame: 0,
+            dbg_floats: std::collections::HashSet::new(),
             perf_log: std::env::var_os("MAVERICK_PERF_LOG").is_some(),
             perf_count: 0,
             perf_ns_total: 0,
@@ -803,6 +848,9 @@ impl Compositor {
     /// top of its siblings by the server, so that is where it enters the stack.
     pub fn on_create(&mut self, win: Window) {
         self.track(win);
+        if self.comp_trace {
+            log::info!("[LIFECYCLE] win={:#x} event=CreateNotify tracked={}", win, self.wins.contains_key(&win));
+        }
         if !self.ignored.contains(&win) {
             stack_add_top(&mut self.stack, win);
         }
@@ -831,6 +879,16 @@ impl Compositor {
 
     /// Window destroyed (`DestroyNotify`).
     pub fn on_destroy(&mut self, win: Window) {
+        if self.comp_trace {
+            let (pm, gpx, tx) = self.dbg_res_ids(win);
+            log::info!(
+                "[LIFECYCLE] win={:#x} event=DestroyNotify pixmap={} glxpixmap={} texture={}",
+                win,
+                pm,
+                gpx,
+                tx,
+            );
+        }
         if let Some(cw) = self.wins.remove(&win) {
             self.release_texture(cw);
         }
@@ -841,12 +899,17 @@ impl Compositor {
         self.mark_full(DirtyReason::SURFACE);
     }
 
-    /// Window mapped (`MapNotify`). Name its off-screen pixmap and bind a texture.
+    /// Window mapped (`MapNotify`). Mark the window mapped and ask for a (re)bind
+    /// on the next frame.
     ///
-    /// Mapping does **not** restack in X — an unmapped window keeps its place
-    /// in the sibling order — so this deliberately does not touch `stack`. It
-    /// only asks for a resync when the window is missing entirely, which means
-    /// we never saw its `CreateNotify`.
+    /// The GLXPixmap/texture is (re)created lazily in `compute_scene` (render
+    /// phase) via `needs_fixup`, **not** synchronously here. Creating it here
+    /// (inside the event-drain loop) for every map/unmap/remap is exactly the
+    /// synchronous-`glXCreatePixmap`+`glXBindTexImageEXT` storm that freezes the
+    /// floating compositor. Mapping does **not** restack in X — an unmapped window
+    /// keeps its place in the sibling order — so this deliberately does not touch
+    /// `stack`. It only asks for a resync when the window is missing entirely,
+    /// which means we never saw its `CreateNotify`.
     pub fn on_map(&mut self, win: Window) {
         if !self.wins.contains_key(&win) {
             self.track(win);
@@ -856,8 +919,28 @@ impl Compositor {
                 return;
             };
             cw.mapped = true;
+            // Defer GLXPixmap/texture creation to `compute_scene`. Drop any stale
+            // resources first so the new bind starts clean (the window may have
+            // been unmapped and remapped, leaving an orphaned texture/pixmap).
+            if let Some(t) = cw.tex.take() {
+                self.renderer.destroy_texture(t);
+            }
+            if let Some(pm) = cw.pixmap.take() {
+                let _ = self.conn.free_pixmap(pm);
+            }
+            cw.needs_rebind = true;
+            cw.damaged = true;
         }
-        self.rename_and_bind(win, false);
+        if self.comp_trace {
+            let (pm, gpx, tx) = self.dbg_res_ids(win);
+            log::info!(
+                "[LIFECYCLE] win={:#x} event=MapNotify pixmap={} glxpixmap={} texture={}",
+                win,
+                pm,
+                gpx,
+                tx,
+            );
+        }
         if !self.ignored.contains(&win) && !self.stack.contains(&win) {
             self.stack_dirty = true;
         }
@@ -870,6 +953,16 @@ impl Compositor {
     /// `render` already skips unmapped windows. Dropping and re-adding it would
     /// silently promote it to the top the next time it maps.
     pub fn on_unmap(&mut self, win: Window) {
+        if self.comp_trace {
+            let (pm, gpx, tx) = self.dbg_res_ids(win);
+            log::info!(
+                "[LIFECYCLE] win={:#x} event=UnmapNotify pixmap={} glxpixmap={} texture={}",
+                win,
+                pm,
+                gpx,
+                tx,
+            );
+        }
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.mapped = false;
             cw.hidden = false;
@@ -897,37 +990,52 @@ impl Compositor {
 
     /// Geometry change (`ConfigureNotify` for a tracked, non-root window).
     pub fn on_configure(&mut self, win: Window, x: i32, y: i32, w: u32, h: u32, bw: u32) {
-        let (resized, mapped, stale) = {
-            let Some(cw) = self.wins.get_mut(&win) else {
-                return;
-            };
-            let new_outer = Rect::new(
-                x.saturating_sub(bw as i32),
-                y.saturating_sub(bw as i32),
-                w + 2 * bw,
-                h + 2 * bw,
-            );
-            let resized = new_outer.w != cw.outer.w || new_outer.h != cw.outer.h;
-            cw.outer = new_outer;
-            cw.border_w = bw;
-            let mapped = cw.mapped;
-            // NameWindowPixmap returns a *new* pixmap on every resize (per the
-            // Composite spec), so the old GLXPixmap/texture is stale.
-            let stale = if resized && mapped {
-                (cw.tex.take(), cw.pixmap.take())
-            } else {
-                (None, None)
-            };
-            (resized, mapped, stale)
+        let (resized, mapped) = match self.wins.get_mut(&win) {
+            Some(cw) => (cw.observe_configure(x, y, w, h, bw), cw.mapped),
+            None => return,
         };
-        if let Some(t) = stale.0 {
-            self.renderer.destroy_texture(t);
-        }
-        if let Some(pm) = stale.1 {
-            let _ = self.conn.free_pixmap(pm);
-        }
+        // A resize of a mapped window invalidates the off-screen pixmap and the
+        // GLXPixmap/texture bound to it (NameWindowPixmap returns a *new* pixmap on
+        // every resize per the Composite spec). We invalidate the *old* GL
+        // resources here, but we deliberately do NOT create the new
+        // GLXPixmap/texture synchronously in this event handler.
+        //
+        // Why: this runs inside the event-drain loop (`run_once`), and a
+        // client-driven floating window emits a flood of `ConfigureNotify`s during
+        // a resize drag. `rename_and_bind` issues `composite_name_window_pixmap`
+        // + `glXCreatePixmap` + `glXBindTexImageEXT` — all synchronous X/GL round
+        // trips — so doing it here serialises N blocking calls per drain burst and
+        // starves frame advancement: the floating-window "freeze". `compute_scene`
+        // (render phase) already (re)binds exactly once per frame via
+        // `needs_fixup`, so the new texture is created when the frame is drawn.
         if resized && mapped {
-            self.rename_and_bind(win, false);
+            let (tex, pix) = match self.wins.get_mut(&win) {
+                Some(cw) => (cw.tex.take(), cw.pixmap.take()),
+                None => (None, None),
+            };
+            if let Some(t) = tex {
+                self.renderer.destroy_texture(t);
+            }
+            if let Some(pm) = pix {
+                let _ = self.conn.free_pixmap(pm);
+            }
+            if let Some(cw) = self.wins.get_mut(&win) {
+                cw.needs_rebind = true;
+                cw.damaged = true;
+            }
+        }
+        if self.comp_trace {
+            let (pm, gpx, tx) = self.dbg_res_ids(win);
+            log::info!(
+                "[LIFECYCLE] win={:#x} event=ConfigureNotify resized={} mapped={} pixmap={} glxpixmap={} texture={} needs_rebind={}",
+                win,
+                resized,
+                mapped,
+                pm,
+                gpx,
+                tx,
+                self.wins.get(&win).is_some_and(|c| c.needs_rebind),
+            );
         }
         self.mark_full(DirtyReason::GEOMETRY);
     }
@@ -937,6 +1045,15 @@ impl Compositor {
     pub fn on_damage(&mut self, win: Window) {
         if let Some(dmg) = self.damages.get(&win) {
             let _ = self.conn.damage_subtract(*dmg, x11rb::NONE, x11rb::NONE);
+        }
+        if self.comp_trace {
+            let pending = self.wins.get(&win).is_some_and(|c| c.damaged);
+            log::info!(
+                "[LIFECYCLE] win={:#x} event=DamageNotify damage_pending_before={} mapped={}",
+                win,
+                pending,
+                self.wins.get(&win).is_some_and(|c| c.mapped),
+            );
         }
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.damaged = true;
@@ -972,6 +1089,9 @@ impl Compositor {
     /// written straight onto the window it belongs to and stamped with this
     /// frame's generation. The draw loop then reads it with no search at all.
     pub fn set_transforms(&mut self, placements: &[(Window, Rect, u32)]) {
+        if self.float_trace {
+            self.dbg_frame = self.dbg_frame.wrapping_add(1);
+        }
         self.frame_gen = self.frame_gen.wrapping_add(1);
         let gen = self.frame_gen;
         let corner_radius = self.corner_radius;
@@ -988,6 +1108,13 @@ impl Compositor {
                 geom.w + 2 * bw,
                 geom.h + 2 * bw,
             );
+            if self.float_trace {
+                let changed = cw.transform != outer || cw.transform_gen != gen;
+                log::info!(
+                    "[TRANSFORM] frame={} win={:#x} old_transform={:?} new_transform={:?} changed={} transform_gen_before={} transform_gen_after={}",
+                    self.dbg_frame, win, cw.transform, outer, changed, cw.transform_gen, gen
+                );
+            }
             cw.transform = outer;
             cw.transform_radius = if corner_radius == 0 {
                 0
@@ -995,6 +1122,18 @@ impl Compositor {
                 corner_radius.min((outer.w / 2).min(outer.h / 2))
             };
             cw.transform_gen = gen;
+        }
+        if self.float_trace {
+            let wins: Vec<String> = placements
+                .iter()
+                .map(|(w, _, _)| format!("{w:#x}"))
+                .collect();
+            log::info!(
+                "[TRANSFORM-SET] frame={} count={} wins=[{}]",
+                self.dbg_frame,
+                wins.len(),
+                wins.join(",")
+            );
         }
         // No `mark_full` here: a pure animation/scroll only moves windows, which
         // `compute_scene` records as `old ∪ new` animation damage (Fase 7) so the
@@ -1016,6 +1155,21 @@ impl Compositor {
     #[allow(dead_code)]
     pub fn wait_vblank(&mut self) -> bool {
         self.renderer.wait_vblank()
+    }
+
+    /// OPT-IN DIAGNOSTIC: populate the debug floating-window set used by the
+    /// [SCENE] trace. No behavioural effect.
+    #[allow(dead_code)]
+    pub(crate) fn set_debug_floats(&mut self, ids: &[WindowId]) {
+        if self.float_trace {
+            self.dbg_floats = ids.iter().copied().map(|w| w as Window).collect();
+        }
+    }
+
+    /// OPT-IN DIAGNOSTIC: raw bits of `dirty_reasons` for logging.
+    #[allow(dead_code)]
+    pub(crate) fn dirty_reasons_bits(&self) -> u8 {
+        self.dirty_reasons.0
     }
 
     /// Whether a frame is still needed (a compositor event marked us dirty).
@@ -1203,6 +1357,62 @@ impl Compositor {
         self.dirty_reasons.insert(reason);
     }
 
+    /// OPT-IN DIAGNOSTIC helper: render the current GL resource ids for `win`
+    /// (X pixmap, `GLXPixmap`, GL texture) as strings for [LIFECYCLE] tracing.
+    /// No behaviour change.
+    fn dbg_res_ids(&self, win: Window) -> (String, String, String) {
+        match self.wins.get(&win) {
+            Some(cw) => (
+                cw.pixmap.map_or_else(|| "none".into(), |p| p.to_string()),
+                cw.tex
+                    .as_ref()
+                    .map_or_else(|| "none".into(), |t| t.glx_pixmap.to_string()),
+                cw.tex
+                    .as_ref()
+                    .map_or_else(|| "none".into(), |t| t.handle().0.to_string()),
+            ),
+            None => ("none".into(), "none".into(), "none".into()),
+        }
+    }
+
+    /// OPT-IN DIAGNOSTIC: a one-line-per-window snapshot of the compositor's
+    /// view of every tracked window (geometry/texture state). Used by the
+    /// frame-loop trace (`MAV_COMP_TRACE`) to correlate GL resources with the
+    /// WM-side floating/override-redirect state. Never affects rendering.
+    pub(crate) fn debug_dump(&self) -> String {
+        let mut s = String::new();
+        writeln!(
+            s,
+            "  frame_gen={} dirty={} needs_full={} scene={}",
+            self.frame_gen,
+            self.dirty,
+            self.needs_full,
+            self.scene.len(),
+        )
+        .unwrap();
+        for (&win, cw) in &self.wins {
+            let tex = cw.tex.as_ref().map_or(0, |t| t.handle().0);
+            let gpx = cw.tex.as_ref().map_or(0, |t| t.glx_pixmap);
+            writeln!(
+                s,
+                "  win={:#x} mapped={} hidden={} occluded={} damaged={} needs_rebind={} pixmap={} glxpixmap={} tex={} outer={:?} tgen={}",
+                win,
+                cw.mapped,
+                cw.hidden,
+                cw.occluded,
+                cw.damaged,
+                cw.needs_rebind,
+                cw.pixmap.unwrap_or(0),
+                gpx,
+                tex,
+                cw.outer,
+                cw.transform_gen,
+            )
+            .unwrap();
+        }
+        s
+    }
+
     // ── frame ───────────────────────────────────────────────────────────────
 
     /// Build the explicit scene for this frame into `self.scene` (reused buffer,
@@ -1261,12 +1471,24 @@ impl Compositor {
         // while iterating without holding an immutable borrow of `self.stack`.
         let stack = self.stack.clone();
         for &win in &stack {
+            // OPT-IN DIAGNOSTIC: only floating windows are traced.
+            let float_dbg = self.float_trace && self.dbg_floats.contains(&win);
+            // OPT-IN DIAGNOSTIC: capture tex presence before the mutable
+            // borrow below, so the [SCENE] logs never re-borrow `cw.tex`.
+            let has_tex = self.wins.get(&win).is_some_and(|c| c.tex.is_some());
             // No `ignored` probe here: `track` refuses to record an ignored
             // window, so `wins` can never contain one and this lookup is the
             // filter. That is one hash per stack entry saved every frame.
             let needs_fixup = match self.wins.get(&win) {
                 Some(cw) if !cw.mapped || cw.hidden || cw.occluded => false,
-                Some(cw) => cw.tex.is_none() || cw.needs_rebind,
+                // A window with no texture yet must always be bound. A window
+                // whose previous bind failed (`needs_rebind`) is retried only when
+                // a *fresh* `DamageNotify`/`ConfigureNotify` arrived (`damaged`):
+                // without this gate a persistently-unbindable window would retry
+                // `rename_and_bind` on every frame, pinning `dirty` and pegging
+                // the loop at 100% (a busy "freeze") while never drawing the
+                // window. The next client repaint re-arms the retry.
+                Some(cw) => cw.tex.is_none() || (cw.needs_rebind && cw.damaged),
                 None => false,
             };
             if needs_fixup {
@@ -1274,15 +1496,40 @@ impl Compositor {
                 self.rename_and_bind(win, has_pix);
             }
             let Some(cw) = self.wins.get_mut(&win) else {
+                if float_dbg {
+                    log::info!(
+                        "[SCENE] frame={} win={:#x} mapped=? outer=? transform=? transform_gen=? frame_gen={} tex=false included=false skip_reason=NoCompWin",
+                        self.dbg_frame, win, gen
+                    );
+                }
                 continue;
             };
             if !cw.mapped || cw.hidden {
+                if float_dbg {
+                    log::info!(
+                        "[SCENE] frame={} win={:#x} mapped={} outer={:?} transform={:?} transform_gen={} frame_gen={} tex={} included=false skip_reason={}",
+                        self.dbg_frame, win, cw.mapped, cw.outer, cw.transform, cw.transform_gen, gen, has_tex,
+                        if cw.mapped { "Hidden" } else { "Unmapped" }
+                    );
+                }
                 continue;
             }
             if cw.occluded {
+                if float_dbg {
+                    log::info!(
+                        "[SCENE] frame={} win={:#x} mapped={} outer={:?} transform={:?} transform_gen={} frame_gen={} tex={} included=false skip_reason=Occluded",
+                        self.dbg_frame, win, cw.mapped, cw.outer, cw.transform, cw.transform_gen, gen, has_tex
+                    );
+                }
                 continue;
             }
             let Some(tex) = cw.tex.as_mut() else {
+            if float_dbg {
+                log::info!(
+                    "[SCENE] frame={} win={:#x} mapped={} outer={:?} transform={:?} transform_gen={} frame_gen={} tex=false included=false skip_reason=NoTexture",
+                    self.dbg_frame, win, cw.mapped, cw.outer, cw.transform, cw.transform_gen, gen
+                );
+            }
                 continue;
             };
             // Rebind the texture if the client repainted.
@@ -1298,6 +1545,12 @@ impl Compositor {
                 (cw.outer, 0)
             };
             if outer.w == 0 || outer.h == 0 {
+                if float_dbg {
+                    log::info!(
+                        "[SCENE] frame={} win={:#x} mapped={} outer={:?} transform={:?} transform_gen={} frame_gen={} tex={} included=false skip_reason=ZeroGeometry",
+                        self.dbg_frame, win, cw.mapped, cw.outer, cw.transform, cw.transform_gen, gen, has_tex
+                    );
+                }
                 continue;
             }
             // Fase 7 — animation damage. A window whose drawn rect changed since
@@ -1327,6 +1580,12 @@ impl Compositor {
             // screen at once; the rest are scrolled off the edges and would
             // otherwise each issue a `glDrawArrays` + texture bind for nothing.
             if CompWin::offscreen(outer, sw, sh) {
+                if float_dbg {
+                    log::info!(
+                        "[SCENE] frame={} win={:#x} mapped={} outer={:?} transform={:?} transform_gen={} frame_gen={} tex={} included=true skip_reason=None offscreen=true",
+                        self.dbg_frame, win, cw.mapped, outer, cw.transform, cw.transform_gen, gen, has_tex
+                    );
+                }
                 continue;
             }
             // A window that repainted this frame only dirtied its own area; that
@@ -1355,6 +1614,12 @@ impl Compositor {
                 opacity: cw.opacity,
                 filter,
             };
+            if float_dbg {
+                log::info!(
+                    "[SCENE] frame={} win={:#x} mapped={} outer={:?} transform={:?} transform_gen={} frame_gen={} tex={} included=true skip_reason=None",
+                    self.dbg_frame, win, cw.mapped, outer, cw.transform, cw.transform_gen, gen, has_tex
+                );
+            }
             items.push(DrawItem {
                 win,
                 quad: q,
@@ -1373,6 +1638,15 @@ impl Compositor {
     /// Blocks to vsync via the swap (when `vsync` is on). Returns `false` on a
     /// GL error so the caller can disable the compositor.
     pub fn render(&mut self) -> bool {
+        if self.comp_trace {
+            log::info!(
+                "[LIFECYCLE] event=RenderBegin dirty={} needs_full={} tracked={} scene_windows={}",
+                self.dirty,
+                self.needs_full,
+                self.damages.len(),
+                self.scene.len(),
+            );
+        }
         if self.stack_dirty {
             self.refresh_stack();
         }
@@ -1422,6 +1696,19 @@ impl Compositor {
             } else {
                 mode = FrameMode::Full;
             }
+        }
+
+        if self.float_trace {
+            let scene_windows = self.scene.len();
+            let floating_windows = self
+                .scene
+                .iter()
+                .filter(|it| self.dbg_floats.contains(&it.win))
+                .count();
+            log::info!(
+                "[RENDER] frame={} mode={:?} dirty={} needs_full={} scene_windows={} floating_windows={}",
+                self.dbg_frame, mode, self.dirty, self.needs_full, scene_windows, floating_windows
+            );
         }
 
         match mode {
@@ -1528,7 +1815,16 @@ impl Compositor {
             self.renderer.clear_scissor();
         }
 
+        if self.float_trace {
+            log::info!(
+                "[PRESENT] frame={} submitted=true mode={:?}",
+                self.dbg_frame, mode
+            );
+        }
         self.renderer.end_frame();
+        if self.comp_trace {
+            log::info!("[LIFECYCLE] event=PresentEnd submitted=true mode={:?}", mode);
+        }
         let swap_ns = t_frame_start.map(|t| t.elapsed().as_nanos() as u64);
         // The just-presented frame is now the committed back buffer, so the
         // accumulated damage describes only what changed since this present.
@@ -2530,5 +2826,83 @@ mod bench {
             "{ns:.0} ns/frame in the occlusion pass exceeds 200 µs (1000 occluders)"
         );
         eprintln!("occlusion bench: {ns:.1} ns/frame, {allocs} allocs/frame (1000 occluders)");
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::CompWin;
+    use crate::types::Rect;
+    use maverick_gl::VisualFormat;
+
+    /// The core invariant the floating-freeze fix relies on: `observe_configure`
+    /// is *pure* — it never touches X11 or GL — and it reports a size change
+    /// exactly when the window was resized (so the caller invalidates + defers the
+    /// GLXPixmap/texture recreation to the once-per-frame render phase) and
+    /// reports no change (a move-only `ConfigureNotify`) so no GL work is queued.
+    ///
+    /// Regression guard: before the fix, `on_configure` created the new
+    /// GLXPixmap/texture *synchronously inside the event handler* — every
+    /// `ConfigureNotify` a client-driven floating resize emitted paid a blocking
+    /// `glXCreatePixmap`+`glXBindTexImageEXT`, which froze the frame. The
+    /// decision itself must stay a cheap, side-effect-free mapping.
+    #[test]
+    fn observe_configure_is_pure_and_reports_resize_only() {
+        let vf = VisualFormat {
+            id: 0,
+            depth: 24,
+            red_bits: 8,
+            green_bits: 8,
+            blue_bits: 8,
+            alpha_bits: 0,
+            direct: true,
+        };
+        let mut cw = CompWin::new(Rect::default(), 0, vf);
+        assert_eq!(cw.outer, Rect::default());
+
+        // First configure: size goes 0x0 -> 100x50 with a 2px border.
+        // Returns `true` (resized) and outer is expanded by the border on every
+        // side.
+        let resized = cw.observe_configure(10, 20, 100, 50, 2);
+        assert!(resized, "first real size must be reported as a resize");
+        assert_eq!(cw.outer, Rect::new(8, 18, 104, 54));
+
+        // Move-only (same w/h, different position): must NOT be reported as a
+        // resize, or the (deferred) bind would be needlessly re-armed for a pure
+        // move — the path that, done synchronously, froze move/resize drags.
+        let moved = cw.observe_configure(40, 60, 100, 50, 2);
+        assert!(!moved, "a move-only ConfigureNotify must not look like a resize");
+        assert_eq!(cw.outer, Rect::new(38, 58, 104, 54));
+
+        // Real resize: report it, and expand by the (changed) border.
+        let resized2 = cw.observe_configure(40, 60, 200, 80, 4);
+        assert!(resized2);
+        assert_eq!(cw.outer, Rect::new(36, 56, 208, 88));
+    }
+
+    /// Border width is folded into `outer` so the compositor's drawn rect matches
+    /// the window's frame geometry. A border change with no size change is a move
+    /// for this decision (the bind decision uses `resized` only).
+    /// `outer` includes the border, so a border-width change expands `outer` and is
+    /// therefore reported as a resize (matches `on_configure`'s original decision,
+    /// which compared `outer.w`/`outer.h`). This guards that the resize flag is
+    /// driven by the drawn rect — including the border — so a focused-window
+    /// border change still re-invalidates the GL texture correctly.
+    #[test]
+    fn observe_configure_expands_by_border() {
+        let vf = VisualFormat {
+            id: 0,
+            depth: 24,
+            red_bits: 8,
+            green_bits: 8,
+            blue_bits: 8,
+            alpha_bits: 0,
+            direct: true,
+        };
+        let mut cw = CompWin::new(Rect::default(), 0, vf);
+        let _ = cw.observe_configure(0, 0, 100, 100, 0);
+        let resized = cw.observe_configure(0, 0, 100, 100, 3);
+        assert!(resized, "border change expands outer -> reported as a resize");
+        assert_eq!(cw.outer, Rect::new(-3, -3, 106, 106));
     }
 }
