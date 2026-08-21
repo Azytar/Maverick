@@ -58,6 +58,19 @@ struct UserConfig {
     rules: Vec<RuleEntry>,
     autostart: Option<AutostartCfg>,
     wallpaper: Option<WallpaperEntry>,
+    /// `[compositor]` table (master switch + fullscreen bypass + camera spring).
+    /// Mirrors `config::CompositorCfg`; merged into `Cfg.compositor` after the
+    /// `[general]` aliases (`compositor_enabled`, `camera_stiffness`,
+    /// `camera_damping`) so either spelling works.
+    compositor: Option<CompositorEntry>,
+}
+
+#[derive(Debug, Default)]
+struct CompositorEntry {
+    enabled: Option<bool>,
+    fullscreen_bypass: Option<bool>,
+    stiffness: Option<f32>,
+    damping: Option<f32>,
 }
 
 #[derive(Debug, Default)]
@@ -298,6 +311,10 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                         _ => {}
                     }
                 }
+                Some(Cur::Plain("compositor")) => {
+                    let c = user.compositor.get_or_insert_with(CompositorEntry::default);
+                    apply_compositor_key(c, key, &value, diag);
+                }
                 Some(Cur::Row("keybindings")) => {
                     if let Some(row) = user.keybindings.last_mut() {
                         apply_keybind_key(row, key, &value);
@@ -363,6 +380,50 @@ fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>, diag: &mut D
         "focused" | "col_focused" => set_u32(&mut c.focused, key, value, diag),
         "urgent" | "col_urgent" => set_u32(&mut c.urgent, key, value, diag),
         _ => {}
+    }
+}
+
+/// Map one `[compositor]` key onto the model. Aliases `camera_stiffness`/
+/// `camera_damping` match the legacy `[general]` spellings; `enabled` and
+/// `fullscreen_bypass` are the new first-class keys.
+fn apply_compositor_key(
+    c: &mut CompositorEntry,
+    key: &str,
+    value: &Value<'_>,
+    diag: &mut Diagnostics,
+) {
+    match key {
+        "enabled" => set_bool(&mut c.enabled, key, value, diag),
+        "fullscreen_bypass" => set_bool(&mut c.fullscreen_bypass, key, value, diag),
+        "stiffness" | "camera_stiffness" => set_f32(&mut c.stiffness, key, value, diag),
+        "damping" | "camera_damping" => set_f32(&mut c.damping, key, value, diag),
+        _ => {}
+    }
+}
+
+/// Fold a parsed `[compositor]` table into the compiled `Cfg`.
+fn apply_compositor(cfg: &mut Cfg, c: CompositorEntry, diag: &mut Diagnostics) {
+    if let Some(v) = c.enabled {
+        cfg.compositor.enabled = v;
+    }
+    if let Some(v) = c.fullscreen_bypass {
+        cfg.compositor.fullscreen_bypass = v;
+    }
+    if let Some(v) = c.stiffness {
+        if v > 0.0 {
+            cfg.compositor.stiffness = v;
+        } else {
+            diag.errors
+                .push(format!("compositor.stiffness must be > 0; ignoring {v}"));
+        }
+    }
+    if let Some(v) = c.damping {
+        if v > 0.0 {
+            cfg.compositor.damping = v;
+        } else {
+            diag.errors
+                .push(format!("compositor.damping must be > 0; ignoring {v}"));
+        }
     }
 }
 
@@ -499,6 +560,9 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
     }
     if let Some(colors) = user.colors {
         apply_colors(&mut cfg, colors, diag);
+    }
+    if let Some(compositor) = user.compositor {
+        apply_compositor(&mut cfg, compositor, diag);
     }
 
     if !user.keybindings.is_empty() {
@@ -1176,9 +1240,7 @@ mod tests {
             );
             assert!(
                 cfg.keybinds.iter().any(|(m, k, a)| {
-                    *m == shift_sup
-                        && *k == ksym
-                        && matches!(a, &Action::MoveToWs(v) if v == i)
+                    *m == shift_sup && *k == ksym && matches!(a, &Action::MoveToWs(v) if v == i)
                 }),
                 "fallback config missing MoveToWs({i}) on Super+Shift+{}",
                 i + 1
@@ -1357,6 +1419,36 @@ commands = [["example", "--flag"]]
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(!cfg.rules[0].deny_fullscreen);
         assert!(!cfg.rules[0].true_fullscreen);
+    }
+
+    #[test]
+    fn compositor_table_enables_and_disables_bypass() {
+        // `[compositor] enabled = false` turns the compositor off entirely.
+        let user = parse_string("[compositor]\nenabled = false\n");
+        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
+        assert!(!cfg.compositor.enabled);
+        assert!(cfg.compositor.fullscreen_bypass); // default preserved
+
+        // `[compositor] enabled = true, fullscreen_bypass = false` keeps the
+        // compositor on but forbids bypass.
+        let user = parse_string("[compositor]\nenabled = true\nfullscreen_bypass = false\n");
+        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
+        assert!(cfg.compositor.enabled);
+        assert!(!cfg.compositor.fullscreen_bypass);
+
+        // `fullscreen_bypass = true` is honoured.
+        let user = parse_string("[compositor]\nfullscreen_bypass = true\n");
+        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
+        assert!(cfg.compositor.fullscreen_bypass);
+    }
+
+    #[test]
+    fn general_compositor_enabled_alias_still_works() {
+        // Backward-compatible `[general].compositor_enabled = false` must still
+        // disable the compositor.
+        let user = parse_string("[general]\ncompositor_enabled = false\n");
+        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
+        assert!(!cfg.compositor.enabled);
     }
 
     #[test]

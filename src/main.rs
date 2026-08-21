@@ -46,6 +46,7 @@
 )]
 
 mod backend;
+mod compositor_policy;
 mod config;
 pub mod core;
 mod log;

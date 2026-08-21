@@ -58,6 +58,7 @@ use x11rb::protocol::shape::SK;
 use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::protocol::xproto::*;
 
+use crate::compositor_policy::CompositionMode;
 use crate::config::Cfg;
 use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements, RibbonScratch};
 use crate::core::present::present_into;
@@ -393,6 +394,18 @@ pub struct Compositor {
     root_format: VisualFormat,
     /// The WM's own windows that must never be composited.
     ignored: HashSet<Window>,
+    /// Composition-policy bypass: for each output (monitor) that is in `Bypass`
+    /// mode, the XID of the single eligible fullscreen window Maverick has
+    /// *un-redirected* so it presents directly (no GL texture, no overlay draw).
+    /// The compositor keeps composing every other window normally — bypass is
+    /// per-window, so a fullscreen game on one monitor leaves Firefox on another
+    /// fully composited. Empty when no output is bypassing.
+    bypassed: HashMap<usize, Window>,
+    /// Reverse index of `bypassed` for O(1) membership tests in the hot path.
+    bypassed_set: HashSet<Window>,
+    /// OPT-IN DIAGNOSTIC (`MAVERICK_COMPOSITION_TRACE`): log mode transitions
+    /// (Bypass <=> Compose) per monitor. Off by default; quiet otherwise.
+    bypass_trace: bool,
     /// Tracked redirected windows, keyed by XID.
     wins: HashMap<Window, CompWin>,
     /// Per-window `Damage` resource, keyed by XID.
@@ -722,6 +735,9 @@ impl Compositor {
             wins: HashMap::new(),
             damages: HashMap::new(),
             warned_visuals: HashSet::new(),
+            bypassed: HashMap::new(),
+            bypassed_set: HashSet::new(),
+            bypass_trace: std::env::var_os("MAVERICK_COMPOSITION_TRACE").is_some(),
             wallpaper: None,
             wallpaper_pixmap: None,
             wallpaper_clock: 0.0,
@@ -847,9 +863,29 @@ impl Compositor {
     /// Window appeared (`CreateNotify`). A freshly created window is placed on
     /// top of its siblings by the server, so that is where it enters the stack.
     pub fn on_create(&mut self, win: Window) {
+        if self.bypassed_set.contains(&win) {
+            // The bypassed window itself was recreated (rare): keep its bookkeeping
+            // consistent but leave the bypass state untouched.
+            self.track(win);
+            if !self.ignored.contains(&win) {
+                stack_add_top(&mut self.stack, win);
+            }
+            return;
+        }
+        // A window appeared while we were bypassing (a popup, an
+        // override-redirect menu, or any new client) and the policy could not
+        // have seen it — re-composite everything rather than risk drawing over
+        // or under it incorrectly.
+        if !self.bypassed_set.is_empty() {
+            self.disengage_all_bypass();
+        }
         self.track(win);
         if self.comp_trace {
-            log::info!("[LIFECYCLE] win={:#x} event=CreateNotify tracked={}", win, self.wins.contains_key(&win));
+            log::info!(
+                "[LIFECYCLE] win={:#x} event=CreateNotify tracked={}",
+                win,
+                self.wins.contains_key(&win)
+            );
         }
         if !self.ignored.contains(&win) {
             stack_add_top(&mut self.stack, win);
@@ -879,6 +915,10 @@ impl Compositor {
 
     /// Window destroyed (`DestroyNotify`).
     pub fn on_destroy(&mut self, win: Window) {
+        if self.bypassed_set.contains(&win) {
+            self.bypassed_set.remove(&win);
+            self.bypassed.retain(|_, &mut w| w != win);
+        }
         if self.comp_trace {
             let (pm, gpx, tx) = self.dbg_res_ids(win);
             log::info!(
@@ -911,6 +951,18 @@ impl Compositor {
     /// `stack`. It only asks for a resync when the window is missing entirely,
     /// which means we never saw its `CreateNotify`.
     pub fn on_map(&mut self, win: Window) {
+        if self.bypassed_set.contains(&win) {
+            // The bypassed window itself re-mapped: it is presented directly, so
+            // its compositor bookkeeping must not be touched (and it stays
+            // bypassed).
+            return;
+        }
+        // A previously-unknown window became visible while bypassing (e.g. a
+        // transient dialog over the fullscreen game) — back off to Compose so it
+        // is composited correctly.
+        if !self.bypassed_set.is_empty() {
+            self.disengage_all_bypass();
+        }
         if !self.wins.contains_key(&win) {
             self.track(win);
         }
@@ -953,6 +1005,12 @@ impl Compositor {
     /// `render` already skips unmapped windows. Dropping and re-adding it would
     /// silently promote it to the top the next time it maps.
     pub fn on_unmap(&mut self, win: Window) {
+        // The bypassed fullscreen window going away means the scene is no longer
+        // safe to bypass — return to Compose (which re-redirects it; the normal
+        // path below then marks it unmapped).
+        if self.bypassed_set.contains(&win) {
+            self.disengage_all_bypass();
+        }
         if self.comp_trace {
             let (pm, gpx, tx) = self.dbg_res_ids(win);
             log::info!(
@@ -990,6 +1048,11 @@ impl Compositor {
 
     /// Geometry change (`ConfigureNotify` for a tracked, non-root window).
     pub fn on_configure(&mut self, win: Window, x: i32, y: i32, w: u32, h: u32, bw: u32) {
+        // The bypassed window is presented directly by X; its geometry churn must
+        // not churn the (released) compositor resources or flip us back to Compose.
+        if self.bypassed_set.contains(&win) {
+            return;
+        }
         let (resized, mapped) = match self.wins.get_mut(&win) {
             Some(cw) => (cw.observe_configure(x, y, w, h, bw), cw.mapped),
             None => return,
@@ -1043,6 +1106,11 @@ impl Compositor {
     /// Damage reported (`DamageNotify`). Re-arm and mark dirty; the texture is
     /// rebound right before drawing.
     pub fn on_damage(&mut self, win: Window) {
+        // A bypassed window is not composited, so its damage is irrelevant and
+        // must not re-arm a (non-existent) texture nor flip us back to Compose.
+        if self.bypassed_set.contains(&win) {
+            return;
+        }
         if let Some(dmg) = self.damages.get(&win) {
             let _ = self.conn.damage_subtract(*dmg, x11rb::NONE, x11rb::NONE);
         }
@@ -1357,6 +1425,141 @@ impl Compositor {
         self.dirty_reasons.insert(reason);
     }
 
+    // ── fullscreen bypass (safe, recoverable XComposite un-redirect) ────────
+    //
+    // When the `CompositionPolicy` decides an output is in `Bypass`, Maverick
+    // stops *interposing* its compositor on the single eligible fullscreen
+    // window: it calls `composite_unredirect_window` so X presents that window
+    // directly (beneath the ARGB overlay), and simply never draws it into the
+    // overlay (the overlay stays transparent over it). Bypass is per-window, so
+    // the rest of the desktop keeps being composited normally.
+    //
+    // Recovery is the whole point: `disengage_bypass` re-redirects the window
+    // (`composite_redirect_window`) and re-arms its texture on the very next
+    // frame through the normal `compute_scene` rebind path. Entering and leaving
+    // bypass is therefore symmetric and idempotent — no state is lost that the
+    // steady-state machinery cannot rebuild.
+
+    /// Engage bypass for `mon`, un-redirecting `win` so it presents directly.
+    /// No-op if `mon` already bypasses `win`; otherwise any previous bypass on
+    /// `mon` is cleanly disengaged first.
+    pub fn engage_bypass(&mut self, mon: usize, win: Window) {
+        if self.bypassed.get(&mon) == Some(&win) {
+            return;
+        }
+        if let Some(old) = self.bypassed.get(&mon).copied() {
+            self.resume_window(old);
+            self.bypassed_set.remove(&old);
+        }
+        self.bypass_window(win);
+        self.bypassed.insert(mon, win);
+        self.bypassed_set.insert(win);
+        if self.bypass_trace {
+            log::info!(
+                "composition policy: monitor {mon} -> {} (win={win:#x})",
+                CompositionMode::Bypass.as_str()
+            );
+        }
+    }
+
+    /// Disengage bypass for `mon` (re-redirect + resume its window) if active.
+    pub fn disengage_bypass(&mut self, mon: usize) {
+        if let Some(win) = self.bypassed.remove(&mon) {
+            self.resume_window(win);
+            self.bypassed_set.remove(&win);
+            if self.bypass_trace {
+                log::info!(
+                    "composition policy: monitor {mon} -> {}",
+                    CompositionMode::Compose.as_str()
+                );
+            }
+        }
+    }
+
+    /// Disengage every active bypass (used when bypass is disabled by config, or
+    /// when an unexpected window appears that the policy did not catch).
+    pub fn disengage_all_bypass(&mut self) {
+        if self.bypassed.is_empty() {
+            return;
+        }
+        let mons: Vec<usize> = self.bypassed.keys().copied().collect();
+        for m in mons {
+            self.disengage_bypass(m);
+        }
+    }
+
+    /// True when any output is currently bypassing.
+    pub fn any_bypass(&self) -> bool {
+        !self.bypassed_set.is_empty()
+    }
+
+    /// Un-redirect `win` so X shows it directly, and drop the GL resources we
+    /// were using for it (the overlay must not keep drawing a stale texture).
+    /// The `CompWin` is kept (so its last `outer` rect is still available for
+    /// the wallpaper-skip decision) but is never drawn while bypassed.
+    fn bypass_window(&mut self, win: Window) {
+        let _ = self.conn.composite_unredirect_window(win, Redirect::MANUAL);
+        if let Some(cw) = self.wins.get_mut(&win) {
+            cw.mapped = true; // still mapped, just shown by X directly
+            let (tex, pix) = (cw.tex.take(), cw.pixmap.take());
+            if let Some(t) = tex {
+                self.renderer.destroy_texture(t);
+            }
+            if let Some(pm) = pix {
+                let _ = self.conn.free_pixmap(pm);
+            }
+            cw.damaged = false;
+            cw.needs_rebind = false;
+        }
+        self.mark_full(DirtyReason::GEOMETRY);
+    }
+
+    /// Re-redirect `win` (undo `bypass_window`) and re-arm its compositor state
+    /// so `compute_scene` rebinds its texture on the next frame. Recovery only
+    /// marks the window for re-composition; it does not synchronously create GL
+    /// resources (that stays in the render phase, per the floating-freeze fix).
+    fn resume_window(&mut self, win: Window) {
+        let _ = self.conn.composite_redirect_window(win, Redirect::MANUAL);
+        if !self.wins.contains_key(&win) {
+            self.track(win);
+        }
+        if let Some(cw) = self.wins.get_mut(&win) {
+            let viewable = self
+                .conn
+                .get_window_attributes(win)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .is_some_and(|a| a.map_state == MapState::VIEWABLE);
+            if viewable {
+                cw.mapped = true;
+                cw.hidden = false;
+                cw.needs_rebind = true;
+                cw.damaged = true;
+            }
+        }
+        if !self.damages.contains_key(&win) {
+            if let Ok(dmg) = self.conn.generate_id() {
+                let _ = self.conn.damage_create(dmg, win, ReportLevel::NON_EMPTY);
+                self.damages.insert(win, dmg);
+            }
+        }
+        self.mark_full(DirtyReason::SURFACE);
+    }
+
+    /// True when `r` is fully contained by a currently-bypassed window's last
+    /// `outer` rect — used by `render` to skip drawing wallpaper under a window
+    /// that is presented directly (so the overlay stays transparent there).
+    fn bypass_covers(&self, r: Rect) -> bool {
+        for win in &self.bypassed_set {
+            if let Some(cw) = self.wins.get(win) {
+                if cw.outer.contains_rect(r) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// OPT-IN DIAGNOSTIC helper: render the current GL resource ids for `win`
     /// (X pixmap, `GLXPixmap`, GL texture) as strings for [LIFECYCLE] tracing.
     /// No behaviour change.
@@ -1471,6 +1674,20 @@ impl Compositor {
         // while iterating without holding an immutable borrow of `self.stack`.
         let stack = self.stack.clone();
         for &win in &stack {
+            // A bypassed window is presented directly by X; the compositor must
+            // never draw it (doing so would cover the real window with a stale
+            // texture) nor rebind a GL resource for it. The overlay simply stays
+            // transparent over it.
+            if self.bypassed_set.contains(&win) {
+                if self.float_trace && self.dbg_floats.contains(&win) {
+                    log::info!(
+                        "[SCENE] frame={} win={:#x} included=false skip_reason=Bypassed",
+                        self.dbg_frame,
+                        win
+                    );
+                }
+                continue;
+            }
             // OPT-IN DIAGNOSTIC: only floating windows are traced.
             let float_dbg = self.float_trace && self.dbg_floats.contains(&win);
             // OPT-IN DIAGNOSTIC: capture tex presence before the mutable
@@ -1524,12 +1741,12 @@ impl Compositor {
                 continue;
             }
             let Some(tex) = cw.tex.as_mut() else {
-            if float_dbg {
-                log::info!(
+                if float_dbg {
+                    log::info!(
                     "[SCENE] frame={} win={:#x} mapped={} outer={:?} transform={:?} transform_gen={} frame_gen={} tex=false included=false skip_reason=NoTexture",
                     self.dbg_frame, win, cw.mapped, cw.outer, cw.transform, cw.transform_gen, gen
                 );
-            }
+                }
                 continue;
             };
             // Rebind the texture if the client repainted.
@@ -1745,10 +1962,19 @@ impl Compositor {
         // Precedence: animated shader > static native image (per-output quads) >
         // legacy root pixmap (`_XROOTPMAP_ID` from feh/hsetroot).
         let mut last_tex = TextureHandle(0);
+        // Resolve bypass state once (immutable snapshot) so the per-branch logic
+        // below — which may hold other `&mut self` borrows — does not conflict.
+        let bypass_active = self.any_bypass();
         if let Some(shader) = self.wallpaper_shader {
             // Animated shader: one fill per output; `u_resolution` tells each shader
             // its own pixel size. Keeps requesting frames via `wallpaper_animating`.
             for out in &self.wallpaper_outputs {
+                // Don't paint the wallpaper over a bypassed fullscreen window —
+                // the overlay must stay transparent there so the directly-presented
+                // window shows through.
+                if self.bypass_covers(*out) {
+                    continue;
+                }
                 self.renderer.draw_shader(
                     shader,
                     GlRect {
@@ -1774,6 +2000,9 @@ impl Compositor {
                     &self.wallpaper_outputs,
                 );
                 for (dst, src) in quads {
+                    if self.bypass_covers(dst) {
+                        continue;
+                    }
                     let q = DrawQuad {
                         dst: [
                             dst.x as f32,
@@ -1791,16 +2020,23 @@ impl Compositor {
                 }
             }
         } else if let Some(wp) = self.wallpaper.as_mut() {
-            // Legacy root pixmap fallback (no native wallpaper configured).
-            self.renderer.bind(wp);
-            last_tex = wp.handle();
-            self.renderer.draw(
-                wp,
-                &DrawQuad {
-                    dst: [0.0, 0.0, sw as f32, sh as f32],
-                    ..Default::default()
-                },
-            );
+            // Legacy root pixmap fallback (no native wallpaper configured). The
+            // legacy path draws a single full-screen quad, so when any output is
+            // bypassing we skip it entirely: a transparent hole is left over the
+            // bypassed window (correct) at the cost of the wallpaper not showing
+            // in the other monitors' gaps for the duration of the bypass — an
+            // acceptable, documented limitation of the legacy wallpaper path.
+            if !bypass_active {
+                self.renderer.bind(wp);
+                last_tex = wp.handle();
+                self.renderer.draw(
+                    wp,
+                    &DrawQuad {
+                        dst: [0.0, 0.0, sw as f32, sh as f32],
+                        ..Default::default()
+                    },
+                );
+            }
         }
 
         for item in &self.scene {
@@ -1818,12 +2054,16 @@ impl Compositor {
         if self.float_trace {
             log::info!(
                 "[PRESENT] frame={} submitted=true mode={:?}",
-                self.dbg_frame, mode
+                self.dbg_frame,
+                mode
             );
         }
         self.renderer.end_frame();
         if self.comp_trace {
-            log::info!("[LIFECYCLE] event=PresentEnd submitted=true mode={:?}", mode);
+            log::info!(
+                "[LIFECYCLE] event=PresentEnd submitted=true mode={:?}",
+                mode
+            );
         }
         let swap_ns = t_frame_start.map(|t| t.elapsed().as_nanos() as u64);
         // The just-presented frame is now the committed back buffer, so the
@@ -2871,7 +3111,10 @@ mod lifecycle_tests {
         // resize, or the (deferred) bind would be needlessly re-armed for a pure
         // move — the path that, done synchronously, froze move/resize drags.
         let moved = cw.observe_configure(40, 60, 100, 50, 2);
-        assert!(!moved, "a move-only ConfigureNotify must not look like a resize");
+        assert!(
+            !moved,
+            "a move-only ConfigureNotify must not look like a resize"
+        );
         assert_eq!(cw.outer, Rect::new(38, 58, 104, 54));
 
         // Real resize: report it, and expand by the (changed) border.
@@ -2902,7 +3145,10 @@ mod lifecycle_tests {
         let mut cw = CompWin::new(Rect::default(), 0, vf);
         let _ = cw.observe_configure(0, 0, 100, 100, 0);
         let resized = cw.observe_configure(0, 0, 100, 100, 3);
-        assert!(resized, "border change expands outer -> reported as a resize");
+        assert!(
+            resized,
+            "border change expands outer -> reported as a resize"
+        );
         assert_eq!(cw.outer, Rect::new(-3, -3, 106, 106));
     }
 }

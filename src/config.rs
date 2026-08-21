@@ -97,11 +97,13 @@ impl Default for Cfg {
     }
 }
 
-/// Compositor (OpenGL/GLX) configuration, exposed as `[compositor]` in the
-/// TOML. Absent => no compositor. `enabled = false` (or the `MAVERICK_NO_COMPOSITOR`
-/// env var) => the compositor is never attempted and the WM stays on the plain
-/// `ConfigureWindow` path, which also keeps the legacy X11 `Shape` corner-radius
-/// rounding working for users who don't want GL.
+/// Compositor (OpenGL/GLX) configuration, exposed as the `[compositor]` table
+/// in the TOML (a `[general].compositor_enabled` alias also maps here). Absent
+/// => compositor on with defaults. `enabled = false` (or the
+/// `MAVERICK_NO_COMPOSITOR` env var) => the compositor is never attempted and
+/// the WM stays on the plain `ConfigureWindow` path, which also keeps the
+/// legacy X11 `Shape` corner-radius rounding working for users who don't want
+/// GL.
 #[derive(Debug, Clone)]
 pub struct CompositorCfg {
     /// Master switch. Default `true`: on by default, with automatic fallback.
@@ -112,6 +114,15 @@ pub struct CompositorCfg {
     /// Spring damping for the scroll camera. Higher = less overshoot. Default 30.
     /// The integrator runs substeps so the combination can't oscillate.
     pub damping: f32,
+    /// When `true` (default), Maverick may step aside ("bypass") and let a single
+    /// eligible fullscreen window on an output present itself directly, instead
+    /// of compositing it, to cut latency/overhead for games and video players.
+    /// The decision is made per-output by `crate::compositor_policy` and only
+    /// fires when the scene is unambiguously safe (exactly one fullscreen window,
+    /// nothing composited above it). Bypass NEVER changes an application's own
+    /// `VSync` — it only removes Maverick's redirection of that one window. When
+    /// `false`, Maverick always composites, even under fullscreen.
+    pub fullscreen_bypass: bool,
 }
 
 impl Default for CompositorCfg {
@@ -120,6 +131,7 @@ impl Default for CompositorCfg {
             enabled: true,
             stiffness: 220.0,
             damping: 30.0,
+            fullscreen_bypass: true,
         }
     }
 }

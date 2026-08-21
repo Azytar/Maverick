@@ -466,6 +466,41 @@ impl WindowManager {
         let mut sched;
 
         if let Some(comp) = self.compositor.as_mut() {
+            // ── Composition policy (per-output fullscreen bypass) ──────────
+            // Pure decision (see `crate::compositor_policy`): for each monitor,
+            // engage bypass on the single eligible fullscreen window, or
+            // disengage it. `engage_bypass`/`disengage_bypass` are no-ops when
+            // the mode is unchanged, so re-evaluating every turn is stable and
+            // free of cycles. Bypass never touches VSync — it only removes
+            // Maverick's redirection of that one window.
+            if self.engine.cfg.compositor.fullscreen_bypass {
+                let nmon = self.engine.state.monitors.len();
+                for i in 0..nmon {
+                    // The policy is the single source of truth: it returns the
+                    // mode for this output. When it says `Bypass` we resolve the
+                    // concrete candidate window; otherwise we disengage.
+                    let win = if crate::compositor_policy::mode_for(
+                        &self.engine.cfg,
+                        &self.engine.state,
+                        i,
+                    ) == crate::compositor_policy::CompositionMode::Bypass
+                    {
+                        crate::compositor_policy::bypass_candidate(
+                            &self.engine.cfg,
+                            &self.engine.state,
+                            i,
+                        )
+                    } else {
+                        None
+                    };
+                    match win {
+                        Some(w) => comp.engage_bypass(i, w),
+                        None => comp.disengage_bypass(i),
+                    }
+                }
+            } else {
+                comp.disengage_all_bypass();
+            }
             // Compositor path: the camera is substepped (its semi-implicit
             // integrator is unstable above ~8 ms) and the *live* layout — read
             // from the spring's current value — is drawn by the GPU. Swap
