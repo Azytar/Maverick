@@ -253,11 +253,16 @@ impl Rule {
 /// has always shipped with. This is the fallback whenever no user TOML exists
 /// or it fails to load, and the starting point that a valid TOML overrides.
 pub fn compiled_config() -> Cfg {
-    use x11rb::protocol::xproto::ModMask;
-
-    let sup: u16 = ModMask::M4.into();
-    let shs: u16 = u16::from(ModMask::M4) | u16::from(ModMask::SHIFT);
-    let sct: u16 = u16::from(ModMask::M4) | u16::from(ModMask::CONTROL);
+    // Pure constants for ModMask bits — avoids pulling `x11rb` into `config`
+    // (which would make `maverick-core` depend on X11). Values match
+    // `x11rb::protocol::xproto::ModMask` (1<<6 = Mod4/Super, 1<<0 = Shift,
+    // 1<<2 = Control).
+    const MOD4: u16 = 1 << 6;
+    const SHIFT: u16 = 1 << 0;
+    const CONTROL: u16 = 1 << 2;
+    let sup: u16 = MOD4;
+    let shs: u16 = MOD4 | SHIFT;
+    let sct: u16 = MOD4 | CONTROL;
 
     // XK_ keysym constants (X11 keysym values)
     const XK_RETURN: u32 = 0xff0d;
