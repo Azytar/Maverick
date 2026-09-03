@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "maverick-core",
     "maverick-sys",
     "maverick-x11",
     "maverick-render",
@@ -30,6 +31,7 @@ name = "maverick"
 path = "src/main.rs"
 
 [dependencies]
+maverick-core = { path = "maverick-core" }
 maverick-sys = { path = "maverick-sys" }
 maverick-toml = { path = "maverick-toml" }
 maverick-img = { path = "maverick-img" }

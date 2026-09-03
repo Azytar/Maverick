@@ -82,6 +82,7 @@ name = "maverick"
 version = "0.5.0"
 dependencies = [
  "libc",
+ "maverick-core",
  "maverick-gl",
  "maverick-img",
  "maverick-render",
@@ -90,6 +91,10 @@ dependencies = [
  "maverick-x11",
  "x11rb",
 ]
+
+[[package]]
+name = "maverick-core"
+version = "0.5.0"
 
 [[package]]
 name = "maverick-dialog"
