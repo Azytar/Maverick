@@ -16,7 +16,13 @@ const RESET: &str = "\x1b[0m";
 
 // `maverick-msg` and `maverickctl` both come from `maverick-sys/src/bin/`;
 // both are built by the workspace build, so both get installed.
-const BINARIES: &[&str] = &["maverick", "maverickctl", "maverick-msg", "maverick-dialog"];
+const BINARIES: &[&str] = &[
+    "maverick",
+    "maverickctl",
+    "maverick-msg",
+    "maverick-dialog",
+    "maverick-setup",
+];
 
 #[derive(Clone, Copy)]
 enum Lang {
@@ -138,6 +144,7 @@ fn main() {
     );
     check_path_variable(&install_dir, lang);
     install_desktop_entry(is_root, lang);
+    run_first_flight(&install_dir, lang);
 
     // Resumen final
     println!("\n{}{}==", BOLD, GREEN);
@@ -743,5 +750,64 @@ Type=XSession
                 file_path.display()
             );
         }
+    }
+}
+
+fn run_first_flight(install_dir: &Path, lang: Lang) {
+    let setup = install_dir.join("maverick-setup");
+    if !setup.exists() {
+        warn(lang.msg(
+            "maverick-setup no fue instalado; se omite First Flight",
+            "maverick-setup was not installed; skipping First Flight",
+        ));
+        return;
+    }
+
+    println!(
+        "{} [OK] {}...{}",
+        CYAN,
+        lang.msg(
+            "Ejecutando Maverick First Flight",
+            "Running Maverick First Flight"
+        ),
+        RESET
+    );
+
+    let mut cmd = if let Some(build) = build_as(lang) {
+        let env_bin = find_in_path("env", &current_path()).unwrap_or_else(|| PathBuf::from("env"));
+        let mut c = Command::new(&build.dropper[0]);
+        c.args(&build.dropper[1..]);
+        c.arg(env_bin);
+        c.arg(format!("HOME={}", build.home.display()));
+        c.arg(format!("PATH={}", current_path()));
+        c.arg(&setup);
+        c
+    } else {
+        Command::new(&setup)
+    };
+
+    let status = cmd
+        .arg("--profile")
+        .arg("daily")
+        .arg("--write")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if status {
+        println!(
+            "  {} [OK] {}{}",
+            GREEN,
+            lang.msg(
+                "Configuración inicial generada y validada",
+                "Initial configuration generated and validated"
+            ),
+            RESET
+        );
+    } else {
+        warn(lang.msg(
+            "First Flight no generó una configuración nueva (puede que ya exista una)",
+            "First Flight did not generate a new config (one may already exist)",
+        ));
     }
 }

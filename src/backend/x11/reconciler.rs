@@ -44,6 +44,10 @@ pub struct AppliedWindow {
     /// False until the first configure has been applied. A freshly-mapped
     /// window has nothing applied yet, so the first diff always emits.
     pub seen: bool,
+    /// Last X11 sequence number applied, if known. `None` for synthetic or
+    /// untracked configures. Used by tests to pin ordering; the reconciler
+    /// itself does not yet use it for decisions.
+    pub sequence: Option<u32>,
 }
 
 /// The full set of windows the `Reconciler` believes X11 currently shows.
@@ -269,6 +273,7 @@ mod tests {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         let obs = classify_configure(Rect::new(0, 0, 400, 300), 2, &applied, &c);
         assert!(
@@ -287,6 +292,7 @@ mod tests {
             rect: Rect::new(0, 0, 1920, 1080),
             border_w: 0,
             seen: true,
+            sequence: None,
         };
         let obs = classify_configure(Rect::new(40, 40, 640, 480), 0, &applied, &c);
         assert!(
@@ -304,6 +310,7 @@ mod tests {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         let obs = classify_configure(Rect::new(0, 0, 1000, 800), 2, &applied, &c);
         assert!(
@@ -322,6 +329,7 @@ mod tests {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         let obs = classify_configure(Rect::new(0, 0, 400, 300), 2, &applied, &c);
         assert!(
@@ -340,11 +348,13 @@ mod tests {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         let applied_b = AppliedWindow {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         let obs_a = classify_configure(Rect::new(0, 0, 1000, 800), 2, &applied_a, &a);
         let obs_b = classify_configure(Rect::new(0, 0, 400, 300), 2, &applied_b, &b);
@@ -370,11 +380,13 @@ mod tests {
             rect: Rect::new(0, 0, 1920, 1080),
             border_w: 0,
             seen: true,
+            sequence: None,
         };
         let applied_b = AppliedWindow {
             rect: Rect::new(0, 0, 1920, 1080),
             border_w: 0,
             seen: true,
+            sequence: None,
         };
         let obs_a = classify_configure(Rect::new(40, 40, 640, 480), 0, &applied_a, &a);
         let obs_b = classify_configure(Rect::new(0, 0, 1920, 1080), 0, &applied_b, &b);
@@ -411,6 +423,7 @@ mod tests {
                 rect,
                 border_w: border,
                 seen: true,
+                sequence: None,
             },
         );
         let desired = DesiredState {
@@ -446,6 +459,7 @@ mod tests {
                 rect: applied_rect,
                 border_w: border,
                 seen: true,
+                sequence: None,
             },
         );
         let desired = DesiredState {
@@ -496,6 +510,7 @@ mod tests {
                 rect,
                 border_w: border,
                 seen: true,
+                sequence: None,
             },
         );
         let desired = DesiredState {
@@ -547,6 +562,7 @@ mod tests {
                     rect: r,
                     border_w: border,
                     seen: true,
+                    sequence: None,
                 },
             );
         }
@@ -592,6 +608,7 @@ mod tests {
                 rect: Rect::new(0, 0, 10, 10),
                 border_w: 1,
                 seen: true,
+                sequence: None,
             },
         );
         applied.forget(win);
@@ -625,6 +642,7 @@ mod tests {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         match classify_configure(reported, 2, &applied, &c) {
             ConfigureObservation::Diverged { follow } => {
@@ -670,6 +688,7 @@ mod tests {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         let obs = classify_configure(Rect::new(0, 0, 0, 0), 2, &applied, &c);
         assert!(

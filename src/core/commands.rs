@@ -788,6 +788,15 @@ impl Command for ToggleFloat {
             .clients
             .get(&win)
             .is_some_and(crate::types::Client::is_float);
+        // P1-B: guard against cross-monitor focus corruption. If the focused
+        // window does not actually belong to the selected monitor, mutating the
+        // selected monitor's trees would remove it from tree A and insert it
+        // into floating B — an inconsistent split state. Bailing out is safe:
+        // nothing is mutated and the caller's focus anomaly is left to the
+        // focus-repair paths instead of being compounded here.
+        if state.clients.get(&win).is_some_and(|c| c.monitor != mi) {
+            return CommandReport::new(cmds);
+        }
         if ws_i >= state.monitors[mi].workspaces.len() {
             return CommandReport::new(cmds);
         }
@@ -1047,6 +1056,21 @@ impl Command for ViewWorkspace {
             return CommandReport::new(cmds);
         }
         state.monitors[mi].active_ws = ws_idx;
+        // P1-A: resolve the post-switch focus *inside* the command (the same
+        // resolution the `FocusWindow` effect applies below), so the logical
+        // state is coherent immediately and never depends on the effect being
+        // applied: `focused == best_focus(active_ws)` — a window of the new
+        // workspace (or its presented overlay owner), or `None`. This mirrors
+        // what `MoveToWorkspace` already does. An alive `pending_focus`
+        // deferral is untouched: `best_focus` never returns the deferred
+        // window, so the ping-pong restore keeps handing input to the overlay
+        // owner, never to the deferred window.
+        let focus = state.best_focus(mi);
+        state.monitors[mi].focused = focus;
+        // The presented maximize overlay follows `mon.focused`; leaving the
+        // source workspace's overlay recorded while focus moved would dangle
+        // the overlay/pending_focus bookkeeping (invariant #9).
+        state.sync_presented_maximize(mi);
         let wa = state.monitors[mi].workarea;
         let scroll = ideal_scroll(
             &state.monitors[mi].workspaces[ws_idx],

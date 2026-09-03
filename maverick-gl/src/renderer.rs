@@ -275,6 +275,14 @@ impl fmt::Display for RendererBackend {
     }
 }
 
+/// VSync mode for the compositor (P0 configurable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VsyncMode {
+    On,
+    Off,
+    Adaptive,
+}
+
 /// Hardware vs software acceleration classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Acceleration {
@@ -642,6 +650,26 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<Self, String> {
+        Self::new_with_vsync(
+            dpy,
+            screen,
+            overlay,
+            root_visual,
+            visuals,
+            (width, height),
+            VsyncMode::On,
+        )
+    }
+
+    pub fn new_with_vsync(
+        dpy: XDisplay,
+        screen: i32,
+        overlay: u32,
+        root_visual: u32,
+        visuals: &[VisualFormat],
+        size: (u32, u32),
+        vsync_mode: VsyncMode,
+    ) -> Result<Self, String> {
         let lib = Lib::open_gl()?;
         let glx = Glx::load(&lib)?;
         let d = dpy.as_ptr();
@@ -745,7 +773,7 @@ impl Renderer {
         // edge, and the loop paces itself for free (no spinning, no 16 ms guess).
         // This is the *single* synchroniser: nothing else must set a conflicting
         // interval, or the loop would skip vblanks (B1).
-        let vsync = enable_vsync(&glx, d, screen, glx_win, &exts);
+        let vsync = enable_vsync(&glx, d, screen, glx_win, &exts, vsync_mode);
 
         // `GLX_SGI_video_sync` is kept purely as an instrumentation signal (C1):
         // its counter can measure missed vblanks. It no longer drives pacing —
@@ -815,7 +843,7 @@ impl Renderer {
             version: version.clone(),
             accelerated: classify_acceleration(&vendor, &renderer_str),
         };
-        let _ = (width, height);
+        let _ = size;
         Ok(r)
     }
 
@@ -1145,7 +1173,9 @@ impl Renderer {
                 // free it to avoid leaking the GLXPixmap; a `0` means creation truly
                 // failed and there is nothing to free.
                 if glx_pixmap != 0 {
-                    unsafe { (self.glx.glXDestroyPixmap)(self.dpy.as_ptr(), glx_pixmap); }
+                    unsafe {
+                        (self.glx.glXDestroyPixmap)(self.dpy.as_ptr(), glx_pixmap);
+                    }
                 }
                 return Err(format!(
                     "glXCreatePixmap for {visual} failed with {} ({})",
@@ -1563,21 +1593,59 @@ fn enable_vsync(
     screen: c_int,
     drawable: GLXDrawable,
     exts: &str,
+    mode: VsyncMode,
 ) -> bool {
+    if mode == VsyncMode::Off {
+        let _ = screen;
+        return false;
+    }
+    let interval: c_int = match mode {
+        VsyncMode::Adaptive => {
+            if has_extension(exts, "GLX_EXT_swap_control_tear") {
+                -1
+            } else {
+                1
+            }
+        }
+        VsyncMode::On => 1,
+        VsyncMode::Off => 0,
+    };
     if has_extension(exts, "GLX_EXT_swap_control") {
         if let Some(f) = glx.glXSwapIntervalEXT {
-            unsafe { f(d, drawable, 1) };
+            unsafe { f(d, drawable, interval) };
+            return interval != 0;
+        }
+    }
+    if has_extension(exts, "GLX_EXT_swap_control_tear") && interval == -1 {
+        if let Some(f) = glx.glXSwapIntervalEXT {
+            unsafe { f(d, drawable, -1) };
             return true;
         }
     }
+    // Mesa/SGI only support interval 1, not -1
+    if interval == -1 {
+        // fallback to On when adaptive not available via this path
+        if has_extension(exts, "GLX_MESA_swap_control") {
+            if let Some(f) = glx.glXSwapIntervalMESA {
+                return unsafe { f(1) } == 0;
+            }
+        }
+        if has_extension(exts, "GLX_SGI_swap_control") {
+            if let Some(f) = glx.glXSwapIntervalSGI {
+                return unsafe { f(1) } == 0;
+            }
+        }
+        let _ = screen;
+        return false;
+    }
     if has_extension(exts, "GLX_MESA_swap_control") {
         if let Some(f) = glx.glXSwapIntervalMESA {
-            return unsafe { f(1) } == 0;
+            return unsafe { f(interval as c_uint) } == 0;
         }
     }
     if has_extension(exts, "GLX_SGI_swap_control") {
         if let Some(f) = glx.glXSwapIntervalSGI {
-            return unsafe { f(1) } == 0;
+            return unsafe { f(interval) } == 0;
         }
     }
     let _ = screen;

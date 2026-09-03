@@ -307,13 +307,30 @@ pub fn fs_ctx(
     }
 }
 
+/// Ceiling for user-configured gaps at the u32→i32 boundary
+/// (see `effective_gaps`). Any value above this is already "all gap" on any
+/// real display; the ordering of user intent below it is preserved.
+/// Shared with `grid.rs`, which has its own `effective_gaps` copy.
+pub(crate) const MAX_CFG_GAP: i32 = 1_000_000;
+
 /// Resolve the effective inner/outer gaps for this workspace, applying
 /// `smart_gaps` (collapse to 0 when exactly one tiled window).
+///
+/// This is also the u32→i32 representation boundary for user config: a raw
+/// `gaps_outer` above `i32::MAX` would wrap negative here and drive the
+/// workarea in the *wrong* direction (the audited extreme-gaps bug, fix #3).
+/// Clamping to [`MAX_CFG_GAP`] is not a behavior change — beyond ~1M px a gap
+/// already exceeds any display — but it keeps the numbers sane so the
+/// workarea-aware gap reduction in `arrange_columns` can do its real job:
+/// preserve the user's intent (big gaps) while guaranteeing valid geometry.
 fn effective_gaps(ws: &Workspace, cfg: &Cfg) -> (i32, i32) {
     if cfg.smart_gaps && count_tiled(ws) <= 1 && ws.floats.is_empty() {
         return (0, 0);
     }
-    (cfg.gaps_inner as i32, cfg.gaps_outer as i32)
+    (
+        cfg.gaps_inner.min(MAX_CFG_GAP as u32) as i32,
+        cfg.gaps_outer.min(MAX_CFG_GAP as u32) as i32,
+    )
 }
 
 /// P10: Clear and refill `out` instead of allocating a new Vec each call.
@@ -422,6 +439,18 @@ pub(crate) fn ribbon_geom_into<'s>(
     cols: &'s mut Vec<(f32, f32)>,
 ) -> RibbonGeom<'s> {
     let (gap, gap_outer) = effective_gaps(ws, cfg);
+    // P2 (audit fix #3): the outer gap insets the workarea on all four edges —
+    // unlike the scrollable horizontal ribbon, it anchors real geometry. A gap
+    // larger than half the workarea pushes the inset area off-monitor
+    // (saturating to a zero-area workarea *anchored outside the screen*, e.g.
+    // a window at y=5000 on a 1080 px display). Clamp to the largest gap that
+    // keeps the inset inside the workarea — Option C policy: the user's "huge
+    // gap" intent still yields the maximum possible inset, and the geometry
+    // stays valid.
+    let gap_outer = gap_outer
+        .min(workarea.w as i32 / 2)
+        .min(workarea.h as i32 / 2)
+        .max(0);
     let wa = Rect::new(
         workarea.x + gap_outer,
         workarea.y + gap_outer,
@@ -592,7 +621,17 @@ fn arrange_columns(
         let inner_w = ((col_w_world * alpha) - 2.0 * bw as f32).max(1.0) as u32;
         // Only the (n-1) gaps *between* rows are reserved; top/bottom edges
         // sit flush with `wa`. Vertical also scales by `alpha` in Overview.
-        let total_h = wa.h as f32 - (n as f32 - 1.0) * gap_f;
+        // P2 hardening: clamp the vertical gap so the windows always have at
+        // least 1px of vertical space, preventing `total_h` from going negative
+        // and pushing windows entirely out of the workarea.
+        let max_total_gaps = (wa.h as f32 - n as f32).max(0.0);
+        let max_gap = if n > 1 {
+            max_total_gaps / (n as f32 - 1.0)
+        } else {
+            0.0
+        };
+        let gap_f_v = gap_f.min(max_gap);
+        let total_h = wa.h as f32 - (n as f32 - 1.0) * gap_f_v;
 
         // ── Row geometry (uniform rows) ───────────────────────────────────
         // The last row absorbs any remainder so the column always fills
@@ -623,7 +662,7 @@ fn arrange_columns(
                 0.0
             };
             let row_h_world = (base_h + extra).max(1.0);
-            let row_y_world = wa.y as f32 + ri as f32 * (base_h + gap_f);
+            let row_y_world = wa.y as f32 + ri as f32 * (base_h + gap_f_v);
             let screen_h = (row_h_world * alpha).max(1.0) as u32;
             let screen_y = (wa.y as f32 + (row_y_world - wa.y as f32) * alpha + cy).round() as i32;
 
@@ -1038,5 +1077,205 @@ mod tests {
             "fullscreen left must equal screen.x under the aligned camera; got {}",
             rect.x
         );
+    }
+    // ── P2: extreme layout inputs (giant gaps, tiny workarea, many columns) ──
+    //
+    // Invariant: the produced geometry must never be invalid — `width >= 0`,
+    // `height >= 0` (guaranteed by the u32 type) and, critically, no i32/f32
+    // overflow or negative projection coordinates escaping `saturating` math.
+    // The layout must survive degenerate inputs without panicking and without
+    // producing NaN/inf.
+
+    /// Build a state with `n` single-window columns on a `screen` monitor.
+    fn many_columns_state(n: usize) -> State {
+        let mut state = State::new();
+        state
+            .monitors
+            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 9));
+        let ws = &mut state.monitors[0].workspaces[0];
+        for i in 0..n {
+            let win = (i + 1) as u32;
+            ws.columns.push(Column {
+                windows: vec![win],
+                focused: 0,
+                weight: 1.0 / n as f32,
+                boost: 0.0,
+            });
+        }
+        for i in 0..n {
+            state.add_client(Client::new((i + 1) as u32, 0, 0));
+        }
+        state.monitors[0].workspaces[0].focus = Focus { column_idx: 0 };
+        state
+    }
+
+    fn assert_geometry_sane(state: &mut State, cfg: &Cfg) {
+        let p = place(state, cfg);
+        for (_, rect, _) in &p {
+            assert!(rect.w < 1 << 30, "width overflowed: {rect:?}");
+            assert!(rect.h < 1 << 30, "height overflowed: {rect:?}");
+            assert!(rect.x.abs() < 1 << 24, "x exploded: {rect:?}");
+            assert!(rect.y.abs() < 1 << 24, "y exploded: {rect:?}");
+        }
+    }
+
+    #[test]
+    fn giant_gaps_tiny_workarea_stay_valid() {
+        let cfg = Cfg {
+            // Gaps larger than the workarea itself.
+            gaps_inner: 5_000,
+            gaps_outer: 5_000,
+            ..Cfg::default()
+        };
+        let mut state = many_columns_state(4);
+        // Shrink the workarea below the gaps via a dock reservation.
+        state.monitors[0].set_reserved_region(0xBEEF, crate::types::Edge::Left, 1900);
+        assert_geometry_sane(&mut state, &cfg);
+    }
+
+    #[test]
+    fn many_rows_and_columns_with_extreme_gaps_never_produce_invalid_geometry() {
+        let cfg = Cfg {
+            gaps_inner: 2_000,
+            gaps_outer: 2_000,
+            ..Cfg::default()
+        };
+        let mut state = many_columns_state(40);
+        assert_geometry_sane(&mut state, &cfg);
+
+        // A 1x1 workarea: every resource consumed by gaps/borders, geometry
+        // must clamp instead of wrapping or going negative.
+        let mut tiny = many_columns_state(3);
+        tiny.monitors[0].screen = Rect::new(0, 0, 1, 1);
+        tiny.monitors[0].workarea = Rect::new(0, 0, 1, 1);
+        assert_geometry_sane(&mut tiny, &cfg);
+    }
+
+    /// Build a state with `cols` columns × `rows` windows per column on a
+    /// `w`×`h` monitor (the exact shapes mandated by the final audit).
+    fn grid_state(w: u32, h: u32, cols: usize, rows: usize) -> State {
+        let mut state = State::new();
+        state.monitors.push(Monitor::new(Rect::new(0, 0, w, h), 9));
+        let ws = &mut state.monitors[0].workspaces[0];
+        let mut next_win: u32 = 1;
+        for _ in 0..cols {
+            ws.columns.push(Column {
+                windows: (0..rows)
+                    .map(|_| {
+                        let id = next_win;
+                        next_win += 1;
+                        id
+                    })
+                    .collect(),
+                focused: 0,
+                weight: 1.0 / cols as f32,
+                boost: 0.0,
+            });
+        }
+        ws.focus = Focus { column_idx: 0 };
+        for i in 0..(cols * rows) as u32 {
+            state.add_client(Client::new(i + 1, 0, 0));
+        }
+        state
+    }
+
+    /// The audit's geometry-validity predicate, stronger than
+    /// `assert_geometry_sane`: finite/reasonable coordinates, non-degenerate
+    /// sizes, per-window fit inside the workarea, and vertical stacking that
+    /// stays inside the workarea (or within the unavoidable 1px-per-window
+    /// floor when the workarea is smaller than the row count — n windows of
+    /// ≥ 1 px each simply cannot fit into fewer than n pixels; the layout
+    /// must then stay valid and *bounded*, not escape to absurdity).
+    ///
+    /// Horizontal containment is intentionally NOT asserted: the column
+    /// ribbon is scrollable by design, so a column lying outside the workarea
+    /// on the x axis is legitimate (the camera scrolls to it), unlike a
+    /// vertical escape which nothing can recover.
+    fn assert_gaps_geometry_within_workarea(state: &mut State, cfg: &Cfg, rows: usize) {
+        let wa = state.monitors[0].workarea;
+        let p = place(state, cfg);
+        assert!(!p.is_empty(), "every client must receive a placement");
+        let one_px = |v: u32| (v as i32).max(1) as u32;
+        for (win, rect, _) in &p {
+            assert!(
+                state.clients.contains_key(win),
+                "placement emitted for an unknown client"
+            );
+            assert!(rect.x.abs() < 1 << 24, "x not reasonable: {rect:?}");
+            assert!(rect.y.abs() < 1 << 24, "y not reasonable: {rect:?}");
+            assert!(rect.w >= 1 && rect.h >= 1, "degenerate rectangle: {rect:?}");
+            assert!(
+                rect.w <= one_px(wa.w) && rect.h <= one_px(wa.h),
+                "window larger than the workarea: {rect:?} wa={wa:?}"
+            );
+            let v_room = (wa.h as i32).max(rows as i32);
+            assert!(rect.y >= wa.y, "row above the workarea: {rect:?} wa={wa:?}");
+            assert!(
+                rect.y + rect.h as i32 <= wa.y + v_room,
+                "rows escaped the workarea: {rect:?} wa={wa:?}"
+            );
+        }
+    }
+
+    /// 1x1 workarea + 2 clients + huge gap (audit-mandated): the most
+    /// degenerate shape. Validity and a bounded, documented 1px-per-row
+    /// floor are the only possible guarantees here.
+    #[test]
+    fn one_by_one_workarea_two_clients_huge_gap_stay_valid() {
+        let cfg = Cfg {
+            gaps_inner: 5_000,
+            gaps_outer: 5_000,
+            ..Cfg::default()
+        };
+        let mut state = grid_state(1, 1, 1, 2);
+        assert_gaps_geometry_within_workarea(&mut state, &cfg, 2);
+    }
+
+    /// 100x100 workarea + 100 clients + huge gap (audit-mandated): exactly
+    /// one pixel per row — the vertical gap clamp must collapse to 0 and
+    /// every row must land precisely inside the workarea.
+    #[test]
+    fn hundred_square_workarea_hundred_clients_huge_gap_stay_valid() {
+        let cfg = Cfg {
+            gaps_inner: 5_000,
+            gaps_outer: 5_000,
+            ..Cfg::default()
+        };
+        let mut state = grid_state(100, 100, 1, 100);
+        assert_gaps_geometry_within_workarea(&mut state, &cfg, 100);
+    }
+
+    /// 1920x1080 + 3 clients + huge gap (audit-mandated): a real monitor
+    /// consumed entirely by gaps must clamp, not produce absurd rectangles.
+    #[test]
+    fn full_hd_three_clients_huge_gap_stay_valid() {
+        let cfg = Cfg {
+            gaps_inner: 5_000,
+            gaps_outer: 5_000,
+            ..Cfg::default()
+        };
+        let mut state = grid_state(1920, 1080, 1, 3);
+        assert_gaps_geometry_within_workarea(&mut state, &cfg, 3);
+    }
+
+    /// Gap sweep: 0, the normal default, the clamp ceiling, and values above
+    /// `i32::MAX` that would wrap NEGATIVE in the u32→i32 conversion (the
+    /// audited wrap bug that pushed the workarea in the wrong direction).
+    #[test]
+    fn gap_sweep_zero_normal_ceiling_and_beyond_i32_stay_valid() {
+        for (inner, outer) in [
+            (0u32, 0u32),
+            (6, 6),
+            (1_000_000, 1_000_000),
+            (u32::MAX, u32::MAX),
+        ] {
+            let cfg = Cfg {
+                gaps_inner: inner,
+                gaps_outer: outer,
+                ..Cfg::default()
+            };
+            let mut state = grid_state(1920, 1080, 2, 3);
+            assert_gaps_geometry_within_workarea(&mut state, &cfg, 3);
+        }
     }
 }

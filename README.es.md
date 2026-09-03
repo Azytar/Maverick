@@ -55,8 +55,9 @@ Rust. Presenta un diseño de columnas desplazables horizontalmente inspirado en
 ### Compilar desde las fuentes
 
 Maverick es un workspace de Cargo: el binario `maverick` (el propio gestor),
-`maverickctl` (CLI de control), `maverick-dialog` (el diálogo de
-confirmación de salida), `maverick-installer`, y los crates de librería
+`maverickctl` (CLI de control), `maverick-setup` (asistente First Flight),
+`maverick-dialog` (el diálogo de confirmación de salida), `maverick-installer`,
+y los crates de librería
 `maverick-gl` (primitivas GL/GLX del compositor), `maverick-img` (decode de
 PNG sin dependencias para el wallpaper) y `maverick-toml` (el parser de
 config sin dependencias). Compílalos todos juntos:
@@ -71,15 +72,34 @@ cargo build --release --workspace
 `maverick` — sin él, Cargo solo compila `maverick` y omite los binarios
 `maverick-sys`/`maverick-dialog`.)
 
+> Propuesta de experiencia inicial: [Maverick First Flight](docs/first-flight.es.md)
+> describe un instalador/asistente capaz de detectar tu sistema, generar una
+> configuración a medida, validar la sesión y evitar que el primer arranque
+> termine en una pantalla vacía.
+
 ### Añadir al PATH
 
 ```bash
-cp target/release/maverick target/release/maverickctl target/release/maverick-dialog ~/.local/bin/
+cp target/release/maverick target/release/maverickctl target/release/maverick-msg target/release/maverick-setup target/release/maverick-dialog ~/.local/bin/
 ```
 
 `maverick-dialog` solo necesita estar en el `PATH` si quieres que aparezca el
 aviso de salida con `Super+Shift+Q`; sin él, `maverickctl` recurre a
 `zenity`/`kdialog`/un aviso en TTY.
+
+Genera una configuración inicial adaptada a tu equipo:
+
+```bash
+maverick-setup --interactive --write
+```
+
+También puedes inspeccionar lo que detecta o previsualizar la configuración sin
+tocar archivos:
+
+```bash
+maverick-setup --detect
+maverick-setup --profile daily --dry-run
+```
 
 ### Arranque con `.xinitrc`
 

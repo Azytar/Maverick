@@ -1,6 +1,6 @@
 [package]
 name = "maverick-gl"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.82"
 authors = ["azytar"]
@@ -14,6 +14,7 @@ keywords = ["window-manager", "x11", "glx", "opengl", "compositor"]
 libc = "0.2"
 log = "0.4"
 maverick-img = { path = "../maverick-img" }
+maverick-x11 = { path = "../maverick-x11" }
 # `allow-unsafe-code` is what unlocks `x11rb::xcb_ffi::XCBConnection`, the
 # connection type that can wrap the `xcb_connection_t*` owned by an Xlib
 # `Display*` — the single connection shared by the WM (XCB requests) and GLX

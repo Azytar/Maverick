@@ -39,7 +39,7 @@ pub mod xlib;
 
 pub use renderer::{
     Acceleration, DrawQuad, Filter, Rect, Renderer, RendererBackend, RendererInfo, ShaderId,
-    Texture, TextureHandle, VisualFormat, VisualReport,
+    Texture, TextureHandle, VisualFormat, VisualReport, VsyncMode,
 };
 pub use xlib::XDisplay;
 

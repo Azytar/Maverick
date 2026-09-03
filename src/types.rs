@@ -102,6 +102,18 @@ impl WinFlags {
     /// leaving fullscreen can return it to its float (and `saved_geom`) instead
     /// of dropping it back as a tiled column. Set by `ToggleFullscreen`.
     pub const FS_WAS_FLOAT: u16 = 1 << 7;
+    /// Window *origin*: the window was born floating — WM policy decided so at
+    /// map time (`_NET_WM_WINDOW_TYPE` dialog/utility/menu/toolbar/splash,
+    /// `_NET_WM_STATE_MODAL`, `WM_TRANSIENT_FOR`, fixed size hints, portal/
+    /// file-chooser heuristics, a `float = true` window rule, or a float state
+    /// restored across a restart). Contrast with a tiled window the *user*
+    /// tears off (`ToggleFloat` / Mod4-drag): that one keeps this bit clear. The
+    /// origin outlives layout-mode changes (it is never cleared), so
+    /// `origin != current layout mode` holds: a native float that is tiled via
+    /// `ToggleFloat` and floated again remains distinguishable from a torn-off
+    /// tile. Backend drag semantics read it (`pointer::float_may_join_tree`)
+    /// so a native float is never dropped into the tiling tree by accident.
+    pub const FLOAT_NATIVE: u16 = 1 << 9;
 
     #[inline]
     pub fn set(&mut self, f: u16) {
@@ -213,6 +225,26 @@ pub struct Camera {
     pub damping: f32,
 }
 
+/// Integrator stability bound for `Camera::step`: explicit Euler on a
+/// spring-damper is stable for `ω·dt < 2` with `ω = √stiffness`; the frame
+/// driver slices every frame into `SUBSTEP_MS = 8 ms` substeps, giving
+/// `stiffness < (2 / 0.008)² = 62 500`.
+pub(crate) const MAX_SPRING: f32 = 62_500.0;
+/// Smallest tolerated stiffness. `Camera::step` re-clamps on every step, so
+/// even a caller that bypasses `sanitize_spring` cannot disable restoration.
+pub(crate) const MIN_STIFFNESS: f32 = 1.0;
+/// Smallest tolerated damping. Semantics, not an arbitrary guard: the settle
+/// predicate of `Camera::step` can only be reached if the damper removes
+/// energy. With `damping > 0` the per-substep velocity update is a strict
+/// contraction (`v ← v·(1 − c·dt)`, `c·dt = 0.0008` at the minimum), so
+/// `|velocity|` decays monotonically toward the 0.01 px/s settle threshold
+/// and the camera terminates. At `damping = 0` explicit Euler *injects*
+/// energy into an oscillating spring — the audited eternal-`moving` bug —
+/// so 0 is illegal. 0.1 is one order of magnitude below the default 30:
+/// every "very low damping" user intent survives verbatim while the
+/// mechanical guarantee above holds.
+pub(crate) const MIN_DAMPING: f32 = 0.1;
+
 impl Camera {
     pub fn new(pos: f32) -> Self {
         Self {
@@ -224,11 +256,40 @@ impl Camera {
         }
     }
     /// Advance one step of `dt` seconds. Returns true while still moving.
+    ///
+    /// P2 hardening: a non-finite `dt` (or an already-poisoned state) can never
+    /// enter the integrator — it would propagate NaN into `position`, which
+    /// feeds the layout projection, freezing every window at an undefined
+    /// coordinate. A poisoned state snaps to target instead of staying NaN.
     pub fn step(&mut self, dt: f32) -> bool {
+        if !dt.is_finite() || dt <= 0.0 {
+            return false;
+        }
+        if !self.position.is_finite() || !self.target.is_finite() || !self.velocity.is_finite() {
+            self.snap(self.target);
+            if !self.target.is_finite() {
+                self.target = 0.0;
+                self.position = 0.0;
+            }
+            return false;
+        }
         let disp = self.position - self.target;
-        let accel = -self.stiffness * disp - self.damping * self.velocity;
+        // P2 hardening: enforce strict lower bounds during integration itself,
+        // so no direct mutation of the public fields can bypass sanitization
+        // and create an undamped infinite loop (see the MIN_DAMPING/MIN_
+        // STIFFNESS const docs for why exactly these bounds).
+        let stiffness = self.stiffness.clamp(MIN_STIFFNESS, MAX_SPRING);
+        let damping = self.damping.clamp(MIN_DAMPING, MAX_SPRING);
+        let accel = -stiffness * disp - damping * self.velocity;
         self.velocity += accel * dt;
         self.position += self.velocity * dt;
+        // Overflow guard: an extreme (but finite) config can still blow the
+        // integrator up in one step; clamp to a finite sentinel rather than
+        // propagate infinity.
+        if !self.position.is_finite() || !self.velocity.is_finite() {
+            self.snap(self.target);
+            return false;
+        }
         self.velocity.abs() > 0.01 || disp.abs() > 0.5
     }
     /// Snap immediately (no animation) — used on first layout / unmanage.
@@ -632,6 +693,10 @@ pub struct Client {
     /// runtime — it is policy, not state, so it deliberately lives here rather
     /// than as another `WinFlags` bit.
     pub fullscreen_policy: FullscreenPolicy,
+    /// `_NET_WM_BYPASS_COMPOSITOR` hint from the client (EWMH): None=auto (0 or
+    /// absent), Some(1)=force compositor ON, Some(2)=force bypass. Updated on
+    /// `PropertyNotify` and read by `compositor_policy::bypass_candidate`.
+    pub bypass_hint: Option<u32>,
 }
 
 impl Client {
@@ -661,12 +726,20 @@ impl Client {
             geometry_dirty: false,
             fs_snapshot: None,
             fullscreen_policy: FullscreenPolicy::Normal,
+            bypass_hint: None,
         }
     }
 
     #[inline]
     pub fn is_float(&self) -> bool {
         self.flags.has(WinFlags::FLOAT)
+    }
+    /// True when this window's floating origin is "born floating" (see
+    /// [`WinFlags::FLOAT_NATIVE`]). Orthogonal to the *current* layout mode:
+    /// a native float toggled into the tiling keeps returning `true`.
+    #[inline]
+    pub fn is_native_float(&self) -> bool {
+        self.flags.has(WinFlags::FLOAT_NATIVE)
     }
     #[inline]
     pub fn is_fullscreen(&self) -> bool {
@@ -1908,11 +1981,63 @@ impl State {
 
 /// Critically-damped-ish exponential approach of `cur` toward `target`.
 /// Returns true while still moving meaningfully. Stable for any dt.
+///
+/// P2 hardening: a non-finite `target` or `dt` must not poison `cur` — an
+/// infinite target would push `cur` to infinity on the first step and the
+/// layout projection would follow. Poisoned inputs are ignored and the
+/// spring reports "settled" so the animator can drop the frame.
 pub fn spring_smooth(cur: &mut f32, target: f32, dt: f32) -> bool {
+    if !dt.is_finite() || dt <= 0.0 {
+        return false;
+    }
+    if !target.is_finite() {
+        // Never chase a non-finite target; if `cur` is already poisoned,
+        // pull it back to a finite value.
+        if !cur.is_finite() {
+            *cur = 0.0;
+        }
+        return false;
+    }
     let rate = 12.0;
     let k = 1.0 - (-rate * dt).exp();
     *cur += (target - *cur) * k;
+    if !cur.is_finite() {
+        *cur = target;
+        return false;
+    }
     (*cur - target).abs() > 0.001
+}
+
+/// Sanitize user-supplied spring parameters (P2) against the real stability
+/// region of the explicit integrator used by `Camera::step`.
+///
+/// The animation driver slices every frame into `SUBSTEP_MS = 8 ms` substeps
+/// (see compositor), so the stability bound for explicit Euler on a
+/// spring-damper is `ω·dt < 2` with `ω = √stiffness`, i.e.
+/// `stiffness < (2 / dt)² = 62 500` at dt = 8 ms. That bound — not an
+/// arbitrary aesthetic region — is the clamp used here. Over-damped systems
+/// (any `damping ≥ 0`) are legitimate and stay allowed.
+///
+/// * `stiffness` non-finite or `≤ 0` → default 220.0 (a zero/negative
+///   stiffness makes the spring never restore, and NaN poisons everything).
+/// * `damping` non-finite or `≤ 0` → default 30.0 (at zero explicit Euler
+///   injects energy: the camera never settles — see [`MIN_DAMPING`]).
+/// * Both are then clamped into `[MIN_STIFFNESS or MIN_DAMPING, MAX_SPRING]`;
+///   the const docs justify the lower bounds from the integrator's settle
+///   semantics, and the upper bound is the hard stability region at the
+///   8 ms substep, not an aesthetic region.
+pub fn sanitize_spring(stiffness: f32, damping: f32) -> (f32, f32) {
+    let stiffness = if !stiffness.is_finite() || stiffness <= 0.0 {
+        220.0
+    } else {
+        stiffness.clamp(MIN_STIFFNESS, MAX_SPRING)
+    };
+    let damping = if !damping.is_finite() || damping <= 0.0 {
+        30.0
+    } else {
+        damping.clamp(MIN_DAMPING, MAX_SPRING)
+    };
+    (stiffness, damping)
 }
 
 impl Default for State {
@@ -2054,5 +2179,164 @@ mod rect_tests {
         assert!(big.contains_rect(Rect::new(0, 0, 10, 10)));
         // Partial overlap is not containment.
         assert!(!big.contains_rect(Rect::new(150, 150, 100, 100)));
+    }
+}
+
+/// P2: spring sanitization + integrator hardening (pure tests).
+#[cfg(test)]
+mod spring_hardening_tests {
+    use super::{sanitize_spring, spring_smooth, Camera};
+
+    #[test]
+    fn stiffness_zero_negative_and_non_finite_fall_back_to_default() {
+        assert_eq!(sanitize_spring(0.0, 30.0), (220.0, 30.0));
+        assert_eq!(sanitize_spring(-5.0, 30.0), (220.0, 30.0));
+        assert_eq!(sanitize_spring(f32::NAN, 30.0), (220.0, 30.0));
+        assert_eq!(sanitize_spring(f32::INFINITY, 30.0), (220.0, 30.0));
+        assert_eq!(sanitize_spring(f32::NEG_INFINITY, 30.0), (220.0, 30.0));
+    }
+
+    #[test]
+    fn damping_negative_and_non_finite_fall_back_to_default() {
+        assert_eq!(sanitize_spring(220.0, -1.0), (220.0, 30.0));
+        assert_eq!(sanitize_spring(220.0, f32::NAN), (220.0, 30.0));
+        assert_eq!(sanitize_spring(220.0, f32::INFINITY), (220.0, 30.0));
+    }
+
+    #[test]
+    fn damping_extreme_is_allowed_but_bounded_by_integrator_stability() {
+        // Over-damping is legitimate physics: no arbitrary region imposed.
+        let (k, c) = sanitize_spring(500.0, 10_000.0);
+        assert_eq!((k, c), (500.0, 10_000.0));
+        // But both are clamped to the explicit-Euler stability bound at the
+        // 8 ms substep (ω·dt < 2 → spring < 62 500).
+        let (k, c) = sanitize_spring(1.0e9, 1.0e9);
+        assert_eq!((k, c), (62_500.0, 62_500.0));
+    }
+
+    #[test]
+    fn camera_step_survives_non_finite_dt_and_poisoned_state() {
+        let mut cam = Camera::new(0.0);
+        cam.target = 100.0;
+        // NaN dt must not poison the state.
+        assert!(!cam.step(f32::NAN));
+        assert!(cam.position.is_finite());
+        // A poisoned position snaps back to target instead of staying NaN.
+        cam.position = f32::NAN;
+        assert!(!cam.step(1.0 / 60.0));
+        assert!(cam.position.is_finite());
+    }
+
+    #[test]
+    fn camera_step_with_extreme_spring_does_not_diverge() {
+        let mut cam = Camera::new(0.0);
+        cam.stiffness = 62_500.0; // at the clamp bound
+        cam.damping = 0.0; // clamped to 0.1 internally
+        cam.target = 1.0e6;
+        for _ in 0..600 {
+            cam.step(1.0 / 60.0);
+            assert!(
+                cam.position.is_finite(),
+                "position diverged: {}",
+                cam.position
+            );
+            assert!(cam.velocity.is_finite());
+        }
+    }
+
+    #[test]
+    fn camera_step_terminates_with_valid_configuration() {
+        let mut cam = Camera::new(0.0);
+        cam.target = 100.0;
+        let mut steps = 0;
+        while cam.step(0.008) {
+            steps += 1;
+            assert!(steps <= 1000, "camera failed to terminate after 1000 steps");
+        }
+        assert!((cam.position - 100.0).abs() <= 0.5);
+    }
+
+    #[test]
+    fn camera_step_terminates_even_with_zero_or_negative_damping() {
+        let mut cam = Camera::new(0.0);
+        cam.target = 100.0;
+        cam.damping = 0.0;
+        let mut steps = 0;
+        while cam.step(0.008) {
+            steps += 1;
+            assert!(
+                steps <= 20000,
+                "zero damping failed to terminate (infinite loop bug)"
+            );
+        }
+
+        cam.snap(0.0);
+        cam.target = 100.0;
+        cam.damping = -10.0;
+        steps = 0;
+        while cam.step(0.008) {
+            steps += 1;
+            assert!(steps <= 20000, "negative damping failed to terminate");
+        }
+    }
+
+    #[test]
+    fn spring_smooth_ignores_non_finite_inputs() {
+        let mut cur = 5.0;
+        assert!(!spring_smooth(&mut cur, f32::NAN, 0.016));
+        assert!(
+            (cur - 5.0).abs() < 1e-6,
+            "a NaN target must not poison the value"
+        );
+        assert!(!spring_smooth(&mut cur, 10.0, f32::INFINITY));
+        assert!((cur - 5.0).abs() < 1e-6);
+    }
+
+    /// Integrator-level invariant (fix #1 of the final audit): `Camera` fields
+    /// are public, so a caller can bypass `sanitize_spring` entirely. Every
+    /// degenerate value must still terminate — and, crucially, the settle
+    /// predicate must be REACHABLE (the camera lands on the target), not just
+    /// "did not explode after N frames". The step-count is only a watchdog
+    /// against a hung test; the real assertion is convergence.
+    #[test]
+    fn camera_step_terminates_and_converges_for_every_degenerate_direct_mutation() {
+        let bad = [
+            (0.0, 0.0),             // the audited eternal-moving pair
+            (220.0, 0.0),           // damping == 0
+            (220.0, -25.0),         // damping < 0 (energy injection)
+            (220.0, f32::NAN),      // NaN damping
+            (220.0, f32::INFINITY), // +inf damping
+            (220.0, f32::NEG_INFINITY),
+            (0.0, 30.0),      // stiffness == 0 (spring never restores)
+            (-100.0, 30.0),   // stiffness < 0
+            (f32::NAN, 30.0), // NaN stiffness
+            (f32::INFINITY, 30.0),
+            (f32::NEG_INFINITY, 30.0),
+        ];
+        for (k, c) in bad {
+            let mut cam = Camera::new(0.0);
+            cam.stiffness = k;
+            cam.damping = c;
+            cam.target = 100.0;
+            let mut steps = 0;
+            while cam.step(0.008) {
+                steps += 1;
+                assert!(
+                    steps <= 40_000,
+                    "stiffness={k} damping={c}: camera never reached the settle predicate \
+                     (eternal moving state)"
+                );
+            }
+            assert!(
+                cam.position.is_finite(),
+                "stiffness={k} damping={c}: position poisoned"
+            );
+            assert!(
+                (cam.position - cam.target).abs() <= 0.5,
+                "stiffness={k} damping={c}: terminated at {} instead of the target {}",
+                cam.position,
+                cam.target
+            );
+        }
     }
 }

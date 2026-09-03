@@ -116,6 +116,11 @@ pub fn bypass_candidate(_cfg: &Cfg, state: &State, mon_idx: usize) -> Option<Win
     let win = candidates[0];
 
     let client: &Client = state.clients.get(&win)?;
+    // EWMH `_NET_WM_BYPASS_COMPOSITOR` hint: 1=force compositor ON → never bypass,
+    // 2=force bypass (when otherwise eligible), 0/None=auto.
+    if client.bypass_hint == Some(1) {
+        return None;
+    }
     // The covering window must live on this monitor and be shown.
     if client.monitor != mon_idx || client.wm_hidden {
         return None;

@@ -137,6 +137,13 @@ gl_api! {
 
     fn glGenTextures(n: GLsizei, out: *mut GLuint);
     fn glBindTexture(target: GLenum, tex: GLuint);
+    fn glGetTexImage(
+        target: GLenum,
+        level: GLint,
+        format: GLenum,
+        kind: GLenum,
+        pixels: *mut c_void,
+    );
     fn glDeleteTextures(n: GLsizei, texs: *const GLuint);
     fn glTexParameteri(target: GLenum, pname: GLenum, param: GLint);
     fn glActiveTexture(unit: GLenum);

@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "maverick-sys",
+    "maverick-x11",
+    "maverick-render",
     "maverick-gl",
     "maverick-dialog",
     "maverick-toml",
@@ -13,7 +15,7 @@ resolver = "2"
 
 [package]
 name = "maverick"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.82"
 authors = ["azytar"]
@@ -30,15 +32,18 @@ path = "src/main.rs"
 [dependencies]
 maverick-sys = { path = "maverick-sys" }
 maverick-toml = { path = "maverick-toml" }
-maverick-gl = { path = "maverick-gl" }
 maverick-img = { path = "maverick-img" }
+maverick-render = { path = "maverick-render" }
 libc = "0.2"
+# Core X11 connection bootstrap lives in `maverick-x11`, independent from any
+# renderer backend. The WM always needs X11; the compositor does not.
+maverick-x11 = { path = "maverick-x11" }
 # `composite`/`damage`/`xfixes` are the compositor's X extensions; `xkb` is used
 # only to *subscribe* to keyboard-map changes (XkbMapNotify /
 # XkbNewKeyboardNotify), which core `MappingNotify` does not always deliver —
 # the keymap itself is still read with core `GetKeyboardMapping`.
 # `allow-unsafe-code` is what makes `x11rb::xcb_ffi::XCBConnection` available so
-# the WM and GLX can share one connection (see `maverick-gl::open_x`).
+# the WM and any renderer backend can share one connection.
 x11rb = { version = "0.13", default-features = false, features = [
     "randr",
     "shape",
@@ -48,8 +53,13 @@ x11rb = { version = "0.13", default-features = false, features = [
     "xkb",
     "allow-unsafe-code",
 ] }
+# OpenGL/GLX compositor backend. Optional: build with `--no-default-features`
+# for a pure X11 WM, or `--features compositor-opengl` to enable it.
+maverick-gl = { path = "maverick-gl", optional = true }
 
 [features]
+# Default build includes the OpenGL compositor backend.
+default = ["compositor-opengl"]
 # Diagnostic build: emits a structured "INPUT-TRACE" log on every input/focus
 # decision so the fullscreen+pointer-loss root cause can be confirmed live in
 # Xephyr. Off by default (no runtime cost, no extra deps). Enabled with
@@ -61,6 +71,10 @@ input-trace = []
 # default (no runtime cost, no extra deps). Enabled with
 # `cargo build --features window-trace`.
 window-trace = []
+# OpenGL/GLX compositor backend.
+compositor-opengl = ["maverick-gl"]
+# Placeholder for a future Vulkan backend. Not yet wired.
+compositor-vulkan = []
 
 [profile.release]
 opt-level = 3

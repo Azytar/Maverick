@@ -81,8 +81,8 @@ mod unit_tests {
         // Mirror what the backend does at startup / reload / hotplug.
         engine.apply_camera_cfg();
         let cam = &engine.state.monitors[0].workspaces[0].camera;
-        assert_eq!(cam.stiffness, 999.0);
-        assert_eq!(cam.damping, 11.0);
+        assert!((cam.stiffness - 999.0).abs() < 1e-6);
+        assert!((cam.damping - 11.0).abs() < 1e-6);
         // A second monitor/workspace must also be covered by the loop.
         engine
             .state
@@ -91,8 +91,8 @@ mod unit_tests {
         engine.apply_camera_cfg();
         for mon in &engine.state.monitors {
             for ws in &mon.workspaces {
-                assert_eq!(ws.camera.stiffness, 999.0);
-                assert_eq!(ws.camera.damping, 11.0);
+                assert!((ws.camera.stiffness - 999.0).abs() < 1e-6);
+                assert!((ws.camera.damping - 11.0).abs() < 1e-6);
             }
         }
     }
@@ -4438,6 +4438,123 @@ mod unit_tests {
         );
     }
 
+    // 8b. Origin vs layout mode: ToggleFloat must never blur the window's
+    //     floating ORIGIN (`WinFlags::FLOAT_NATIVE`), so a born-floating window
+    //     (dialog/splash/transient/rule) stays distinguishable from a tile the
+    //     user tore off — even after both have been through tiled→float→tiled.
+    #[test]
+    fn toggle_float_preserves_window_origin() {
+        use crate::core::commands::{Command, ToggleFloat};
+        use crate::types::{Client, WinFlags};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+
+        // Tiled origin: tear off (ToggleFloat) and put back. The origin bit
+        // must stay CLEAR through both transitions.
+        engine.state.add_client(Client::new(1, mi, ws_i));
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, engine.cfg.column_width);
+        engine.state.monitors[mi].focused = Some(1);
+        ToggleFloat.execute(&mut engine.state, &mut engine.cfg);
+        assert!(engine.state.clients.get(&1).unwrap().is_float());
+        assert!(
+            !engine.state.clients.get(&1).unwrap().is_native_float(),
+            "a torn-off tile must NOT acquire the native-float origin"
+        );
+        ToggleFloat.execute(&mut engine.state, &mut engine.cfg);
+        assert!(!engine.state.clients.get(&1).unwrap().is_float());
+        assert!(!engine.state.clients.get(&1).unwrap().is_native_float());
+
+        // Native origin: born floating (as manage() marks every policy-floated
+        // window). Toggle it tiled and back — the origin bit must SURVIVE both
+        // transitions so drag semantics can still tell it apart.
+        let mut f = Client::new(2, mi, ws_i);
+        f.flags.set(WinFlags::FLOAT);
+        f.flags.set(WinFlags::FLOAT_NATIVE);
+        engine.state.add_client(f);
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(2);
+        engine.state.monitors[mi].focused = Some(2);
+        ToggleFloat.execute(&mut engine.state, &mut engine.cfg);
+        assert!(!engine.state.clients.get(&2).unwrap().is_float());
+        assert!(
+            engine.state.clients.get(&2).unwrap().is_native_float(),
+            "tiled mode must not erase a native float's origin"
+        );
+        ToggleFloat.execute(&mut engine.state, &mut engine.cfg);
+        assert!(engine.state.clients.get(&2).unwrap().is_float());
+        assert!(engine.state.clients.get(&2).unwrap().is_native_float());
+    }
+
+    // 8c. Native-float geometry ownership: a native float smaller than a tile
+    //     keeps its own rect (never stretched to the column width), and one
+    //     larger than the workarea is clamped to the WORKAREA — never to a
+    //     column/tile rectangle.
+    #[test]
+    fn native_float_geometry_is_independent_from_tile_rect() {
+        use crate::types::{Client, WinFlags};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        let wa = engine.state.monitors[mi].workarea;
+
+        // One tiled window (defines the tile rect: column_width * workarea).
+        engine.state.add_client(Client::new(1, mi, ws_i));
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, engine.cfg.column_width);
+        engine.state.monitors[mi].focused = Some(1);
+
+        // Native float much smaller than any tile.
+        let small = Rect::new(120, 90, 320, 240);
+        let mut f = Client::new(2, mi, ws_i);
+        f.flags.set(WinFlags::FLOAT);
+        f.flags.set(WinFlags::FLOAT_NATIVE);
+        f.geom = small;
+        f.saved_geom = small;
+        f.border_w = engine.cfg.border_w;
+        engine.state.add_client(f);
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(2);
+
+        // Native float larger than the workarea (must clamp to wa, not tile).
+        let mut big = Client::new(3, mi, ws_i);
+        big.flags.set(WinFlags::FLOAT);
+        big.flags.set(WinFlags::FLOAT_NATIVE);
+        big.geom = Rect::new(-100, -100, 9999, 9999);
+        big.saved_geom = big.geom;
+        big.border_w = engine.cfg.border_w;
+        engine.state.add_client(big);
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(3);
+
+        let desired = pipeline_desired(&engine, mi);
+        let tile_w = (wa.w as f32 * engine.cfg.column_width) as u32;
+
+        let small_entry = desired
+            .windows
+            .iter()
+            .find(|d| d.window == 2)
+            .expect("native float present in Desired");
+        assert_eq!(
+            small_entry.rect, small,
+            "native float keeps its own (smaller-than-tile) geometry"
+        );
+        assert_ne!(
+            small_entry.rect.w, tile_w,
+            "native float must not be stretched to the column width"
+        );
+
+        let big_entry = desired
+            .windows
+            .iter()
+            .find(|d| d.window == 3)
+            .expect("oversized native float present in Desired");
+        assert_eq!(
+            big_entry.rect.w, wa.w,
+            "oversized float clamps to workarea width"
+        );
+        assert_eq!(
+            big_entry.rect.h, wa.h,
+            "oversized float clamps to workarea height"
+        );
+    }
+
     // 9. A tiled window's self-resize request is DENIED: client.geom (the desired)
     //    stays the WM-authored tile, never the client's divergent request.
     #[test]
@@ -4483,6 +4600,7 @@ mod unit_tests {
             rect: before,
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         let c = engine.state.clients.get(&1).unwrap();
         let obs = classify_configure(requested, 2, &applied, c);
@@ -4519,6 +4637,7 @@ mod unit_tests {
                 rect: r,
                 border_w: b,
                 seen: true,
+                sequence: None,
             },
         );
 
@@ -4586,6 +4705,7 @@ mod unit_tests {
             rect: g0,
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         let c = engine.state.clients.get(&1).unwrap();
         let obs = classify_configure(g1, 2, &applied, c);
@@ -4976,6 +5096,7 @@ mod unit_tests {
                 rect: r,
                 border_w: b,
                 seen: true,
+                sequence: None,
             },
         );
 
@@ -5043,6 +5164,7 @@ mod unit_tests {
                 rect: r,
                 border_w: b,
                 seen: true,
+                sequence: None,
             },
         );
 
@@ -5100,6 +5222,7 @@ mod unit_tests {
             rect: g0,
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         let g1 = Rect::new(200, 150, 400, 250);
         let obs = classify_configure(g1, 2, &applied, engine.state.clients.get(&1).unwrap());
@@ -5115,6 +5238,7 @@ mod unit_tests {
             rect: g1,
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         let obs2 = classify_configure(g1, 2, &applied, engine.state.clients.get(&1).unwrap());
         assert!(
@@ -5145,6 +5269,7 @@ mod unit_tests {
             rect: g0,
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         let mut last = g0;
         for i in 0..5 {
@@ -5164,6 +5289,7 @@ mod unit_tests {
                 rect: r,
                 border_w: 2,
                 seen: true,
+                sequence: None,
             };
             last = r;
         }
@@ -5267,6 +5393,7 @@ mod unit_tests {
                 rect: desired_before,
                 border_w: engine.cfg.border_w,
                 seen: true,
+                sequence: None,
             };
             let obs = classify_configure(
                 reported,
@@ -5385,6 +5512,7 @@ mod unit_tests {
             rect: a_screen,
             border_w: 0,
             seen: true,
+            sequence: None,
         };
         let b_desired = pipeline_desired(&engine, mi);
         let (b_r, b_b) = {
@@ -5395,6 +5523,7 @@ mod unit_tests {
             rect: b_r,
             border_w: b_b,
             seen: true,
+            sequence: None,
         };
 
         // Simulate an unexpected ConfigureNotify for A (fullscreen) and B (tiled).
@@ -6481,6 +6610,7 @@ mod unit_tests {
                 rect: Rect::new(0, 0, 50, 50),
                 border_w: b,
                 seen: true,
+                sequence: None,
             },
         );
         let effects = reconcile(&desired, &engine.state, &mut applied);
@@ -6521,6 +6651,7 @@ mod unit_tests {
                 rect: old,
                 border_w: b,
                 seen: true,
+                sequence: None,
             },
         );
         let effects = reconcile(&desired, &engine.state, &mut applied);
@@ -6549,6 +6680,7 @@ mod unit_tests {
                 rect: r,
                 border_w: b,
                 seen: true,
+                sequence: None,
             },
         );
         // Set a pending_focus referencing the window (8c context).
@@ -6694,6 +6826,7 @@ mod unit_tests {
             rect: g0,
             border_w: 2,
             seen: true,
+            sequence: None,
         };
         let mut last = g0;
         let mut iterations = 0u32;
@@ -6714,6 +6847,7 @@ mod unit_tests {
                 rect: r,
                 border_w: 2,
                 seen: true,
+                sequence: None,
             };
             last = r;
             iterations += 1;
@@ -7090,6 +7224,7 @@ mod unit_tests {
                                         rect: reported,
                                         border_w: bw,
                                         seen: true,
+                                        sequence: None,
                                     },
                                 );
                             } else {
@@ -7106,6 +7241,7 @@ mod unit_tests {
                                             rect: dr,
                                             border_w: bw,
                                             seen: true,
+                                            sequence: None,
                                         },
                                     );
                                 }
@@ -7266,6 +7402,7 @@ mod unit_tests {
                                             rect: reported,
                                             border_w: bw,
                                             seen: true,
+                                            sequence: None,
                                         },
                                     );
                                 } else {
@@ -7281,6 +7418,7 @@ mod unit_tests {
                                                 rect: dr,
                                                 border_w: bw,
                                                 seen: true,
+                                                sequence: None,
                                             },
                                         );
                                     }
@@ -7680,6 +7818,7 @@ mod unit_tests {
             rect: desired_before,
             border_w: engine.cfg.border_w,
             seen: true,
+            sequence: None,
         };
         let obs = classify_configure(
             reported,
@@ -7884,5 +8023,191 @@ mod unit_tests {
                 "requests for unknown windows are ignored"
             );
         }
+    }
+    // ── P1-A: ViewWorkspace keeps `focused` coherent with `active_ws` ─────────────
+
+    /// Fixture: monitor with window 1 tiled+focused on ws0 and window 2 tiled on ws1.
+    fn build_view_fixture() -> crate::types::State {
+        let mut state = crate::types::State::new();
+        state
+            .monitors
+            .push(Monitor::new(crate::types::Rect::new(0, 0, 1920, 1080), 9));
+        let mi = state.sel_mon;
+        state.add_client(Client::new(1, mi, 0));
+        state.add_client(Client::new(2, mi, 1));
+        state.monitors[mi].workspaces[0].add_tiled(1, 0.6);
+        state.monitors[mi].workspaces[1].add_tiled(2, 0.6);
+        state.monitors[mi].focused = Some(1);
+        state.monitors[mi].focus_stack = vec![1];
+        state
+    }
+
+    /// After `ViewWorkspace(B)`, the monitor's logical state must satisfy:
+    /// `focused == None` OR `focused` lives on workspace B — immediately after the
+    /// command, not only after the backend applies the `FocusWindow` effect.
+    #[test]
+    fn view_workspace_fixes_focus_immediately() {
+        use crate::core::commands::{Command, ViewWorkspace};
+        // Case A: view the *empty* workspace 2 → stale focus on window 1 must be
+        // dropped in the command itself (before any effect application).
+        {
+            let mut state = build_view_fixture();
+            let mut cmd = ViewWorkspace(2);
+            let _ = cmd.execute(&mut state, &mut default_cfg());
+            let m = &state.monitors[state.sel_mon];
+            assert_eq!(m.active_ws, 2);
+            assert_eq!(
+                m.focused, None,
+                "stale focus from the previous workspace must be cleared immediately"
+            );
+        }
+
+        // Case B: view workspace 1, which owns window 2 → the focus may stay (it
+        // belongs to the now-active workspace) and the invariant holds.
+        {
+            let mut state = build_view_fixture();
+            let mut cmd = ViewWorkspace(1);
+            let _ = cmd.execute(&mut state, &mut default_cfg());
+            let m = &state.monitors[state.sel_mon];
+            assert_eq!(m.active_ws, 1);
+            assert!(m
+                .focused
+                .is_none_or(|w| state.clients.get(&w).is_some_and(|c| c.workspace == 1)));
+        }
+    }
+
+    /// End-to-end through the engine: after the effect stage the invariant still
+    /// holds (`focused ∈ active_ws` ∨ `focused == None`).
+    #[test]
+    fn view_workspace_invariant_after_effect_stage() {
+        use crate::core::commands::ViewWorkspace;
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        engine.state.add_client(Client::new(1, mi, 0));
+        engine.state.monitors[mi].workspaces[0].add_tiled(1, 0.6);
+        engine.state.monitors[mi].focused = Some(1);
+
+        engine.execute(ViewWorkspace(1));
+        let st = &engine.state;
+        let m = &st.monitors[mi];
+        assert_eq!(m.active_ws, 1);
+        assert!(
+            m.focused.is_none_or(|w| st
+                .clients
+                .get(&w)
+                .is_some_and(|c| c.workspace == m.active_ws)),
+            "focused must live on the active workspace after ViewWorkspace"
+        );
+    }
+
+    // ── P1-B: ToggleFloat rejects cross-monitor focus corruption ─────────────────
+
+    /// If the focused window belongs to a DIFFERENT monitor than the selected one
+    /// (logical focus corruption), `ToggleFloat` must not mutate the selected
+    /// monitor's trees (no `remove from tree A / insert into floating B` split).
+    #[test]
+    fn toggle_float_rejects_cross_monitor_focus() {
+        use crate::core::commands::ToggleFloat;
+        use crate::types::WinFlags;
+        let mut engine = setup_engine_multi();
+        let _mi = engine.state.sel_mon; // monitor 0 selected (deliberately != client monitor)
+                                        // Window 1 lives on monitor 1, workspace 0, tiled.
+        engine.state.add_client(Client::new(1, 1, 0));
+        engine.state.monitors[1].workspaces[0].add_tiled(1, 0.6);
+        // Cross-monitor (corrupt) logical focus on monitor 0.
+        engine.state.monitors[0].focused = Some(1);
+        engine.state.monitors[0].focus_stack = vec![1];
+
+        let effects = engine.execute(ToggleFloat);
+        assert!(effects.is_empty(), "a cross-monitor toggle must be a no-op");
+        // Monitor 0's trees untouched: window 1 was never floating there.
+        assert!(!engine.state.monitors[0].workspaces[0].floats.contains(&1));
+        // Monitor 1's membership unchanged and the client not flagged FLOAT.
+        assert!(!engine.state.monitors[1].workspaces[0].floats.contains(&1));
+        assert_eq!(
+            engine
+                .state
+                .clients
+                .get(&1)
+                .map(|c| c.flags.has(WinFlags::FLOAT)),
+            Some(false)
+        );
+        // Sanity: the same toggle when focus is *consistent* still works.
+        engine.state.sel_mon = 1;
+        engine.state.monitors[1].focused = Some(1);
+        let effects = engine.execute(ToggleFloat);
+        assert!(!effects.is_empty(), "a consistent toggle still mutates");
+        assert!(engine.state.monitors[1].workspaces[0].floats.contains(&1));
+    }
+
+    #[test]
+    fn extreme_gaps_do_not_produce_invalid_or_offscreen_geometry() {
+        use crate::core::layout::{arrange, RibbonScratch};
+        use crate::types::{Client, Rect};
+
+        fn test_extreme(wa: Rect, n_clients: usize, gap: u32, desc: &str) {
+            let mut engine = setup_engine();
+            engine.state.monitors[0].workarea = wa;
+            engine.cfg.gaps_inner = gap;
+            engine.cfg.gaps_outer = gap;
+
+            for i in 0..n_clients {
+                let win = (100 + i) as u32;
+                let mut c = Client::new(win, 0, 0);
+                c.border_w = 2;
+                engine.state.add_client(c);
+                engine.state.monitors[0].workspaces[0].add_tiled(win, 1.0);
+            }
+
+            let registry = default_registry();
+            let mut placements = crate::core::layout::Placements::new();
+            arrange(
+                &engine.state,
+                0,
+                &engine.cfg,
+                &registry,
+                crate::core::layout::Phase::Live,
+                &mut placements,
+                &mut RibbonScratch::default(),
+            );
+
+            for (win, rect, _bw) in placements {
+                // Ensure dimensions are positive
+                assert!(rect.w > 0, "{desc}: window {win} width must be > 0");
+                assert!(rect.h > 0, "{desc}: window {win} height must be > 0");
+
+                // Ensure coordinates stay vaguely within/around workarea, not completely blowing up to 500,000
+                assert!(
+                    rect.y <= wa.y + wa.h as i32 + 100,
+                    "{desc}: window {win} y is completely off-screen: {}",
+                    rect.y
+                );
+                assert!(
+                    rect.y >= wa.y - 100,
+                    "{desc}: window {win} y is above screen: {}",
+                    rect.y
+                );
+            }
+        }
+
+        test_extreme(
+            Rect::new(0, 0, 1, 1),
+            2,
+            99999,
+            "1x1 + 2 clients + huge gap",
+        );
+        test_extreme(
+            Rect::new(0, 0, 100, 100),
+            100,
+            99999,
+            "100x100 + 100 clients + huge gap",
+        );
+        test_extreme(
+            Rect::new(0, 0, 1920, 1080),
+            3,
+            99999,
+            "1920x1080 + 3 clients + huge gap",
+        );
+        test_extreme(Rect::new(0, 0, 1920, 1080), 3, 0, "normal gap = 0");
     }
 }

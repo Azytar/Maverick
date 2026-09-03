@@ -1,0 +1,13 @@
+[package]
+name = "maverick-render"
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.82"
+authors = ["azytar"]
+description = "Neutral renderer trait and shared types for Maverick's compositor backends"
+license = "GPL-3.0"
+repository = "https://github.com/azytar/Maverick"
+categories = ["os::unix-apis", "rendering"]
+keywords = ["window-manager", "x11", "compositor", "renderer"]
+
+[dependencies]

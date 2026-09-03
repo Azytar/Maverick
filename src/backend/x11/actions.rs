@@ -30,11 +30,14 @@ impl WindowManager {
             } else {
                 (None, Rect::default(), false)
             };
-            let d = self.compositor.as_ref().map_or(false, |c| c.needs_frame());
-            let r = self
+            let d = self
                 .compositor
                 .as_ref()
-                .map_or(0u8, |c| c.dirty_reasons_bits());
+                .is_some_and(crate::backend::x11::compositor::Compositor::needs_frame);
+            let r = self.compositor.as_ref().map_or(
+                0u8,
+                crate::backend::x11::compositor::Compositor::dirty_reasons_bits,
+            );
             (f, f.map(|(_, fl)| fl), g, ld, d, r)
         } else {
             (None, None, Rect::default(), false, false, 0u8)
@@ -48,7 +51,7 @@ impl WindowManager {
                 .state
                 .clients
                 .get(&w)
-                .map_or(false, |c| c.is_float());
+                .is_some_and(crate::types::Client::is_float);
             let new_geom = self
                 .engine
                 .state
@@ -60,12 +63,15 @@ impl WindowManager {
                 .state
                 .monitors
                 .get(mi)
-                .map_or(false, |m| m.layout_dirty);
-            let new_dirty = self.compositor.as_ref().map_or(false, |c| c.needs_frame());
-            let new_reasons = self
+                .is_some_and(|m| m.layout_dirty);
+            let new_dirty = self
                 .compositor
                 .as_ref()
-                .map_or(0u8, |c| c.dirty_reasons_bits());
+                .is_some_and(crate::backend::x11::compositor::Compositor::needs_frame);
+            let new_reasons = self.compositor.as_ref().map_or(
+                0u8,
+                crate::backend::x11::compositor::Compositor::dirty_reasons_bits,
+            );
             if let Some(comp) = self.compositor.as_ref() {
                 if comp.float_trace {
                     log::info!(

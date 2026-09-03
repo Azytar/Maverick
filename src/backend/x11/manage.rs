@@ -149,6 +149,14 @@ impl WindowManager {
                 0,
                 18,
             )?;
+            let c_bypass = self.conn.get_property(
+                false,
+                win,
+                self.atoms.net_wm_bypass_compositor,
+                AtomEnum::CARDINAL,
+                0,
+                1,
+            )?;
 
             // Process title (net_wm_name with WM_NAME fallback)
             if let Ok(ref prop) = c_title_net.reply() {
@@ -282,6 +290,15 @@ impl WindowManager {
                             client.flags.set(WinFlags::FIXED);
                             client.flags.set(WinFlags::FLOAT);
                         }
+                    }
+                }
+            }
+
+            // Process _NET_WM_BYPASS_COMPOSITOR
+            if let Ok(ref prop) = c_bypass.reply() {
+                if let Some(v) = prop.value32().and_then(|mut i| i.next()) {
+                    if v == 1 || v == 2 {
+                        client.bypass_hint = Some(v);
                     }
                 }
             }

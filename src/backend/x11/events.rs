@@ -474,6 +474,26 @@ impl WindowManager {
             return Ok(());
         }
 
+        // `_NET_WM_BYPASS_COMPOSITOR`: EWMH hint 1=force ON, 2=force bypass. Handled
+        // even on DELETE (property removed → None). Policy re-evaluates each
+        // `run_once` via `bypass_candidate`, so no compositor call needed.
+        if e.atom == self.atoms.net_wm_bypass_compositor {
+            if e.state == Property::DELETE {
+                if let Some(cl) = self.engine.state.clients.get_mut(&e.window) {
+                    cl.bypass_hint = None;
+                }
+            } else if let Some(v) =
+                read_bypass_hint(&self.conn, e.window, self.atoms.net_wm_bypass_compositor)
+            {
+                if let Some(cl) = self.engine.state.clients.get_mut(&e.window) {
+                    cl.bypass_hint = Some(v);
+                }
+            } else if let Some(cl) = self.engine.state.clients.get_mut(&e.window) {
+                cl.bypass_hint = None;
+            }
+            return Ok(());
+        }
+
         if e.state == Property::DELETE {
             return Ok(());
         }
@@ -824,7 +844,7 @@ impl WindowManager {
 /// the max value means fully opaque) and normalise it to `0.0..=1.0`. Returns
 /// `None` when the property is absent or unreadable, so the caller keeps the
 /// current opacity.
-fn read_window_opacity(conn: &maverick_gl::XConn, win: Window, atom: Atom) -> Option<f32> {
+fn read_window_opacity(conn: &maverick_x11::XConn, win: Window, atom: Atom) -> Option<f32> {
     let ty = u32::from(AtomEnum::CARDINAL);
     let reply = conn
         .get_property(false, win, atom, ty, 0, 1)
@@ -833,4 +853,16 @@ fn read_window_opacity(conn: &maverick_gl::XConn, win: Window, atom: Atom) -> Op
         .ok()?;
     let raw = reply.value32()?.next()?;
     Some(raw as f32 / 0xFFFF_FFFFu32 as f32)
+}
+
+/// Read `_NET_WM_BYPASS_COMPOSITOR` (CARDINAL 0/1/2). Returns `None` when absent.
+fn read_bypass_hint(conn: &maverick_x11::XConn, win: Window, atom: Atom) -> Option<u32> {
+    let ty = u32::from(AtomEnum::CARDINAL);
+    let reply = conn
+        .get_property(false, win, atom, ty, 0, 1)
+        .ok()?
+        .reply()
+        .ok()?;
+    let v = reply.value32().and_then(|mut it| it.next())?;
+    Some(v)
 }

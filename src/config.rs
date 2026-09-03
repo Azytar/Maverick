@@ -104,6 +104,16 @@ impl Default for Cfg {
 /// the WM stays on the plain `ConfigureWindow` path, which also keeps the
 /// legacy X11 `Shape` corner-radius rounding working for users who don't want
 /// GL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VsyncMode {
+    /// `glXSwapInterval 1` – tear-free, blocks to vblank (default).
+    On,
+    /// No swap interval – immediate present (tearing allowed, lowest latency).
+    Off,
+    /// `GLX_EXT_swap_control_tear` with `-1` when available, else `1`. Best for VRR.
+    Adaptive,
+}
+
 #[derive(Debug, Clone)]
 pub struct CompositorCfg {
     /// Master switch. Default `true`: on by default, with automatic fallback.
@@ -123,6 +133,9 @@ pub struct CompositorCfg {
     /// `VSync` — it only removes Maverick's redirection of that one window. When
     /// `false`, Maverick always composites, even under fullscreen.
     pub fullscreen_bypass: bool,
+    /// `VSync` mode for the GL compositor. `On` (default) = interval 1, `Off` = no
+    /// vsync, `Adaptive` = `-1` (tear) when `GLX_EXT_swap_control_tear` is present.
+    pub vsync: VsyncMode,
 }
 
 impl Default for CompositorCfg {
@@ -132,6 +145,7 @@ impl Default for CompositorCfg {
             stiffness: 220.0,
             damping: 30.0,
             fullscreen_bypass: true,
+            vsync: VsyncMode::On,
         }
     }
 }

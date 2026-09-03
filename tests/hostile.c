@@ -195,7 +195,8 @@ static Window make_window(void) {
     XStoreName(dpy, w, cn);
 
     XSelectInput(dpy, w,
-                 StructureNotifyMask | FocusChangeMask | PropertyChangeMask);
+                 StructureNotifyMask | FocusChangeMask | PropertyChangeMask |
+                 ButtonPressMask | ButtonReleaseMask);
 
     set_wtype_prop(w, a_net_wm_window_type_normal);
     set_wm_protocols(w);

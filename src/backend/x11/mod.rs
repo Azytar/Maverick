@@ -12,7 +12,7 @@ use x11rb::protocol::Event;
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::COPY_DEPTH_FROM_PARENT;
 
-use maverick_gl::{XConn, XDisplay};
+use maverick_x11::{XConn, XDisplay};
 
 use crate::backend::atoms::Atoms;
 use crate::backend::x11::compositor::DirtyReason;
@@ -817,7 +817,7 @@ impl WindowManager {
         config_path: Option<PathBuf>,
         launch_args: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let (dpy, conn, screen_num) = maverick_gl::open_x()?;
+        let (dpy, conn, screen_num) = maverick_x11::open_x()?;
         // `conn` is shared (via `Rc`) with the compositor so both the WM and the
         // GLX layer issue requests over the *same* `XCBConnection` — that is what
         // keeps x11rb's sequence-number/reply tracking coherent. `XDisplay` is

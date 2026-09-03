@@ -85,6 +85,18 @@ fn cell_geom(rows: &[usize], area: Rect, gap: i32) -> (Vec<i32>, Vec<i32>) {
 /// rows) as content rects (border already subtracted from width/height, x/y are
 /// border-inclusive top-left, X11 semantics).
 fn build_cells(rows: &[usize], area: Rect, gap: i32, border: i32) -> Vec<(usize, usize, Rect)> {
+    // P2 (audit fix #3): the caller's gap can exceed the area (extreme user
+    // config). The per-cell `+ gap` accumulation below would then walk cells
+    // off-screen (the audited y=99999 bug). Clamp to the largest gap that
+    // still leaves every cell at least 1 px — the same Option C policy the
+    // Column layout uses (workarea-aware gap reduction): intent preserved,
+    // geometry valid. When the area cannot host one pixel per row/column the
+    // gap collapses to 0 and the ≥1px-per-cell floor bounds the overflow.
+    let m = (*rows.iter().max().unwrap_or(&1)) as i32;
+    let r = rows.len() as i32;
+    let max_gap_h = ((area.w as i32 - m).max(0) / m.max(1)).max(0);
+    let max_gap_v = ((area.h as i32 - r).max(0) / r.max(1)).max(0);
+    let gap = gap.clamp(0, max_gap_h.min(max_gap_v));
     let (col_w, row_h) = cell_geom(rows, area, gap);
     let mut cells = Vec::new();
     let mut y = area.y;
@@ -333,6 +345,13 @@ pub fn arrange_workspace(
     prev: Option<&GridSnapshot>,
 ) -> (Vec<(WindowId, Rect)>, GridSnapshot) {
     let (gap, gap_outer) = effective_gaps(ws, cfg);
+    // P2 (audit fix #3): same outer-gap clamp as the Column ribbon
+    // (`layout::ribbon_geom_into`) — the inset must stay anchored inside the
+    // workarea, never saturate off-monitor.
+    let gap_outer = gap_outer
+        .min(mon.workarea.w as i32 / 2)
+        .min(mon.workarea.h as i32 / 2)
+        .max(0);
     let area = Rect::new(
         mon.workarea.x + gap_outer,
         mon.workarea.y + gap_outer,
@@ -355,7 +374,13 @@ fn effective_gaps(ws: &Workspace, cfg: &Cfg) -> (i32, i32) {
     if cfg.smart_gaps && count_tiled(ws) <= 1 && ws.floats.is_empty() {
         return (0, 0);
     }
-    (cfg.gaps_inner as i32, cfg.gaps_outer as i32)
+    // Same u32→i32 representation clamp as `layout::effective_gaps`: a config
+    // value above `i32::MAX` would wrap negative and drive the workarea the
+    // wrong way.
+    (
+        cfg.gaps_inner.min(crate::core::layout::MAX_CFG_GAP as u32) as i32,
+        cfg.gaps_outer.min(crate::core::layout::MAX_CFG_GAP as u32) as i32,
+    )
 }
 
 /// Spatial neighbour body shared by the public `neighbor` (operates on

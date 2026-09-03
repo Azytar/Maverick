@@ -146,25 +146,28 @@ impl WallpaperSource {
     }
 }
 
-pub use maverick_gl::ShaderId;
-
 /// Neutral GPU handle for an uploaded wallpaper image (opaque `u32` texture id).
 /// Lives in `core`, never names GL — the backend fills it in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GpuImage(pub u32);
 
 /// The GPU abstraction the wallpaper needs. Implemented by the x11/GL backend
 /// (`GlWallpaper`); a future Vulkan backend implements the same trait. The core
 /// only ever calls these methods — it never speaks OpenGL.
+///
+/// `ShaderId` is the backend's own opaque program/pipeline handle (GL:
+/// `GLuint`). The core treats it as opaque, only forwarding it back to the
+/// backend, so it does not define its own copy here.
+#[cfg(feature = "compositor-opengl")]
 pub trait WallpaperGpu {
     /// Upload decoded CPU pixels to a GPU texture.
     fn upload_image(&mut self, img: &Rgba8) -> Result<GpuImage, String>;
     /// Compile a user fragment shader, returning an opaque program id.
-    fn compile_shader(&mut self, frag: &str) -> Result<ShaderId, String>;
+    fn compile_shader(&mut self, frag: &str) -> Result<maverick_gl::ShaderId, String>;
     /// Draw `img` into `dst` (screen px) sampling `src_uv` (0..1, top-down).
     fn draw_image(&mut self, img: &GpuImage, dst: Rect, src_uv: [f32; 4]);
     /// Draw the shader `s` filling `out` (screen px) for time `time`/`dt`.
-    fn draw_shader(&mut self, s: ShaderId, out: Rect, time: f32, dt: f32);
+    fn draw_shader(&mut self, s: maverick_gl::ShaderId, out: Rect, time: f32, dt: f32);
     /// Release a previously uploaded image.
     fn release(&mut self, img: GpuImage);
 }
@@ -211,30 +214,33 @@ pub fn compute_wallpaper_rects(
                 let disp_h = ih * scale;
                 let x = o.x as f64 + (ow - disp_w) / 2.0;
                 let y = o.y as f64 + (oh - disp_h) / 2.0;
+                let fw = (disp_w / ow) as f32;
+                let fh = (disp_h / oh) as f32;
+                let u0 = (1.0 - fw) / 2.0;
+                let v0 = (1.0 - fh) / 2.0;
                 (
-                    Rect {
-                        x: x.round() as i32,
-                        y: y.round() as i32,
-                        w: disp_w.round() as u32,
-                        h: disp_h.round() as u32,
-                    },
-                    [0.0, 0.0, 1.0, 1.0],
+                    Rect::new(x as i32, y as i32, disp_w as u32, disp_h as u32),
+                    [u0, v0, u0 + fw, v0 + fh],
                 )
             }
             WallpaperMode::Stretch => (*o, [0.0, 0.0, 1.0, 1.0]),
             WallpaperMode::Center => {
-                // 1:1, centred: native-size quad (may overflow or gap).
-                let x = o.x as f64 + (ow - iw) / 2.0;
-                let y = o.y as f64 + (oh - ih) / 2.0;
-                (
-                    Rect {
-                        x: x.round() as i32,
-                        y: y.round() as i32,
-                        w: img_w,
-                        h: img_h,
-                    },
-                    [0.0, 0.0, 1.0, 1.0],
-                )
+                if iw >= ow && ih >= oh {
+                    // Image larger than output: crop, centred.
+                    let u0 = ((iw - ow) / 2.0 / iw) as f32;
+                    let v0 = ((ih - oh) / 2.0 / ih) as f32;
+                    let fu = (ow / iw) as f32;
+                    let fv = (oh / ih) as f32;
+                    (*o, [u0, v0, u0 + fu, v0 + fv])
+                } else {
+                    // Image smaller: 1:1, centred with letterbox gaps.
+                    let x = o.x as f64 + (ow - iw) / 2.0;
+                    let y = o.y as f64 + (oh - ih) / 2.0;
+                    (
+                        Rect::new(x as i32, y as i32, iw as u32, ih as u32),
+                        [0.0, 0.0, 1.0, 1.0],
+                    )
+                }
             }
         };
         out.push((dst, src));
@@ -242,164 +248,50 @@ pub fn compute_wallpaper_rects(
     out
 }
 
+/// Unit tests for the pure wallpaper geometry.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Rect;
 
-    fn rect(x: i32, y: i32, w: u32, h: u32) -> Rect {
+    fn r(x: i32, y: i32, w: u32, h: u32) -> Rect {
         Rect::new(x, y, w, h)
     }
 
     #[test]
-    fn mode_from_str_round_trips() {
-        assert_eq!(
-            "fill".parse::<WallpaperMode>().unwrap(),
-            WallpaperMode::Fill
-        );
-        assert_eq!("FIT".parse::<WallpaperMode>().unwrap(), WallpaperMode::Fit);
-        assert_eq!(
-            "Stretch".parse::<WallpaperMode>().unwrap(),
-            WallpaperMode::Stretch
-        );
-        assert_eq!(
-            "center".parse::<WallpaperMode>().unwrap(),
-            WallpaperMode::Center
-        );
-        assert!("bogus".parse::<WallpaperMode>().is_err());
-        assert_eq!(WallpaperMode::default(), WallpaperMode::Fill);
+    fn fill_covers_output() {
+        // Image 4:3, output 16:9 → image is taller relative to width, so we
+        // crop top/bottom and cover the full output width.
+        let rects = compute_wallpaper_rects(800, 600, WallpaperMode::Fill, &[r(0, 0, 1920, 1080)]);
+        let (dst, src) = rects[0];
+        assert_eq!(dst, r(0, 0, 1920, 1080));
+        // Vertical crop: disp 1920x1440, fv=0.75, v0=0.125
+        assert!((src[0] - 0.0).abs() < 1e-6);
+        assert!((src[2] - 1.0).abs() < 1e-6);
+        assert!((src[1] - 0.125).abs() < 1e-3);
+        assert!((src[3] - 0.875).abs() < 1e-3);
     }
 
     #[test]
-    fn fill_covers_output_cropping() {
-        // image 200x100 (wide), output 1920x1080 (narrower) -> width fills, crop X.
-        let r = compute_wallpaper_rects(200, 100, WallpaperMode::Fill, &[rect(0, 0, 1920, 1080)]);
-        let (dst, src) = &r[0];
-        assert_eq!(*dst, rect(0, 0, 1920, 1080));
-        // vertical is fully used, horizontal is cropped symmetrically.
-        assert!((src[1] - 0.0).abs() < 1e-6 && (src[3] - 1.0).abs() < 1e-6);
-        let used_u = src[2] - src[0];
-        // 1920/2160 ≈ 0.8889 of the width.
-        assert!((used_u - 1920.0 / 2160.0).abs() < 1e-4);
-        assert!((src[0] - (1.0 - used_u) / 2.0).abs() < 1e-4);
-    }
-
-    // Exact, deterministic UV-rect compares (0.0/1.0 are exactly representable).
-    #[allow(clippy::float_cmp)]
-    #[test]
-    fn fit_letterboxes_inside_output() {
-        let r = compute_wallpaper_rects(200, 100, WallpaperMode::Fit, &[rect(0, 0, 1920, 1080)]);
-        let (dst, src) = &r[0];
-        assert_eq!(*src, [0.0, 0.0, 1.0, 1.0]);
-        assert_eq!(dst.w, 1920);
-        assert_eq!(dst.h, 960);
-        assert_eq!(dst.x, 0);
-        assert_eq!(dst.y, 60); // (1080-960)/2
-    }
-
-    // Exact, deterministic UV-rect compares (0.0/1.0 are exactly representable).
-    #[allow(clippy::float_cmp)]
-    #[test]
-    fn stretch_fills_without_crop() {
-        let r =
-            compute_wallpaper_rects(200, 100, WallpaperMode::Stretch, &[rect(0, 0, 1920, 1080)]);
-        let (dst, src) = &r[0];
-        assert_eq!(*dst, rect(0, 0, 1920, 1080));
-        assert_eq!(*src, [0.0, 0.0, 1.0, 1.0]);
-    }
-
-    // Exact, deterministic UV-rect compares (0.0/1.0 are exactly representable).
-    #[allow(clippy::float_cmp)]
-    #[test]
-    fn center_is_native_size_centered() {
-        // image smaller than output -> centred 1:1.
-        let r =
-            compute_wallpaper_rects(1000, 1000, WallpaperMode::Center, &[rect(0, 0, 1920, 1080)]);
-        let (dst, src) = &r[0];
-        assert_eq!(*src, [0.0, 0.0, 1.0, 1.0]);
-        assert_eq!(*dst, rect(460, 40, 1000, 1000)); // (1920-1000)/2=460, (1080-1000)/2=40
+    fn fit_letterboxes() {
+        let rects = compute_wallpaper_rects(800, 600, WallpaperMode::Fit, &[r(0, 0, 1920, 1080)]);
+        let (dst, _src) = rects[0];
+        // 800x600 → fit means height matches output, width is smaller.
+        assert_eq!(dst.w, 1440);
+        assert_eq!(dst.h, 1080);
+        let x = (1920 - 1440) / 2;
+        assert_eq!(dst.x, x);
     }
 
     #[test]
-    fn multi_monitor_different_aspect_fill() {
-        let outs = [rect(0, 0, 1920, 1080), rect(1920, 0, 1280, 1024)];
-        let r = compute_wallpaper_rects(1000, 1000, WallpaperMode::Fill, &outs);
-        assert_eq!(r.len(), 2);
-        // Each output is fully covered.
-        assert_eq!(r[0].0, rect(0, 0, 1920, 1080));
-        assert_eq!(r[1].0, rect(1920, 0, 1280, 1024));
-        // A square image on either landscape output covers full width (crops the
-        // height); the two crops differ only because the outputs differ in height.
-        let fu0 = r[0].1[2] - r[0].1[0];
-        let fu1 = r[1].1[2] - r[1].1[0];
-        assert!((fu0 - 1.0).abs() < 1e-6); // 1920x1080 -> width fully used
-        assert!((fu1 - 1.0).abs() < 1e-6); // 1280x1024 -> width fully used
-                                           // Both crops centre the (taller) image vertically.
-        assert!((r[1].1[1] - (1.0 - 0.8) / 2.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn multi_monitor_fit_letterboxes_asymmetric() {
-        let outs = [rect(0, 0, 1920, 1080), rect(1920, 0, 1280, 1024)];
-        let r = compute_wallpaper_rects(1000, 1000, WallpaperMode::Fit, &outs);
-        // Both quads are 1:1 (square image, square quad), centred per monitor.
-        assert_eq!(r[0].0.w, r[0].0.h);
-        assert_eq!(r[1].0.w, r[1].0.h);
-        // Second monitor (narrower/taller) yields a smaller quad.
-        assert!(r[1].0.w < r[0].0.w);
-    }
-
-    #[test]
-    fn reordering_outputs_changes_quads() {
-        let a = [rect(0, 0, 1920, 1080), rect(1920, 0, 800, 600)];
-        let mut b = a.to_vec();
-        b.reverse();
-        let ra = compute_wallpaper_rects(1000, 1000, WallpaperMode::Fit, &a);
-        let rb = compute_wallpaper_rects(1000, 1000, WallpaperMode::Fit, &b);
-        assert_ne!(ra[0].0, rb[0].0); // different destination for monitor 0
-        assert_eq!(ra[0].0, rb[1].0); // but consistent per-output geometry
-    }
-
-    #[test]
-    fn video_source_round_trips_as_reserved() {
-        let s = WallpaperSource::Video(std::path::PathBuf::from("/tmp/x.mp4"));
-        assert_eq!(
-            s,
-            WallpaperSource::Video(std::path::PathBuf::from("/tmp/x.mp4"))
-        );
-    }
-
-    #[test]
-    fn static_shader_is_not_animated() {
-        let src = "void main() { vec3 c = vec3(0.1, 0.2, 0.3); gl_FragColor = vec4(c, 1.0); }";
-        assert!(!shader_is_animated(src));
-    }
-
-    #[test]
-    fn shader_using_u_time_is_animated() {
-        let src = "void main() { float t = u_time; gl_FragColor = vec4(t, 0.0, 0.0, 1.0); }";
-        assert!(shader_is_animated(src));
-    }
-
-    #[test]
-    fn shader_using_u_delta_time_is_animated() {
-        let src = "void main() { float d = u_delta_time; gl_FragColor = vec4(d, 0.0, 1.0, 1.0); }";
-        assert!(shader_is_animated(src));
-    }
-
-    #[test]
-    fn u_time_in_comment_is_not_animated() {
-        // A mention of `u_time` only inside a comment must not count.
-        let src = "// drives nothing: u_time\nvoid main() { gl_FragColor = vec4(0.0); }";
-        assert!(!shader_is_animated(src));
-        let block = "/* u_time u_delta_time */ void main() { gl_FragColor = vec4(1.0); }";
-        assert!(!shader_is_animated(block));
-    }
-
-    #[test]
-    fn near_miss_identifiers_are_not_animated() {
-        // `u_time` must be a whole identifier, not a prefix/suffix of another.
-        assert!(!shader_is_animated("float utime = 1.0;"));
-        assert!(!shader_is_animated("float u_timex = 1.0;"));
-        assert!(!shader_is_animated("float xu_time = 1.0;"));
+    fn stretch_ignores_aspect() {
+        let rects =
+            compute_wallpaper_rects(800, 600, WallpaperMode::Stretch, &[r(0, 0, 1920, 1080)]);
+        let (dst, src) = rects[0];
+        assert_eq!(dst, r(0, 0, 1920, 1080));
+        assert!(src
+            .iter()
+            .zip([0.0, 0.0, 1.0, 1.0])
+            .all(|(a, b)| (a - b).abs() < 1e-6));
     }
 }

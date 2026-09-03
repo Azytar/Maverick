@@ -79,58 +79,73 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "maverick"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "libc",
  "maverick-gl",
  "maverick-img",
+ "maverick-render",
  "maverick-sys",
  "maverick-toml",
+ "maverick-x11",
  "x11rb",
 ]
 
 [[package]]
 name = "maverick-dialog"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "x11rb",
 ]
 
 [[package]]
 name = "maverick-gl"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "libc",
  "log",
  "maverick-img",
+ "maverick-x11",
  "x11rb",
 ]
 
 [[package]]
 name = "maverick-img"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "maverick-installer"
-version = "0.4.0"
+version = "0.5.0"
+
+[[package]]
+name = "maverick-render"
+version = "0.5.0"
 
 [[package]]
 name = "maverick-sys"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "maverick-toml"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "maverick-vk"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "ash",
  "maverick-gl",
+ "x11rb",
+]
+
+[[package]]
+name = "maverick-x11"
+version = "0.5.0"
+dependencies = [
+ "libc",
  "x11rb",
 ]
 

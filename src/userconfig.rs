@@ -71,6 +71,7 @@ struct CompositorEntry {
     fullscreen_bypass: Option<bool>,
     stiffness: Option<f32>,
     damping: Option<f32>,
+    vsync: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -397,6 +398,20 @@ fn apply_compositor_key(
         "fullscreen_bypass" => set_bool(&mut c.fullscreen_bypass, key, value, diag),
         "stiffness" | "camera_stiffness" => set_f32(&mut c.stiffness, key, value, diag),
         "damping" | "camera_damping" => set_f32(&mut c.damping, key, value, diag),
+        "vsync" => {
+            if let Some(s) = value.as_str() {
+                c.vsync = Some(s.to_string());
+            } else if let Some(b) = value.as_bool() {
+                c.vsync = Some(if b {
+                    "on".to_string()
+                } else {
+                    "off".to_string()
+                });
+            } else {
+                diag.errors
+                    .push("compositor.vsync must be 'on'|'off'|'adaptive'".to_string());
+            }
+        }
         _ => {}
     }
 }
@@ -423,6 +438,18 @@ fn apply_compositor(cfg: &mut Cfg, c: CompositorEntry, diag: &mut Diagnostics) {
         } else {
             diag.errors
                 .push(format!("compositor.damping must be > 0; ignoring {v}"));
+        }
+    }
+    if let Some(s) = c.vsync {
+        match s.to_ascii_lowercase().as_str() {
+            "on" | "true" | "1" | "vsync" => cfg.compositor.vsync = crate::config::VsyncMode::On,
+            "off" | "false" | "0" | "none" => cfg.compositor.vsync = crate::config::VsyncMode::Off,
+            "adaptive" | "tear" | "mailbox" => {
+                cfg.compositor.vsync = crate::config::VsyncMode::Adaptive
+            }
+            _ => diag.errors.push(format!(
+                "compositor.vsync must be 'on'|'off'|'adaptive'; ignoring '{s}'"
+            )),
         }
     }
 }

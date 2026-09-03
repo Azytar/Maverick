@@ -33,6 +33,6 @@ pub use effect::Effect;
 pub use engine::Engine;
 pub use event::{CommandReport, Event, EventHandler};
 pub use ipc::state_json;
-pub use wallpaper::{
-    GpuImage, ShaderId, WallpaperGpu, WallpaperMode, WallpaperSource, WallpaperSpec,
-};
+#[cfg(feature = "compositor-opengl")]
+pub use wallpaper::WallpaperGpu;
+pub use wallpaper::{GpuImage, WallpaperMode, WallpaperSource, WallpaperSpec};

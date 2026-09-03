@@ -1,0 +1,17 @@
+[package]
+name = "maverick-x11"
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.82"
+authors = ["azytar"]
+description = "Shared X11/Xlib bootstrap for Maverick: open_display, XCB connection handoff, XDisplay handle"
+license = "GPL-3.0"
+repository = "https://github.com/azytar/Maverick"
+categories = ["os::unix-apis"]
+keywords = ["x11", "window-manager"]
+
+[dependencies]
+# `allow-unsafe-code` unlocks `x11rb::xcb_ffi::XCBConnection`, the connection
+# type that can wrap the `xcb_connection_t*` owned by an Xlib `Display*`.
+x11rb = { version = "0.13", default-features = false, features = ["allow-unsafe-code"] }
+libc = "0.2"
