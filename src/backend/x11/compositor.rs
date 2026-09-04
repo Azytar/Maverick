@@ -106,6 +106,15 @@ mod placeholder {
         #[inline(always)]
         pub fn set_transforms(&mut self, _placements: &[(Window, Rect, u32)]) {}
         #[inline(always)]
+        pub fn prepare_frame(
+            &mut self,
+            _state: &mut crate::types::State,
+            _cfg: &crate::config::Cfg,
+            _registry: &crate::core::layout::LayoutRegistry,
+            _anim_per_mon: &[bool],
+        ) {
+        }
+        #[inline(always)]
         pub fn set_debug_floats(&mut self, _ids: &[WindowId]) {}
         #[inline(always)]
         pub fn render(&mut self) -> bool {

@@ -70,6 +70,8 @@ struct ProjSig {
 }
 
 /// Build the [`ProjSig`] for one workspace.
+// Kept for potential future WM-side use; presentation cache now lives in the compositor.
+#[allow(dead_code)]
 fn proj_signature(ws: &Workspace, cfg: &Cfg) -> ProjSig {
     let total_boost = cfg.accordion_boost.clamp(0.0, 0.9);
     ProjSig {
@@ -85,6 +87,7 @@ fn proj_signature(ws: &Workspace, cfg: &Cfg) -> ProjSig {
 /// the `Phase::Live` projection. Required to translate cached placements by the
 /// exact camera delta: `screen_x = wa.x + (world_x - cam) * alpha + cx`, so a
 /// camera change of `dcam` shifts every scrolling window by `-dcam * alpha`.
+#[allow(dead_code)]
 fn live_alpha(ws: &Workspace) -> f32 {
     let a = ws.zoom.max(0.05);
     if ws.viewport_mode == ViewportMode::Zoomed {
@@ -157,27 +160,28 @@ pub struct WindowManager {
     /// P10: Reusable raise-list scratch for `live_placements` → `present_into`.
     /// The WM discards the raise list, so a fresh `Vec` here would allocate once
     /// per animating monitor per frame. Owned by the WM and threaded through.
+    #[allow(dead_code)]
     compositor_present_scratch: Vec<WindowId>,
     /// Per-monitor cached live placements; recomputed only when that monitor's
     /// layout actually changes (or it is still animating), so an idle monitor
     /// costs nothing while another scrolls. Parallel to `state.monitors`.
+    /// Now owned by the compositor — kept here for the compositor-less path
+    /// compatibility until fully removed.
+    #[allow(dead_code)]
     live_cache: Vec<Vec<(Window, Rect, u32)>>,
     /// Per-monitor camera position the `live_cache[i]` entry was projected at.
-    /// When only the camera moved (the projection signature is unchanged) the
-    /// cached placements are re-used by translating them by the camera delta
-    /// instead of re-running `arrange` — a cheap O(n) pass vs a full layout
-    /// projection. Parallel to `state.monitors`.
+    #[allow(dead_code)]
     cam_cache: Vec<f32>,
     /// Per-monitor projection signature the `live_cache[i]` entry was built with
-    /// (`None` forces a fresh `arrange` on the next frame). Parallel to
-    /// `state.monitors`.
+    #[allow(dead_code)]
     proj_cache: Vec<Option<ProjSig>>,
     /// Per-monitor "is a spring still moving" flag, produced by
     /// `tick_animations_multi`. Lets the frame loop recompute the live layout for
     /// only the monitors that are actually animating. Parallel to `state.monitors`.
     anim_per_mon: Vec<bool>,
     /// Reusable transform buffer for `set_transforms` — avoids a `Vec` alloc per
-    /// animation frame.
+    /// animation frame. Now owned by the compositor.
+    #[allow(dead_code)]
     transforms_buf: Vec<(Window, Rect, u32)>,
     /// Reusable raise-list scratch for the per-frame projection (`present_into`).
     /// The WM discards the raise list, so a fresh `Vec` here would allocate once
@@ -556,89 +560,6 @@ impl WindowManager {
             let wants_frame = sched.needs_frame();
             self.frame_needs = wants_frame;
             if wants_frame {
-                // Keep the per-monitor cache sized to the live monitor set; a
-                // change in monitor count (hotplug) invalidates everything.
-                if self.live_cache.len() != self.engine.state.monitors.len() {
-                    let n = self.engine.state.monitors.len();
-                    self.live_cache = vec![Vec::new(); n];
-                    self.cam_cache = vec![0.0; n];
-                    self.proj_cache = vec![None; n];
-                    self.anim_per_mon = vec![false; n];
-                    for m in &mut self.engine.state.monitors {
-                        m.layout_dirty = true;
-                    }
-                }
-                self.transforms_buf.clear();
-                for i in 0..self.engine.state.monitors.len() {
-                    // Recompute this monitor only when its layout actually changed,
-                    // it is still animating, or its projection signature diverged
-                    // (e.g. the accordion boost is gliding). Otherwise:
-                    //   * if only the camera moved, translate the cached placements
-                    //     by the camera delta (a cheap O(n) pass);
-                    //   * if nothing moved, reuse the cached placements verbatim.
-                    // Idle monitors therefore cost nothing while another scrolls.
-                    let anim_i = self.anim_per_mon.get(i).copied().unwrap_or(false);
-                    let cam_now = self.engine.state.monitors[i].ws().camera.position;
-                    let (sig, alpha) = {
-                        let ws = self.engine.state.monitors[i].ws();
-                        (proj_signature(ws, &self.engine.cfg), live_alpha(ws))
-                    };
-                    let layout_dirty = self.engine.state.monitors[i].layout_dirty;
-                    let sig_changed = self.proj_cache[i].as_ref() != Some(&sig);
-                    let recompute = anim_i || layout_dirty || sig_changed;
-                    if recompute {
-                        self.desired.clear();
-                        compositor::live_placements(
-                            &self.engine.state,
-                            i,
-                            &self.engine.cfg,
-                            &self.layout_registry,
-                            &mut self.desired,
-                            &mut self.compositor_present_scratch,
-                            &mut self.ribbon_scratch,
-                        );
-                        self.live_cache[i].clear();
-                        self.live_cache[i].extend(self.desired.iter().copied());
-                        self.cam_cache[i] = cam_now;
-                        self.proj_cache[i] = Some(sig);
-                        self.engine.state.monitors[i].layout_dirty = false;
-                    } else if (cam_now - self.cam_cache[i]).abs() > 1e-4 {
-                        // Pure camera scroll: translate the cached placements. The
-                        // projection is `screen_x = wa.x + (world_x - cam) * alpha +
-                        // cx`, so a camera delta of `dcam` shifts every *scrolling*
-                        // window by `-dcam * alpha`. Windows pinned to the screen
-                        // (floats, maximized, true-fullscreen overrides) keep their
-                        // geometry and are left untouched.
-                        let dx = (-(cam_now - self.cam_cache[i]) * alpha).round() as i32;
-                        self.desired.clear();
-                        let ws = self.engine.state.monitors[i].ws();
-                        for &(win, g, bw) in &self.live_cache[i] {
-                            let stationary =
-                                ws.floats.contains(&win)
-                                    || self.engine.state.clients.get(&win).is_some_and(|c| {
-                                        c.is_maximized() || c.is_true_fullscreen()
-                                    });
-                            let nx = if stationary {
-                                g.x
-                            } else {
-                                g.x.saturating_add(dx)
-                            };
-                            self.desired.push((win, Rect::new(nx, g.y, g.w, g.h), bw));
-                        }
-                        crate::core::present::present_into(
-                            &self.engine.state,
-                            &self.engine.state.monitors[i],
-                            &mut self.desired,
-                            &mut self.compositor_present_scratch,
-                        );
-                        self.cam_cache[i] = cam_now;
-                    } else {
-                        // Nothing moved this frame: reuse the cached placements.
-                        self.desired.clear();
-                        self.desired.extend(self.live_cache[i].iter().copied());
-                    }
-                    self.transforms_buf.extend(self.desired.iter().copied());
-                }
                 if comp.float_trace {
                     let mut fids: Vec<WindowId> = Vec::new();
                     for (mi, mon) in self.engine.state.monitors.iter().enumerate() {
@@ -653,7 +574,14 @@ impl WindowManager {
                     }
                     comp.set_debug_floats(&fids);
                 }
-                comp.set_transforms(&self.transforms_buf);
+                // Presentation state is owned by the compositor; the WM only
+                // supplies state/cfg and the animation flags.
+                comp.prepare_frame(
+                    &mut self.engine.state,
+                    &self.engine.cfg,
+                    &self.layout_registry,
+                    &self.anim_per_mon,
+                );
                 // A GL failure disables the compositor and returns us to the
                 // classic path. `panic = "abort"` means a GL panic would kill
                 // the whole WM, so the draw is isolated behind `catch_unwind`.

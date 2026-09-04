@@ -70,6 +70,38 @@ use crate::types::{Rect, State, WindowId};
 /// no longer than this — see `WindowManager::run_once`.
 const SUBSTEP_MS: f32 = 8.0;
 
+/// Projection signature for the compositor's live layout cache — mirrors
+/// `WindowManager::ProjSig` but lives in the compositor so the WM core does
+/// not own presentation state.
+#[derive(Clone, PartialEq)]
+struct ProjSig {
+    zoom: f32,
+    zoom_target: f32,
+    page_zoom: f32,
+    page_zoom_target: f32,
+    eff_boost: Vec<f32>,
+}
+
+fn proj_signature(ws: &crate::types::Workspace, cfg: &Cfg) -> ProjSig {
+    let total_boost = cfg.accordion_boost.clamp(0.0, 0.9);
+    ProjSig {
+        zoom: ws.zoom,
+        zoom_target: ws.zoom_target,
+        page_zoom: ws.page_zoom,
+        page_zoom_target: ws.page_zoom_target,
+        eff_boost: ws.columns.iter().map(|c| total_boost * c.boost).collect(),
+    }
+}
+
+fn live_alpha(ws: &crate::types::Workspace) -> f32 {
+    let a = ws.zoom.max(0.05);
+    if ws.viewport_mode == crate::types::ViewportMode::Zoomed {
+        ws.page_zoom.max(0.05)
+    } else {
+        a
+    }
+}
+
 /// One redirected window the compositor tracks.
 struct CompWin {
     /// Outer (border-inclusive) geometry as last seen from X.
@@ -550,6 +582,15 @@ pub struct Compositor {
     trace_partial_to_full: u64,
     /// Timestamp of the previous present, for the present-to-present interval.
     last_present: Option<Instant>,
+    // ── Presentation caches — owned by the compositor so the WM core never
+    // hands GPU transforms (WindowManager does not import Renderer details).
+    live_cache: Vec<Vec<(Window, crate::types::Rect, u32)>>,
+    cam_cache: Vec<f32>,
+    proj_cache: Vec<Option<ProjSig>>,
+    presentation_transforms: Vec<(Window, crate::types::Rect, u32)>,
+    presentation_desired: Placements,
+    presentation_raise_scratch: Vec<WindowId>,
+    presentation_ribbon_scratch: RibbonScratch,
 }
 
 impl Compositor {
@@ -802,6 +843,13 @@ impl Compositor {
             trace_mode_partial: 0,
             trace_partial_to_full: 0,
             last_present: None,
+            live_cache: Vec::new(),
+            cam_cache: Vec::new(),
+            proj_cache: Vec::new(),
+            presentation_transforms: Vec::with_capacity(256),
+            presentation_desired: Placements::with_capacity(32),
+            presentation_raise_scratch: Vec::with_capacity(32),
+            presentation_ribbon_scratch: RibbonScratch::default(),
         };
 
         comp.scan_existing();
@@ -1251,6 +1299,92 @@ impl Compositor {
         // scroll. Structural changes (resize/restack/opacity/map/unmap) already
         // call `mark_full` through their own events, and the frame loop renders
         // while `animating` is true, so dropping this flag does not skip frames.
+    }
+
+    /// Build presentation transforms for this frame (moved from `WindowManager` so
+    /// the WM core never handles GPU presentation state). Populates the
+    /// compositor's internal caches and installs the transforms via
+    /// `set_transforms`.
+    pub fn prepare_frame(
+        &mut self,
+        state: &mut State,
+        cfg: &Cfg,
+        registry: &LayoutRegistry,
+        anim_per_mon: &[bool],
+    ) {
+        // Ensure caches match live monitor count.
+        let nmon = state.monitors.len();
+        if self.live_cache.len() != nmon {
+            self.live_cache = vec![Vec::new(); nmon];
+            self.cam_cache = vec![0.0; nmon];
+            self.proj_cache = vec![None; nmon];
+            for m in &mut state.monitors {
+                m.layout_dirty = true;
+            }
+        }
+        self.presentation_transforms.clear();
+        for i in 0..nmon {
+            let anim_i = anim_per_mon.get(i).copied().unwrap_or(false);
+            let cam_now = state.monitors[i].ws().camera.position;
+            let (sig, alpha) = {
+                let ws = state.monitors[i].ws();
+                (proj_signature(ws, cfg), live_alpha(ws))
+            };
+            let layout_dirty = state.monitors[i].layout_dirty;
+            let sig_changed = self.proj_cache[i].as_ref() != Some(&sig);
+            let recompute = anim_i || layout_dirty || sig_changed;
+            if recompute {
+                self.presentation_desired.clear();
+                live_placements(
+                    state,
+                    i,
+                    cfg,
+                    registry,
+                    &mut self.presentation_desired,
+                    &mut self.presentation_raise_scratch,
+                    &mut self.presentation_ribbon_scratch,
+                );
+                self.live_cache[i].clear();
+                self.live_cache[i].extend(self.presentation_desired.iter().copied());
+                self.cam_cache[i] = cam_now;
+                self.proj_cache[i] = Some(sig);
+                state.monitors[i].layout_dirty = false;
+            } else if (cam_now - self.cam_cache[i]).abs() > 1e-4 {
+                let dx = (-(cam_now - self.cam_cache[i]) * alpha).round() as i32;
+                self.presentation_desired.clear();
+                let ws = state.monitors[i].ws();
+                for &(win, g, bw) in &self.live_cache[i] {
+                    let stationary = ws.floats.contains(&win)
+                        || state
+                            .clients
+                            .get(&win)
+                            .is_some_and(|c| c.is_maximized() || c.is_true_fullscreen());
+                    let nx = if stationary {
+                        g.x
+                    } else {
+                        g.x.saturating_add(dx)
+                    };
+                    self.presentation_desired
+                        .push((win, Rect::new(nx, g.y, g.w, g.h), bw));
+                }
+                crate::core::present::present_into(
+                    state,
+                    &state.monitors[i],
+                    &mut self.presentation_desired,
+                    &mut self.presentation_raise_scratch,
+                );
+                self.cam_cache[i] = cam_now;
+            } else {
+                self.presentation_desired.clear();
+                self.presentation_desired
+                    .extend(self.live_cache[i].iter().copied());
+            }
+            self.presentation_transforms
+                .extend(self.presentation_desired.iter().copied());
+        }
+        // Install transforms (frame_gen bump + per-window write).
+        let transforms = self.presentation_transforms.clone();
+        self.set_transforms(&transforms);
     }
 
     /// Mark the whole frame dirty (used when stacking or the wallpaper changes).
