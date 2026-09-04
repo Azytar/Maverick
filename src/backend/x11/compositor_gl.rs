@@ -41,8 +41,8 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use maverick_gl::{
-    DrawQuad, Filter, Rect as GlRect, Renderer, ShaderId, Texture, TextureHandle, VisualFormat,
-    VsyncMode as GlVsyncMode, XConn,
+    DrawQuad, Filter, Rect as GlRect, Renderer as GlRenderer, ShaderId, Texture, TextureHandle,
+    VisualFormat, VsyncMode as GlVsyncMode, XConn,
 };
 use maverick_img::Rgba8;
 use maverick_x11::XDisplay as X11Display;
@@ -99,6 +99,38 @@ fn live_alpha(ws: &crate::types::Workspace) -> f32 {
         ws.page_zoom.max(0.05)
     } else {
         a
+    }
+}
+
+/// Renderer backend abstraction — the WM never knows which is active.
+/// `Gl` is the current OpenGL/GLX implementation; `Vulkan` will be added
+/// behind `#[cfg(feature = "compositor-vulkan")]` without touching WM code.
+pub enum CompositorRenderer {
+    Gl(GlRenderer),
+}
+
+impl CompositorRenderer {
+    pub fn has_buffer_age(&self) -> bool {
+        match self {
+            Self::Gl(r) => r.has_buffer_age,
+        }
+    }
+}
+
+impl std::ops::Deref for CompositorRenderer {
+    type Target = GlRenderer;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Gl(r) => r,
+        }
+    }
+}
+
+impl std::ops::DerefMut for CompositorRenderer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Gl(r) => r,
+        }
     }
 }
 
@@ -422,7 +454,7 @@ pub struct Compositor {
     // open and records what we redirected.
     #[allow(dead_code)]
     dpy: X11Display,
-    renderer: Renderer,
+    renderer: CompositorRenderer,
     root: Window,
     #[allow(dead_code)]
     overlay: Window,
@@ -705,7 +737,7 @@ impl Compositor {
             crate::config::VsyncMode::Adaptive => GlVsyncMode::Adaptive,
         };
         let gl_dpy = unsafe { maverick_gl::XDisplay::from_raw(dpy.as_ptr()) };
-        let mut renderer = match Renderer::new_with_vsync(
+        let mut renderer = match GlRenderer::new_with_vsync(
             gl_dpy,
             screen_num as i32,
             overlay,
@@ -785,7 +817,7 @@ impl Compositor {
         let mut comp = Compositor {
             conn,
             dpy,
-            renderer,
+            renderer: CompositorRenderer::Gl(renderer),
             root,
             overlay,
             screen_w,
@@ -2057,7 +2089,7 @@ impl Compositor {
         // for the full/partial/idle choice (unit-tested in `frameplan_tests`).
         // `force_full_redraw` (MAVERICK_FORCE_FULL_REDRAW) pretends buffer-age
         // is unavailable so the harness can exercise the full-redraw fallback.
-        let has_age = self.renderer.has_buffer_age && !self.force_full_redraw;
+        let has_age = self.renderer.has_buffer_age() && !self.force_full_redraw;
         let t0 = Instant::now();
         let mut mode = decide_redraw(has_age, self.needs_full, !self.frame_dirty.is_empty());
         let decided_partial = mode == FrameMode::Partial;

@@ -157,33 +157,11 @@ pub struct WindowManager {
     /// The `Reconciler` diffs this `Desired` against `AppliedState` to decide what
     /// to write to X11. P10: reusable buffer — avoids allocation per `arrange()`.
     desired: Placements,
-    /// P10: Reusable raise-list scratch for `live_placements` → `present_into`.
-    /// The WM discards the raise list, so a fresh `Vec` here would allocate once
-    /// per animating monitor per frame. Owned by the WM and threaded through.
-    #[allow(dead_code)]
-    compositor_present_scratch: Vec<WindowId>,
-    /// Per-monitor cached live placements; recomputed only when that monitor's
-    /// layout actually changes (or it is still animating), so an idle monitor
-    /// costs nothing while another scrolls. Parallel to `state.monitors`.
-    /// Now owned by the compositor — kept here for the compositor-less path
-    /// compatibility until fully removed.
-    #[allow(dead_code)]
-    live_cache: Vec<Vec<(Window, Rect, u32)>>,
-    /// Per-monitor camera position the `live_cache[i]` entry was projected at.
-    #[allow(dead_code)]
-    cam_cache: Vec<f32>,
-    /// Per-monitor projection signature the `live_cache[i]` entry was built with
-    #[allow(dead_code)]
-    proj_cache: Vec<Option<ProjSig>>,
     /// Per-monitor "is a spring still moving" flag, produced by
     /// `tick_animations_multi`. Lets the frame loop recompute the live layout for
     /// only the monitors that are actually animating. Parallel to `state.monitors`.
     anim_per_mon: Vec<bool>,
-    /// Reusable transform buffer for `set_transforms` — avoids a `Vec` alloc per
-    /// animation frame. Now owned by the compositor.
-    #[allow(dead_code)]
-    transforms_buf: Vec<(Window, Rect, u32)>,
-    /// Reusable raise-list scratch for the per-frame projection (`present_into`).
+    /// Reusable raise-list scratch for `live_placements` → `present_into`.
     /// The WM discards the raise list, so a fresh `Vec` here would allocate once
     /// per animating monitor per frame.
     present_scratch: Vec<WindowId>,
@@ -880,12 +858,7 @@ impl WindowManager {
             hide_ws_set: std::collections::HashSet::with_capacity(32),
             hide_mon_vec: Vec::with_capacity(64),
             desired: Placements::with_capacity(32),
-            compositor_present_scratch: Vec::with_capacity(32),
-            live_cache: Vec::new(),
-            cam_cache: Vec::new(),
-            proj_cache: Vec::new(),
             anim_per_mon: Vec::new(),
-            transforms_buf: Vec::with_capacity(256),
             present_scratch: Vec::with_capacity(32),
             ribbon_scratch: RibbonScratch::default(),
             last_key_times: std::collections::BTreeMap::new(),
