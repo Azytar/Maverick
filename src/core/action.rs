@@ -22,7 +22,7 @@ pub enum ArgKind {
     None,
     /// A `Dir` (`left`/`right`/`up`/`down`/`next`/`prev`).
     Dir,
-    /// A `LayoutKind` (`column`/`grid`).
+    /// A `LayoutKind` (`column`).
     Layout,
     /// A signed integer (`i32`).
     I32,
@@ -46,7 +46,6 @@ pub static ACTIONS: &[(&str, ArgKind)] = &[
     ("toggle_fullscreen", ArgKind::None),
     ("toggle_maximize", ArgKind::None),
     ("set_layout", ArgKind::Layout),
-    ("cycle_layout", ArgKind::None),
     ("grow_col", ArgKind::I32),
     ("new_column", ArgKind::None),
     ("collapse_column", ArgKind::None),
@@ -77,7 +76,6 @@ pub fn name(a: &Action) -> &'static str {
         Action::ToggleFullscreen => "toggle_fullscreen",
         Action::ToggleMaximize => "toggle_maximize",
         Action::SetLayout(_) => "set_layout",
-        Action::CycleLayout => "cycle_layout",
         Action::GrowCol(_) => "grow_col",
         Action::NewColumn => "new_column",
         Action::CollapseColumn => "collapse_column",
@@ -111,7 +109,6 @@ fn dir_from(s: &str) -> Option<Dir> {
 fn layout_from(s: &str) -> Option<LayoutKind> {
     match s.trim().to_ascii_lowercase().as_str() {
         "column" => Some(LayoutKind::Column),
-        "grid" => Some(LayoutKind::Grid),
         _ => None,
     }
 }
@@ -202,7 +199,6 @@ pub fn parse(input: &str) -> Option<Action> {
             .then(|| layout_from(arg))
             .flatten()
             .map(Action::SetLayout),
-        "cycle_layout" => none_if_arg(has_arg, Action::CycleLayout),
         "grow_col" => has_arg
             .then(|| arg.parse::<i32>().ok())
             .flatten()
@@ -293,7 +289,7 @@ mod tests {
             let mut sample = match kind {
                 ArgKind::None => String::new(),
                 ArgKind::Dir => ":left".to_string(),
-                ArgKind::Layout => ":grid".to_string(),
+                ArgKind::Layout => ":column".to_string(),
                 ArgKind::I32 => ":-50".to_string(),
                 ArgKind::F32Opt => ":0.2".to_string(),
                 ArgKind::Ws => ":2".to_string(),
@@ -318,7 +314,6 @@ mod tests {
             Action::ToggleFloat,
             Action::ToggleFullscreen,
             Action::ToggleMaximize,
-            Action::CycleLayout,
             Action::NewColumn,
             Action::CollapseColumn,
             Action::Restart,
@@ -370,7 +365,7 @@ mod tests {
         assert_eq!(parse("view 3"), parse("view:3"));
         assert_eq!(parse("grow-col 40"), parse("grow_col:40"));
         assert_eq!(parse("spawn alacritty"), parse("spawn:alacritty"));
-        assert_eq!(parse("layout grid"), parse("set_layout:grid"));
+        assert_eq!(parse("layout column"), parse("set_layout:column"));
         assert_eq!(parse("focus_mon next"), parse("focus_mon:next"));
         assert_eq!(parse("page_snap right"), parse("page_snap:right"));
         assert_eq!(parse("toggle_overview"), parse("toggle_overview"));

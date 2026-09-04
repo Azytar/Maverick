@@ -487,7 +487,7 @@ fn render_keybindings(out: &mut String, plan: &Plan) {
         ("Mod4+Control+h", "grow_col:-50"),
         ("Mod4+Control+l", "grow_col:50"),
         ("Mod4+Control+j", "collapse_column"),
-        ("Mod4+space", "cycle_layout"),
+        ("Mod4+space", "set_layout:column"),
         ("Mod4+g", "layout:grid"),
         ("Mod4+t", "layout:column"),
         ("Mod4+Shift+q", "spawn:maverickctl quit --confirm"),

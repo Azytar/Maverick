@@ -5,7 +5,6 @@ pub mod desired;
 pub mod effect;
 pub mod engine;
 pub mod event;
-pub mod grid;
 pub mod ipc;
 pub mod layout;
 pub mod present;

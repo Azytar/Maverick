@@ -1,9 +1,9 @@
 use crate::config::Cfg;
 use crate::core::commands::{
-    CollapseColumn, Command, CycleLayout, FocusDirection, FocusMonitor, GrowColumn, KillWindow,
-    MoveToWorkspace, MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav,
-    PageSnap, Quit, Restart, SetLayout, SetWallpaper, Spawn, ToggleFloat, ToggleFullscreen,
-    ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
+    CollapseColumn, Command, FocusDirection, FocusMonitor, GrowColumn, KillWindow, MoveToWorkspace,
+    MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav, PageSnap, Quit,
+    Restart, SetLayout, SetWallpaper, Spawn, ToggleFloat, ToggleFullscreen, ToggleMaximize,
+    ToggleOverview, ViewWorkspace, ViewportZoom,
 };
 use crate::core::effect::Effect;
 use crate::core::event::{Event, EventBus, EventHandler};
@@ -150,7 +150,6 @@ impl Engine {
     /// resolves the focused window when an action needs one.
     pub fn dispatch(&mut self, action: Action) -> Vec<Effect> {
         match action {
-            Action::CycleLayout => self.execute(CycleLayout),
             Action::SetLayout(lk) => self.execute(SetLayout(lk)),
             Action::FocusDir(dir) => self.execute(FocusDirection(dir)),
             Action::MoveDir(dir) => match self

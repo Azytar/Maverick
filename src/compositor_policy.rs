@@ -201,7 +201,7 @@ mod tests {
         let mut state = State::new();
         let mut mon = Monitor::new(Rect::new(0, 0, 800, 600), 1);
         mon.workarea = Rect::new(0, 0, 800, 600);
-        mon.workspaces[0].layout = LayoutKind::Grid;
+        mon.workspaces[0].layout = LayoutKind::Column;
         let mut wins = Vec::new();
         for i in 0..n {
             let w: WindowId = (i + 1) as u32;
@@ -371,10 +371,10 @@ mod tests {
         let mut state = State::new();
         let mut mon0 = Monitor::new(Rect::new(0, 0, 800, 600), 1);
         mon0.workarea = Rect::new(0, 0, 800, 600);
-        mon0.workspaces[0].layout = LayoutKind::Grid;
+        mon0.workspaces[0].layout = LayoutKind::Column;
         let mut mon1 = Monitor::new(Rect::new(800, 0, 800, 600), 1);
         mon1.workarea = Rect::new(800, 0, 800, 600);
-        mon1.workspaces[0].layout = LayoutKind::Grid;
+        mon1.workspaces[0].layout = LayoutKind::Column;
 
         let game: WindowId = 1;
         let mut gc = Client::new(game, 0, 0);

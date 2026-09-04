@@ -1254,7 +1254,11 @@ fn layout_switch_with_displaced_camera_recenters_focused_column() {
         wa,
         fs,
     );
-    let _proj = focus_step(&mut engine, crate::core::commands::CycleLayout, &registry);
+    let _proj = focus_step(
+        &mut engine,
+        crate::core::commands::SetLayout(crate::types::LayoutKind::Column),
+        &registry,
+    );
 
     let cam = engine.state.monitors[mi].workspaces[ws_i].camera.target;
     assert!(

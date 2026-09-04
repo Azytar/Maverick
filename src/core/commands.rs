@@ -510,14 +510,6 @@ impl Command for FocusDirection {
         }
         let from = state.monitors[mi].focused;
         let ws_i = state.monitors[mi].active_ws;
-        // In the `Grid` layout, left/right/up/down navigate by *geometry*, not
-        // by the (meaningless, one-window-per-column) column model. Next/Prev
-        // keep using the focus stack, handled below.
-        if state.monitors[mi].workspaces[ws_i].layout == LayoutKind::Grid
-            && matches!(self.0, Dir::Left | Dir::Right | Dir::Up | Dir::Down)
-        {
-            return focus_grid(state, cfg, mi, ws_i, self.0, from);
-        }
         let target: Option<WindowId> = match self.0 {
             Dir::Left | Dir::Right => {
                 let ws = &state.monitors[mi].workspaces[ws_i];
@@ -648,71 +640,6 @@ impl Command for FocusDirection {
         }
         CommandReport::new(cmds)
     }
-}
-
-/// Spatial focus navigation for the `Grid` layout. Resolves the neighbour of
-/// the focused window by its on-screen geometry (so `h`/`j`/`k`/`l` move in the
-/// direction you expect, unlike the column model where every grid window is its
-/// own 1-window column). Pure — no camera, no `ideal_scroll` (the grid has none).
-fn focus_grid(
-    state: &mut State,
-    _cfg: &Cfg,
-    mi: usize,
-    ws_i: usize,
-    dir: Dir,
-    from: Option<WindowId>,
-) -> CommandReport {
-    let mut cmds = Vec::new();
-    let focused = {
-        let mon = &state.monitors[mi];
-        let ws = &mon.workspaces[ws_i];
-        mon.focused.or_else(|| ws.focused_win())
-    };
-    let Some(focused) = focused else {
-        return CommandReport::new(cmds);
-    };
-
-    // Base geometry comes from the snapshot kept fresh by the render path; if it
-    // is missing (no arrange yet) fall back to a gap-free arrangement from the
-    // raw workarea — direction is scale-invariant, so the neighbour is still
-    // correct.
-    let placements: Vec<(WindowId, Rect)> = {
-        let mon = &state.monitors[mi];
-        let ws = &mon.workspaces[ws_i];
-        if let Some(s) = &ws.grid_snapshot {
-            s.placements.iter().map(|p| (p.win, p.rect)).collect()
-        } else {
-            let wins: Vec<WindowId> = ws
-                .columns
-                .iter()
-                .flat_map(|c| c.windows.iter().copied())
-                .collect();
-            let area = mon.workarea;
-            crate::core::grid::arrange(&wins, area, 0, 0, None).0
-        }
-    };
-    let Some(target) = crate::core::grid::neighbor(&placements, focused, dir) else {
-        return CommandReport::new(cmds);
-    };
-
-    {
-        let ws = &mut state.monitors[mi].workspaces[ws_i];
-        if let Some(ci) = ws.columns.iter().position(|c| c.windows.contains(&target)) {
-            ws.focus.column_idx = ci;
-            ws.columns[ci].focused = 0;
-        }
-    }
-    state.monitors[mi].focused = Some(target);
-    cmds.push(Effect::Unfocus(from.unwrap_or(0)));
-    cmds.push(Effect::ArrangeMonitor(mi));
-    cmds.push(Effect::FocusWindow(Some(target)));
-    CommandReport::with_event(
-        cmds,
-        Event::FocusChanged {
-            from,
-            to: Some(target),
-        },
-    )
 }
 
 // ─── Move ────────────────────────────────────────────────────────────────────
@@ -979,12 +906,7 @@ impl Command for CycleLayout {
         let mi = state.sel_mon;
         if mi < state.monitors.len() {
             let ws_i = state.monitors[mi].active_ws;
-            state.monitors[mi].workspaces[ws_i].cycle_layout();
-            // A layout switch must leave the scroll in a deterministic position:
-            // re-center the camera on the focused column so the focused window is
-            // on-screen at rest regardless of where the camera was before the
-            // switch (e.g. camera != 0 when going Grid→Column). Without this the
-            // focused column could stay off-screen until the next focus change.
+            state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
             let layout = state.monitors[mi].workspaces[ws_i].layout;
             if layout == LayoutKind::Column {
                 let wa = state.monitors[mi].workarea;

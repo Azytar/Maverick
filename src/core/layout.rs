@@ -113,56 +113,6 @@ impl Layout for ColumnLayout {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GridLayout;
-
-impl Layout for GridLayout {
-    fn name(&self) -> &'static str {
-        "grid"
-    }
-    fn arrange(
-        &self,
-        state: &State,
-        mon: &Monitor,
-        cfg: &Cfg,
-        _phase: Phase,
-        out: &mut Placements,
-        _scratch: &mut RibbonScratch,
-    ) {
-        let ws = mon.ws();
-        let (placements, _snap) =
-            crate::core::grid::arrange_workspace(ws, cfg, mon, ws.grid_snapshot.as_ref());
-        let bw = cfg.border_w;
-        for (win, rect) in placements {
-            if state.clients.contains_key(&win) {
-                out.push((win, rect, bw));
-            }
-        }
-        // ── floating windows — keep existing geom, clamped to the full workarea ──
-        for &win in &ws.floats {
-            let Some(c) = state.clients.get(&win) else {
-                continue;
-            };
-            let mut g = c.geom;
-            g.x = g.x.clamp(
-                mon.workarea.x,
-                (mon.workarea.x + mon.workarea.w as i32)
-                    .saturating_sub(g.w as i32)
-                    .max(mon.workarea.x),
-            );
-            g.y = g.y.clamp(
-                mon.workarea.y,
-                (mon.workarea.y + mon.workarea.h as i32)
-                    .saturating_sub(g.h as i32)
-                    .max(mon.workarea.y),
-            );
-            g.w = g.w.min(mon.workarea.w);
-            g.h = g.h.min(mon.workarea.h);
-            out.push((win, g, c.border_w));
-        }
-    }
-}
-
 // ─── LayoutRegistry ───────────────────────────────────────────────────────────
 //
 // Maps `LayoutKind` → `Box<dyn Layout>`. Built once at startup from
@@ -179,7 +129,6 @@ impl LayoutRegistry {
             layouts: HashMap::new(),
         };
         r.register(LayoutKind::Column, Box::new(ColumnLayout));
-        r.register(LayoutKind::Grid, Box::new(GridLayout));
         r
     }
 
@@ -208,17 +157,15 @@ impl Default for LayoutRegistry {
 
 // NOTE: `arrange` computes ONLY the logical layout geometry (layout_rect).
 // It is intentionally unaware of the *maximized* presentation overlay — that
-// is applied afterwards by `core::present::present`. But fullscreen is
-// special: in `LayoutKind::Column` it is a *normal participant of the
-// scrolling ribbon* (niri-style), not an overlay. The fullscreen window
-// becomes one column of the ribbon whose single tile measures `mon.screen`;
-// it scrolls with the camera and leaves the screen when focus moves to a
-// neighbour, instead of being a pinned always-on-top overlay. The only
-// fullscreen overlay that remains is `LayoutKind::Grid`, where there is no
-// scroll ribbon for it to join. This is driven entirely by `FsCtx` — a
-// derived descriptor (never stored) passed through `ribbon_geom`,
-// `arrange_columns`, `ideal_scroll` and `column_screen_extents` so all four
-// agree on where the fullscreen column sits.
+// is applied afterwards by `core::present::present`. Fullscreen is a normal
+// participant of the scrolling ribbon (niri-style), not an overlay. The
+// fullscreen window becomes one column of the ribbon whose single tile
+// measures `mon.screen`; it scrolls with the camera and leaves the screen
+// when focus moves to a neighbour, instead of being a pinned always-on-top
+// overlay. This is driven entirely by `FsCtx` — a derived descriptor (never
+// stored) passed through `ribbon_geom`, `arrange_columns`, `ideal_scroll` and
+// `column_screen_extents` so all four agree on where the fullscreen column
+// sits.
 
 /// Count the number of tiled (non-floating) windows on a workspace.
 fn count_tiled(ws: &Workspace) -> usize {

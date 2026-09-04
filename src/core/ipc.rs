@@ -122,7 +122,6 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
 pub fn layout_name(l: LayoutKind) -> &'static str {
     match l {
         LayoutKind::Column => "column",
-        LayoutKind::Grid => "grid",
     }
 }
 
@@ -401,8 +400,8 @@ mod tests {
     #[test]
     fn parses_layout_and_ws() {
         assert!(matches!(
-            parse_action("layout grid"),
-            Some(Action::SetLayout(LayoutKind::Grid))
+            parse_action("layout column"),
+            Some(Action::SetLayout(LayoutKind::Column))
         ));
         // view is 1-based externally, 0-based internally.
         assert!(matches!(parse_action("view 3"), Some(Action::View(2))));

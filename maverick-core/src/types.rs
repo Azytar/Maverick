@@ -300,43 +300,6 @@ impl Camera {
     }
 }
 
-// ─── Grid snapshot ─────────────────────────────────────────────────────────────
-//
-// The `Grid` layout is a *pure* geometry engine (see `core::grid`). Its snapshot
-// is a *derived cache* — regenerated on every `arrange` — used only to (a) keep
-// window motion stable across insertions/removals and (b) give spatial focus /
-// move commands the geometry they need without recomputing it. It is never the
-// source of truth for geometry (which stays a pure function of the window set +
-// workarea); if it is ever stale, at most one frame of suboptimal stability
-// results.
-
-/// One window's slot in the current grid arrangement. `rect` is the base
-/// (pre-fullscreen-overlay) geometry with the border already subtracted from the
-/// content width/height, so it matches the `Rect` stored in `Placements`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GridPlacement {
-    pub win: WindowId,
-    pub rect: Rect,
-    pub row: usize,
-    pub col: usize,
-}
-
-/// The full set of grid placements for a workspace, in stable window order.
-#[derive(Debug, Clone, Default)]
-pub struct GridSnapshot {
-    pub placements: Vec<GridPlacement>,
-}
-
-impl GridSnapshot {
-    /// The base geometry of `win`, if it is currently tiled in the grid.
-    pub fn rect_of(&self, win: WindowId) -> Option<Rect> {
-        self.placements
-            .iter()
-            .find(|p| p.win == win)
-            .map(|p| p.rect)
-    }
-}
-
 // ─── Workspace ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,11 +333,6 @@ pub struct Workspace {
     pub page_zoom: f32,
     /// Animated target of `page_zoom`, eased by `tick_animations` (Fase 9/11).
     pub page_zoom_target: f32,
-    /// Derived cache of the current `Grid` arrangement (see `GridSnapshot`).
-    /// `None` until the first `arrange` runs, or on non-Grid workspaces. Pure
-    /// geometry is recomputed from this each frame; it is only consumed for
-    /// stability and spatial navigation.
-    pub grid_snapshot: Option<GridSnapshot>,
     /// The window currently presented as the **maximize** overlay on this
     /// workspace (`None` when no maximized window owns the overlay). This is the
     /// explicit maximize-overlay owner; it is kept in sync with `Monitor::focused`
@@ -399,7 +357,6 @@ impl Workspace {
             viewport_mode: ViewportMode::Normal,
             page_zoom: 1.0,
             page_zoom_target: 1.0,
-            grid_snapshot: None,
             presented_maximize: None,
         }
     }
@@ -414,17 +371,6 @@ impl Workspace {
 
     pub fn focused_win(&self) -> Option<WindowId> {
         self.columns.get(self.focus.column_idx)?.focused_win()
-    }
-
-    /// Advance this workspace's layout Column→Grid→Column.
-    /// Pure state mutation (no X11); the single source of truth shared by the
-    /// backend's `do_action` and the core `Engine`.
-    pub fn cycle_layout(&mut self) -> LayoutKind {
-        self.layout = match self.layout {
-            LayoutKind::Column => LayoutKind::Grid,
-            LayoutKind::Grid => LayoutKind::Column,
-        };
-        self.layout
     }
 
     /// True-scroll insert: a new window becomes a sibling column inserted to
@@ -995,22 +941,15 @@ pub enum Dir {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayoutKind {
-    Column, // niri-style: one or more windows per column, columns side by side
-    Grid,   // equal grid
+    Column,
 }
 
 impl LayoutKind {
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "grid" => Self::Grid,
-            _ => Self::Column,
-        }
+    pub fn from_str(_s: &str) -> Self {
+        Self::Column
     }
     pub fn symbol(&self) -> &'static str {
-        match self {
-            Self::Column => "[|]",
-            Self::Grid => "[#]",
-        }
+        "[|]"
     }
 }
 
@@ -1046,7 +985,6 @@ pub enum Action {
     /// `_NET_WM_STATE` request, so the keyboard path was missing (bug C18).
     ToggleMaximize,
     SetLayout(LayoutKind),
-    CycleLayout,
     GrowCol(i32),    // pixels to grow/shrink column width
     NewColumn,       // move focused window into a new column to the right
     CollapseColumn,  // merge column into previous
@@ -1312,7 +1250,7 @@ impl State {
                 c.workspace == ws_idx
                     && c.is_fullscreen()
                     && !c.is_maximized()
-                    && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen())
+                    && c.is_true_fullscreen()
             })
         });
         if let Some(&w) = fs_overlay {
@@ -1340,12 +1278,11 @@ impl State {
         };
         self.monitors.get(pf.monitor).is_some_and(|m| {
             let focused = m.focused;
-            m.workspaces.get(pf.workspace).is_some_and(|ws| {
+            m.workspaces.get(pf.workspace).is_some_and(|_ws| {
                 self.clients.get(&pf.owner).is_some_and(|c| {
                     c.monitor == pf.monitor
                         && c.workspace == pf.workspace
-                        && (c.is_fullscreen()
-                            && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen())
+                        && (c.is_fullscreen() && c.is_true_fullscreen()
                             || (c.is_maximized_v() || c.is_maximized_h())
                                 && focused == Some(pf.owner))
                 })
@@ -1353,30 +1290,6 @@ impl State {
         })
     }
 
-    /// The single, canonical definition of "which window is the *covering
-    /// fullscreen*" on `mon_idx`'s active workspace — i.e. the `Column`-layout
-    /// fullscreen tile that currently paints a ribbon tile covering the screen
-    /// (used by pointer hit-testing and `render::stack_overlay`'s 2-bis case to
-    /// decide which window is under the cursor).
-    ///
-    /// THIS IS DELIBERATELY DIFFERENT FROM [`State::presented_overlay_owner`]:
-    ///   * a `Column` fullscreen is a *covering* fullscreen but is **NOT** an
-    ///     overlay owner — in the `Column` ribbon a fullscreen window is just a
-    ///     scrolling participant, never an out-of-ribbon overlay
-    ///     (`core::present` / `presented_overlay_owner` exclude it on purpose);
-    ///   * a `presented_maximize` window **IS** the overlay owner but is **NOT**
-    ///     a covering fullscreen (it is not `is_fullscreen()` in the `LayoutKind`
-    ///     sense at all);
-    ///   * a `Grid` / `FullscreenPolicy::True` fullscreen **IS** the overlay owner
-    ///     but is **NOT** a covering fullscreen (it is an exclusive overlay, not
-    ///     a ribbon tile — it never joins the Column ribbon).
-    ///
-    /// Because the `Column` case makes the three categories disjoint, **never**
-    /// substitute `Client::is_fullscreen()` for either predicate: `is_fullscreen()`
-    /// is true for *all* of the above (Column, Grid and True), so it conflates
-    /// "covering" with "overlay owner" and silently changes behaviour. Read the
-    /// concrete predicate you actually mean.
-    ///
     pub fn mon_at(&self, x: i32, y: i32) -> usize {
         for (i, m) in self.monitors.iter().enumerate() {
             if m.screen.contains(x, y) {
@@ -1489,6 +1402,99 @@ impl State {
             }
         }
         Some(c)
+    }
+
+    /// Pure workspace rearrangement for `MoveDir` — no X11 calls.
+    /// Call this from x11.rs then follow up with arrange/focus.
+    /// Returns false if there was nothing to do (float, empty workspace, boundary no-op).
+    pub fn apply_move_dir(&mut self, dir: Dir) -> bool {
+        if self.monitors.is_empty() {
+            return false;
+        }
+        let mi = self.sel_mon.min(self.monitors.len().saturating_sub(1));
+        let ws_i = match self.monitors.get(mi) {
+            Some(m) => m.active_ws,
+            None => return false,
+        };
+        // Spring-split ratio used when extracting a window into its own
+        // column. No `Cfg` here, so a balanced split keeps the node weights
+        // normalized (the caller can re-tune via grow/shrink afterwards).
+        let focused = match self.monitors[mi].focused {
+            Some(w) => w,
+            None => return false,
+        };
+
+        if self.clients.get(&focused).is_some_and(Client::is_float) {
+            return false;
+        }
+
+        let (ci, n_cols, col_len) = {
+            let ws = &self.monitors[mi].workspaces[ws_i];
+            (
+                ws.focus.column_idx,
+                ws.columns.len(),
+                ws.columns
+                    .get(ws.focus.column_idx)
+                    .map_or(0, |c| c.windows.len()),
+            )
+        };
+
+        // P3: mutate in-place, no clone
+        match dir {
+            Dir::Left | Dir::Right => {
+                if col_len <= 1 {
+                    let ws = &mut self.monitors[mi].workspaces[ws_i];
+                    match dir {
+                        Dir::Left if ci > 0 => {
+                            ws.columns.swap(ci, ci - 1);
+                            ws.focus.column_idx = ci - 1;
+                        }
+                        Dir::Right if ci + 1 < n_cols => {
+                            ws.columns.swap(ci, ci + 1);
+                            ws.focus.column_idx = ci + 1;
+                        }
+                        _ => return false,
+                    }
+                } else {
+                    let ws = &mut self.monitors[mi].workspaces[ws_i];
+                    let ratio = 0.5;
+                    let src_w = ws.columns[ci].weight;
+                    ws.remove_window(focused); // column keeps `src_w` (still non-empty)
+                    let index_in_ws = if dir == Dir::Left { ci } else { ci + 1 };
+                    let insert_pos = index_in_ws.min(ws.columns.len());
+                    // Spring-split the source column: it keeps `ratio` of its
+                    // weight, the extracted window takes the rest.
+                    ws.columns[insert_pos.min(ci)].weight = src_w * ratio;
+                    let mut new_col = Column::new(src_w * (1.0 - ratio));
+                    new_col.windows.push(focused);
+                    new_col.focused = 0;
+                    ws.columns.insert(insert_pos, new_col);
+                    ws.focus.column_idx = insert_pos;
+                    ws.rebalance_weights();
+                }
+            }
+            Dir::Up | Dir::Down => {
+                let ws = &mut self.monitors[mi].workspaces[ws_i];
+                if let Some(col) = ws.columns.get_mut(ci) {
+                    let n = col.windows.len();
+                    if n < 2 {
+                        return false;
+                    }
+                    let ri = col.focused;
+                    let new_ri = if dir == Dir::Up {
+                        (ri + n - 1) % n
+                    } else {
+                        (ri + 1) % n
+                    };
+                    col.windows.swap(ri, new_ri);
+                    col.focused = new_ri;
+                } else {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// Check the structural invariants of the whole `State` (the 14-point

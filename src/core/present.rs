@@ -4,7 +4,7 @@
 //
 // There is a presentation overlay per workspace that is *not* tied to focus:
 //
-//   * FULLSCREEN (only in `LayoutKind::Grid`) — a fullscreen window covers the
+//   * FULLSCREEN (only in `LayoutKind::Column`) — a fullscreen window covers the
 //     whole `screen` (border 0), ignoring reserved regions, and is raised above
 //     everything. In `LayoutKind::Column` a fullscreen window is NOT an overlay:
 //     it is a normal participant of the scrolling ribbon (see `core::layout`),
@@ -28,7 +28,7 @@
 // Fullscreen takes precedence over maximized if a window somehow has both flags.
 
 use crate::core::layout::Placements;
-use crate::types::{LayoutKind, Monitor, Rect, State, WindowId};
+use crate::types::{Monitor, Rect, State, WindowId};
 
 #[cfg(test)]
 use crate::core::layout::LayoutRegistry;
@@ -59,9 +59,7 @@ pub fn present_into(
             continue;
         };
         // (target rect, target border). Fullscreen wins over maximized.
-        let present_rect: Option<(Rect, u32)> = if client.is_fullscreen()
-            && (mon.ws().layout == LayoutKind::Grid || client.is_true_fullscreen())
-        {
+        let present_rect: Option<(Rect, u32)> = if client.is_fullscreen_overlay() {
             // In the `Column` layout a fullscreen window is a *participant of the
             // scrolling ribbon* (laid out by `core::layout`), not a pinned
             // overlay — so it is only presented as an overlay in `Grid`, where
@@ -138,7 +136,7 @@ mod tests {
         mon.workarea = Rect::new(0, 0, 800, 600);
         // Fullscreen is only a pinned overlay in `Grid` (in `Column` it joins the
         // scrolling ribbon), so these overlay tests run in `Grid`.
-        mon.workspaces[0].layout = LayoutKind::Grid;
+        mon.workspaces[0].layout = LayoutKind::Column;
         state.monitors.push(mon);
         (state, Cfg::default())
     }
@@ -161,6 +159,7 @@ mod tests {
             .unwrap()
             .flags
             .set(WinFlags::FULLSCREEN);
+        state.clients.get_mut(&1).unwrap().fullscreen_policy = crate::types::FullscreenPolicy::True;
         state.monitors[0].focused = Some(1);
 
         let mut p = Placements::new();
@@ -195,6 +194,7 @@ mod tests {
             .unwrap()
             .flags
             .set(WinFlags::FULLSCREEN);
+        state.clients.get_mut(&1).unwrap().fullscreen_policy = crate::types::FullscreenPolicy::True;
         state.monitors[0].focused = Some(2);
 
         let mut p = Placements::new();
@@ -311,6 +311,7 @@ mod tests {
         let c = state.clients.get_mut(&1).unwrap();
         c.flags.set(WinFlags::MAXIMIZED_V | WinFlags::MAXIMIZED_H);
         c.flags.set(WinFlags::FULLSCREEN);
+        c.fullscreen_policy = crate::types::FullscreenPolicy::True;
         state.monitors[0].focused = Some(1);
         state.monitors[0].workspaces[0].presented_maximize = Some(1);
 

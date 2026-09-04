@@ -2,7 +2,6 @@ use super::*;
 use crate::backend::x11::reconciler::{reconcile, GeometryEffect};
 use crate::core::commands::retarget_focus_to_window;
 use crate::core::desired::DesiredState;
-use crate::core::grid;
 use crate::core::layout::Phase;
 use crate::core::present::present_into;
 use x11rb::protocol::shape;
@@ -287,23 +286,6 @@ impl WindowManager {
         );
 
         // Capture the base grid geometry as a derived snapshot so the next
-        // frame's `Grid` arrangement can keep existing windows stable, and so
-        // spatial focus/move commands have geometry to navigate. The overlay
-        // below rewrites placements in place, which must NOT leak into the
-        // snapshot — the snapshot stays the pure base layout.
-        {
-            let mon = &self.engine.state.monitors[mon_idx];
-            if mon.ws().layout == LayoutKind::Grid {
-                let (_, snap) = grid::arrange_workspace(
-                    mon.ws(),
-                    &self.engine.cfg,
-                    mon,
-                    mon.ws().grid_snapshot.as_ref(),
-                );
-                self.engine.state.monitors[mon_idx].ws_mut().grid_snapshot = Some(snap);
-            }
-        }
-
         // Presentation layer: apply the fullscreen/maximized overlay in place.
         present_into(
             &self.engine.state,
@@ -494,11 +476,9 @@ impl WindowManager {
             }
         }
 
-        // 2. Presentation overlay. In the Column layout a fullscreen window is a
-        //    ribbon participant, not an overlay, so it is excluded here; only
-        //    Grid fullscreen, `FullscreenPolicy::True` fullscreen (exclusive in
-        //    any layout, and already excluded from `fs_ctx`) and focused
-        //    maximized count.
+        // 2. Presentation overlay — only `FullscreenPolicy::True` exclusive
+        // fullscreen (in any layout, already excluded from `fs_ctx`) and focused
+        // maximized count. A normal fullscreen window is a ribbon participant.
         let mut presented: Vec<WindowId> = ws
             .columns
             .iter()
@@ -506,7 +486,7 @@ impl WindowManager {
             .chain(ws.floats.iter().copied())
             .filter(|win| {
                 self.engine.state.clients.get(win).is_some_and(|c| {
-                    (c.is_fullscreen() && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen()))
+                    (c.is_fullscreen() && c.is_true_fullscreen())
                         || ws.presented_maximize == Some(*win)
                 })
             })

@@ -300,43 +300,6 @@ impl Camera {
     }
 }
 
-// ─── Grid snapshot ─────────────────────────────────────────────────────────────
-//
-// The `Grid` layout is a *pure* geometry engine (see `core::grid`). Its snapshot
-// is a *derived cache* — regenerated on every `arrange` — used only to (a) keep
-// window motion stable across insertions/removals and (b) give spatial focus /
-// move commands the geometry they need without recomputing it. It is never the
-// source of truth for geometry (which stays a pure function of the window set +
-// workarea); if it is ever stale, at most one frame of suboptimal stability
-// results.
-
-/// One window's slot in the current grid arrangement. `rect` is the base
-/// (pre-fullscreen-overlay) geometry with the border already subtracted from the
-/// content width/height, so it matches the `Rect` stored in `Placements`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GridPlacement {
-    pub win: WindowId,
-    pub rect: Rect,
-    pub row: usize,
-    pub col: usize,
-}
-
-/// The full set of grid placements for a workspace, in stable window order.
-#[derive(Debug, Clone, Default)]
-pub struct GridSnapshot {
-    pub placements: Vec<GridPlacement>,
-}
-
-impl GridSnapshot {
-    /// The base geometry of `win`, if it is currently tiled in the grid.
-    pub fn rect_of(&self, win: WindowId) -> Option<Rect> {
-        self.placements
-            .iter()
-            .find(|p| p.win == win)
-            .map(|p| p.rect)
-    }
-}
-
 // ─── Workspace ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,11 +333,6 @@ pub struct Workspace {
     pub page_zoom: f32,
     /// Animated target of `page_zoom`, eased by `tick_animations` (Fase 9/11).
     pub page_zoom_target: f32,
-    /// Derived cache of the current `Grid` arrangement (see `GridSnapshot`).
-    /// `None` until the first `arrange` runs, or on non-Grid workspaces. Pure
-    /// geometry is recomputed from this each frame; it is only consumed for
-    /// stability and spatial navigation.
-    pub grid_snapshot: Option<GridSnapshot>,
     /// The window currently presented as the **maximize** overlay on this
     /// workspace (`None` when no maximized window owns the overlay). This is the
     /// explicit maximize-overlay owner; it is kept in sync with `Monitor::focused`
@@ -399,7 +357,6 @@ impl Workspace {
             viewport_mode: ViewportMode::Normal,
             page_zoom: 1.0,
             page_zoom_target: 1.0,
-            grid_snapshot: None,
             presented_maximize: None,
         }
     }
@@ -414,17 +371,6 @@ impl Workspace {
 
     pub fn focused_win(&self) -> Option<WindowId> {
         self.columns.get(self.focus.column_idx)?.focused_win()
-    }
-
-    /// Advance this workspace's layout Column→Grid→Column.
-    /// Pure state mutation (no X11); the single source of truth shared by the
-    /// backend's `do_action` and the core `Engine`.
-    pub fn cycle_layout(&mut self) -> LayoutKind {
-        self.layout = match self.layout {
-            LayoutKind::Column => LayoutKind::Grid,
-            LayoutKind::Grid => LayoutKind::Column,
-        };
-        self.layout
     }
 
     /// True-scroll insert: a new window becomes a sibling column inserted to
@@ -995,22 +941,15 @@ pub enum Dir {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayoutKind {
-    Column, // niri-style: one or more windows per column, columns side by side
-    Grid,   // equal grid
+    Column,
 }
 
 impl LayoutKind {
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "grid" => Self::Grid,
-            _ => Self::Column,
-        }
+    pub fn from_str(_s: &str) -> Self {
+        Self::Column
     }
     pub fn symbol(&self) -> &'static str {
-        match self {
-            Self::Column => "[|]",
-            Self::Grid => "[#]",
-        }
+        "[|]"
     }
 }
 
@@ -1046,7 +985,6 @@ pub enum Action {
     /// `_NET_WM_STATE` request, so the keyboard path was missing (bug C18).
     ToggleMaximize,
     SetLayout(LayoutKind),
-    CycleLayout,
     GrowCol(i32),    // pixels to grow/shrink column width
     NewColumn,       // move focused window into a new column to the right
     CollapseColumn,  // merge column into previous
@@ -1312,7 +1250,7 @@ impl State {
                 c.workspace == ws_idx
                     && c.is_fullscreen()
                     && !c.is_maximized()
-                    && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen())
+                    && c.is_true_fullscreen()
             })
         });
         if let Some(&w) = fs_overlay {
@@ -1340,12 +1278,11 @@ impl State {
         };
         self.monitors.get(pf.monitor).is_some_and(|m| {
             let focused = m.focused;
-            m.workspaces.get(pf.workspace).is_some_and(|ws| {
+            m.workspaces.get(pf.workspace).is_some_and(|_ws| {
                 self.clients.get(&pf.owner).is_some_and(|c| {
                     c.monitor == pf.monitor
                         && c.workspace == pf.workspace
-                        && (c.is_fullscreen()
-                            && (ws.layout == LayoutKind::Grid || c.is_true_fullscreen())
+                        && (c.is_fullscreen() && c.is_true_fullscreen()
                             || (c.is_maximized_v() || c.is_maximized_h())
                                 && focused == Some(pf.owner))
                 })
@@ -1531,14 +1468,6 @@ impl State {
             return false;
         }
 
-        // The `Grid` layout is one window per column, so the column-based move
-        // below would only shuffle 1-window columns. Instead move the focused
-        // window by swapping it with its *geometric* neighbour in the flat
-        // stable order, then rebuild the single-window columns in that order.
-        if self.monitors[mi].workspaces[ws_i].layout == LayoutKind::Grid {
-            return self.apply_move_dir_grid(dir);
-        }
-
         let (ci, n_cols, col_len) = {
             let ws = &self.monitors[mi].workspaces[ws_i];
             (
@@ -1605,73 +1534,6 @@ impl State {
             }
             _ => return false,
         }
-        true
-    }
-
-    /// `Grid`-layout move: swap the focused window with its geometric neighbour
-    /// in the flat stable window order, then rewrite `ws.columns` as one-window
-    /// columns in that new order. Keeps `ws.focus.column_idx` on the moved
-    /// window. Geometry is taken from the render-kept `grid_snapshot` so the
-    /// neighbour is the real on-screen one; if absent, a gap-free arrangement is
-    /// used (direction is scale-invariant).
-    fn apply_move_dir_grid(&mut self, dir: Dir) -> bool {
-        let mi = self.sel_mon.min(self.monitors.len().saturating_sub(1));
-        let ws_i = self.monitors[mi].active_ws;
-        let focused = {
-            // Use the WM's logical focused window (mon.focused), not
-            // `ws.focused_win()` — in Grid every window is its own single-window
-            // column, so `ws.focus.column_idx` may point at a different window.
-            let Some(f) = self.monitors[mi].focused else {
-                return false;
-            };
-            f
-        };
-        let (wins, placements) = {
-            let ws = &self.monitors[mi].workspaces[ws_i];
-            let mon = &self.monitors[mi];
-            let wins: Vec<WindowId> = ws
-                .columns
-                .iter()
-                .flat_map(|c| c.windows.iter().copied())
-                .collect();
-            let placements: Vec<(WindowId, Rect)> = if let Some(s) = &ws.grid_snapshot {
-                s.placements.iter().map(|p| (p.win, p.rect)).collect()
-            } else {
-                crate::core::grid::arrange(&wins, mon.workarea, 0, 0, None).0
-            };
-            (wins, placements)
-        };
-        let Some(nb) = crate::core::grid::neighbor(&placements, focused, dir) else {
-            return false;
-        };
-
-        let mut order = wins;
-        if let (Some(fi), Some(ni)) = (
-            order.iter().position(|&w| w == focused),
-            order.iter().position(|&w| w == nb),
-        ) {
-            order.swap(fi, ni);
-        }
-
-        let area = self.monitors[mi].workarea;
-        let ws = &mut self.monitors[mi].workspaces[ws_i];
-        ws.columns.clear();
-        for w in &order {
-            ws.columns.push(Column {
-                windows: vec![*w],
-                focused: 0,
-                weight: 1.0,
-                boost: 1.0,
-            });
-        }
-        ws.focus.column_idx = order.iter().position(|&w| w == focused).unwrap_or(0);
-        ws.cleanup_empty_columns();
-        // Refresh the grid snapshot so the next `arrange` (which uses it as the
-        // stability anchor) preserves this explicit reorder instead of reverting
-        // it back to the pre-move layout. Geometry isn't needed for stability
-        // beyond the (row, col) slots, so a gap/border-free arrange suffices.
-        let (_, snap) = crate::core::grid::arrange(&order, area, 0, 0, None);
-        ws.grid_snapshot = Some(snap);
         true
     }
 

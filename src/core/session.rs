@@ -672,7 +672,6 @@ impl ValidatedSession {
             for wi in 0..state.monitors[mi].workspaces.len() {
                 let ws = &mut state.monitors[mi].workspaces[wi];
                 if ws.layout != LayoutKind::Column {
-                    ws.grid_snapshot = None;
                     continue;
                 }
                 let fs = fs_ctx(&state.clients, ws, screen);
@@ -982,7 +981,7 @@ fn decode_session(root: &Jv) -> Result<PersistedSession, SessionError> {
                 .and_then(Jv::as_u32)
                 .ok_or_else(|| SessionError::parse(format!("monitor {mi} ws {wi}: missing tag")))?;
             let layout = match wsv.get("layout").and_then(Jv::as_str) {
-                Some("grid") => LayoutKind::Grid,
+                Some("grid") => LayoutKind::Column,
                 Some("column") | None => LayoutKind::Column,
                 Some(other) => {
                     return Err(SessionError::parse(format!(
@@ -1077,7 +1076,7 @@ fn decode_session(root: &Jv) -> Result<PersistedSession, SessionError> {
 fn layout_json_name(l: LayoutKind) -> &'static str {
     match l {
         LayoutKind::Column => "column",
-        LayoutKind::Grid => "grid",
+        LayoutKind::Column => "grid",
     }
 }
 

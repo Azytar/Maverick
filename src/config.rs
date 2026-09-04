@@ -314,8 +314,6 @@ pub fn compiled_config() -> Cfg {
         (sct, k!(b'l'), Action::GrowCol(50)),
         (sct, k!(b'j'), Action::CollapseColumn),
         // ── layout ──
-        (sup, XK_SPACE, Action::CycleLayout),
-        (sup, k!(b'g'), Action::SetLayout(LayoutKind::Grid)),
         (sup, k!(b't'), Action::SetLayout(LayoutKind::Column)),
         // ── misc ──
         // Mod4+Shift+Q asks maverickctl for confirmation instead of quitting

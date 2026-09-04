@@ -28,6 +28,6 @@ pub mod wallpaper;
 
 pub use types::{
     Action, Camera, Client, Column, Dir, Edge, Focus, FullscreenPolicy, FullscreenSnapshot,
-    GridPlacement, GridSnapshot, LayoutKind, Monitor, PendingFocus, Rect, ReservedArea,
-    ReservedRegion, SizeHints, State, ViewportMode, WallpaperCmd, WinFlags, WindowId, WindowMode,
+    LayoutKind, Monitor, PendingFocus, Rect, ReservedArea, ReservedRegion, SizeHints, State,
+    ViewportMode, WallpaperCmd, WinFlags, WindowId, WindowMode,
 };
