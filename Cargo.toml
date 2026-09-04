@@ -74,7 +74,7 @@ input-trace = []
 # `cargo build --features window-trace`.
 window-trace = []
 # OpenGL/GLX compositor backend.
-compositor-opengl = ["maverick-gl"]
+compositor-opengl = ["dep:maverick-gl"]
 # Placeholder for a future Vulkan backend. Not yet wired.
 compositor-vulkan = []
 

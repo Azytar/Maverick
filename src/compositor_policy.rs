@@ -61,6 +61,7 @@ pub enum CompositionMode {
 
 impl CompositionMode {
     /// Stable, human-readable tag (used by the opt-in composition trace).
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             CompositionMode::Disabled => "Disabled",

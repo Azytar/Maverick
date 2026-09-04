@@ -19,12 +19,12 @@ pub(crate) use compositor_gl::*;
 // --- Placeholder API when no compositor backend is compiled in ---------------
 
 #[cfg(not(feature = "compositor-opengl"))]
+#[allow(dead_code, clippy::inline_always)]
 mod placeholder {
     use std::rc::Rc;
 
     use crate::types::*;
-    use maverick_x11::XDisplay;
-    use x11rb::connection::Connection;
+    use maverick_x11::{XConn, XDisplay};
     use x11rb::protocol::xproto::Window;
 
     /// Zero-field placeholder. All methods are no-ops so the WM core compiles
@@ -37,7 +37,7 @@ mod placeholder {
 
     impl Compositor {
         pub fn init(
-            _conn: &Rc<dyn Connection>,
+            _conn: Rc<XConn>,
             _dpy: XDisplay,
             _root: Window,
             _screen_num: usize,
@@ -112,9 +112,11 @@ mod placeholder {
             false
         }
         #[inline(always)]
-        pub fn disable(self) {}
+        pub fn disable(&mut self) {}
         #[inline(always)]
-        pub fn debug_dump(&self) {}
+        pub fn debug_dump(&self) -> String {
+            String::new()
+        }
         #[inline(always)]
         pub fn tracked_window_count(&self) -> usize {
             0
@@ -134,8 +136,16 @@ mod placeholder {
         pub const FOCUS: Self = Self(1 << 3);
         pub const WALLPAPER: Self = Self(1 << 4);
         #[inline(always)]
-        pub fn contains(self, _other: Self) -> bool {
-            false
+        pub fn contains(self, other: Self) -> bool {
+            self.0 & other.0 != 0
+        }
+        #[inline(always)]
+        pub fn insert(&mut self, other: Self) {
+            self.0 |= other.0;
+        }
+        #[inline(always)]
+        pub fn clear(&mut self) {
+            self.0 = 0;
         }
     }
 
@@ -160,17 +170,14 @@ mod placeholder {
         Vec::new()
     }
 
-    // `ProjSig` is defined in `crate::core::layout` only when the compositor
-    // feature is on (it holds projection-signature state for the live-layout
-    // cache). In the no-compositor build it doesn't exist; gate the signature.
     pub fn live_placements(
-        _monitors: &[crate::types::Monitor],
-        _placements: &mut [crate::core::layout::Placements],
-        _scratch: &mut crate::core::layout::RibbonScratch,
-        _cam_cache: &mut [f32],
-        _proj_cache: &mut [Option<crate::core::layout::ProjSig>],
-        _animating: &[bool],
+        _state: &crate::types::State,
+        _mon_idx: usize,
         _cfg: &crate::config::Cfg,
+        _registry: &crate::core::layout::LayoutRegistry,
+        _out: &mut crate::core::layout::Placements,
+        _raise: &mut Vec<crate::types::WindowId>,
+        _scratch: &mut crate::core::layout::RibbonScratch,
     ) {
     }
 

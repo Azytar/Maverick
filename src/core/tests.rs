@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::if_same_then_else)]
 mod unit_tests {
     use crate::config::Cfg;
     use crate::core::desired::DesiredState;
@@ -7316,7 +7317,7 @@ mod unit_tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "slow property test"]
     fn property_realistic_client_resistance() {
         const SEEDS: [u64; 5] = [
             0x0000_0000_9999_9999,
