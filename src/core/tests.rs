@@ -72,8 +72,8 @@ mod unit_tests {
         // read, leaving the camera hard-coded at 220/30 (a second, ignored
         // source of truth).
         let mut cfg = default_cfg();
-        cfg.compositor.stiffness = 999.0;
-        cfg.compositor.damping = 11.0;
+        cfg.animations.stiffness = 999.0;
+        cfg.animations.damping = 11.0;
         let mut engine = Engine::new(cfg);
         engine
             .state

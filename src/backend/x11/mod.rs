@@ -513,12 +513,18 @@ impl WindowManager {
             if self.anim_per_mon.len() != nmon {
                 self.anim_per_mon = vec![false; nmon];
             }
+            let anim_enabled = crate::config::animations_enabled(&self.engine.cfg);
             let mut anim = false;
-            for sub in compositor::substep_bounds(dt) {
-                anim |= self
-                    .engine
-                    .state
-                    .tick_animations_multi(sub, &mut self.anim_per_mon);
+            if anim_enabled {
+                for sub in compositor::substep_bounds(dt) {
+                    anim |= self
+                        .engine
+                        .state
+                        .tick_animations_multi(sub, &mut self.anim_per_mon);
+                }
+            } else {
+                self.engine.state.snap_animations();
+                self.anim_per_mon.fill(false);
             }
             self.animating = anim;
             // Advance the wallpaper animation clock with the same clamped `dt` the
@@ -677,12 +683,18 @@ impl WindowManager {
             if self.anim_per_mon.len() != nmon {
                 self.anim_per_mon = vec![false; nmon];
             }
+            let anim_enabled = crate::config::animations_enabled(&self.engine.cfg);
             let mut anim = false;
-            for sub in compositor::substep_bounds(dt) {
-                anim |= self
-                    .engine
-                    .state
-                    .tick_animations_multi(sub, &mut self.anim_per_mon);
+            if anim_enabled {
+                for sub in compositor::substep_bounds(dt) {
+                    anim |= self
+                        .engine
+                        .state
+                        .tick_animations_multi(sub, &mut self.anim_per_mon);
+                }
+            } else {
+                self.engine.state.snap_animations();
+                self.anim_per_mon.fill(false);
             }
             self.animating = anim;
             sched = FrameScheduler::from_compositor(self.animating, false, DirtyReason::NONE);
@@ -891,14 +903,19 @@ impl WindowManager {
         // GLX context. On any failure it logs and returns `None`, leaving the WM
         // on the classic `ConfigureWindow` path.
         let mut compositor = if crate::config::compositor_enabled(&engine.cfg) {
-            compositor::Compositor::init(
-                conn.clone(),
-                dpy,
-                root,
-                screen_num,
-                check_win,
-                &engine.cfg,
-            )
+            if let Err(e) = crate::config::validate_compositor_backend(&engine.cfg) {
+                log::warn!("compositor: {e}; staying on X11 path");
+                None
+            } else {
+                compositor::Compositor::init(
+                    conn.clone(),
+                    dpy,
+                    root,
+                    screen_num,
+                    check_win,
+                    &engine.cfg,
+                )
+            }
         } else {
             None
         };

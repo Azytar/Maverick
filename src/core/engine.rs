@@ -25,21 +25,19 @@ impl Engine {
     }
 
     /// Push the configured scroll-camera spring constants
-    /// (`Cfg::compositor.stiffness` / `Cfg::compositor.damping`) into every
+    /// (`Cfg::animations.stiffness` / `Cfg::animations.damping`) into every
     /// workspace camera. `Camera::new` can't take them at construction — a
     /// workspace is built from its tag alone and `Monitor::reconcile_workspaces`
     /// creates fresh ones on hotplug — so the configured values reach the
-    /// runtime scroll physics here. Previously `compositor.stiffness`/`compositor.damping`
-    /// were parsed but never read, leaving the camera hard-coded at 220/30 (a
-    /// second, ignored source of truth). Call after every (re)build of the
+    /// runtime scroll physics here. Call after every (re)build of the
     /// monitor/workspace set: startup, config reload, and `RandR` hotplug.
     pub fn apply_camera_cfg(&mut self) {
-        // P2: every spring value coming from config is sanitized against the
+        // Every spring value coming from config is sanitized against the
         // real stability region of the integrator (see `sanitize_spring`) —
         // a NaN/inf or zero/negative stiffness from a config file can never
         // reach the physics.
         let (stiffness, damping) =
-            sanitize_spring(self.cfg.compositor.stiffness, self.cfg.compositor.damping);
+            sanitize_spring(self.cfg.animations.stiffness, self.cfg.animations.damping);
         for mon in &mut self.state.monitors {
             for ws in &mut mon.workspaces {
                 ws.camera.stiffness = stiffness;

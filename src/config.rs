@@ -36,6 +36,10 @@ pub struct Cfg {
     /// silently falls back to the classic `ConfigureWindow` path.
     pub compositor: CompositorCfg,
 
+    /// Animation configuration. Independent from the compositor: the compositor
+    /// can run with `animations.enabled = false` for vsync without springs.
+    pub animations: AnimationsCfg,
+
     /// Native wallpaper configuration (source + mode). `None` path ⇒ no native
     /// wallpaper (legacy root pixmap / transparent). Applied to `State.wallpaper`
     /// at startup; the compositor decodes/uploads it when GL is available.
@@ -84,6 +88,7 @@ impl Default for Cfg {
             accordion_boost: 0.0,
             overview_zoom_min: 0.25,
             compositor: CompositorCfg::default(),
+            animations: AnimationsCfg::default(),
             wallpaper: WallpaperCfg::default(),
             col_normal: 0x45475a,
             col_focused: 0x89b4fa,
@@ -114,16 +119,43 @@ pub enum VsyncMode {
     Adaptive,
 }
 
+/// Backend selected for the compositor. The WM never assumes which GPU API is
+/// available — the config is validated against compiled features.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompositorBackend {
+    #[default]
+    OpenGl,
+    Vulkan,
+}
+
+impl std::str::FromStr for CompositorBackend {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "opengl" | "gl" | "glx" => Ok(Self::OpenGl),
+            "vulkan" | "vk" => Ok(Self::Vulkan),
+            other => Err(format!(
+                "unknown compositor backend '{other}' (opengl|vulkan)"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for CompositorBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OpenGl => f.write_str("opengl"),
+            Self::Vulkan => f.write_str("vulkan"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CompositorCfg {
     /// Master switch. Default `true`: on by default, with automatic fallback.
     pub enabled: bool,
-    /// Spring stiffness for the scroll camera (see `Camera::step`). Higher =
-    /// snappier. Default 220.
-    pub stiffness: f32,
-    /// Spring damping for the scroll camera. Higher = less overshoot. Default 30.
-    /// The integrator runs substeps so the combination can't oscillate.
-    pub damping: f32,
+    /// Backend to use when the compositor is enabled.
+    pub backend: CompositorBackend,
     /// When `true` (default), Maverick may step aside ("bypass") and let a single
     /// eligible fullscreen window on an output present itself directly, instead
     /// of compositing it, to cut latency/overhead for games and video players.
@@ -142,10 +174,33 @@ impl Default for CompositorCfg {
     fn default() -> Self {
         Self {
             enabled: true,
-            stiffness: 220.0,
-            damping: 30.0,
+            backend: CompositorBackend::OpenGl,
             fullscreen_bypass: true,
             vsync: VsyncMode::On,
+        }
+    }
+}
+
+/// Animation configuration, exposed as `[animations]` in the TOML.
+/// Independent from `[compositor]`: animations can be disabled while keeping
+/// vsync, and vice versa.
+#[derive(Debug, Clone)]
+pub struct AnimationsCfg {
+    /// Master switch for spring animations (scroll, zoom, accordion). Default `true`.
+    pub enabled: bool,
+    /// Spring stiffness for the scroll camera (see `Camera::step`). Higher =
+    /// snappier. Default 220.
+    pub stiffness: f32,
+    /// Spring damping for the scroll camera. Higher = less overshoot. Default 30.
+    pub damping: f32,
+}
+
+impl Default for AnimationsCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            stiffness: 220.0,
+            damping: 30.0,
         }
     }
 }
@@ -464,6 +519,45 @@ pub fn compiled_config() -> Cfg {
 /// not set. The actual GL probe/fallback happens later; this is the policy gate.
 pub fn compositor_enabled(cfg: &Cfg) -> bool {
     cfg.compositor.enabled && std::env::var_os("MAVERICK_NO_COMPOSITOR").is_none()
+}
+
+/// Whether spring animations should run. When false, the WM snaps directly to
+/// the target (no interpolation) and never requests animation frames.
+pub fn animations_enabled(cfg: &Cfg) -> bool {
+    cfg.animations.enabled
+}
+
+/// Validate that the requested compositor backend was compiled in. Returns an
+/// actionable error when `backend = "vulkan"` is configured but the binary was
+/// built without `compositor-vulkan`.
+pub fn validate_compositor_backend(cfg: &Cfg) -> Result<(), String> {
+    match cfg.compositor.backend {
+        CompositorBackend::OpenGl => {
+            if cfg!(feature = "compositor-opengl") {
+                Ok(())
+            } else {
+                Err(
+                    "compositor.backend = \"opengl\" requested but this binary was built without \
+                     the `compositor-opengl` feature; rebuild with `--features compositor-opengl` \
+                     or set `backend = \"vulkan\"` if that feature is available, or disable the \
+                     compositor with `[compositor] enabled = false`"
+                        .to_string(),
+                )
+            }
+        }
+        CompositorBackend::Vulkan => {
+            if cfg!(feature = "compositor-vulkan") {
+                Ok(())
+            } else {
+                Err(
+                    "compositor.backend = \"vulkan\" requested but this binary was built without \
+                     the `compositor-vulkan` feature; rebuild with `--features compositor-vulkan` \
+                     or set `backend = \"opengl\"`"
+                        .to_string(),
+                )
+            }
+        }
+    }
 }
 
 /// Build the runtime config: the compiled baseline, with an optional user

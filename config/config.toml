@@ -58,12 +58,35 @@ auto_workspace_binds = true
 # unavailable or another compositor owns the screen. Disable it to keep the
 # legacy X11 Shape corner-radius path, or to run an external compositor via
 # autostart (see MAVERICK_NO_COMPOSITOR to disable for a single run).
+# Prefer `[compositor].enabled` for new configs; this key is a deprecated alias.
 compositor_enabled = true
 
-# Scroll-camera spring constants (higher stiffness = snappier, higher damping =
-# less overshoot). Defaults 220.0 / 30.0. Only affect the ribbon scroll feel.
+# Scroll-camera spring constants are now under `[animations]`. These keys are
+# deprecated aliases and will emit a warning; use `[animations]` instead.
 camera_stiffness = 220.0
 camera_damping = 30.0
+
+[compositor]
+# Master switch for the compositor. `false` forces pure X11 WM.
+# enabled = true
+# Backend selection: "opengl" (default, requires compositor-opengl feature)
+# or "vulkan" (requires compositor-vulkan feature). Mismatched backend
+# emits an actionable error at startup and falls back to the X11 path.
+# backend = "opengl"
+# VSync mode: "on" (default, interval 1), "off" (tearing, lowest latency),
+# "adaptive" (tear with VRR, -1 when available else 1).
+# vsync = "on"
+# Allow a single fullscreen window to bypass compositing (latency).
+# fullscreen_bypass = true
+
+[animations]
+# Master switch for spring animations (scroll, zoom, accordion).
+# `false` snaps instantly to the target and never requests animation frames,
+# while still allowing the compositor to run vsync/damage frames.
+# enabled = true
+# Spring tuning for the scroll camera.
+# stiffness = 220.0
+# damping = 30.0
 
 # Normalize the `_NET_WM_STATE_MAXIMIZED_*` / `_NET_WM_STATE_FULLSCREEN` a
 # window requests at map time, so every new client opens as a normal tile

@@ -58,20 +58,25 @@ struct UserConfig {
     rules: Vec<RuleEntry>,
     autostart: Option<AutostartCfg>,
     wallpaper: Option<WallpaperEntry>,
-    /// `[compositor]` table (master switch + fullscreen bypass + camera spring).
-    /// Mirrors `config::CompositorCfg`; merged into `Cfg.compositor` after the
-    /// `[general]` aliases (`compositor_enabled`, `camera_stiffness`,
-    /// `camera_damping`) so either spelling works.
+    /// `[compositor]` table. Mirrors `config::CompositorCfg`.
     compositor: Option<CompositorEntry>,
+    /// `[animations]` table. Mirrors `config::AnimationsCfg`.
+    animations: Option<AnimationsEntry>,
 }
 
 #[derive(Debug, Default)]
 struct CompositorEntry {
     enabled: Option<bool>,
     fullscreen_bypass: Option<bool>,
+    backend: Option<String>,
+    vsync: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct AnimationsEntry {
+    enabled: Option<bool>,
     stiffness: Option<f32>,
     damping: Option<f32>,
-    vsync: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -316,6 +321,10 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                     let c = user.compositor.get_or_insert_with(CompositorEntry::default);
                     apply_compositor_key(c, key, &value, diag);
                 }
+                Some(Cur::Plain("animations")) => {
+                    let a = user.animations.get_or_insert_with(AnimationsEntry::default);
+                    apply_animations_key(a, key, &value, diag);
+                }
                 Some(Cur::Row("keybindings")) => {
                     if let Some(row) = user.keybindings.last_mut() {
                         apply_keybind_key(row, key, &value);
@@ -384,9 +393,7 @@ fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>, diag: &mut D
     }
 }
 
-/// Map one `[compositor]` key onto the model. Aliases `camera_stiffness`/
-/// `camera_damping` match the legacy `[general]` spellings; `enabled` and
-/// `fullscreen_bypass` are the new first-class keys.
+/// Map one `[compositor]` key onto the model.
 fn apply_compositor_key(
     c: &mut CompositorEntry,
     key: &str,
@@ -396,8 +403,26 @@ fn apply_compositor_key(
     match key {
         "enabled" => set_bool(&mut c.enabled, key, value, diag),
         "fullscreen_bypass" => set_bool(&mut c.fullscreen_bypass, key, value, diag),
-        "stiffness" | "camera_stiffness" => set_f32(&mut c.stiffness, key, value, diag),
-        "damping" | "camera_damping" => set_f32(&mut c.damping, key, value, diag),
+        "backend" => {
+            if let Some(s) = value.as_str() {
+                c.backend = Some(s.to_string());
+            } else {
+                diag.errors
+                    .push("compositor.backend must be 'opengl'|'vulkan'".to_string());
+            }
+        }
+        // Legacy animation keys that were previously under `[compositor]` — keep
+        // them as aliases that set `[animations]` instead, with a deprecation warning.
+        "stiffness" | "camera_stiffness" | "damping" | "camera_damping" => {
+            diag.warnings.push(format!(
+                "[compositor].{key} is deprecated; use [animations].{} instead",
+                if key.contains("stiffness") {
+                    "stiffness"
+                } else {
+                    "damping"
+                }
+            ));
+        }
         "vsync" => {
             if let Some(s) = value.as_str() {
                 c.vsync = Some(s.to_string());
@@ -416,6 +441,21 @@ fn apply_compositor_key(
     }
 }
 
+/// Map one `[animations]` key onto the model.
+fn apply_animations_key(
+    a: &mut AnimationsEntry,
+    key: &str,
+    value: &Value<'_>,
+    diag: &mut Diagnostics,
+) {
+    match key {
+        "enabled" => set_bool(&mut a.enabled, key, value, diag),
+        "stiffness" | "camera_stiffness" => set_f32(&mut a.stiffness, key, value, diag),
+        "damping" | "camera_damping" => set_f32(&mut a.damping, key, value, diag),
+        _ => {}
+    }
+}
+
 /// Fold a parsed `[compositor]` table into the compiled `Cfg`.
 fn apply_compositor(cfg: &mut Cfg, c: CompositorEntry, diag: &mut Diagnostics) {
     if let Some(v) = c.enabled {
@@ -424,20 +464,10 @@ fn apply_compositor(cfg: &mut Cfg, c: CompositorEntry, diag: &mut Diagnostics) {
     if let Some(v) = c.fullscreen_bypass {
         cfg.compositor.fullscreen_bypass = v;
     }
-    if let Some(v) = c.stiffness {
-        if v > 0.0 {
-            cfg.compositor.stiffness = v;
-        } else {
-            diag.errors
-                .push(format!("compositor.stiffness must be > 0; ignoring {v}"));
-        }
-    }
-    if let Some(v) = c.damping {
-        if v > 0.0 {
-            cfg.compositor.damping = v;
-        } else {
-            diag.errors
-                .push(format!("compositor.damping must be > 0; ignoring {v}"));
+    if let Some(s) = c.backend {
+        match crate::config::CompositorBackend::from_str(&s) {
+            Ok(b) => cfg.compositor.backend = b,
+            Err(e) => diag.errors.push(e),
         }
     }
     if let Some(s) = c.vsync {
@@ -450,6 +480,29 @@ fn apply_compositor(cfg: &mut Cfg, c: CompositorEntry, diag: &mut Diagnostics) {
             _ => diag.errors.push(format!(
                 "compositor.vsync must be 'on'|'off'|'adaptive'; ignoring '{s}'"
             )),
+        }
+    }
+}
+
+/// Fold a parsed `[animations]` table into the compiled `Cfg`.
+fn apply_animations(cfg: &mut Cfg, a: AnimationsEntry, diag: &mut Diagnostics) {
+    if let Some(v) = a.enabled {
+        cfg.animations.enabled = v;
+    }
+    if let Some(v) = a.stiffness {
+        if v > 0.0 {
+            cfg.animations.stiffness = v;
+        } else {
+            diag.errors
+                .push(format!("animations.stiffness must be > 0; ignoring {v}"));
+        }
+    }
+    if let Some(v) = a.damping {
+        if v > 0.0 {
+            cfg.animations.damping = v;
+        } else {
+            diag.errors
+                .push(format!("animations.damping must be > 0; ignoring {v}"));
         }
     }
 }
@@ -591,6 +644,9 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
     if let Some(compositor) = user.compositor {
         apply_compositor(&mut cfg, compositor, diag);
     }
+    if let Some(animations) = user.animations {
+        apply_animations(&mut cfg, animations, diag);
+    }
 
     if !user.keybindings.is_empty() {
         cfg.keybinds = parse_keybindings(&user.keybindings, cfg.n_tags, auto_ws, diag);
@@ -620,6 +676,12 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
     }
     if let Some(wp) = user.wallpaper {
         apply_wallpaper(&mut cfg, wp, diag);
+    }
+
+    // Validate compositor backend against compiled features — actionable error
+    // when the user requests a backend that was not built.
+    if let Err(e) = crate::config::validate_compositor_backend(&cfg) {
+        diag.errors.push(e);
     }
 
     normalize_tag_names(&mut cfg);
@@ -738,7 +800,9 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     }
     if let Some(v) = general.camera_stiffness {
         if v > 0.0 {
-            cfg.compositor.stiffness = v;
+            cfg.animations.stiffness = v;
+            diag.warnings
+                .push("general.camera_stiffness is deprecated; use [animations].stiffness".into());
         } else {
             diag.errors.push(format!(
                 "general.camera_stiffness must be > 0; ignoring {v}"
@@ -747,7 +811,9 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     }
     if let Some(v) = general.camera_damping {
         if v > 0.0 {
-            cfg.compositor.damping = v;
+            cfg.animations.damping = v;
+            diag.warnings
+                .push("general.camera_damping is deprecated; use [animations].damping".into());
         } else {
             diag.errors
                 .push(format!("general.camera_damping must be > 0; ignoring {v}"));

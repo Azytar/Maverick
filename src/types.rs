@@ -1839,6 +1839,30 @@ impl State {
         }
         any
     }
+
+    /// Snap all animated values to their targets immediately (no interpolation).
+    /// Used when `animations.enabled = false` so the WM never requests animation
+    /// frames.
+    pub fn snap_animations(&mut self) {
+        for mon in &mut self.monitors {
+            for ws in &mut mon.workspaces {
+                ws.camera.snap(ws.camera.target);
+                let focus_i = ws.focus.column_idx;
+                for (i, col) in ws.columns.iter_mut().enumerate() {
+                    let target = if ws.overview {
+                        0.0
+                    } else if i == focus_i {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    col.boost = target;
+                }
+                ws.zoom = ws.zoom_target;
+                ws.page_zoom = ws.page_zoom_target;
+            }
+        }
+    }
 }
 
 /// Critically-damped-ish exponential approach of `cur` toward `target`.
