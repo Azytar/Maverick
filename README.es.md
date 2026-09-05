@@ -72,7 +72,6 @@ cargo build --release --workspace
 `maverick` — sin él, Cargo solo compila `maverick` y omite los binarios
 `maverick-sys`/`maverick-dialog`.)
 
-> Propuesta de experiencia inicial: [Maverick First Flight](docs/first-flight.es.md)
 > describe un instalador/asistente capaz de detectar tu sistema, generar una
 > configuración a medida, validar la sesión y evitar que el primer arranque
 > termine en una pantalla vacía.

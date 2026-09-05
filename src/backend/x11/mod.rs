@@ -236,18 +236,6 @@ pub struct WindowManager {
     /// back to `None` (the classic X11 path) on `MAVERICK_NO_COMPOSITOR`, a
     /// missing driver, or a runtime GL error.
     compositor: Option<compositor::Compositor>,
-    /// Debug-only: monotonic counter of actually-presented compositor frames.
-    /// Bumped once per turn whose GL render path ran, so an external harness can
-    /// detect a stalled frame loop while a client (e.g. an mpv floated window)
-    /// misbehaves. Not read anywhere in production logic.
-    frame_id: u64,
-    /// Debug-only: the `needs_frame` decision of the most recent turn, surfaced
-    /// for the `MAV_FRAME_TRACE` liveness line at the end of `run_once`.
-    frame_needs: bool,
-    /// Debug-only: when set (via `MAV_FRAME_TRACE=1`), `run_once` logs one
-    /// compact liveness line per turn instead of staying silent. Never touched in
-    /// production; gated so normal builds emit nothing.
-    frame_trace: bool,
 }
 
 impl WindowManager {
@@ -537,7 +525,6 @@ impl WindowManager {
                 );
             }
             let wants_frame = sched.needs_frame();
-            self.frame_needs = wants_frame;
             if wants_frame {
                 if comp.float_trace {
                     let mut fids: Vec<WindowId> = Vec::new();
@@ -566,9 +553,7 @@ impl WindowManager {
                 // the whole WM, so the draw is isolated behind `catch_unwind`.
                 let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| comp.render()))
                     .unwrap_or(false);
-                if ok {
-                    self.frame_id = self.frame_id.wrapping_add(1);
-                } else {
+                if !ok {
                     log::warn!("compositor: GL error — disabling, falling back to X11 path");
                     if let Some(c) = self.compositor.as_mut() {
                         c.disable();
@@ -668,39 +653,6 @@ impl WindowManager {
         // Execute any commands from the control socket, then publish state.
         self.drain_control()?;
         self.publish_state();
-
-        if self.frame_trace {
-            let managed = self.engine.state.clients.len();
-            let damaged = self
-                .compositor
-                .as_ref()
-                .map_or(0, compositor::Compositor::tracked_window_count);
-            log::info!(
-                "[FRAME] id={} needs_frame={} animating={} managed={} damaged={} comp={}",
-                self.frame_id,
-                self.frame_needs,
-                self.animating,
-                managed,
-                damaged,
-                self.compositor.is_some()
-            );
-        }
-        // OPT-IN DIAGNOSTIC (`MAV_COMP_TRACE`): when the compositor's lifecycle
-        // trace is on, dump the per-window GL resource state once per turn so the
-        // full event→state→damage→render→present pipeline can be correlated. Off
-        // by default and a no-op when unset.
-        if let Some(c) = self.compositor.as_ref() {
-            if c.comp_trace {
-                log::info!(
-                    "[FRAME-DUMP] id={} needs_frame={} animating={} managed={}\n{}",
-                    self.frame_id,
-                    self.frame_needs,
-                    self.animating,
-                    self.engine.state.clients.len(),
-                    c.debug_dump()
-                );
-            }
-        }
 
         // Loop back → flush_client_list() rewrites _NET_CLIENT_LIST at most once per batch.
         Ok(())
@@ -878,9 +830,6 @@ impl WindowManager {
             animating: false,
             last_stack_order: std::collections::HashMap::new(),
             fs_covering: std::collections::HashMap::new(),
-            frame_id: 0u64,
-            frame_needs: false,
-            frame_trace: std::env::var("MAV_FRAME_TRACE").is_ok(),
             compositor,
         };
 
