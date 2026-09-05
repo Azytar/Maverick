@@ -102,6 +102,83 @@ fn live_alpha(ws: &crate::types::Workspace) -> f32 {
     }
 }
 
+/// Pure overlay coverage: screen minus union of bypass rectangles.
+///
+/// Starts with `screen` and iteratively subtracts each hole, splitting
+/// rects into up to 4 pieces. Handles overlapping holes and holes outside
+/// screen (clipped). Returns the list of rectangles that remain covered
+/// by the overlay (bounding shape). Empty bypasses => vec![screen].
+pub(crate) fn overlay_coverage(screen: Rect, holes: &[Rect]) -> Vec<Rect> {
+    let mut coverage = vec![screen];
+    for hole in holes {
+        let mut next = Vec::new();
+        for r in coverage {
+            next.extend(subtract_rect(r, *hole));
+        }
+        coverage = next;
+        if coverage.is_empty() {
+            break;
+        }
+    }
+    coverage
+}
+
+fn subtract_rect(r: Rect, hole: Rect) -> Vec<Rect> {
+    // No overlap => keep r
+    if hole.w == 0 || hole.h == 0 || r.w == 0 || r.h == 0 {
+        return vec![r];
+    }
+    let r_x1 = r.x;
+    let r_y1 = r.y;
+    let r_x2 = r.x + r.w as i32;
+    let r_y2 = r.y + r.h as i32;
+    let h_x1 = hole.x;
+    let h_y1 = hole.y;
+    let h_x2 = hole.x + hole.w as i32;
+    let h_y2 = hole.y + hole.h as i32;
+
+    // No overlap
+    if h_x2 <= r_x1 || h_x1 >= r_x2 || h_y2 <= r_y1 || h_y1 >= r_y2 {
+        return vec![r];
+    }
+
+    let mut out = Vec::with_capacity(4);
+    // Left strip
+    if h_x1 > r_x1 {
+        out.push(Rect::new(r_x1, r_y1, (h_x1 - r_x1) as u32, r.h));
+    }
+    // Right strip
+    if h_x2 < r_x2 {
+        out.push(Rect::new(h_x2, r_y1, (r_x2 - h_x2) as u32, r.h));
+    }
+    // Top strip (between left/right, above hole)
+    let mid_x1 = r_x1.max(h_x1);
+    let mid_x2 = r_x2.min(h_x2);
+    if h_y1 > r_y1 && mid_x2 > mid_x1 {
+        out.push(Rect::new(
+            mid_x1,
+            r_y1,
+            (mid_x2 - mid_x1) as u32,
+            (h_y1 - r_y1) as u32,
+        ));
+    }
+    // Bottom strip
+    if h_y2 < r_y2 && mid_x2 > mid_x1 {
+        out.push(Rect::new(
+            mid_x1,
+            h_y2,
+            (mid_x2 - mid_x1) as u32,
+            (r_y2 - h_y2) as u32,
+        ));
+    }
+    out.into_iter().filter(|r| r.w > 0 && r.h > 0).collect()
+}
+
+#[allow(dead_code)]
+pub(crate) fn global_to_local(global: Rect, origin: Rect) -> Rect {
+    Rect::new(global.x - origin.x, global.y - origin.y, global.w, global.h)
+}
+
 /// Renderer backend abstraction — the WM never knows which is active.
 /// `Gl` is the current OpenGL/GLX implementation; `Vulkan` will be added
 /// behind `#[cfg(feature = "compositor-vulkan")]` without touching WM code.
@@ -460,6 +537,7 @@ pub struct Compositor {
     overlay: Window,
     screen_w: u32,
     screen_h: u32,
+    screen_rect: Rect,
     /// Every visual this screen advertises, keyed by id. The compositor never
     /// infers a pixel format from a depth; it looks it up here.
     formats: HashMap<u32, VisualFormat>,
@@ -822,6 +900,7 @@ impl Compositor {
             overlay,
             screen_w,
             screen_h,
+            screen_rect: Rect::new(0, 0, screen_w, screen_h),
             formats,
             root_format,
             ignored,
@@ -1026,9 +1105,11 @@ impl Compositor {
 
     /// Window destroyed (`DestroyNotify`).
     pub fn on_destroy(&mut self, win: Window) {
-        if self.bypassed_set.contains(&win) {
+        let was_bypassed = self.bypassed_set.contains(&win);
+        if was_bypassed {
             self.bypassed_set.remove(&win);
             self.bypassed.retain(|_, &mut w| w != win);
+            self.update_overlay_shape();
         }
         if self.comp_trace {
             let (pm, gpx, tx) = self.dbg_res_ids(win);
@@ -1169,9 +1250,14 @@ impl Compositor {
 
     /// Geometry change (`ConfigureNotify` for a tracked, non-root window).
     pub fn on_configure(&mut self, win: Window, x: i32, y: i32, w: u32, h: u32, bw: u32) {
-        // The bypassed window is presented directly by X; its geometry churn must
-        // not churn the (released) compositor resources or flip us back to Compose.
+        // I6: bypassed window geometry must stay coherent (cached outer == actual)
+        // and the overlay hole must follow it. We still update outer and shape,
+        // but avoid churning released GL resources or flipping back to Compose.
         if self.bypassed_set.contains(&win) {
+            if let Some(cw) = self.wins.get_mut(&win) {
+                cw.observe_configure(x, y, w, h, bw);
+            }
+            self.update_overlay_shape();
             return;
         }
         let (resized, mapped) = match self.wins.get_mut(&win) {
@@ -1540,7 +1626,9 @@ impl Compositor {
             }
             self.screen_w = (x1 - x0).max(1) as u32;
             self.screen_h = (y1 - y0).max(1) as u32;
+            self.screen_rect = Rect::new(x0, y0, self.screen_w, self.screen_h);
         }
+        self.update_overlay_shape();
         self.mark_full(DirtyReason::GEOMETRY);
     }
 
@@ -1658,6 +1746,7 @@ impl Compositor {
         self.bypass_window(win);
         self.bypassed.insert(mon, win);
         self.bypassed_set.insert(win);
+        self.update_overlay_shape();
         if self.bypass_trace {
             log::info!(
                 "composition policy: monitor {mon} -> {} (win={win:#x})",
@@ -1671,6 +1760,7 @@ impl Compositor {
         if let Some(win) = self.bypassed.remove(&mon) {
             self.resume_window(win);
             self.bypassed_set.remove(&win);
+            self.update_overlay_shape();
             if self.bypass_trace {
                 log::info!(
                     "composition policy: monitor {mon} -> {}",
@@ -1695,6 +1785,39 @@ impl Compositor {
     /// True when any output is currently bypassing.
     pub fn any_bypass(&self) -> bool {
         !self.bypassed_set.is_empty()
+    }
+
+    /// Recalculate the overlay's bounding shape from the current bypass set.
+    /// The overlay's INPUT shape stays empty (clicks fall through); only the
+    /// BOUNDING shape is punched. Single source of truth: `self.bypassed`
+    /// + `CompWin.outer`.
+    fn update_overlay_shape(&self) {
+        let holes: Vec<Rect> = self
+            .bypassed
+            .values()
+            .filter_map(|w| self.wins.get(w).map(|cw| cw.outer))
+            .collect();
+        let coverage = overlay_coverage(self.screen_rect, &holes);
+        // Translate coverage rects to overlay window coordinates (overlay at 0,0
+        // covering screen_rect). For typical positive monitors this is identity;
+        // for union with negative origin we offset.
+        let rects: Vec<Rectangle> = coverage
+            .iter()
+            .map(|r| Rectangle {
+                x: (r.x - self.screen_rect.x) as i16,
+                y: (r.y - self.screen_rect.y) as i16,
+                width: r.w as u16,
+                height: r.h as u16,
+            })
+            .collect();
+        let Ok(region) = self.conn.generate_id() else {
+            return;
+        };
+        let _ = self.conn.xfixes_create_region(region, &rects);
+        let _ = self
+            .conn
+            .xfixes_set_window_shape_region(self.overlay, SK::BOUNDING, 0, 0, region);
+        let _ = self.conn.xfixes_destroy_region(region);
     }
 
     /// Un-redirect `win` so X shows it directly, and drop the GL resources we
@@ -3132,6 +3255,175 @@ mod damage_tests {
         assert_eq!(dirties, 2, "only non-bypassed damages schedule render");
         // The last damage after disengage must be observable (dirty)
         assert!(dirties >= 1);
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::{global_to_local, overlay_coverage, subtract_rect};
+    use crate::types::Rect;
+
+    fn area(rects: &[Rect]) -> u64 {
+        rects.iter().map(|r| r.w as u64 * r.h as u64).sum()
+    }
+
+    fn contains(outer: Rect, inner: Rect) -> bool {
+        outer.contains_rect(inner)
+    }
+
+    #[test]
+    fn empty_equals_screen() {
+        let screen = Rect::new(0, 0, 800, 600);
+        let cov = overlay_coverage(screen, &[]);
+        assert_eq!(cov, vec![screen]);
+        assert_eq!(area(&cov), 800 * 600);
+    }
+
+    #[test]
+    fn one_bypass_punches_hole() {
+        let screen = Rect::new(0, 0, 800, 600);
+        let hole = Rect::new(100, 100, 200, 200);
+        let cov = overlay_coverage(screen, &[hole]);
+        assert!(!cov.iter().any(|r| contains(*r, hole)));
+        assert!(cov.iter().any(|r| contains(*r, Rect::new(0, 0, 10, 10))));
+        assert!(cov.iter().any(|r| contains(*r, Rect::new(700, 500, 10, 10))));
+        assert_eq!(area(&cov), 800 * 600 - 200 * 200);
+    }
+
+    #[test]
+    fn two_bypasses_non_overlapping() {
+        let screen = Rect::new(0, 0, 1000, 600);
+        let a = Rect::new(0, 0, 400, 600);
+        let b = Rect::new(600, 0, 400, 600);
+        let cov = overlay_coverage(screen, &[a, b]);
+        assert!(cov.iter().any(|r| contains(*r, Rect::new(450, 100, 10, 10))));
+        assert!(!cov.iter().any(|r| contains(*r, a)));
+        assert!(!cov.iter().any(|r| contains(*r, b)));
+        assert_eq!(area(&cov), 1000 * 600 - 400 * 600 * 2);
+    }
+
+    #[test]
+    fn overlapping_holes_handled() {
+        let screen = Rect::new(0, 0, 800, 600);
+        let a = Rect::new(100, 100, 300, 300);
+        let b = Rect::new(200, 200, 300, 300);
+        let cov = overlay_coverage(screen, &[a, b]);
+        let union = 300 * 300 + 300 * 300 - 200 * 200;
+        assert_eq!(area(&cov), 800 * 600 - union as u64);
+    }
+
+    #[test]
+    fn updated_rect_recalculates() {
+        let screen = Rect::new(0, 0, 800, 600);
+        let old = Rect::new(0, 0, 400, 600);
+        let new = Rect::new(400, 0, 400, 600);
+        let cov_old = overlay_coverage(screen, &[old]);
+        let cov_new = overlay_coverage(screen, &[new]);
+        assert_ne!(cov_old, cov_new);
+        assert!(cov_new.iter().any(|r| contains(*r, Rect::new(10, 10, 10, 10))));
+        assert!(!cov_new.iter().any(|r| contains(*r, new)));
+    }
+
+    #[test]
+    fn remove_bypass_restores() {
+        let screen = Rect::new(0, 0, 800, 600);
+        let a = Rect::new(0, 0, 400, 600);
+        let b = Rect::new(400, 0, 400, 600);
+        let cov_both = overlay_coverage(screen, &[a, b]);
+        let cov_a = overlay_coverage(screen, &[a]);
+        assert_ne!(cov_both, cov_a);
+        assert!(area(&cov_a) > area(&cov_both));
+    }
+
+    #[test]
+    fn subtract_rect_no_overlap() {
+        let r = Rect::new(0, 0, 100, 100);
+        let hole = Rect::new(200, 200, 10, 10);
+        assert_eq!(subtract_rect(r, hole), vec![r]);
+    }
+
+    #[test]
+    fn state_machine_engage_resize_destroy() {
+        let screen = Rect::new(0, 0, 1000, 600);
+        let mut bypasses: Vec<Rect> = vec![];
+        assert_eq!(overlay_coverage(screen, &bypasses), vec![screen]);
+        let a = Rect::new(0, 0, 500, 600);
+        bypasses.push(a);
+        let cov_a = overlay_coverage(screen, &bypasses);
+        assert!(!cov_a.iter().any(|r| contains(*r, a)));
+        bypasses[0] = Rect::new(100, 100, 300, 300);
+        let cov_resized = overlay_coverage(screen, &bypasses);
+        assert!(!cov_resized.iter().any(|r| contains(*r, bypasses[0])));
+        assert!(cov_resized.iter().any(|r| contains(*r, Rect::new(0, 0, 10, 10))));
+        let b = Rect::new(600, 0, 400, 600);
+        bypasses.push(b);
+        let cov_ab = overlay_coverage(screen, &bypasses);
+        assert!(!cov_ab.iter().any(|r| contains(*r, a)));
+        assert!(!cov_ab.iter().any(|r| contains(*r, b)));
+        bypasses.remove(0);
+        let cov_b = overlay_coverage(screen, &bypasses);
+        assert!(cov_b.iter().any(|r| contains(*r, a)));
+        assert!(!cov_b.iter().any(|r| contains(*r, b)));
+        bypasses.clear();
+        assert_eq!(overlay_coverage(screen, &bypasses), vec![screen]);
+    }
+
+    #[test]
+    fn case_a_single_output() {
+        let screen = Rect::new(0, 0, 1920, 1080);
+        let win = Rect::new(100, 100, 400, 300);
+        let cov = overlay_coverage(screen, &[win]);
+        assert!(!cov.iter().any(|r| contains(*r, win)));
+        assert_eq!(area(&cov), 1920 * 1080 - 400 * 300);
+    }
+
+    #[test]
+    fn case_b_two_positive_outputs() {
+        let screen = Rect::new(0, 0, 3840, 1080);
+        let win_b = Rect::new(1920, 0, 800, 600);
+        let cov = overlay_coverage(screen, &[win_b]);
+        assert!(!cov.iter().any(|r| contains(*r, win_b)));
+        assert!(cov.iter().any(|r| contains(*r, Rect::new(10, 10, 10, 10))));
+    }
+
+    #[test]
+    fn case_c_negative_x_output() {
+        let screen = Rect::new(-800, 0, 2720, 1080);
+        let win = Rect::new(-800, 0, 800, 600);
+        let cov = overlay_coverage(screen, &[win]);
+        assert!(!cov.iter().any(|r| contains(*r, win)));
+        assert!(cov.iter().any(|r| contains(*r, Rect::new(0, 0, 10, 10))));
+        let local = global_to_local(win, screen);
+        assert_eq!(local, Rect::new(0, 0, 800, 600));
+        let win2 = Rect::new(100, 100, 200, 200);
+        let local2 = global_to_local(win2, screen);
+        assert_eq!(local2, Rect::new(900, 100, 200, 200));
+    }
+
+    #[test]
+    fn case_d_negative_y_output() {
+        let screen = Rect::new(0, -600, 1920, 1680);
+        let win = Rect::new(0, -600, 500, 400);
+        let cov = overlay_coverage(screen, &[win]);
+        assert!(!cov.iter().any(|r| contains(*r, win)));
+        let local = global_to_local(win, screen);
+        assert_eq!(local, Rect::new(0, 0, 500, 400));
+        let win2 = Rect::new(100, 100, 200, 200);
+        let local2 = global_to_local(win2, screen);
+        assert_eq!(local2, Rect::new(100, 700, 200, 200));
+    }
+
+    #[test]
+    fn global_to_local_identity_and_negative() {
+        let origin = Rect::new(-800, 0, 2720, 1080);
+        assert_eq!(
+            global_to_local(Rect::new(-800, 0, 100, 100), origin),
+            Rect::new(0, 0, 100, 100)
+        );
+        assert_eq!(
+            global_to_local(Rect::new(100, 100, 50, 50), origin),
+            Rect::new(900, 100, 50, 50)
+        );
     }
 }
 
