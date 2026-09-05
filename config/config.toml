@@ -58,13 +58,17 @@ auto_workspace_binds = true
 # unavailable or another compositor owns the screen. Disable it to keep the
 # legacy X11 Shape corner-radius path, or to run an external compositor via
 # autostart (see MAVERICK_NO_COMPOSITOR to disable for a single run).
-# Prefer `[compositor].enabled` for new configs; this key is a deprecated alias.
-compositor_enabled = true
+# Prefer `[compositor].enabled` for new configs; `compositor_enabled` under
+# `[general]` is a deprecated alias (kept for compat, commented to avoid
+# warnings in `maverick --check-config`).
+# compositor_enabled = true
 
-# Scroll-camera spring constants are now under `[animations]`. These keys are
-# deprecated aliases and will emit a warning; use `[animations]` instead.
-camera_stiffness = 220.0
-camera_damping = 30.0
+# Scroll-camera spring constants now live under `[animations]` (see below).
+# The old `general.camera_stiffness` / `camera_damping` aliases are deprecated
+# and emit warnings; they are kept for compat but left commented here so the
+# sample validates clean (0 warnings).
+# camera_stiffness = 220.0
+# camera_damping = 30.0
 
 [compositor]
 # Master switch for the compositor. `false` forces pure X11 WM.
@@ -132,12 +136,11 @@ urgent  = 0xf38ba8        # catppuccin-mocha red
 # Each entry is one [[keybindings]] table with `key` and `action`.
 # Action grammar (colon separates the verb from its argument):
 #   spawn:<command and args>      kill
-#   toggle_float                  toggle_fullscreen
-#   toggle_maximize               cycle_layout
+#   toggle_float                  toggle_fullscreen  toggle_maximize
 #   focus:<left|right|up|down|next|prev>
 #   move:<left|right|up|down|next|prev>
 #   focus_mon:<dir>  move_mon:<dir>
-#   layout:<column|grid>
+#   layout:column
 #   grow_col:<px>                 new_column        collapse_column
 #   view:<n>        move_to_ws:<n>
 #   viewport_zoom[:<factor>]      page_snap:<left|right|up|down>
@@ -212,13 +215,7 @@ action = "grow_col:50"
 key = "Mod4+Control+j"
 action = "collapse_column"
 
-# Layout switching
-[[keybindings]]
-key = "Mod4+space"
-action = "cycle_layout"
-[[keybindings]]
-key = "Mod4+g"
-action = "layout:grid"
+# Layout (currently only Column is available; Grid was removed)
 [[keybindings]]
 key = "Mod4+t"
 action = "layout:column"
