@@ -126,10 +126,6 @@ mod placeholder {
         pub fn debug_dump(&self) -> String {
             String::new()
         }
-        #[inline(always)]
-        pub fn tracked_window_count(&self) -> usize {
-            0
-        }
     }
 
     /// Bitfield-style dirty-reason placeholder. Mirrors the real enum's

@@ -1616,14 +1616,6 @@ impl Compositor {
     pub fn damage_region(&self) -> &DamageRegion {
         &self.frame_dirty
     }
-
-    /// Number of client windows this compositor currently holds a `Damage`
-    /// resource for — i.e. the windows it is texturing from. Debug-only liveness
-    /// signal for the frame-loop instrumentation; O(1).
-    pub fn tracked_window_count(&self) -> usize {
-        self.damages.len()
-    }
-
     /// Mark the whole frame dirty *and* require a full repaint: used for changes
     /// that cannot be expressed as a rectangle set (resize, reparent, restack,
     /// opacity, new/removed window, wallpaper). Content-only `XDamage` must call
