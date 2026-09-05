@@ -1415,8 +1415,11 @@ impl Compositor {
                 .extend(self.presentation_desired.iter().copied());
         }
         // Install transforms (frame_gen bump + per-window write).
-        let transforms = self.presentation_transforms.clone();
+        // Avoid per-frame Vec clone (allocation) by moving the buffer out,
+        // borrowing it, and restoring it — no allocation, just a pointer swap.
+        let transforms = std::mem::take(&mut self.presentation_transforms);
         self.set_transforms(&transforms);
+        self.presentation_transforms = transforms;
     }
 
     /// Mark the whole frame dirty (used when stacking or the wallpaper changes).
@@ -1877,10 +1880,10 @@ impl Compositor {
         }
 
         // ── pass 2 (bottom→top): build the scene, skipping occluded windows.
-        // Snapshot the stack order so we can mutate `self` (for a pending rebind)
-        // while iterating without holding an immutable borrow of `self.stack`.
-        let stack = self.stack.clone();
-        for &win in &stack {
+        // Iterate by index to avoid per-frame Vec clone (allocation) while still
+        // allowing mutable borrows of `self.wins` disjoint from `self.stack`.
+        for i in 0..self.stack.len() {
+            let win = self.stack[i];
             // A bypassed window is presented directly by X; the compositor must
             // never draw it (doing so would cover the real window with a stale
             // texture) nor rebind a GL resource for it. The overlay simply stays
