@@ -2771,9 +2771,13 @@ pub fn live_placements(
 /// Substep the given total `dt` (seconds) into pieces no longer than
 /// `SUBSTEP_MS`, returning the slice boundaries. Used by the animation driver.
 pub fn substep_bounds(dt: f32) -> impl Iterator<Item = f32> {
-    let max = SUBSTEP_MS / 1000.0;
-    let n = (dt / max).ceil().max(1.0) as usize;
-    let step = dt / n as f32;
+    let (n, step) = if !dt.is_finite() || dt <= 0.0 {
+        (0, 0.0)
+    } else {
+        let max = SUBSTEP_MS / 1000.0;
+        let n = (dt / max).ceil().max(1.0) as usize;
+        (n, dt / n as f32)
+    };
     (0..n).map(move |_| step)
 }
 
@@ -3435,5 +3439,66 @@ mod lifecycle_tests {
             "border change expands outer -> reported as a resize"
         );
         assert_eq!(cw.outer, Rect::new(-3, -3, 106, 106));
+    }
+}
+
+#[cfg(test)]
+mod substep_tests {
+    use super::substep_bounds;
+
+    #[test]
+    fn zero_and_negative_yields_empty() {
+        let v: Vec<f32> = substep_bounds(0.0).collect();
+        assert!(v.is_empty());
+        let v: Vec<f32> = substep_bounds(-0.01).collect();
+        assert!(v.is_empty());
+        let v: Vec<f32> = substep_bounds(f32::NAN).collect();
+        assert!(v.is_empty());
+        let v: Vec<f32> = substep_bounds(f32::INFINITY).collect();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn small_dt_single_step() {
+        let v: Vec<f32> = substep_bounds(0.004).collect();
+        assert_eq!(v.len(), 1);
+        assert!((v[0] - 0.004).abs() < 1e-6);
+        let v: Vec<f32> = substep_bounds(0.008).collect();
+        assert_eq!(v.len(), 1);
+    }
+
+    #[test]
+    fn multi_step_invariants() {
+        let cases = [(0.016, 2), (0.017, 3), (0.024, 3), (0.032, 4)];
+        for (dt, expect_n) in cases {
+            let v: Vec<f32> = substep_bounds(dt).collect();
+            assert_eq!(v.len(), expect_n, "dt={dt}");
+            let sum: f32 = v.iter().sum();
+            assert!((sum - dt).abs() < 1e-6, "sum {sum} != dt {dt}");
+            for &s in &v {
+                assert!(s <= 0.0080001, "step {s} > 8ms");
+                assert!(s > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn tick_consumes_substeps() {
+        use crate::types::{Monitor, Rect};
+        let mut mon = Monitor::new(Rect::new(0, 0, 800, 600), 1);
+        mon.workspaces[0].camera.position = 0.0;
+        mon.workspaces[0].camera.target = 100.0;
+        let dt = 0.016;
+        for sub in substep_bounds(dt) {
+            mon.workspaces[0].camera.step(sub);
+        }
+        assert!((mon.workspaces[0].camera.position - 0.0).abs() > 1e-6);
+        let mut mon2 = Monitor::new(Rect::new(0, 0, 800, 600), 1);
+        mon2.workspaces[0].camera.position = 0.0;
+        mon2.workspaces[0].camera.target = 100.0;
+        for sub in substep_bounds(0.0) {
+            mon2.workspaces[0].camera.step(sub);
+        }
+        assert!((mon2.workspaces[0].camera.position - 0.0).abs() < 1e-6);
     }
 }

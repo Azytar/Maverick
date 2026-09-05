@@ -168,11 +168,19 @@ mod placeholder {
         }
     }
 
-    /// Substeps the animation delta for stable spring integration. In the
-    /// no-compositor build this yields nothing so `tick_animations_multi` is
-    /// never called.
-    pub fn substep_bounds(_dt: f32) -> Vec<f32> {
-        Vec::new()
+    /// Substeps the animation delta for stable spring integration. Must match
+    /// the compositor-enabled implementation so animations still tick when the
+    /// compositor is disabled (placeholder bug fix: returning empty killed the
+    /// spring).
+    pub fn substep_bounds(dt: f32) -> Vec<f32> {
+        if !dt.is_finite() || dt <= 0.0 {
+            return Vec::new();
+        }
+        const SUBSTEP_MS: f32 = 8.0;
+        let max = SUBSTEP_MS / 1000.0;
+        let n = (dt / max).ceil().max(1.0) as usize;
+        let step = dt / n as f32;
+        vec![step; n]
     }
 
     pub fn live_placements(
@@ -196,3 +204,63 @@ mod placeholder {
 
 #[cfg(not(feature = "compositor-opengl"))]
 pub use placeholder::*;
+
+#[cfg(all(test, not(feature = "compositor-opengl")))]
+mod placeholder_substep_tests {
+    use super::placeholder::substep_bounds;
+
+    #[test]
+    fn zero_and_negative_yields_empty() {
+        assert!(substep_bounds(0.0).is_empty());
+        assert!(substep_bounds(-0.01).is_empty());
+        assert!(substep_bounds(f32::NAN).is_empty());
+        assert!(substep_bounds(f32::INFINITY).is_empty());
+    }
+
+    #[test]
+    fn small_dt_single_step() {
+        let v = substep_bounds(0.004);
+        assert_eq!(v.len(), 1);
+        assert!((v[0] - 0.004).abs() < 1e-6);
+        let v = substep_bounds(0.008);
+        assert_eq!(v.len(), 1);
+    }
+
+    #[test]
+    fn multi_step_invariants() {
+        let cases = [(0.016, 2), (0.017, 3), (0.024, 3), (0.032, 4)];
+        for (dt, expect_n) in cases {
+            let v = substep_bounds(dt);
+            assert_eq!(v.len(), expect_n, "dt={dt}");
+            let sum: f32 = v.iter().sum();
+            assert!((sum - dt).abs() < 1e-6, "sum {sum} != dt {dt}");
+            for &s in &v {
+                assert!(s <= 0.0080001, "step {s} > 8ms");
+                assert!(s > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn tick_consumes_substeps() {
+        // Placeholder must produce steps that actually drive the spring.
+        use crate::types::{Monitor, Rect};
+        let mut mon = Monitor::new(Rect::new(0, 0, 800, 600), 1);
+        mon.workspaces[0].camera.position = 0.0;
+        mon.workspaces[0].camera.target = 100.0;
+        let dt = 0.016;
+        let mut pos_before = mon.workspaces[0].camera.position;
+        for sub in substep_bounds(dt) {
+            mon.workspaces[0].camera.step(sub);
+        }
+        assert!((mon.workspaces[0].camera.position - pos_before).abs() > 1e-6);
+        // Empty dt must not move
+        let mut mon2 = Monitor::new(Rect::new(0, 0, 800, 600), 1);
+        mon2.workspaces[0].camera.position = 0.0;
+        mon2.workspaces[0].camera.target = 100.0;
+        for sub in substep_bounds(0.0) {
+            mon2.workspaces[0].camera.step(sub);
+        }
+        assert!((mon2.workspaces[0].camera.position - 0.0).abs() < 1e-6);
+    }
+}
