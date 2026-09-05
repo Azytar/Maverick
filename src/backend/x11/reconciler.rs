@@ -176,19 +176,23 @@ pub enum ConfigureObservation {
 }
 
 /// Classify an external `ConfigureNotify` for a managed window. Pure: it only
-/// reads `AppliedState` and `Client`, so the convergence policy is unit-tested
-/// without an X server. The caller acts on the verdict (see `on_configure_notify`).
+/// reads `AppliedState` and `Client` plus the drag authority flag, so the
+/// convergence policy is unit-tested without an X server. The caller acts on
+/// the verdict (see `on_configure_notify`).
 pub(crate) fn classify_configure(
     reported_rect: Rect,
     reported_bw: u32,
     applied: &AppliedWindow,
     client: &Client,
+    is_dragged: bool,
 ) -> ConfigureObservation {
     if applied.rect == reported_rect && applied.border_w == reported_bw {
         return ConfigureObservation::Compliant;
     }
     // Diverged. Floats may size themselves; tiled/fullscreen are WM-owned.
-    let follow = client.is_float() && !client.is_fullscreen();
+    // While a float is being dragged, WM authority is temporarily exclusive
+    // (I1/I3): never follow client geometry during drag.
+    let follow = client.is_float() && !client.is_fullscreen() && !is_dragged;
     ConfigureObservation::Diverged { follow }
 }
 
@@ -275,7 +279,7 @@ mod tests {
             seen: true,
             sequence: None,
         };
-        let obs = classify_configure(Rect::new(0, 0, 400, 300), 2, &applied, &c);
+        let obs = classify_configure(Rect::new(0, 0, 400, 300), 2, &applied, &c, false);
         assert!(
             matches!(obs, ConfigureObservation::Diverged { follow: false }),
             "tiled self-resize must be re-asserted, not followed"
@@ -294,7 +298,7 @@ mod tests {
             seen: true,
             sequence: None,
         };
-        let obs = classify_configure(Rect::new(40, 40, 640, 480), 0, &applied, &c);
+        let obs = classify_configure(Rect::new(40, 40, 640, 480), 0, &applied, &c, false);
         assert!(
             matches!(obs, ConfigureObservation::Diverged { follow: false }),
             "fullscreen must re-assert and stay fullscreen"
@@ -312,7 +316,7 @@ mod tests {
             seen: true,
             sequence: None,
         };
-        let obs = classify_configure(Rect::new(0, 0, 1000, 800), 2, &applied, &c);
+        let obs = classify_configure(Rect::new(0, 0, 1000, 800), 2, &applied, &c, false);
         assert!(
             matches!(obs, ConfigureObservation::Compliant),
             "matching geometry must be treated as our own echo"
@@ -331,7 +335,7 @@ mod tests {
             seen: true,
             sequence: None,
         };
-        let obs = classify_configure(Rect::new(0, 0, 400, 300), 2, &applied, &c);
+        let obs = classify_configure(Rect::new(0, 0, 400, 300), 2, &applied, &c, false);
         assert!(
             matches!(obs, ConfigureObservation::Diverged { follow: true }),
             "a float may resize itself; the model should follow"
@@ -356,8 +360,8 @@ mod tests {
             seen: true,
             sequence: None,
         };
-        let obs_a = classify_configure(Rect::new(0, 0, 1000, 800), 2, &applied_a, &a);
-        let obs_b = classify_configure(Rect::new(0, 0, 400, 300), 2, &applied_b, &b);
+        let obs_a = classify_configure(Rect::new(0, 0, 1000, 800), 2, &applied_a, &a, false);
+        let obs_b = classify_configure(Rect::new(0, 0, 400, 300), 2, &applied_b, &b, false);
         assert!(
             matches!(obs_a, ConfigureObservation::Compliant),
             "A did not move → ignore"
@@ -388,8 +392,8 @@ mod tests {
             seen: true,
             sequence: None,
         };
-        let obs_a = classify_configure(Rect::new(40, 40, 640, 480), 0, &applied_a, &a);
-        let obs_b = classify_configure(Rect::new(0, 0, 1920, 1080), 0, &applied_b, &b);
+        let obs_a = classify_configure(Rect::new(40, 40, 640, 480), 0, &applied_a, &a, false);
+        let obs_b = classify_configure(Rect::new(0, 0, 1920, 1080), 0, &applied_b, &b, false);
         assert!(
             matches!(obs_a, ConfigureObservation::Diverged { follow: false }),
             "A re-asserts its fullscreen rect"
@@ -644,7 +648,7 @@ mod tests {
             seen: true,
             sequence: None,
         };
-        match classify_configure(reported, 2, &applied, &c) {
+        match classify_configure(reported, 2, &applied, &c, false) {
             ConfigureObservation::Diverged { follow } => {
                 assert!(
                     !follow,
@@ -690,11 +694,84 @@ mod tests {
             seen: true,
             sequence: None,
         };
-        let obs = classify_configure(Rect::new(0, 0, 0, 0), 2, &applied, &c);
+        let obs = classify_configure(Rect::new(0, 0, 0, 0), 2, &applied, &c, false);
         assert!(
             matches!(obs, ConfigureObservation::Diverged { follow: true }),
             "a float may follow an external (even invalid) rect"
         );
+    }
+
+    // ── I1/I2/I3: drag authority table ─────────────────────────────────────
+    #[test]
+    fn drag_authority_table() {
+        let mk = |is_float: bool, is_fs: bool, dragged: bool, expect_follow: bool| {
+            let mut c = Client::new(1, 0, 0);
+            if is_float {
+                c.flags.set(WinFlags::FLOAT);
+            }
+            if is_fs {
+                c.flags.set(WinFlags::FULLSCREEN);
+            }
+            let applied = AppliedWindow {
+                rect: Rect::new(0, 0, 100, 100),
+                border_w: 2,
+                seen: true,
+                sequence: None,
+            };
+            let obs = classify_configure(Rect::new(10, 10, 200, 200), 2, &applied, &c, dragged);
+            match obs {
+                ConfigureObservation::Diverged { follow } => assert_eq!(
+                    follow, expect_follow,
+                    "float={is_float} fullscreen={is_fs} dragged={dragged} => follow={follow} expected {expect_follow}"
+                ),
+                ConfigureObservation::Compliant => panic!("expected diverged"),
+            }
+        };
+        mk(false, false, false, false);
+        mk(false, false, true, false);
+        mk(true, true, false, false);
+        mk(true, true, true, false);
+        mk(true, false, false, true);
+        mk(true, false, true, false);
+    }
+
+    #[test]
+    fn float_dragged_does_not_follow() {
+        let mut c = Client::new(1, 0, 0);
+        c.flags.set(WinFlags::FLOAT);
+        let applied = AppliedWindow {
+            rect: Rect::new(0, 0, 100, 100),
+            border_w: 2,
+            seen: true,
+            sequence: None,
+        };
+        let obs = classify_configure(Rect::new(5, 5, 50, 50), 2, &applied, &c, true);
+        assert!(
+            matches!(obs, ConfigureObservation::Diverged { follow: false }),
+            "dragged float must not follow client geometry"
+        );
+    }
+
+    #[test]
+    fn drag_ends_restores_float_authority() {
+        let mut c = Client::new(1, 0, 0);
+        c.flags.set(WinFlags::FLOAT);
+        let applied = AppliedWindow {
+            rect: Rect::new(0, 0, 100, 100),
+            border_w: 2,
+            seen: true,
+            sequence: None,
+        };
+        let during = classify_configure(Rect::new(5, 5, 50, 50), 2, &applied, &c, true);
+        assert!(matches!(
+            during,
+            ConfigureObservation::Diverged { follow: false }
+        ));
+        let after = classify_configure(Rect::new(5, 5, 50, 50), 2, &applied, &c, false);
+        assert!(matches!(
+            after,
+            ConfigureObservation::Diverged { follow: true }
+        ));
     }
 
     // ── Fase 1.3: `clamp_float_to_workarea` — the single normalizer ──────────

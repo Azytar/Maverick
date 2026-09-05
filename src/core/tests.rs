@@ -4203,7 +4203,7 @@ mod unit_tests {
             sequence: None,
         };
         let c = engine.state.clients.get(&1).unwrap();
-        let obs = classify_configure(requested, 2, &applied, c);
+        let obs = classify_configure(requested, 2, &applied, c, false);
         assert!(
             matches!(obs, ConfigureObservation::Diverged { follow: false }),
             "tiled self-resize must be denied (re-asserted), not followed"
@@ -4308,7 +4308,7 @@ mod unit_tests {
             sequence: None,
         };
         let c = engine.state.clients.get(&1).unwrap();
-        let obs = classify_configure(g1, 2, &applied, c);
+        let obs = classify_configure(g1, 2, &applied, c, false);
         assert!(
             matches!(obs, ConfigureObservation::Diverged { follow: true }),
             "a float's self-resize must be followed, not re-asserted"
@@ -4708,6 +4708,7 @@ mod unit_tests {
             b,
             &applied.windows[&1],
             engine.state.clients.get(&1).unwrap(),
+            false,
         );
         assert!(
             matches!(obs, ConfigureObservation::Diverged { follow: false }),
@@ -4774,6 +4775,7 @@ mod unit_tests {
             b,
             &applied.windows[&1],
             engine.state.clients.get(&1).unwrap(),
+            false,
         );
         assert!(
             matches!(obs, ConfigureObservation::Diverged { follow: false }),
@@ -4825,7 +4827,13 @@ mod unit_tests {
             sequence: None,
         };
         let g1 = Rect::new(200, 150, 400, 250);
-        let obs = classify_configure(g1, 2, &applied, engine.state.clients.get(&1).unwrap());
+        let obs = classify_configure(
+            g1,
+            2,
+            &applied,
+            engine.state.clients.get(&1).unwrap(),
+            false,
+        );
         assert!(
             matches!(obs, ConfigureObservation::Diverged { follow: true }),
             "a float's self-resize must be followed, not re-asserted"
@@ -4840,7 +4848,13 @@ mod unit_tests {
             seen: true,
             sequence: None,
         };
-        let obs2 = classify_configure(g1, 2, &applied, engine.state.clients.get(&1).unwrap());
+        let obs2 = classify_configure(
+            g1,
+            2,
+            &applied,
+            engine.state.clients.get(&1).unwrap(),
+            false,
+        );
         assert!(
             matches!(obs2, ConfigureObservation::Compliant),
             "after adoption the reported == applied must be Compliant"
@@ -4879,7 +4893,8 @@ mod unit_tests {
                 300 + (i as u32 + 1) * 20,
                 200 + (i as u32 + 1) * 20,
             );
-            let obs = classify_configure(r, 2, &applied, engine.state.clients.get(&1).unwrap());
+            let obs =
+                classify_configure(r, 2, &applied, engine.state.clients.get(&1).unwrap(), false);
             assert!(
                 matches!(obs, ConfigureObservation::Diverged { follow: true }),
                 "float request {i} must be followed"
@@ -4893,7 +4908,13 @@ mod unit_tests {
             };
             last = r;
         }
-        let obs = classify_configure(last, 2, &applied, engine.state.clients.get(&1).unwrap());
+        let obs = classify_configure(
+            last,
+            2,
+            &applied,
+            engine.state.clients.get(&1).unwrap(),
+            false,
+        );
         assert!(
             matches!(obs, ConfigureObservation::Compliant),
             "final state must be Compliant"
@@ -5000,6 +5021,7 @@ mod unit_tests {
                 engine.cfg.border_w,
                 &applied,
                 &engine.state.clients[&1],
+                false,
             );
             assert!(
                 matches!(obs, ConfigureObservation::Diverged { follow: false }),
@@ -5132,12 +5154,14 @@ mod unit_tests {
             0,
             &a_applied,
             engine.state.clients.get(&1).unwrap(),
+            false,
         );
         let obs_b = classify_configure(
             Rect::new(10, 10, 800, 600),
             b_b,
             &b_applied,
             engine.state.clients.get(&2).unwrap(),
+            false,
         );
         assert!(
             matches!(obs_a, ConfigureObservation::Diverged { follow: false }),
@@ -6439,7 +6463,8 @@ mod unit_tests {
                 300 + (i as u32 + 1) * 11,
                 200 + (i as u32 + 1) * 11,
             );
-            let obs = classify_configure(r, 2, &applied, engine.state.clients.get(&1).unwrap());
+            let obs =
+                classify_configure(r, 2, &applied, engine.state.clients.get(&1).unwrap(), false);
             assert!(
                 matches!(obs, ConfigureObservation::Diverged { follow: true }),
                 "iteration {i}: float fight must be followed"
@@ -6809,6 +6834,7 @@ mod unit_tests {
                                 a.border_w,
                                 &a,
                                 engine.state.clients.get(&w).unwrap(),
+                                false,
                             );
                             let ok = matches!(obs, ConfigureObservation::Diverged { follow: f } if f == is_float_fs);
                             assert!(
@@ -6985,6 +7011,7 @@ mod unit_tests {
                                     a.border_w,
                                     &a,
                                     engine.state.clients.get(&w).unwrap(),
+                                    false,
                                 );
                                 match obs {
                                     ConfigureObservation::Compliant => {}
@@ -7428,6 +7455,7 @@ mod unit_tests {
             engine.cfg.border_w,
             &applied,
             &engine.state.clients[&w],
+            false,
         );
         assert!(
             matches!(obs, ConfigureObservation::Diverged { follow: false }),

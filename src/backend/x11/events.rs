@@ -86,6 +86,31 @@ impl WindowManager {
         &mut self,
         e: ConfigureRequestEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // I1/I2: while a float is being dragged, WM drag geometry has exclusive
+        // authority — client ConfigureRequest must not change x/y/width/height.
+        if self.drag.as_ref().is_some_and(|d| d.win == e.window) {
+            if let Some(client) = self.engine.state.clients.get(&e.window) {
+                let geom = client.geom;
+                let bw = client.border_w;
+                let ev = ConfigureNotifyEvent {
+                    response_type: CONFIGURE_NOTIFY_EVENT,
+                    sequence: 0,
+                    event: e.window,
+                    window: e.window,
+                    above_sibling: x11rb::NONE,
+                    x: geom.x as i16,
+                    y: geom.y as i16,
+                    width: geom.w as u16,
+                    height: geom.h as u16,
+                    border_width: bw as u16,
+                    override_redirect: false,
+                };
+                let _ = self
+                    .conn
+                    .send_event(false, e.window, EventMask::STRUCTURE_NOTIFY, ev);
+            }
+            return Ok(());
+        }
         if let Some(client) = self.engine.state.clients.get(&e.window) {
             // WM authority (tiled AND fullscreen): the client's request is
             // ignored and we re-assert the Desired rect. A fullscreen window's
@@ -216,6 +241,7 @@ impl WindowManager {
             if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
                 c.last_reported = Some(reported);
             }
+            let is_dragged = self.drag.as_ref().is_some_and(|d| d.win == e.window);
             let observation = {
                 let clients = &self.engine.state.clients;
                 let applied = &self.applied.windows;
@@ -226,6 +252,7 @@ impl WindowManager {
                             reported_bw,
                             applied_win,
                             client,
+                            is_dragged,
                         ))
                     }
                     _ => None,
