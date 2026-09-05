@@ -1909,6 +1909,7 @@ impl Compositor {
     /// view of every tracked window (geometry/texture state). Used by the
     /// frame-loop trace (`MAV_COMP_TRACE`) to correlate GL resources with the
     /// WM-side floating/override-redirect state. Never affects rendering.
+    #[allow(dead_code)]
     pub(crate) fn debug_dump(&self) -> String {
         let mut s = String::new();
         writeln!(
