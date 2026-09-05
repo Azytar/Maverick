@@ -3287,7 +3287,9 @@ mod coverage_tests {
         let cov = overlay_coverage(screen, &[hole]);
         assert!(!cov.iter().any(|r| contains(*r, hole)));
         assert!(cov.iter().any(|r| contains(*r, Rect::new(0, 0, 10, 10))));
-        assert!(cov.iter().any(|r| contains(*r, Rect::new(700, 500, 10, 10))));
+        assert!(cov
+            .iter()
+            .any(|r| contains(*r, Rect::new(700, 500, 10, 10))));
         assert_eq!(area(&cov), 800 * 600 - 200 * 200);
     }
 
@@ -3297,7 +3299,9 @@ mod coverage_tests {
         let a = Rect::new(0, 0, 400, 600);
         let b = Rect::new(600, 0, 400, 600);
         let cov = overlay_coverage(screen, &[a, b]);
-        assert!(cov.iter().any(|r| contains(*r, Rect::new(450, 100, 10, 10))));
+        assert!(cov
+            .iter()
+            .any(|r| contains(*r, Rect::new(450, 100, 10, 10))));
         assert!(!cov.iter().any(|r| contains(*r, a)));
         assert!(!cov.iter().any(|r| contains(*r, b)));
         assert_eq!(area(&cov), 1000 * 600 - 400 * 600 * 2);
@@ -3321,7 +3325,9 @@ mod coverage_tests {
         let cov_old = overlay_coverage(screen, &[old]);
         let cov_new = overlay_coverage(screen, &[new]);
         assert_ne!(cov_old, cov_new);
-        assert!(cov_new.iter().any(|r| contains(*r, Rect::new(10, 10, 10, 10))));
+        assert!(cov_new
+            .iter()
+            .any(|r| contains(*r, Rect::new(10, 10, 10, 10))));
         assert!(!cov_new.iter().any(|r| contains(*r, new)));
     }
 
@@ -3355,7 +3361,9 @@ mod coverage_tests {
         bypasses[0] = Rect::new(100, 100, 300, 300);
         let cov_resized = overlay_coverage(screen, &bypasses);
         assert!(!cov_resized.iter().any(|r| contains(*r, bypasses[0])));
-        assert!(cov_resized.iter().any(|r| contains(*r, Rect::new(0, 0, 10, 10))));
+        assert!(cov_resized
+            .iter()
+            .any(|r| contains(*r, Rect::new(0, 0, 10, 10))));
         let b = Rect::new(600, 0, 400, 600);
         bypasses.push(b);
         let cov_ab = overlay_coverage(screen, &bypasses);
