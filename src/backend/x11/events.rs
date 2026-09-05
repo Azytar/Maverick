@@ -1,5 +1,6 @@
 use super::render::clamp_float_to_workarea;
 use super::*;
+#[cfg(feature = "compositor-opengl")]
 use x11rb::protocol::damage::NotifyEvent as DamageNotifyEvent;
 
 impl WindowManager {
@@ -545,6 +546,7 @@ impl WindowManager {
         Ok(())
     }
 
+    #[cfg(feature = "compositor-opengl")]
     pub(super) fn on_damage_notify(
         &mut self,
         e: DamageNotifyEvent,

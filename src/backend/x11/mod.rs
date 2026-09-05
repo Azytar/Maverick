@@ -270,6 +270,7 @@ impl WindowManager {
             Event::MotionNotify(e) => self.on_motion(e)?,
             Event::PropertyNotify(e) => self.on_property(e)?,
             Event::UnmapNotify(e) => self.on_unmap(e)?,
+            #[cfg(feature = "compositor-opengl")]
             Event::DamageNotify(e) => self.on_damage_notify(e)?,
             // RandR change events (config/grab selected in `setup_root`): both
             // the 1.5 `NotifyEvent` (crtc/output changes) and the classic

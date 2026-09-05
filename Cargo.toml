@@ -40,20 +40,15 @@ libc = "0.2"
 # Core X11 connection bootstrap lives in `maverick-x11`, independent from any
 # renderer backend. The WM always needs X11; the compositor does not.
 maverick-x11 = { path = "maverick-x11" }
-# `composite`/`damage`/`xfixes` are the compositor's X extensions; `xkb` is used
-# only to *subscribe* to keyboard-map changes (XkbMapNotify /
+# `xkb` is used only to *subscribe* to keyboard-map changes (XkbMapNotify /
 # XkbNewKeyboardNotify), which core `MappingNotify` does not always deliver —
 # the keymap itself is still read with core `GetKeyboardMapping`.
 # `allow-unsafe-code` is what makes `x11rb::xcb_ffi::XCBConnection` available so
 # the WM and any renderer backend can share one connection.
+# `composite`/`damage`/`xfixes` are gated behind `compositor-opengl` so a
+# `--no-default-features` build does not pull compositor X extensions.
 x11rb = { version = "0.13", default-features = false, features = [
-    "randr",
-    "shape",
-    "composite",
-    "damage",
-    "xfixes",
-    "xkb",
-    "allow-unsafe-code",
+    "randr", "shape", "xkb", "allow-unsafe-code",
 ] }
 # OpenGL/GLX compositor backend. Optional: build with `--no-default-features`
 # for a pure X11 WM, or `--features compositor-opengl` to enable it.
@@ -74,7 +69,7 @@ input-trace = []
 # `cargo build --features window-trace`.
 window-trace = []
 # OpenGL/GLX compositor backend.
-compositor-opengl = ["dep:maverick-gl"]
+compositor-opengl = ["dep:maverick-gl", "x11rb/composite", "x11rb/damage", "x11rb/xfixes"]
 # Placeholder for a future Vulkan backend. Not yet wired.
 compositor-vulkan = []
 
