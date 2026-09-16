@@ -287,14 +287,26 @@ fn tree_json(state: &State) -> String {
             s.push('{');
             write!(s, "\"index\":{wi},").unwrap();
             write!(s, "\"layout\":\"{}\",", layout_name(ws.layout)).unwrap();
-            write!(s, "\"scroll\":{},", ws.camera.position as i32).unwrap();
+            // `camera.position` can be NaN from a pre-fix session: emit 0
+            // instead of the `NaN` literal (invalid JSON for consumers).
+            let scroll = if ws.camera.position.is_finite() {
+                ws.camera.position as i32
+            } else {
+                0
+            };
+            write!(s, "\"scroll\":{scroll},").unwrap();
             s.push_str("\"columns\":[");
             for (ci, col) in ws.columns.iter().enumerate() {
                 if ci > 0 {
                     s.push(',');
                 }
                 s.push('{');
-                write!(s, "\"width\":{},", col.weight * (mon.workarea.w as f32)).unwrap();
+                let width = if col.weight.is_finite() {
+                    col.weight * (mon.workarea.w as f32)
+                } else {
+                    0.0
+                };
+                write!(s, "\"width\":{width},").unwrap();
 
                 write!(s, "\"focused\":{},", col.focused).unwrap();
                 s.push_str("\"windows\":[");

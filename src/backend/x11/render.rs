@@ -2,8 +2,9 @@ use super::*;
 use crate::backend::x11::reconciler::{reconcile, GeometryEffect};
 use crate::core::commands::retarget_focus_to_window;
 use crate::core::desired::DesiredState;
-use crate::core::layout::Phase;
+use crate::core::layout::{clamp_float_geom, normalize_float_geom, Phase};
 use crate::core::present::present_into;
+use crate::types::StateExt;
 use x11rb::protocol::shape;
 
 // ── input-trace instrumentation (feature `input-trace`) ───────────────────────
@@ -95,20 +96,68 @@ fn rounded_rectangles(w: i32, h: i32, r: i32) -> Vec<Rectangle> {
 /// `wa.x`, so clamping the position alone parks the window at a negative
 /// coordinate while its size still overflows the screen. Clamping the size
 /// first keeps `min <= max` and guarantees the result is inside `wa`.
-pub(crate) fn clamp_float_to_workarea(mut g: Rect, wa: Rect, bw: u32) -> Rect {
-    let frame = 2 * bw as i32;
-    let max_w = (wa.w as i32 - frame).max(1) as u32;
-    let max_h = (wa.h as i32 - frame).max(1) as u32;
-    // Floor at 1: X11 rejects a 0x0 configure with BadValue, so a client
-    // requesting 0x0 (or any zero dimension) must never reach X11 as such. The
-    // WM policy normalizes the degenerate request to the X11-valid minimum.
-    g.w = g.w.min(max_w).max(1);
-    g.h = g.h.min(max_h).max(1);
-    let max_x = (wa.x + wa.w as i32 - g.w as i32 - frame).max(wa.x);
-    let max_y = (wa.y + wa.h as i32 - g.h as i32 - frame).max(wa.y);
-    g.x = g.x.clamp(wa.x, max_x);
-    g.y = g.y.clamp(wa.y, max_y);
-    g
+pub(crate) fn clamp_float_to_workarea(g: Rect, wa: Rect, bw: u32) -> Rect {
+    // Adaptador fino sobre la unica autoridad (`layout::clamp_float_geom`).
+    // Se conserva el nombre porque `manage`, `events`, `pointer` y los tests
+    // lo usan como sumidero X11; la politica vive en un solo sitio para que
+    // arrange / drag / ConfigureRequest no puedan divergir (saltos de 2*bw
+    // o rebotes de posicion que hacian "bailar" a los flotantes).
+    clamp_float_geom(g, wa, bw)
+}
+
+/// Full float-request normalization for a rect the **WM** decided (initial
+/// placement, rules, drag/resize, `ToggleFloat`, monitor change): hints snap,
+/// then workarea clamp, then a final settle onto the increment grid.
+///
+/// # Authority
+///
+/// This rewrites the rect it is given, so it must never be applied to a rect the
+/// *client* asked for (see [`adopt_float_request`]). It is a fixed point of the
+/// toolkit's correction function because the answer lands on the grid the client
+/// itself declares: the WM can hand it to the client and the client accepts it
+/// as-is (no corrective `ConfigureRequest`, no bigger/smaller bounce).
+///
+/// The settle matters at the screen edge: the workarea clamp can shrink a
+/// grid-aligned size to an off-grid one (e.g. 10px grid clamped to 1916px),
+/// which the toolkit would floor and re-request — one bounce per update.
+/// Settling floors to the grid upfront (never growing back past the clamped
+/// size, so the workarea always wins) makes the answer grid-stable too.
+pub(crate) fn normalize_float_request(g: Rect, hints: SizeHints, wa: Rect, bw: u32) -> Rect {
+    // Adaptador fino sobre la unica autoridad de geometria WM-owned
+    // (`layout::normalize_float_geom`): snap -> clamp con marco -> settle.
+    normalize_float_geom(g, hints, wa, bw)
+}
+
+/// Adopt the geometry a **client** asked for (a float's `ConfigureRequest`).
+///
+/// The client is the authority for its own floating window; the WM only drops
+/// what X cannot represent (see [`layout::adopt_client_float_geometry`]). The
+/// answer is therefore bit-for-bit the request, which is what makes the
+/// client↔WM conversation terminate: a toolkit that re-asserts "its" geometry
+/// on every `ConfigureNotify` sees exactly that geometry come back and stops.
+///
+/// Hints, the workarea and the strut-inset workarea are deliberately *not*
+/// applied here: a float that wants to overlap a dock or hang off the screen
+/// edge is making a choice, not a mistake, and overriding it starts a fight
+/// (`ConfigureWindow` ping-pong) that reads on screen as a window that jumps
+/// around on its own.
+pub(crate) fn adopt_float_request(g: Rect) -> Rect {
+    crate::core::layout::adopt_client_float_geometry(g)
+}
+
+/// Off-screen parking rect for a window that is not on its monitor's active
+/// workspace.
+///
+/// The single definition of "hidden": `hide_offscreen` parks windows with it and
+/// every client-driven geometry sink re-parks with it, so a client that resizes
+/// itself while parked can never resurrect its window onto the workspace the
+/// user is actually looking at.
+pub(crate) fn parked_rect(g: Rect) -> Rect {
+    // i32 conversion is saturating: a pathological width must not overflow the
+    // negation and park the window at an absurd (visible) coordinate.
+    let w = g.w.min(i32::MAX as u32) as i32;
+    let off_x = w.saturating_add(200).saturating_neg();
+    Rect::new(off_x, g.y, g.w, g.h)
 }
 
 /// How many `transient_parent` links a single ownership question may follow.
@@ -186,17 +235,6 @@ impl WindowManager {
         self.arrange_full(mon_idx, true)
     }
 
-    /// Like `arrange`, but projects with `Phase::Live` so the X11-only path
-    /// animates each frame (reads the live camera `position`). The compositor
-    /// path must NOT use this — it configures X only once, at the settled
-    /// (`target`) position, and animates on the GPU instead.
-    pub(super) fn arrange_live(
-        &mut self,
-        mon_idx: usize,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        self.arrange_full_phase(mon_idx, true, Phase::Live)
-    }
-
     /// Reposition floating windows to stay within the workarea after a monitor
     /// geometry change. Clamps each float's size *and* position so its whole
     /// frame remains inside the new workarea — including floats that are larger
@@ -213,13 +251,19 @@ impl WindowManager {
         // Collect all floats that need repositioning to avoid borrow conflicts
         let mut to_reposition: Vec<(WindowId, Rect, u32)> = Vec::new();
 
-        // Regular floats in workspaces
+        // Regular floats in workspaces. Usa la normalizacion unica con hints
+        // (ver `layout::normalize_float_geom`): tras un RandR el arrange ya
+        // proyecta con la misma funcion, asi que solo se reposiciona lo que de
+        // verdad cambio y el flotante no "salta" dos veces (aqui + arrange).
+        // Re-asentar TAMBIEN limpia el sello `float_client_authority`: el
+        // workarea cambio (RandR/strut), el WM reclama la geometria, y un rect
+        // adoptado bajo el workarea viejo ya no es autoridad sobre el nuevo.
         for ws in &self.engine.state.monitors[mon_idx].workspaces {
             for &win in &ws.floats {
                 if let Some(client) = self.engine.state.clients.get(&win) {
-                    let bw = client.border_w;
-                    let g = clamp_float_to_workarea(client.geom, wa, bw);
-                    if g != client.geom {
+                    let (bw, sealed) = (client.border_w, client.float_client_authority);
+                    let g = normalize_float_geom(client.geom, client.hints, wa, bw);
+                    if g != client.geom || sealed {
                         to_reposition.push((win, g, bw));
                     }
                 }
@@ -229,9 +273,9 @@ impl WindowManager {
         // Sticky floats that belong to this monitor
         for (&win, client) in &self.engine.state.clients {
             if client.monitor == mon_idx && client.is_sticky() && client.is_float() {
-                let bw = client.border_w;
-                let g = clamp_float_to_workarea(client.geom, wa, bw);
-                if g != client.geom {
+                let (bw, sealed) = (client.border_w, client.float_client_authority);
+                let g = normalize_float_geom(client.geom, client.hints, wa, bw);
+                if g != client.geom || sealed {
                     to_reposition.push((win, g, bw));
                 }
             }
@@ -379,7 +423,7 @@ impl WindowManager {
                 .map(|(w, _)| *w),
         );
 
-        let hide_wins: Vec<_> = self.hide_mon_vec.drain(..).collect();
+        let hide_wins: Vec<_> = std::mem::take(&mut self.hide_mon_vec);
         for win in hide_wins {
             let in_ws = self.hide_ws_set.contains(&win);
             let client = match self.engine.state.clients.get_mut(&win) {
@@ -387,13 +431,12 @@ impl WindowManager {
                 None => continue,
             };
             if !in_ws && !client.wm_hidden {
-                let w = client.geom.w.min(i32::MAX as u32) as i32;
-                let off_x = w.saturating_add(200).saturating_neg();
-                // Route the off-screen move through the single geometry sink.
+                // Route the off-screen move through the single geometry sink
+                // (`parked_rect` is the one definition of the parking spot).
                 // The logical `client.geom` is intentionally left untouched
                 // (`write_client_geom = false`) — only `AppliedState` and the
                 // X11 configure are updated.
-                let off_rect = Rect::new(off_x, client.geom.y, client.geom.w, client.geom.h);
+                let off_rect = parked_rect(client.geom);
                 let bw = client.border_w;
                 let on_other_ws = client.workspace != self.engine.state.monitors[mon_idx].active_ws;
                 self.apply_geom(win, off_rect, bw, false)?;
@@ -479,6 +522,30 @@ impl WindowManager {
         // 2. Presentation overlay — only `FullscreenPolicy::True` exclusive
         // fullscreen (in any layout, already excluded from `fs_ctx`) and focused
         // maximized count. A normal fullscreen window is a ribbon participant.
+        // 1-bis. Docks/bar of this monitor sit BETWEEN the float layer and the
+        // presented overlays. They must live inside the canonical order — not
+        // stacked opportunistically by map order or by one-off re-raises — or a
+        // bar that mapped after a `FullscreenPolicy::True` fullscreen (or was
+        // re-raised by a covering transition) stays painted ON TOP of it
+        // forever: the C6 order-cache then sees an unchanged `order` and never
+        // re-raises the overlay above it. With docks in the order, any dock
+        // map/unmap changes `order`, the full sequence re-raises, and the
+        // invariant "tiles < floats < docks < overlays" is re-asserted in one
+        // deterministic pass. Sorted for hash-iteration stability.
+        let mut dock_wins: Vec<Window> = self
+            .docks
+            .iter()
+            .filter(|&(_, &dm)| dm == mon_idx)
+            .map(|(&d, _)| d)
+            .collect();
+        dock_wins.sort_unstable();
+        order.extend(dock_wins);
+
+        // A covering ribbon fullscreen belongs in the cached order too.
+        // Otherwise the next arrange replays the dock above it after the
+        // one-off covering raise, even though focus has not changed.
+        order.extend(self.engine.state.covering_fullscreen_window(mon_idx));
+
         let mut presented: Vec<WindowId> = ws
             .columns
             .iter()
@@ -534,23 +601,16 @@ impl WindowManager {
             self.last_stack_order.insert(mon_idx, order);
         }
 
-        // 2-bis. Fullscreen covering. The focused fullscreen tile of a Column
-        //    workspace, while the camera is settled and not in Overview, is
-        //    raised above everything (incl. the dock). Otherwise it is a normal
-        //    tile: when coverage ends we drop it to the bottom of the stack so
-        //    the neighbouring tile (and the bar) paint over it, and re-raise the
-        //    dock so the bar returns on top. Both only happen on the
-        //    covering→not-covering transition, to avoid a `raise()` storm.
-        // The window that currently covers the screen as a Column ribbon tile
-        // (or `None`). The runtime raise/drop additionally requires the camera
-        // and zoom to be settled; `covering_fullscreen_window` only names *which*
-        // window covers — see its docs for why this is distinct from
-        // `presented_overlay_owner`.
+        // 2-bis. Fullscreen covering. El tile fullscreen enfocado en Column
+        // ocupa `mon.screen` (no `workarea`) y debe estar por encima del dock
+        // (polybar) el tiempo que esté enfocado, sin esperar a que la cámara
+        // se asiente. Antes se exigía `camera settled + zoom settled` y el bar
+        // quedaba visible durante la animación de entrada/salida; eso rompe la
+        // promesa “pantalla completa ocupa toda la pantalla y está arriba”.
+        // `covering_fullscreen_window` ya filtra `layout != Column` y `overview`,
+        // y el `prev_cover != new_cover` evita el storm por frame.
         let cover_win = self.engine.state.covering_fullscreen_window(mon_idx);
-        let covering = cover_win.is_some()
-            && (ws.camera.position - ws.camera.target).abs() < 0.5
-            && ws.camera.velocity.abs() < 0.01
-            && (ws.zoom - ws.zoom_target).abs() < 0.001;
+        let covering = cover_win.is_some();
 
         // `cover_win` is the *focused* fullscreen window (or `None`); exactly one
         // fullscreen column is raised above the dock at a time — the one you are
@@ -577,7 +637,6 @@ impl WindowManager {
             // Raise the newly-covering window above the dock and every tile.
             if let Some(w) = new_cover {
                 self.raise(w);
-                self.last_stack_order.entry(mon_idx).or_default().push(w);
             }
         }
         self.fs_covering.insert(mon_idx, new_cover);
@@ -611,14 +670,20 @@ impl WindowManager {
         // Captured before the mutable borrow below flips geom/border_w.
         let is_fullscreen = client.is_fullscreen();
 
+        // Clamp before the wire: a 0 width/height is a server `BadValue`
+        // (rejected, leaving Applied ahead of Real forever). The synthetic
+        // notify below already clamps; the configure itself must too.
+        let wire_w = geom.w.clamp(1, u16::MAX as u32);
+        let wire_h = geom.h.clamp(1, u16::MAX as u32);
+        let wire_bw = bw.min(u16::MAX as u32);
         let _ = self.conn.configure_window(
             win,
             &ConfigureWindowAux::new()
                 .x(geom.x)
                 .y(geom.y)
-                .width(geom.w)
-                .height(geom.h)
-                .border_width(bw),
+                .width(wire_w)
+                .height(wire_h)
+                .border_width(wire_bw),
         );
 
         let event = ConfigureNotifyEvent {
@@ -662,7 +727,20 @@ impl WindowManager {
             } else {
                 self.engine.cfg.corner_radius as i32
             };
-            self.round_corners(win, geom.w + 2 * bw, geom.h + 2 * bw, r);
+            let outer_w = geom.w + 2 * bw;
+            let outer_h = geom.h + 2 * bw;
+            // The Shape `BOUNDING` mask depends only on (outer_w, outer_h, r),
+            // never on position. `emit_geometry` fires on every Configure
+            // effect, including pure moves (camera scroll re-Configures every
+            // visible window's x each animation frame), so without this guard
+            // an unchanged mask was re-uploaded to the X server every such
+            // frame. Skip the SHAPE request when nothing the mask depends on
+            // has changed since the last one we actually issued.
+            let key = (outer_w, outer_h, r);
+            if self.shape_mask_cache.get(&win) != Some(&key) {
+                self.round_corners(win, outer_w, outer_h, r);
+                self.shape_mask_cache.insert(win, key);
+            }
         }
 
         Ok(())
@@ -692,6 +770,23 @@ impl WindowManager {
             self.emit_geometry(win, g, b, write_client_geom)?;
         }
         Ok(())
+    }
+
+    /// Re-apply the off-screen parking configure for a hidden client, keeping
+    /// the logical model (`client.geom`) on the workspace it belongs to.
+    ///
+    /// Used by the client-driven geometry sinks: while a window is parked,
+    /// `client.geom` is the *logical* (on-screen) rect, so `apply_geom` with the
+    /// model rect would physically resurrect it on the active workspace (a
+    /// background-workspace window appearing out of nowhere). Parking again with
+    /// `write_client_geom = false` keeps the model intact and only lets the size
+    /// change land, off-screen where it belongs.
+    pub(super) fn apply_parked(&mut self, win: Window) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(c) = self.engine.state.clients.get(&win) else {
+            return Ok(());
+        };
+        let (rect, bw) = (parked_rect(c.geom), c.border_w);
+        self.apply_geom(win, rect, bw, false)
     }
 
     /// Raise `win` above all its siblings (`TopLevel`). Fire-and-forget: called
@@ -763,14 +858,21 @@ impl WindowManager {
             // `CURRENT_TIME`: a `CurrentTime` focus request is silently ignored
             // by the server when a newer focus change has occurred, which is
             // exactly what desyncs logical vs real focus (the red-border bug).
+            // ICCCM 4.1.7: a window with `input == False` (`wants_input ==
+            // false`, but not `NO_FOCUS`) must NOT receive the X input focus —
+            // focus the root instead and offer `WM_TAKE_FOCUS` below. Focusing
+            // the window itself sends the keyboard to a client that declared
+            // it never wants it.
             if wants {
                 let _ = self
                     .conn
                     .set_input_focus(InputFocus::PARENT, w, self.last_event_time);
             } else {
-                let _ =
-                    self.conn
-                        .set_input_focus(InputFocus::POINTER_ROOT, w, self.last_event_time);
+                let _ = self.conn.set_input_focus(
+                    InputFocus::POINTER_ROOT,
+                    self.root,
+                    self.last_event_time,
+                );
             }
             if self.has_protocol(w, self.atoms.wm_take_focus)? {
                 self.send_proto(w, self.atoms.wm_take_focus, self.last_event_time)?;
@@ -903,17 +1005,12 @@ impl WindowManager {
                 // position; warp onto *that* (not the stale pre-scroll `geom`
                 // captured at the top), so the warped pointer lands on the
                 // window we actually focused rather than wherever it slid from.
+                // Clamped to i16: the synthetic-notify path clamps, the warp
+                // must too (a >32k half-size would wrap negative).
                 let g = self.engine.state.clients.get(&w).map_or(geom, |c| c.geom);
-                let _ = self.conn.warp_pointer(
-                    x11rb::NONE,
-                    w,
-                    0,
-                    0,
-                    0,
-                    0,
-                    (g.w / 2) as i16,
-                    (g.h / 2) as i16,
-                );
+                let dx = (g.w / 2).min(i16::MAX as u32) as i16;
+                let dy = (g.h / 2).min(i16::MAX as u32) as i16;
+                let _ = self.conn.warp_pointer(x11rb::NONE, w, 0, 0, 0, 0, dx, dy);
             }
         } else {
             // Only clear the focused window on the currently selected monitor.
@@ -1030,6 +1127,24 @@ impl WindowManager {
             return Ok(());
         }
 
+        // ICCCM counterpart of `focus()`: a logical window with
+        // `wants_input == false` intentionally leaves the X focus on the
+        // root (real == None). That divergence is by design — re-asserting
+        // the focus onto the window would undo it on every focus event.
+        if real.is_none() {
+            if let Some(w) = logical {
+                let input_false = self
+                    .engine
+                    .state
+                    .clients
+                    .get(&w)
+                    .is_some_and(|c| !c.wants_input && !c.no_focus());
+                if input_false {
+                    return Ok(());
+                }
+            }
+        }
+
         // Presentation-aware guard: after `manage()` records a `pending_focus`
         // behind the live overlay while a fullscreen/maximized overlay keeps the
         // real X input focus, `logical` (sel_mon's focus) may diverge from
@@ -1080,12 +1195,20 @@ impl WindowManager {
                     Some(c) => c.wants_input,
                     None => true,
                 };
-                let mode = if wants {
-                    InputFocus::PARENT
+                // ICCCM 4.1.7 (same rule as `focus()`): never put the X
+                // input focus on an `input == False` window — re-assert to
+                // the root instead.
+                if wants {
+                    let _ = self
+                        .conn
+                        .set_input_focus(InputFocus::PARENT, w, self.last_event_time);
                 } else {
-                    InputFocus::POINTER_ROOT
-                };
-                let _ = self.conn.set_input_focus(mode, w, self.last_event_time);
+                    let _ = self.conn.set_input_focus(
+                        InputFocus::POINTER_ROOT,
+                        self.root,
+                        self.last_event_time,
+                    );
+                }
                 if self.has_protocol(w, self.atoms.wm_take_focus)? {
                     self.send_proto(w, self.atoms.wm_take_focus, self.last_event_time)?;
                 }

@@ -425,9 +425,9 @@ impl ValidatedSession {
     /// persisted twin get empty workspaces.
     ///
     /// Runtime fields are always reset: camera snaps to the focused column's
-    /// home, `grid_snapshot`/`pending_focus` are cleared, and
-    /// `presented_maximize` is re-derived from the restored focus. No geometry
-    /// from the file is ever used.
+    /// home, `pending_focus` is cleared, and `presented_maximize` is
+    /// re-derived from the restored focus. No geometry from the file is
+    /// ever used.
     pub fn commit(
         &self,
         state: &mut State,
@@ -527,8 +527,12 @@ impl ValidatedSession {
                                 return None;
                             }
                             let focused = pc.focused.min(wins.len() - 1);
-                            let weight = if pc.weight.is_finite() && pc.weight > 0.0 {
-                                pc.weight.min(1.0)
+                            // Clamp to the layout's live range [0.05, 1.0]:
+                            // a persisted 0.0001 (or NaN) would otherwise
+                            // survive validation `(0,1]` yet trip the
+                            // debug invariant on the next transition.
+                            let weight = if pc.weight.is_finite() {
+                                pc.weight.clamp(0.05, 1.0)
                             } else {
                                 0.5
                             };
@@ -564,8 +568,16 @@ impl ValidatedSession {
             }
 
             // Default-homed windows that fell outside any persisted workspace
-            // get tiled/floated onto their recorded (mi, wi).
-            for (&id, p) in placements.iter() {
+            // get tiled/floated onto their recorded (mi, wi). Sorted by id:
+            // `HashMap` order is random and `add_tiled` moves the workspace
+            // focus, so unsorted iteration restored a nondeterministic focus.
+            let mut homed: Vec<WindowId> = placements.keys().copied().collect();
+            homed.sort_unstable();
+            for id in homed {
+                let p = match placements.get(&id) {
+                    Some(p) => *p,
+                    None => continue,
+                };
                 if p.mon != mi {
                     continue;
                 }
@@ -653,6 +665,11 @@ impl ValidatedSession {
         }
 
         // ── derived state that must stay in lock-step ──
+        // A pre-restore `pending_focus` deferral names an overlay owner from
+        // the OLD topology: resolving it against the new tree would focus a
+        // window on the wrong workspace (#8c). Drop it; focus is authoritative
+        // from the restored `mon.focused` above.
+        state.pending_focus = None;
         for mi in 0..state.monitors.len() {
             state.sync_presented_maximize(mi);
         }
@@ -1074,10 +1091,10 @@ fn decode_session(root: &Jv) -> Result<PersistedSession, SessionError> {
 }
 
 fn layout_json_name(l: LayoutKind) -> &'static str {
-    match l {
-        LayoutKind::Column => "column",
-        LayoutKind::Column => "grid",
-    }
+    // `LayoutKind` is currently `Column`-only; keep the function so a future
+    // `Grid` variant gains its arm here instead of at every call site.
+    let _ = l;
+    "column"
 }
 
 /// Append `"name":<float>` avoiding a trailing `.0` where possible.

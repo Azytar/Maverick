@@ -27,13 +27,31 @@ impl WindowManager {
             .check()?;
 
         let first_mon = &self.engine.state.monitors[0];
+        // `_NET_DESKTOP_GEOMETRY` is the size of the virtual desktop, not
+        // one monitor: the bounding box of all screens (multi-monitor
+        // aware). Saturating: hostile ±2G origins can never wrap the cast.
+        let (mut x0, mut y0, mut x1, mut y1) = (
+            first_mon.screen.x as i64,
+            first_mon.screen.y as i64,
+            first_mon.screen.x as i64 + first_mon.screen.w as i64,
+            first_mon.screen.y as i64 + first_mon.screen.h as i64,
+        );
+        for mon in &self.engine.state.monitors[1..] {
+            let s = &mon.screen;
+            x0 = x0.min(s.x as i64);
+            y0 = y0.min(s.y as i64);
+            x1 = x1.max(s.x as i64 + s.w as i64);
+            y1 = y1.max(s.y as i64 + s.h as i64);
+        }
+        let vw = (x1 - x0).clamp(1, u32::MAX as i64) as u32;
+        let vh = (y1 - y0).clamp(1, u32::MAX as i64) as u32;
         self.conn
             .change_property32(
                 PropMode::REPLACE,
                 self.root,
                 a.net_desktop_geometry,
                 AtomEnum::CARDINAL,
-                &[first_mon.workarea.w, first_mon.workarea.h],
+                &[vw, vh],
             )?
             .check()?;
         Ok(())
@@ -90,7 +108,10 @@ impl WindowManager {
     }
 
     pub(super) fn update_client_list(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let wins: Vec<u32> = self.engine.state.clients.keys().copied().collect();
+        // Sorted for stability: `HashMap` iteration order is random, which
+        // made taskbars flicker/reorder on every manage/unmanage.
+        let mut wins: Vec<u32> = self.engine.state.clients.keys().copied().collect();
+        wins.sort_unstable();
         self.conn
             .change_property32(
                 PropMode::REPLACE,
@@ -140,6 +161,16 @@ impl WindowManager {
             }
         }
         for &w in state.clients.keys() {
+            if seen.insert(w) {
+                out.push(w);
+            }
+        }
+        // Docks (override-redirect panels) are not `clients`, but they ARE
+        // mapped windows above the tiling tree — pagers and `rofi
+        // -windowdmenu` must see them. Sorted for stability, stacked topmost.
+        let mut docks: Vec<u32> = self.docks.keys().copied().collect();
+        docks.sort_unstable();
+        for w in docks {
             if seen.insert(w) {
                 out.push(w);
             }

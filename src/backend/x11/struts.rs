@@ -68,6 +68,11 @@ impl WindowManager {
     /// monitors — is attributed to the monitor actually containing its span,
     /// not just its window centre.
     pub(super) fn monitor_for_strut(&self, win: Window, struts: &[(Edge, u32)]) -> usize {
+        // Hostile CARDINALs can exceed i32::MAX: `as i32` would wrap them
+        // negative and misattribute the dock. Saturate instead.
+        fn sat(v: u32) -> i32 {
+            v.min(i32::MAX as u32) as i32
+        }
         let geom = || -> Option<(i32, i32)> {
             if let Ok(Ok(g)) = self
                 .conn
@@ -82,7 +87,10 @@ impl WindowManager {
                 None
             }
         };
-        let mut point = None;
+        // Candidate points, one per reserved edge: a multi-edge dock
+        // (`top` + `left`) must be attributable by ANY of its spans, not
+        // just `struts.first()`.
+        let mut candidates: Vec<(i32, i32)> = Vec::new();
         if let Some(p) = self
             .conn
             .get_property(
@@ -103,14 +111,14 @@ impl WindowManager {
                     .unwrap_or_default();
                 if v.len() >= 12 {
                     if let Some((cx, cy)) = geom() {
-                        if let Some((edge, _)) = struts.first() {
+                        for (edge, _) in struts {
                             // Midpoint of the dock's span along the *perpendicular*
                             // axis; the coordinate on the edge axis comes from the
                             // window centre.
                             let span_mid = match edge {
                                 Edge::Left | Edge::Right => {
-                                    let s = v[4] as i32;
-                                    let e = v[5] as i32;
+                                    let s = sat(v[4]);
+                                    let e = sat(v[5]);
                                     if e > s {
                                         Some((s + e) / 2)
                                     } else {
@@ -118,8 +126,8 @@ impl WindowManager {
                                     }
                                 }
                                 Edge::Top | Edge::Bottom => {
-                                    let s = v[8] as i32;
-                                    let e = v[9] as i32;
+                                    let s = sat(v[8]);
+                                    let e = sat(v[9]);
                                     if e > s {
                                         Some((s + e) / 2)
                                     } else {
@@ -127,7 +135,7 @@ impl WindowManager {
                                     }
                                 }
                             };
-                            point = Some(match edge {
+                            candidates.push(match edge {
                                 Edge::Left | Edge::Right => (cx, span_mid.unwrap_or(cy)),
                                 Edge::Top | Edge::Bottom => (span_mid.unwrap_or(cx), cy),
                             });
@@ -136,7 +144,20 @@ impl WindowManager {
                 }
             }
         }
-        let (cx, cy) = point.or_else(geom).unwrap_or((0, 0));
+        // First monitor containing ANY candidate span point wins.
+        for &(cx, cy) in &candidates {
+            for (i, m) in self.engine.state.monitors.iter().enumerate() {
+                let s = &m.screen;
+                if cx >= s.x
+                    && cx < s.x.saturating_add(s.w.min(i32::MAX as u32) as i32)
+                    && cy >= s.y
+                    && cy < s.y.saturating_add(s.h.min(i32::MAX as u32) as i32)
+                {
+                    return i;
+                }
+            }
+        }
+        let (cx, cy) = geom().unwrap_or((0, 0));
         for (i, m) in self.engine.state.monitors.iter().enumerate() {
             let s = &m.screen;
             if cx >= s.x && cx < s.x + s.w as i32 && cy >= s.y && cy < s.y + s.h as i32 {
@@ -184,7 +205,12 @@ impl WindowManager {
     ) -> Result<(), Box<dyn std::error::Error>> {
         match self.read_strut(win) {
             Some(struts) if !struts.is_empty() => {
-                let mi = self.monitor_for_strut(win, &struts);
+                if self.engine.state.monitors.is_empty() {
+                    return Ok(());
+                }
+                let mi = self
+                    .monitor_for_strut(win, &struts)
+                    .min(self.engine.state.monitors.len() - 1);
                 // Register every reserved edge at once (bug B4): a single dock
                 // may reserve `top` *and* `left`, and `set_reserved_region`
                 // clears the owner's previous region — so all edges must go in

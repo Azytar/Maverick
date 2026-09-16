@@ -8,8 +8,12 @@
 use std::collections::HashMap;
 
 use crate::config::Cfg;
-use crate::types::{Client, LayoutKind, Monitor, Rect, State, ViewportMode, WindowId, Workspace};
+use crate::types::{
+    Client, LayoutKind, Monitor, Rect, SizeHints, State, ViewportMode, WindowId, Workspace,
+};
 
+/// Scratch tuple-vec `(WindowId, Rect, border_w)` that `arrange` fills before
+/// `DesiredState::from_placements` makes it explicit. Cleared on every call.
 pub type Placements = Vec<(WindowId, Rect, u32)>; // (win, geom, border_w)
 
 /// Which camera/zoom/boost values an `arrange` call should read.
@@ -23,7 +27,8 @@ pub type Placements = Vec<(WindowId, Rect, u32)>; // (win, geom, border_w)
 ///   `ConfigureWindow`s.
 ///
 /// The two paths share every bit of projection math except this one choice, so
-/// they can never drift apart.
+/// they can never drift apart. This is the `Phase::Live`/`Phase::Settled`
+/// split that `arrange` takes as a parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Settled,
@@ -33,6 +38,9 @@ pub enum Phase {
 impl Phase {
     fn is_live(self) -> bool {
         matches!(self, Phase::Live)
+    }
+    fn is_settled(self) -> bool {
+        matches!(self, Phase::Settled)
     }
 }
 
@@ -294,8 +302,17 @@ pub fn arrange(
     out: &mut Placements,
     scratch: &mut RibbonScratch,
 ) {
-    let mon = &state.monitors[mon_idx];
-    let layout = registry.get(mon.ws().layout);
+    let Some(mon) = state.monitors.get(mon_idx) else {
+        // Stale monitor index after hotplug: produce no placements instead
+        // of panicking; the reconciler keeps the last applied frame.
+        out.clear();
+        return;
+    };
+    let Some(ws) = mon.workspaces.get(mon.active_ws) else {
+        out.clear();
+        return;
+    };
+    let layout = registry.get(ws.layout);
     // Always produce a fresh placement set. `out` is the WM's *shared* `desired`
     // buffer, which the compositor animation path also writes into
     // (see `compositor::live_placements`). Without this clear, the previous
@@ -500,7 +517,12 @@ fn arrange_columns(
     let fs = fs_ctx(&state.clients, ws, mon.screen);
 
     // Single source of truth: the ribbon geometry for the requested phase.
-    let g = scratch.ribbon_geom(ws, cfg, full_wa, phase.is_live(), &fs);
+    // NOTE: `ribbon_geom_into` takes `settled` (targets) — pass
+    // `is_settled()`, NOT `is_live()`. A previous revision passed `is_live()`,
+    // swapping both animations at once: one-shot arranges read mid-flight
+    // springs (viewport zoom seemingly not applying) while live frames jumped
+    // straight to targets (accordion/zoom glides snapping).
+    let g = scratch.ribbon_geom(ws, cfg, full_wa, phase.is_settled(), &fs);
     let wa = g.wa;
 
     // `Phase::Settled` projects to the camera's *rest* position (`target`) so a
@@ -623,31 +645,34 @@ fn arrange_columns(
         }
     }
 
-    // ── floating windows — keep existing geom, clamped to the full workarea ──
+    // ── floating windows ── keep existing geom, normalized to workarea ──
+    // Autoridad unica de flotantes (ver `normalize_float_geom`): el arrange es
+    // una proyeccion pura — nunca muta `client.geom` — y normaliza con la
+    // misma funcion idempotente que usan drag / `ConfigureRequest` /
+    // `MoveResize`. Asi el `Desired` de un flotante quieto es bit a bit igual a
+    // su `Applied` y el reconciliador no emite `ConfigureWindow` espurios.
+    //
+    // Excepcion — `float_client_authority`: el WM adopto el rect del cliente
+    // verbatim (sink de `ConfigureRequest`). Re-normalizarlo aqui reescribiria
+    // lo prometido y reabriria el ping-pong (cliente re-pide → WM re-escribe:
+    // el "flotante que salta solo"). Mientras el sello vive, la proyeccion es
+    // el rect adoptado con solo la sanidad de protocolo. El sello se limpia
+    // cuando el WM vuelve a decidir (drag, reglas, `ToggleFloat`, cambio de
+    // workarea/monitor — `settle_float_in_workarea`).
     for &win in &ws.floats {
         let client = match state.clients.get(&win) {
             Some(c) => c,
             None => continue,
         };
-        let mut g = client.geom;
-        // Clamp to workarea so the window is never completely off-screen.
-        g.x = g.x.clamp(
-            full_wa.x,
-            (full_wa.x + full_wa.w as i32)
-                .saturating_sub(g.w as i32)
-                .max(full_wa.x),
-        );
-        g.y = g.y.clamp(
-            full_wa.y,
-            (full_wa.y + full_wa.h as i32)
-                .saturating_sub(g.h as i32)
-                .max(full_wa.y),
-        );
-        g.w = g.w.min(full_wa.w);
-        g.h = g.h.min(full_wa.h);
+        let bw = client.border_w;
+        let g = if client.float_client_authority {
+            adopt_client_float_geometry(client.geom)
+        } else {
+            normalize_float_geom(client.geom, client.hints, full_wa, bw)
+        };
         // Use the client's own border_w so Rule::border_w overrides take effect
         // for floating windows.
-        out.push((win, g, client.border_w));
+        out.push((win, g, bw));
     }
 }
 
@@ -727,6 +752,311 @@ pub fn ideal_scroll(ws: &Workspace, cfg: &Cfg, workarea: Rect, fs: FsCtx) -> f32
             want.clamp(cam_min, cam_max)
         }
     }
+}
+
+/// Normaliza un rect flotante que **el WM ha decidido** (colocacion inicial,
+/// reglas, drag/resize, `ToggleFloat`, cambio de monitor) contra `SizeHints` +
+/// workarea, de forma idempotente (`f(f(x)) == f(x)`).
+///
+/// Orden canonico: `snap_float_to_hints` -> `clamp_float_geom` -> `settle_to_grid`.
+/// El clamp intermedio garantiza que el grid nunca empuje fuera del workarea y
+/// el `settle` final solo encoge dentro de `[min, clamped]`, asi que la
+/// respuesta cae en la rejilla que el propio cliente declara y no le queda nada
+/// que corregir (un flotante quieto no genera `ConfigureWindow` espurios).
+///
+/// # Autoridad: NO usar sobre un rect que el cliente ha pedido
+///
+/// Esta funcion *reescribe* el rect que recibe. Es correcto cuando el rect es
+/// una eleccion del WM (nadie mas va a reclamarlo) y es exactamente el error que
+/// produce el ping-pong cuando se aplica a una peticion del cliente: el cliente
+/// vuelve a pedir su rect y el WM vuelve a reescribirlo, indefinidamente. Para
+/// el rect que llega por `ConfigureRequest` (el cliente es la autoridad) usar
+/// [`adopt_client_float_geometry`].
+///
+/// Puro sobre `(Rect, SizeHints, Rect, u32)`: sin X11, sin `&State`.
+pub fn normalize_float_geom(g: Rect, hints: SizeHints, wa: Rect, border_w: u32) -> Rect {
+    settle_to_grid(
+        clamp_float_geom(snap_float_to_hints(g, hints), wa, border_w),
+        hints,
+    )
+}
+
+/// Re-asienta un flotante como punto fijo de la normalizacion del WM contra el
+/// workarea de `mi` (helper unico para "el flotante adquirio un contexto
+/// nuevo": `ToggleFloat`, cambio de workspace/monitor, des-promocion desde
+/// fullscreen, refresco de `WM_NORMAL_HINTS`).
+///
+/// Por que existe: un flotante insertado en un workarea distinto del que moldeo
+/// su rect llega con un geom que NO es punto fijo de la proyeccion (grid de
+/// hints del nuevo contexto, clamp al nuevo workarea). Sin re-asentarlo, el
+/// primer `arrange` lo corrige — un salto visible *despues* del cambio — y si
+/// el cliente reclama su rect, el ping-pong vuelve. Normalizar aqui (una vez,
+/// al adquirir el contexto) hace que el primer arrange ya no tenga nada que
+/// corregir: un configure, cero saltos.
+///
+/// Limpia el sello `float_client_authority`: el WM vuelve a ser quien decide
+/// (el rect que re-asienta es una eleccion del WM, ya en la rejilla del
+/// cliente). Idempotente por construccion (`normalize_float_geom` lo es).
+///
+/// Puro sobre `&mut State`: sin X11, sin `&mut Cfg`.
+pub fn settle_float_in_workarea(state: &mut State, mi: usize, win: WindowId) {
+    let Some(c) = state.clients.get_mut(&win) else {
+        return;
+    };
+    if !c.is_float() {
+        return;
+    }
+    let Some(mon) = state.monitors.get(mi) else {
+        return;
+    };
+    let (geom, hints, bw, wa) = (c.geom, c.hints, c.border_w, mon.workarea);
+    let settled = normalize_float_geom(geom, hints, wa, bw);
+    let Some(c) = state.clients.get_mut(&win) else {
+        return;
+    };
+    c.geom = settled;
+    c.saved_geom = settled;
+    c.float_client_authority = false;
+}
+
+/// Adopta el rect flotante que **el cliente ha pedido**: la autoridad es el
+/// cliente, el WM solo se queda con lo que la X ya no puede representar.
+///
+/// Esta es la mitad *pliant* de la politica de flotantes y la razon por la que
+/// un flotante es estable: `f(x) == x` para todo rect representable, asi que la
+/// funcion de correccion del cliente (el `ConfigureRequest`/`XResizeWindow` que
+/// un toolkit reenvia cuando cree que su geometria no fue respetada) tiene su
+/// punto fijo en la *primera* peticion. Un WM que reescribe la peticion (snap a
+/// la rejilla, clamp al workarea) crea el bucle: cliente pide A, WM contesta B,
+/// cliente vuelve a pedir A, ... — el flotante "baila" y el WM quema CPU.
+///
+/// Solo se sanean los valores que el protocolo no puede expresar:
+/// * `w`/`h` a `1..=u16::MAX` (un `ConfigureWindow` con 0 es `BadValue`, y el
+///   servidor rechaza la peticion dejando `Applied` por delante de la realidad);
+/// * `x`/`y` al rango `i16` que el evento `ConfigureNotify` transporta.
+///
+/// No hay snap a hints, no hay clamp al workarea y no hay settle: nada de eso
+/// puede mejorar un rect que el cliente eligio, y cualquiera de los tres puede
+/// empeorarlo. La posicion *puede* quedar parcialmente fuera del workarea (un
+/// workarea con struts es invisible para el cliente que se centra en la
+/// pantalla); el WM garantiza que la ventana se pueda alcanzar colocando los
+/// flotantes nuevos dentro (`normalize_float_geom`) y reclamando el trabajo
+/// completo al cambiar el workarea (`reposition_floats`).
+///
+/// Puro sobre `Rect`: sin X11, sin `&State`.
+pub fn adopt_client_float_geometry(g: Rect) -> Rect {
+    let clamp_i16 = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+    Rect::new(
+        clamp_i16(g.x),
+        clamp_i16(g.y),
+        g.w.clamp(1, u32::from(u16::MAX)),
+        g.h.clamp(1, u32::from(u16::MAX)),
+    )
+}
+
+/// Recorta un rect flotante al workarea reservando el marco `2 * border_w`.
+///
+/// Tamano antes que posicion, idempotente, nunca degenerado (`w/h >= 1`).
+/// Es la mitad X11-libre del antiguo `render::clamp_float_to_workarea`: el
+/// backend lo reexporta como adaptador fino para no bifurcar la politica.
+///
+/// Puro sobre `(Rect, Rect, u32)`: sin X11, sin `&State`.
+pub fn clamp_float_geom(mut g: Rect, wa: Rect, border_w: u32) -> Rect {
+    let frame = i64::from(border_w) * 2;
+    let max_w = (i64::from(wa.w) - frame).clamp(1, i64::from(u16::MAX)) as u32;
+    let max_h = (i64::from(wa.h) - frame).clamp(1, i64::from(u16::MAX)) as u32;
+    g.w = g.w.clamp(1, max_w);
+    g.h = g.h.clamp(1, max_h);
+    let max_x = (i64::from(wa.x) + i64::from(wa.w) - i64::from(g.w) - frame).max(i64::from(wa.x));
+    let max_y = (i64::from(wa.y) + i64::from(wa.h) - i64::from(g.h) - frame).max(i64::from(wa.y));
+    g.x = g.x.clamp(
+        wa.x,
+        max_x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+    );
+    g.y = g.y.clamp(
+        wa.y,
+        max_y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+    );
+    g
+}
+
+/// Snap a floating window's requested size to its `WM_NORMAL_HINTS`
+/// (minimum / maximum / base / increment). Pure over `(Rect, SizeHints)` —
+/// no X11, no `&self` — so the drag-resize path and the client
+/// `ConfigureRequest` path share one interpretation and can never disagree.
+///
+/// Why this exists: a hint-respecting toolkit (Qt, Xt, …) corrects any size
+/// that violates its own hints with an immediate follow-up `ConfigureRequest`.
+/// Answering a client resize with a hint-violating size therefore guarantees a
+/// corrective bounce on *every* update — for a progress/download dialog that
+/// resizes itself dozens of times per second (e.g. `PrismLauncher`'s resource
+/// download window) the window visibly jumps bigger/smaller on each bounce.
+/// Snapping first makes the WM's answer something the toolkit accepts, so a
+/// resize storm terminates in exactly one configure per distinct size.
+///
+/// Order matters: min/max clamp, increment round-snap (nearest multiple of
+/// `(size - base)`, the same rounding the drag path historically used), then
+/// min/max clamp again as the final word. Hard `[min, max]` bounds win over
+/// the increment grid because a toolkit always accepts its own min/max, so
+/// the result is a fixed point of the client's correction function even when
+/// the hints themselves are not increment-aligned (pathological).
+///
+/// `!valid` (or all-zero) hints mean "no constraint" and return `g`
+/// unchanged, preserving the old pass-through behaviour for clients without
+/// hints. Position is never touched — only `w`/`h`.
+///
+/// Note: the result may still need a workarea clamp afterwards (see
+/// `normalize_float_request` in `backend::x11::render`): the screen is a
+/// harder constraint than the hints, and the workarea clamp wins when both
+/// cannot be satisfied at once.
+pub(crate) fn snap_float_to_hints(g: Rect, h: SizeHints) -> Rect {
+    if !h.valid {
+        return g;
+    }
+    let mut w = g.w as i32;
+    let mut hh = g.h as i32;
+    if h.min_w > 0 {
+        w = w.max(h.min_w);
+    }
+    if h.min_h > 0 {
+        hh = hh.max(h.min_h);
+    }
+    if h.max_w > 0 {
+        w = w.min(h.max_w);
+    }
+    if h.max_h > 0 {
+        hh = hh.min(h.max_h);
+    }
+    if h.inc_w > 0 {
+        let base = h.base_w.max(0);
+        // i64 math: hostile hints (`base = i32::MIN`) overflow `w - base`
+        // in i32 (panic debug / wrap release) before the `.max(0)`.
+        let n = (((w as i64 - base as i64).max(0) + h.inc_w as i64 / 2) / h.inc_w as i64)
+            .min(i32::MAX as i64) as i32;
+        w = base.saturating_add(n.saturating_mul(h.inc_w));
+    }
+    if h.inc_h > 0 {
+        let base = h.base_h.max(0);
+        let n = (((hh as i64 - base as i64).max(0) + h.inc_h as i64 / 2) / h.inc_h as i64)
+            .min(i32::MAX as i64) as i32;
+        hh = base.saturating_add(n.saturating_mul(h.inc_h));
+    }
+    // Final word: hard bounds (a client always accepts its own min/max).
+    if h.min_w > 0 {
+        w = w.max(h.min_w);
+    }
+    if h.min_h > 0 {
+        hh = hh.max(h.min_h);
+    }
+    if h.max_w > 0 {
+        w = w.min(h.max_w);
+    }
+    if h.max_h > 0 {
+        hh = hh.min(h.max_h);
+    }
+    Rect::new(g.x, g.y, w.max(1) as u32, hh.max(1) as u32)
+}
+
+/// Floor a (workarea-clamped) size onto the increment grid without ever
+/// growing it: the workarea clamp wins over the grid. A grid point is adopted
+/// only when it still satisfies `min`; otherwise the clamped size is kept
+/// (no grid point fits `[min, clamped]` — unsatisfiable constraints the
+/// client must yield on, documented in `snap_float_to_hints`).
+pub(crate) fn settle_to_grid(mut g: Rect, h: SizeHints) -> Rect {
+    if !h.valid {
+        return g;
+    }
+    if h.inc_w > 0 {
+        let base = h.base_w.max(0);
+        let w = g.w as i32;
+        if w >= base {
+            let floored = base.saturating_add(
+                ((w as i64 - base as i64) / h.inc_w as i64 * h.inc_w as i64).min(i32::MAX as i64)
+                    as i32,
+            );
+            if h.min_w <= 0 || floored >= h.min_w {
+                g.w = floored.max(1) as u32;
+            }
+        }
+    }
+    if h.inc_h > 0 {
+        let base = h.base_h.max(0);
+        let hgt = g.h as i32;
+        if hgt >= base {
+            let floored = base.saturating_add(
+                ((hgt as i64 - base as i64) / h.inc_h as i64 * h.inc_h as i64).min(i32::MAX as i64)
+                    as i32,
+            );
+            if h.min_h <= 0 || floored >= h.min_h {
+                g.h = floored.max(1) as u32;
+            }
+        }
+    }
+    g
+}
+
+/// Parse the body of a `WM_NORMAL_HINTS` property (the 18 `long`s of
+/// `XSizeHints`) into `SizeHints`. Pure over the wire words so map-time
+/// parsing and `PropertyNotify` refresh share one interpretation.
+///
+/// # Wire layout (ICCCM 4.1.2.3)
+///
+/// The property is the C `XSizeHints` structure serialized as CARD32s, so the
+/// indices below are a *contract*, not a choice:
+///
+/// ```text
+/// 0 flags        1 x          2 y          3 width     4 height
+/// 5 min_w        6 min_h      7 max_w      8 max_h
+/// 9 inc_w       10 inc_h     11 min_asp_x 12 min_asp_y
+/// 13 max_asp_x  14 max_asp_y 15 base_w    16 base_h     17 win_gravity
+/// ```
+///
+/// Every field is read from the index that `Xlib` itself uses (verified against
+/// `XGetWMNormalHints`): a single-word slip silently feeds the float policy
+/// garbage — a resize increment read out of the aspect slot is 0 (no snapping
+/// at all), and a maximum read out of `min_aspect` clamps a 1:1-aspect client
+/// to a few pixels, which the client then fights with a `ConfigureRequest` on
+/// every frame.
+///
+/// Returns `None` when the body is short (< 18 words) — the caller keeps the
+/// previous hints instead of installing a half-parsed constraint set.
+pub(crate) fn parse_wm_normal_hints(v: &[u32]) -> Option<SizeHints> {
+    if v.len() < 18 {
+        return None;
+    }
+    let mut h = SizeHints::default();
+    let f = v[0];
+    if f & SizeHints::P_MIN_SIZE != 0 {
+        h.min_w = v[5] as i32;
+        h.min_h = v[6] as i32;
+    }
+    if f & SizeHints::P_MAX_SIZE != 0 {
+        h.max_w = v[7] as i32;
+        h.max_h = v[8] as i32;
+    }
+    if f & SizeHints::P_RESIZE_INC != 0 {
+        h.inc_w = v[9] as i32;
+        h.inc_h = v[10] as i32;
+    }
+    if f & SizeHints::P_ASPECT != 0 {
+        // Each aspect ratio is `x / y`; a zero denominator is meaningless, so
+        // it is neutralised to 1 (the old code guarded with `.max(1)`).
+        h.min_aspect = v[11] as f32 / (v[12].max(1)) as f32;
+        h.max_aspect = v[13] as f32 / (v[14].max(1)) as f32;
+    }
+    if f & SizeHints::P_BASE_SIZE != 0 {
+        h.base_w = v[15] as i32;
+        h.base_h = v[16] as i32;
+    }
+    h.flags = f;
+    h.valid = true;
+    Some(h)
+}
+
+/// True when the hints pin the window to exactly one size (`min == max` on
+/// both axes). Such a window is always floated at manage time.
+pub(crate) fn fixed_size_hints(h: &SizeHints) -> bool {
+    h.valid && h.max_w > 0 && h.max_h > 0 && h.max_w == h.min_w && h.max_h == h.min_h
 }
 
 #[cfg(test)]

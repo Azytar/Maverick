@@ -65,6 +65,98 @@ mod unit_tests {
     }
 
     #[test]
+    fn fullscreen_horizontal_navigation_releases_exclusive_overlay() {
+        use crate::core::commands::{FocusDirection, ToggleFullscreen};
+        use crate::core::layout::{arrange, Phase, Placements};
+        use crate::types::Dir;
+
+        for (direction, policy) in [
+            (Dir::Left, FullscreenPolicy::Normal),
+            (Dir::Right, FullscreenPolicy::Normal),
+            (Dir::Left, FullscreenPolicy::Deny),
+            (Dir::Right, FullscreenPolicy::True),
+        ] {
+            let mut engine = setup_engine();
+            for win in [1, 2] {
+                let mut c = Client::new(win, 0, 0);
+                c.border_w = 2;
+                engine.state.add_client(c);
+                engine.state.monitors[0].workspaces[0].add_tiled(win, 0.6);
+            }
+            engine.state.monitors[0].workspaces[0].focus.column_idx = 0;
+            engine.state.monitors[0].focused = Some(1);
+            engine.state.monitors[0].focus_stack = vec![2, 1];
+            engine.state.clients.get_mut(&1).unwrap().fullscreen_policy = policy;
+            engine.execute(ToggleFullscreen(Some(1)));
+            let snapshot = engine.state.clients[&1].fs_snapshot;
+            assert_eq!(engine.state.presented_overlay_owner(0), Some(1));
+            // manage(B) can leave the insertion cursor on B while A retains
+            // actual focus and the map-time deferral belongs to A.
+            engine.state.monitors[0].workspaces[0].focus.column_idx = 1;
+            engine.state.pending_focus = Some(crate::types::PendingFocus {
+                window: 2, owner: 1, monitor: 0, workspace: 0,
+            });
+
+            engine.execute(FocusDirection(direction));
+            assert!(engine.state.pending_focus.is_none());
+            assert_eq!(engine.state.monitors[0].focused, Some(2));
+            assert_eq!(engine.state.presented_overlay_owner(0), None,
+                "explicit horizontal navigation must release the pinned overlay");
+            assert!(engine.state.clients[&1].is_fullscreen());
+            assert_eq!(engine.state.clients[&1].fs_snapshot, snapshot);
+
+            let camera = engine.state.monitors[0].ws().camera.target;
+            engine.state.monitors[0].workspaces[0].camera.position = camera;
+            let mut placements = Placements::new();
+            arrange(&engine.state, 0, &engine.cfg, &default_registry(), Phase::Live,
+                &mut placements, &mut RibbonScratch::default());
+            crate::core::present::present(&engine.state, &engine.state.monitors[0], &mut placements);
+            let a = placements.iter().find(|e| e.0 == 1).unwrap().1;
+            let b = placements.iter().find(|e| e.0 == 2).unwrap().1;
+            let screen = engine.state.monitors[0].screen;
+            assert!(
+                b.x >= screen.x && b.right() <= screen.x + screen.w as i32,
+                "B must be fully revealed on screen: {b:?}"
+            );
+            assert!(
+                a.right() <= b.x || a.x >= b.right(),
+                "A must not cover B: {a:?}"
+            );
+
+            engine.execute(FocusDirection(direction));
+            let camera = engine.state.monitors[0].ws().camera.target;
+            engine.state.monitors[0].workspaces[0].camera.position = camera;
+            arrange(&engine.state, 0, &engine.cfg, &default_registry(), Phase::Live,
+                &mut placements, &mut RibbonScratch::default());
+            crate::core::present::present(&engine.state, &engine.state.monitors[0], &mut placements);
+            let a = placements.iter().find(|e| e.0 == 1).unwrap();
+            assert_eq!((a.1, a.2), (screen, 0), "returning to A preserves fullscreen");
+            engine.execute(ToggleFullscreen(Some(1)));
+            assert!(!engine.state.clients[&1].is_fullscreen());
+            assert_eq!(engine.state.clients[&1].border_w, 2);
+            assert_eq!(engine.state.clients[&1].fullscreen_policy, policy);
+        }
+    }
+
+    #[test]
+    fn fullscreen_horizontal_navigation_without_neighbour_keeps_overlay() {
+        use crate::core::commands::{FocusDirection, ToggleFullscreen};
+        use crate::types::Dir;
+        let mut engine = setup_engine();
+        engine.state.add_client(Client::new(1, 0, 0));
+        engine.state.monitors[0].workspaces[0].add_tiled(1, 0.6);
+        engine.state.monitors[0].focused = Some(1);
+        engine.state.monitors[0].focus_stack = vec![1];
+        engine.execute(ToggleFullscreen(Some(1)));
+        for direction in [Dir::Left, Dir::Right] {
+            engine.execute(FocusDirection(direction));
+            assert_eq!(engine.state.presented_overlay_owner(0), Some(1));
+            assert!(engine.state.clients[&1].is_fullscreen());
+        }
+    }
+
+
+    #[test]
     fn config_compositor_spring_reaches_camera() {
         // Regression: `compositor.stiffness` / `compositor.damping` (the
         // `camera_stiffness` / `camera_damping` config keys) must actually
@@ -1264,7 +1356,12 @@ mod unit_tests {
                     windows: vec![i],
                     focused: 0,
                     weight: 0.4,
-                    boost: 1.0,
+                    // Live boost already converged (focused column 1.0,
+                    // others 0.0): a `Phase::Live` arrange below must read a
+                    // self-consistent live state. Leaving every boost at 1.0
+                    // describes no reachable live moment and mis-centers the
+                    // camera target (which is computed from settled targets).
+                    boost: if i == 2 { 1.0 } else { 0.0 },
                 });
             }
             ws.focus = Focus { column_idx: 0 };
@@ -1809,6 +1906,111 @@ mod unit_tests {
                 .all(|c| c.weight >= 0.0 && c.weight.is_finite()),
             "no column weight panicked into NaN/negative"
         );
+    }
+
+    #[test]
+    fn grow_column_second_tile_can_reach_fullscreen() {
+        // Regresión del segundo mosaico bloqueado a 0.95 con 2 columnas
+        // (`max_w = 1.0-0.05*(n-1)`). Debe poder llegar a 1.0 (pantalla completa).
+        use crate::types::Client;
+        let mut engine = setup_engine();
+        let mi = 0;
+        let ws_i = 0;
+        // Dos columnas: la 1ª weight=1.0 (sola), la 2ª weight=0.6 (cfg.column_width)
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, 1.0);
+        engine.state.add_client(Client::new(1, mi, ws_i));
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(2, 0.6);
+        engine.state.add_client(Client::new(2, mi, ws_i));
+        engine.state.monitors[mi].focused = Some(2);
+        engine.state.monitors[mi].workspaces[ws_i].focus.column_idx = 1;
+        // Empujar la 2ª hasta el tope con deltas grandes
+        for _ in 0..30 {
+            engine.dispatch(Action::GrowCol(500));
+        }
+        let w = engine.state.monitors[mi].workspaces[ws_i].columns[1].weight;
+        assert!(
+            (w - 1.0).abs() < 1e-6,
+            "segundo mosaico debe poder llegar a weight=1.0, got {w}"
+        );
+        // Y debe proyectar a ancho de workarea - 2*bw
+        let mut out = crate::core::layout::Placements::new();
+        let mut scratch = crate::core::layout::RibbonScratch::default();
+        let registry = default_registry();
+        crate::core::layout::arrange(
+            &engine.state,
+            mi,
+            &engine.cfg,
+            &registry,
+            crate::core::layout::Phase::Settled,
+            &mut out,
+            &mut scratch,
+        );
+        let bw = engine.cfg.border_w;
+        let win2 = out.iter().find(|(id, _, _)| *id == 2).unwrap();
+        assert_eq!(
+            win2.2, bw,
+            "borde del mosaico agrandado debe ser cfg.border_w"
+        );
+        // Ancho interior = workarea inset por gaps_outer - 2*bw (lo que `ribbon_geom`
+        // usa como `wa`). Con gaps_outer=6, wa_inset=1908 → inner 1904.
+        let wa_raw = engine.state.monitors[mi].workarea;
+        let gap_outer: i32 = engine.cfg.gaps_outer.min(1_000_000) as i32;
+        let gap_outer = gap_outer
+            .min(wa_raw.w as i32 / 2)
+            .min(wa_raw.h as i32 / 2)
+            .max(0);
+        let wa_w_inset = wa_raw.w.saturating_sub((2 * gap_outer) as u32) as i32;
+        let expected_inner = (wa_w_inset - 2 * bw as i32).max(1) as u32;
+        assert_eq!(
+            win2.1.w, expected_inner,
+            "segundo mosaico a pantalla completa debe ocupar wa_inset - marco, got {:?} want {expected_inner} (wa_raw {wa_raw:?})",
+            win2.1
+        );
+    }
+
+    #[test]
+    fn float_new_window_does_not_tremble_between_manage_and_arrange() {
+        // Nuevo float centrado en manage y luego `arrange` no deben discrepar 4px
+        // por el marco 2*bw — el temblor se arreglaba con Mod+drag (clamp correcto).
+        fn clamp(mut g: crate::types::Rect, wa: crate::types::Rect, bw: u32) -> crate::types::Rect {
+            let frame = 2 * bw as i32;
+            let max_w = (wa.w as i32 - frame).max(1) as u32;
+            let max_h = (wa.h as i32 - frame).max(1) as u32;
+            g.w = g.w.min(max_w).max(1);
+            g.h = g.h.min(max_h).max(1);
+            let max_x =
+                wa.x.saturating_add(wa.w as i32)
+                    .saturating_sub(g.w as i32)
+                    .saturating_sub(frame)
+                    .max(wa.x);
+            let max_y =
+                wa.y.saturating_add(wa.h as i32)
+                    .saturating_sub(g.h as i32)
+                    .saturating_sub(frame)
+                    .max(wa.y);
+            g.x = g.x.clamp(wa.x, max_x);
+            g.y = g.y.clamp(wa.y, max_y);
+            g
+        }
+        let engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let wa = engine.state.monitors[mi].workarea;
+        let bw = engine.cfg.border_w;
+        let target = crate::types::Rect::new(
+            wa.x + (wa.w as i32 - 400) / 2,
+            wa.y + (wa.h as i32 - 300) / 2,
+            400,
+            300,
+        );
+        let clamped_manage = clamp(target, wa, bw);
+        let g2 = clamp(clamped_manage, wa, bw);
+        assert_eq!(
+            clamped_manage, g2,
+            "clamp del float debe ser idempotente, no temblar"
+        );
+        // Y debe ser el mismo que produciría `arrange` (misma fórmula)
+        let again = clamp(g2, wa, bw);
+        assert_eq!(g2, again);
     }
 
     // ─── Fullscreen-as-ribbon-regression (plan 1786166283911) ────────────────────
@@ -2377,6 +2579,56 @@ mod unit_tests {
         );
         assert!(a.is_float());
         assert!(!a.is_fullscreen());
+    }
+
+    #[test]
+    fn fullscreen_toggle_promotes_policy_and_restores_it() {
+        // Column-only design (commit 9dbce98): entering fullscreen via the
+        // Command promotes to `True` (exclusive overlay: present pins it,
+        // manage defers behind it, bypass can step aside). Leaving restores
+        // the snapshotted prior policy so a `Deny`/`True` rule is never
+        // clobbered by one toggle cycle (S6 regression test).
+        use crate::core::commands::{Command, ToggleFullscreen};
+        use crate::types::{Client, FullscreenPolicy, WinFlags};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+
+        let mut c = Client::new(1, mi, ws_i);
+        c.flags.set(WinFlags::FLOAT);
+        c.geom = Rect::new(50, 50, 300, 200);
+        c.saved_geom = c.geom;
+        // A `Deny` rule was applied at manage time: entering must still
+        // promote (keybind wins, as before) but remember the denial.
+        c.fullscreen_policy = FullscreenPolicy::Deny;
+        engine.state.add_client(c);
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(1);
+        engine.state.monitors[mi].focused = Some(1);
+
+        ToggleFullscreen(Some(1)).execute(&mut engine.state, &mut engine.cfg);
+        assert_eq!(
+            engine.state.clients.get(&1).unwrap().fullscreen_policy,
+            FullscreenPolicy::True,
+            "entering fullscreen must promote to exclusive (True)"
+        );
+        assert!(
+            engine
+                .state
+                .clients
+                .get(&1)
+                .unwrap()
+                .is_fullscreen_overlay(),
+            "promoted window must count as the overlay owner"
+        );
+
+        ToggleFullscreen(Some(1)).execute(&mut engine.state, &mut engine.cfg);
+        let c = engine.state.clients.get(&1).unwrap();
+        assert!(!c.is_fullscreen());
+        assert_eq!(
+            c.fullscreen_policy,
+            FullscreenPolicy::Deny,
+            "leaving must restore the pre-enter policy, not Normal"
+        );
     }
 
     #[test]
@@ -4145,13 +4397,157 @@ mod unit_tests {
             .iter()
             .find(|d| d.window == 3)
             .expect("oversized native float present in Desired");
+        // Clamp incluye el marco 2*border_w, igual que `clamp_float_to_workarea`.
+        let bw = engine.cfg.border_w;
+        let exp_w = (wa.w as i32 - 2 * bw as i32).max(1) as u32;
+        let exp_h = (wa.h as i32 - 2 * bw as i32).max(1) as u32;
         assert_eq!(
-            big_entry.rect.w, wa.w,
-            "oversized float clamps to workarea width"
+            big_entry.rect.w, exp_w,
+            "oversized float clamps to workarea width minus frame"
         );
         assert_eq!(
-            big_entry.rect.h, wa.h,
-            "oversized float clamps to workarea height"
+            big_entry.rect.h, exp_h,
+            "oversized float clamps to workarea height minus frame"
+        );
+    }
+
+    // 8d. Autoridad del cliente sobre su flotante: cuando el WM adopta un
+    //     `ConfigureRequest` verbatim (sink de events.rs), sella
+    //     `float_client_authority` y el arrange proyecta ESE rect tal cual —
+    //     sin re-normalizarlo — incluso cuando un snap a hints lo movería.
+    //     Sin el sello, el WM reescribe lo prometido, el cliente reclama su
+    //     rect y el flotante "salta solo" (ping-pong de dos autoridades).
+    #[test]
+    fn adopted_float_request_is_projected_verbatim() {
+        use crate::types::{Client, SizeHints, WinFlags};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+
+        // Flotante con rejilla de hints (base 0, incremento 10, min 100x100).
+        let hints = SizeHints {
+            base_w: 0,
+            base_h: 0,
+            inc_w: 10,
+            inc_h: 10,
+            max_w: 0,
+            max_h: 0,
+            min_w: 100,
+            min_h: 100,
+            min_aspect: 0.0,
+            max_aspect: 0.0,
+            flags: 0,
+            valid: true,
+        };
+        let requested = Rect::new(60, 70, 600, 400); // en rejilla, snap-neutral
+        let mut f = Client::new(2, mi, ws_i);
+        f.flags.set(WinFlags::FLOAT);
+        f.geom = requested;
+        f.saved_geom = requested;
+        f.hints = hints;
+        f.border_w = engine.cfg.border_w;
+        engine.state.add_client(f);
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(2);
+
+        // El sink adoptó la petición verbatim y selló la autoridad.
+        engine
+            .state
+            .clients
+            .get_mut(&2)
+            .unwrap()
+            .float_client_authority = true;
+
+        let desired = pipeline_desired(&engine, mi);
+        let entry = desired
+            .windows
+            .iter()
+            .find(|d| d.window == 2)
+            .expect("sealed float present in Desired");
+        assert_eq!(
+            entry.rect, requested,
+            "sealed float must be projected verbatim, not re-normalized"
+        );
+        assert!(
+            engine.state.clients.get(&2).unwrap().float_client_authority,
+            "projection must be pure: the seal survives arrange"
+        );
+    }
+
+    // 8e. Contexto nuevo para un flotante (ToggleFloat, cambio de workspace o
+    //     de monitor): el rect se re-asienta como punto fijo de la proyección
+    //     del nuevo workarea, de modo que el primer arrange no lo corrija con
+    //     un salto visible. Helper único: `layout::settle_float_in_workarea`.
+    #[test]
+    fn float_gaining_new_context_is_settled_before_first_arrange() {
+        use crate::types::{Client, WinFlags};
+        let mut engine = setup_engine_multi();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+
+        // ToggleFloat: el tile proyectado (800x1080-ish, off-grid) nace
+        // flotante ya re-asentado a la rejilla de hints (inc 10).
+        engine.state.add_client(Client::new(1, mi, ws_i));
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, engine.cfg.column_width);
+        engine.state.monitors[mi].focused = Some(1);
+        let hints_inc: u32 = 10;
+        {
+            let c = engine.state.clients.get_mut(&1).unwrap();
+            c.hints.inc_w = hints_inc as i32;
+            c.hints.inc_h = hints_inc as i32;
+            c.hints.valid = true;
+        }
+        // Estado pre-toggle como en producción: el arrange ya escribió el tile
+        // proyectado en `client.geom` (tipicamente off-grid respecto a hints).
+        use crate::core::commands::Command;
+        let pre = pipeline_desired(&engine, mi);
+        let tile = pre
+            .windows
+            .iter()
+            .find(|d| d.window == 1)
+            .expect("tiled window in Desired")
+            .rect;
+        engine.state.clients.get_mut(&1).unwrap().geom = tile;
+        crate::core::commands::ToggleFloat.execute(&mut engine.state, &mut engine.cfg);
+        {
+            let c = engine.state.clients.get(&1).unwrap();
+            assert!(c.is_float(), "toggle made it float");
+            assert!(
+                c.geom.w % hints_inc == 0 && c.geom.h % hints_inc == 0,
+                "born-float geom must be on the hint grid at once, geom={:?}",
+                c.geom
+            );
+        }
+        let settled = engine.state.clients.get(&1).unwrap().geom;
+        let desired = pipeline_desired(&engine, mi);
+        let entry = desired
+            .windows
+            .iter()
+            .find(|d| d.window == 1)
+            .expect("float present in Desired");
+        assert_eq!(
+            entry.rect, settled,
+            "first arrange after settling must not move the float"
+        );
+
+        // MoveWindowToMonitor: un flotante quieto cambia a un workarea nuevo
+        // (otro monitor) y sale re-asentado dentro de él en el mismo Command.
+        let mut f = Client::new(2, mi, ws_i);
+        f.flags.set(WinFlags::FLOAT);
+        f.geom = Rect::new(100, 100, 200, 150); // fuera del monitor 1 (x>=1920)
+        f.saved_geom = f.geom;
+        engine.state.add_client(f);
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(2);
+        crate::core::commands::MoveWindowToMonitor(2, crate::types::Dir::Right)
+            .execute(&mut engine.state, &mut engine.cfg);
+        let new_mi = (mi + 1) % engine.state.monitors.len();
+        let wa1 = engine.state.monitors[new_mi].workarea;
+        let c2 = engine.state.clients.get(&2).unwrap();
+        assert_eq!(c2.monitor, new_mi, "float moved to monitor 1");
+        assert!(
+            c2.geom.x >= wa1.x && c2.geom.x + c2.geom.w as i32 <= wa1.right(),
+            "float must be settled inside the NEW workarea in the same command, geom={:?} wa={:?}",
+            c2.geom,
+            wa1
         );
     }
 
@@ -4189,8 +4585,8 @@ mod unit_tests {
         assert_eq!(before, tile, "desired geom is the tiled placement");
 
         // A client self-resize reports a divergent rect. The WM (tiled → authority)
-        // must NOT adopt it: classify_configure returns Diverged{follow:false}, so
-        // the model re-asserts Desired instead of mutating client.geom.
+        // must NOT adopt it: classify_configure returns Stale, so the model
+        // re-asserts Desired instead of mutating client.geom.
         let requested = Rect::new(40, 40, 640, 480);
         assert_ne!(
             requested, before,
@@ -4202,10 +4598,10 @@ mod unit_tests {
             seen: true,
             sequence: None,
         };
-        let c = engine.state.clients.get(&1).unwrap();
-        let obs = classify_configure(requested, 2, &applied, c, false);
-        assert!(
-            matches!(obs, ConfigureObservation::Diverged { follow: false }),
+        let obs = classify_configure(requested, 2, &applied);
+        assert_eq!(
+            obs,
+            ConfigureObservation::Stale,
             "tiled self-resize must be denied (re-asserted), not followed"
         );
         assert_eq!(
@@ -4300,18 +4696,19 @@ mod unit_tests {
             "the model adopted the float's new geometry"
         );
 
-        // The convergence policy agrees: a float's divergence is followed.
+        // The convergence policy agrees: a float's divergence is followed (the
+        // sink adopts; classification just marks the report as not-our-echo).
         let applied = AppliedWindow {
             rect: g0,
             border_w: 2,
             seen: true,
             sequence: None,
         };
-        let c = engine.state.clients.get(&1).unwrap();
-        let obs = classify_configure(g1, 2, &applied, c, false);
-        assert!(
-            matches!(obs, ConfigureObservation::Diverged { follow: true }),
-            "a float's self-resize must be followed, not re-asserted"
+        let obs = classify_configure(g1, 2, &applied);
+        assert_eq!(
+            obs,
+            ConfigureObservation::Stale,
+            "a float's self-resize is not our echo: Stale, for the sink to adopt"
         );
     }
 
@@ -4703,15 +5100,10 @@ mod unit_tests {
         // The client attempts a divergent self-resize.
         let reported = Rect::new(40, 40, 640, 480);
         assert_ne!(reported, r, "sanity: request differs from the tile");
-        let obs = classify_configure(
-            reported,
-            b,
-            &applied.windows[&1],
-            engine.state.clients.get(&1).unwrap(),
-            false,
-        );
-        assert!(
-            matches!(obs, ConfigureObservation::Diverged { follow: false }),
+        let obs = classify_configure(reported, b, &applied.windows[&1]);
+        assert_eq!(
+            obs,
+            ConfigureObservation::Stale,
             "tiled self-resize must be re-asserted (WM authority), not followed"
         );
 
@@ -4770,15 +5162,10 @@ mod unit_tests {
         );
 
         let reported = Rect::new(40, 40, 640, 480);
-        let obs = classify_configure(
-            reported,
-            b,
-            &applied.windows[&1],
-            engine.state.clients.get(&1).unwrap(),
-            false,
-        );
-        assert!(
-            matches!(obs, ConfigureObservation::Diverged { follow: false }),
+        let obs = classify_configure(reported, b, &applied.windows[&1]);
+        assert_eq!(
+            obs,
+            ConfigureObservation::Stale,
             "fullscreen self-resize must be re-asserted (stays fullscreen), not followed"
         );
 
@@ -4827,16 +5214,11 @@ mod unit_tests {
             sequence: None,
         };
         let g1 = Rect::new(200, 150, 400, 250);
-        let obs = classify_configure(
-            g1,
-            2,
-            &applied,
-            engine.state.clients.get(&1).unwrap(),
-            false,
-        );
-        assert!(
-            matches!(obs, ConfigureObservation::Diverged { follow: true }),
-            "a float's self-resize must be followed, not re-asserted"
+        let obs = classify_configure(g1, 2, &applied);
+        assert_eq!(
+            obs,
+            ConfigureObservation::Stale,
+            "a float's self-resize is not our echo: Stale, for the sink to adopt"
         );
 
         // Simulate adoption: the model adopts the reported rect into client.geom
@@ -4848,15 +5230,10 @@ mod unit_tests {
             seen: true,
             sequence: None,
         };
-        let obs2 = classify_configure(
-            g1,
-            2,
-            &applied,
-            engine.state.clients.get(&1).unwrap(),
-            false,
-        );
-        assert!(
-            matches!(obs2, ConfigureObservation::Compliant),
+        let obs2 = classify_configure(g1, 2, &applied);
+        assert_eq!(
+            obs2,
+            ConfigureObservation::Compliant,
             "after adoption the reported == applied must be Compliant"
         );
     }
@@ -4893,11 +5270,11 @@ mod unit_tests {
                 300 + (i as u32 + 1) * 20,
                 200 + (i as u32 + 1) * 20,
             );
-            let obs =
-                classify_configure(r, 2, &applied, engine.state.clients.get(&1).unwrap(), false);
-            assert!(
-                matches!(obs, ConfigureObservation::Diverged { follow: true }),
-                "float request {i} must be followed"
+            let obs = classify_configure(r, 2, &applied);
+            assert_eq!(
+                obs,
+                ConfigureObservation::Stale,
+                "float request {i} must not be our echo: Stale, for the sink to adopt"
             );
             engine.state.clients.get_mut(&1).unwrap().geom = r;
             applied = AppliedWindow {
@@ -4908,15 +5285,10 @@ mod unit_tests {
             };
             last = r;
         }
-        let obs = classify_configure(
-            last,
-            2,
-            &applied,
-            engine.state.clients.get(&1).unwrap(),
-            false,
-        );
-        assert!(
-            matches!(obs, ConfigureObservation::Compliant),
+        let obs = classify_configure(last, 2, &applied);
+        assert_eq!(
+            obs,
+            ConfigureObservation::Compliant,
             "final state must be Compliant"
         );
         assert_eq!(engine.state.clients.get(&1).unwrap().geom, last);
@@ -5016,16 +5388,11 @@ mod unit_tests {
                 seen: true,
                 sequence: None,
             };
-            let obs = classify_configure(
-                reported,
-                engine.cfg.border_w,
-                &applied,
-                &engine.state.clients[&1],
-                false,
-            );
-            assert!(
-                matches!(obs, ConfigureObservation::Diverged { follow: false }),
-                "tiled invalid ConfigureRequest {reported:?} must be Diverged{{follow:false}}"
+            let obs = classify_configure(reported, engine.cfg.border_w, &applied);
+            assert_eq!(
+                obs,
+                ConfigureObservation::Stale,
+                "tiled invalid ConfigureRequest {reported:?} must be Stale (never adopted)"
             );
             // The model re-asserts Desired; the client geometry is untouched.
             let desired_after = pipeline_desired(&engine, mi)
@@ -5149,30 +5516,21 @@ mod unit_tests {
         };
 
         // Simulate an unexpected ConfigureNotify for A (fullscreen) and B (tiled).
-        let obs_a = classify_configure(
-            Rect::new(40, 40, 640, 480),
-            0,
-            &a_applied,
-            engine.state.clients.get(&1).unwrap(),
-            false,
+        let obs_a = classify_configure(Rect::new(40, 40, 640, 480), 0, &a_applied);
+        let obs_b = classify_configure(Rect::new(10, 10, 800, 600), b_b, &b_applied);
+        assert_eq!(
+            obs_a,
+            ConfigureObservation::Stale,
+            "A (fullscreen) must NOT be classified as our echo"
         );
-        let obs_b = classify_configure(
-            Rect::new(10, 10, 800, 600),
-            b_b,
-            &b_applied,
-            engine.state.clients.get(&2).unwrap(),
-            false,
-        );
-        assert!(
-            matches!(obs_a, ConfigureObservation::Diverged { follow: false }),
-            "A (fullscreen) must NOT follow"
-        );
-        assert!(
-            matches!(obs_b, ConfigureObservation::Diverged { follow: false }),
-            "B (tiled) must NOT follow"
+        assert_eq!(
+            obs_b,
+            ConfigureObservation::Stale,
+            "B (tiled) must NOT be classified as our echo"
         );
         // This proves no "fullscreen == overlay" regression: the WM is the
-        // authority for tiled AND fullscreen windows and never follows.
+        // authority for tiled AND fullscreen windows — both reports are stale
+        // traffic it re-asserts over, never adopted as the model.
 
         engine.execute(crate::core::commands::ViewWorkspace(1));
         assert_eq!(engine.state.monitors[mi].active_ws, 1);
@@ -6463,11 +6821,11 @@ mod unit_tests {
                 300 + (i as u32 + 1) * 11,
                 200 + (i as u32 + 1) * 11,
             );
-            let obs =
-                classify_configure(r, 2, &applied, engine.state.clients.get(&1).unwrap(), false);
-            assert!(
-                matches!(obs, ConfigureObservation::Diverged { follow: true }),
-                "iteration {i}: float fight must be followed"
+            let obs = classify_configure(r, 2, &applied);
+            assert_eq!(
+                obs,
+                ConfigureObservation::Stale,
+                "iteration {i}: float fight must not be our echo (Stale, sink adopts)"
             );
             engine.state.clients.get_mut(&1).unwrap().geom = r;
             applied = AppliedWindow {
@@ -6480,8 +6838,9 @@ mod unit_tests {
             iterations += 1;
         }
         // MEASUREMENT NOTE: the loop completed exactly 200 iterations; every
-        // iteration produced a `follow:true` verdict with no backoff mechanism
-        // throttling the adoptions (count = 200, all followed).
+        // iteration produced a `Stale` verdict (not our echo) that the sink
+        // adopted, with no backoff mechanism throttling the adoptions
+        // (count = 200, all followed).
         assert_eq!(iterations, 200, "loop completed 200 iterations");
         assert_eq!(engine.state.clients.get(&1).unwrap().geom, last);
         assert_eq!(
@@ -6816,7 +7175,7 @@ mod unit_tests {
                 }
                 // 9: ConfigureRequest (simulated — no X11 connection). A reported
                 //    rect the WM did not ask for. Tiled/fullscreen ⇒ the WM is the
-                //    authority (Diverged{follow:false}); a pure float ⇒ follow.
+                //    authority (Stale ⇒ re-assert); a pure float ⇒ the sink adopts.
                 9 => {
                     if !live.is_empty() {
                         configure_requests += 1;
@@ -6829,17 +7188,11 @@ mod unit_tests {
                         if let Some((is_float_fs, bw)) = facts {
                             let reported = rrect(&mut rng);
                             let a = applied.windows.get(&w).copied().unwrap_or_default();
-                            let obs = classify_configure(
-                                reported,
-                                a.border_w,
-                                &a,
-                                engine.state.clients.get(&w).unwrap(),
-                                false,
-                            );
-                            let ok = matches!(obs, ConfigureObservation::Diverged { follow: f } if f == is_float_fs);
+                            let obs = classify_configure(reported, a.border_w, &a);
+                            let ok = obs != ConfigureObservation::Compliant;
                             assert!(
                                 ok,
-                                "seed {seed:#x} step {step} op ConfigureRequest win {w}: expected Diverged{{follow:{is_float_fs}}} but got a different verdict",
+                                "seed {seed:#x} step {step} op ConfigureRequest win {w}: expected Stale (not our echo) but got a different verdict",
                             );
                             if is_float_fs {
                                 // Float: adopt the reported geometry into the model.
@@ -7006,20 +7359,23 @@ mod unit_tests {
                                 .map(|c| (c.is_float() && !c.is_fullscreen(), c.border_w));
                             if let Some((is_float_fs, bw)) = facts {
                                 let a = applied.windows.get(&w).copied().unwrap_or_default();
-                                let obs = classify_configure(
-                                    reported,
-                                    a.border_w,
-                                    &a,
-                                    engine.state.clients.get(&w).unwrap(),
-                                    false,
-                                );
-                                match obs {
-                                    ConfigureObservation::Compliant => {}
-                                    ConfigureObservation::Diverged { follow } => assert_eq!(
-                                        follow,
-                                        is_float_fs,
-                                        "seed {seed:#x} step {step} op ConfigureNotify win {w}: follow {follow} != expected {is_float_fs}"
-                                    ),
+                                let obs = classify_configure(reported, a.border_w, &a);
+                                // Pure geometry contract: only an echo of Applied
+                                // is Compliant; every other report (incl. the
+                                // Desired-matching reassert path) is stale
+                                // traffic the sink re-asserts over or adopts.
+                                if reported == a.rect {
+                                    assert_eq!(
+                                        obs,
+                                        ConfigureObservation::Compliant,
+                                        "seed {seed:#x} step {step} op ConfigureNotify win {w}: echo of Applied must be Compliant"
+                                    );
+                                } else {
+                                    assert_eq!(
+                                        obs,
+                                        ConfigureObservation::Stale,
+                                        "seed {seed:#x} step {step} op ConfigureNotify win {w}: non-echo report must be Stale"
+                                    );
                                 }
                                 if is_float_fs {
                                     if let Some(cmut) = engine.state.clients.get_mut(&w) {
@@ -7450,16 +7806,11 @@ mod unit_tests {
             seen: true,
             sequence: None,
         };
-        let obs = classify_configure(
-            reported,
-            engine.cfg.border_w,
-            &applied,
-            &engine.state.clients[&w],
-            false,
-        );
-        assert!(
-            matches!(obs, ConfigureObservation::Diverged { follow: false }),
-            "model A: a fullscreen ConfigureRequest must be Diverged{{follow:false}} (WM authority)"
+        let obs = classify_configure(reported, engine.cfg.border_w, &applied);
+        assert_eq!(
+            obs,
+            ConfigureObservation::Stale,
+            "model A: a fullscreen ConfigureRequest must be Stale (WM authority re-asserts)"
         );
 
         // The WM must NOT adopt the divergent client rect — it reasserts its own

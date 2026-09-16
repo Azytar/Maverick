@@ -76,8 +76,11 @@ impl Drop for SyncGrabGuard {
     }
 }
 
+/// Live drag/resize state for the window currently grabbed by `Mod4+Button`.
+/// Owned by `WindowManager::drag`; `None` when no drag is active.
 #[derive(Debug)]
 pub(super) struct DragState {
+    /// Window being dragged.
     pub(super) win: Window,
     pub(super) start_geom: Rect,
     pub(super) ptr_x: i32,
@@ -116,6 +119,14 @@ impl WindowManager {
             let clean = clean_mask(u16::from(e.state), self.numlock);
             if clean == sup {
                 self.scroll_camera_with_wheel(e.detail, e.root_x as i32, e.root_y as i32)?;
+                // Consumed as a WM gesture: release the SYNC grab WITHOUT
+                // replay (ASYNC discards the press so the app doesn't also
+                // scroll) and mark the guard emitted — falling through to
+                // `Drop` would REPLAY plus log a bogus FREEZE-RISK.
+                _guard.emitted = true;
+                self.conn
+                    .allow_events(Allow::ASYNC_POINTER, e.time)?
+                    .check()?;
                 return Ok(());
             }
             _guard.emitted = true;
@@ -341,7 +352,12 @@ impl WindowManager {
         let clean = clean_mask(u16::from(e.state), self.numlock);
         if clean == sup && !focused_fs {
             if let Some(cw) = client_win {
-                if let Some(c) = self.engine.state.clients.get(&cw) {
+                // Only already-floating windows are draggable (move with
+                // Button1, resize with Button3). Tiled windows are managed
+                // exclusively by the keyboard (Mod4+Shift+h/l/j/k); a Mod4
+                // drag on a tile is a no-op — it can never detach it as a
+                // float and a float drag can never drop back into a column.
+                if let Some(c) = self.engine.state.clients.get(&cw).filter(|c| c.is_float()) {
                     let geom = c.geom;
                     let is_resize = e.detail == ButtonIndex::M3.into();
                     let grab_ok = self
@@ -375,38 +391,26 @@ impl WindowManager {
                             resize_t,
                             moved: false,
                         });
+                        // El WM reclama la geometria durante el drag: el sello
+                        // de autoridad del cliente muere aqui, no en el
+                        // siguiente request (el rect resultante ya no es suyo).
+                        if let Some(c) = self.engine.state.clients.get_mut(&cw) {
+                            c.float_client_authority = false;
+                        }
                         drag_started = true;
                     }
                 }
             }
         }
 
-        // After a click that *changes* focus, warp the pointer onto the newly
-        // focused window. `focus()` just recentered the camera, so the clicked
-        // window now sits somewhere else on screen; without the warp the next
-        // click (at the same spot) would land on whatever scrolled under the
-        // cursor — i.e. the *previous* window ("clicks act on the old window").
-        // Skipped while a Mod4 drag is starting, so grabs keep working.
-        if !drag_started {
-            let new_focused = self.engine.state.monitors[mi].focused;
-            if new_focused != prev_focused {
-                if let Some(fw) = new_focused {
-                    if let Some(c) = self.engine.state.clients.get(&fw) {
-                        let g = c.geom;
-                        let _ = self.conn.warp_pointer(
-                            x11rb::NONE,
-                            fw,
-                            0,
-                            0,
-                            0,
-                            0,
-                            (g.w / 2) as i16,
-                            (g.h / 2) as i16,
-                        );
-                    }
-                }
-            }
-        }
+        // El warp al centro tras cambiar foco vive únicamente en
+        // `render::focus()` y respeta `cfg.warp_cursor`. El bloque que
+        // estaba aquí duplicaba ese warp de forma incondicional (ignoraba
+        // la config) y competía con él: cada click en un mosaico vecino
+        // movía el puntero dos veces y desalineaba el hit-test del
+        // siguiente click — especialmente visible con flotantes.
+        let _ = prev_focused;
+        let _ = drag_started;
 
         // REPLAY_POINTER: re-delivers the click to the application so popups,
         //   context menus and dialogs open normally.
@@ -445,7 +449,7 @@ impl WindowManager {
 
     pub(super) fn on_button_release(
         &mut self,
-        e: ButtonReleaseEvent,
+        _e: ButtonReleaseEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Unconditional: guarantees the active drag grab is released on every exit
         // path (see `SyncGrabGuard`), so a failed `focus`/`arrange` inside the
@@ -460,11 +464,12 @@ impl WindowManager {
         itrace!("BR-enter drag_active={}", self.drag.is_some());
 
         if let Some(drag) = self.drag.take() {
+            // Explicit ungrab below: mark emitted in ALL builds (the old
+            // cfg-gated mark double-ungrabbed + spammed FREEZE-RISK on every
+            // normal drag release).
+            _guard.emitted = true;
             #[cfg(feature = "input-trace")]
-            {
-                _guard.emitted = true;
-                itrace!("BR-ungrab_pointer EMITTED (drag was active)");
-            }
+            itrace!("BR-ungrab_pointer EMITTED (drag was active)");
             self.conn.ungrab_pointer(x11rb::CURRENT_TIME)?.check()?;
             // Use the window's actual monitor, not sel_mon (H3).
             // After a hotplug during a drag, sel_mon may be stale.
@@ -478,92 +483,17 @@ impl WindowManager {
                 .filter(|&m| m < self.engine.state.monitors.len())
                 .unwrap_or(0);
 
-            // Clear any tile-insertion preview highlight left on the last
-            // hovered window.
-            if let Some(prev) = self.drag_target.take() {
-                let _ = self.conn.change_window_attributes(
-                    prev,
-                    &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
-                        .border_pixel(self.engine.cfg.col_normal),
-                );
-            }
-
-            // Drop-to-tile: a *real move* released over a tiled window inserts
-            // the dragged window back into the tiling tree at that column and
-            // row (dropping over empty space still leaves it floating).
-            if drag.moved && !drag.resize {
-                let (rx, ry) = (e.root_x as i32, e.root_y as i32);
-                if let Some(target) = self.drop_candidate(win, mi, rx, ry) {
-                    let ws_i = self.engine.state.monitors[mi].active_ws;
-                    let col_idx = {
-                        let ws = &self.engine.state.monitors[mi].workspaces[ws_i];
-                        ws.columns
-                            .iter()
-                            .position(|col| col.windows.contains(&target))
-                    };
-                    if let Some(ci) = col_idx {
-                        // Insert at the row whose windows sit above the pointer
-                        // (count of windows with center above ry).
-                        let insert_pos = {
-                            let ws = &self.engine.state.monitors[mi].workspaces[ws_i];
-                            ws.columns[ci]
-                                .windows
-                                .iter()
-                                .take_while(|&&w| {
-                                    self.engine
-                                        .state
-                                        .clients
-                                        .get(&w)
-                                        .is_some_and(|c| c.geom.y + c.geom.h as i32 / 2 < ry)
-                                })
-                                .count()
-                        };
-                        {
-                            let ws = &mut self.engine.state.monitors[mi].workspaces[ws_i];
-                            // Remove from its current place (floats or a column),
-                            // then drop into the target column as its focused row.
-                            ws.remove_window(win);
-                            ws.drop_into_column(ci, win, insert_pos);
-                        }
-                        if let Some(c) = self.engine.state.clients.get_mut(&win) {
-                            c.flags.clear(WinFlags::FLOAT);
-                        }
-                        self.stack_dirty = true;
-                        self.arrange(mi)?;
-                        self.focus(Some(win))?;
-                        self.sync_window_prefs(win);
-                        return Ok(());
-                    }
-                }
-            }
-
-            // Not dropped into a tile: keep it floating. If on_motion set the
-            // FLOAT flag but the window is still in a column, promote it to
-            // ws.floats now so arrange() treats it as a float and doesn't
-            // retile it back to its column position.
-            let is_float = self
-                .engine
-                .state
-                .clients
-                .get(&win)
-                .is_some_and(crate::types::Client::is_float);
-            if is_float {
-                let ws_i = self.engine.state.monitors[mi].active_ws;
-                let in_floats = self.engine.state.monitors[mi].workspaces[ws_i]
-                    .floats
-                    .contains(&win);
-                if !in_floats {
-                    // P3: mutate in-place, no clone
-                    self.engine.state.monitors[mi].workspaces[ws_i].remove_window(win);
-                    self.engine.state.monitors[mi].workspaces[ws_i]
-                        .floats
-                        .push(win);
-                    self.stack_dirty = true;
-                }
-            }
-
+            // A float drag never changes tiling membership: it stays floating
+            // wherever it is released (clamped to the workarea by on_motion).
+            // No preview highlight to clear — drag-release never re-tiles.
             self.arrange(mi)?;
             self.sync_window_prefs(win);
+        } else {
+            // No drag was active: the press path already released the SYNC
+            // grab via allow_events, so there is nothing to ungrab. Mark
+            // emitted so Drop doesn't fire a spurious ungrab_pointer +
+            // FREEZE-RISK log on every plain click release.
+            _guard.emitted = true;
         }
         Ok(())
     }
@@ -612,10 +542,12 @@ impl WindowManager {
                     g.h = (start_geom.h as i32).saturating_add(dy).max(1) as u32;
                 }
                 // Respect `WM_SIZE_HINTS` (bug B5): clamp to the client's
-                // minimum size and snap to its size increments, so terminals /
-                // emacs can't be dragged below their hinted minimum. The hard
-                // `1px` floor above only guards against overflow; real limits
-                // come from the hints. When the left/top edge is the grabbed
+                // minimum/maximum size and snap to its size increments, so
+                // terminals / emacs can't be dragged below their hinted
+                // minimum. The hard `1px` floor above only guards against
+                // overflow; real limits come from the hints (shared with the
+                // client `ConfigureRequest` path via `snap_float_to_hints` so
+                // both agree). When the left/top edge is the grabbed
                 // one, the opposite (anchored) corner must stay put after the
                 // width/height snap.
                 let (mi, bw) = {
@@ -634,28 +566,7 @@ impl WindowManager {
                     .get(&win)
                     .map(|c| c.hints)
                     .unwrap_or_default();
-                let min_w = if hints.min_w > 0 {
-                    hints.min_w as u32
-                } else {
-                    1
-                };
-                let min_h = if hints.min_h > 0 {
-                    hints.min_h as u32
-                } else {
-                    1
-                };
-                g.w = g.w.max(min_w);
-                g.h = g.h.max(min_h);
-                if hints.inc_w > 0 {
-                    let base = hints.base_w.max(0);
-                    let n = ((g.w as i32 - base).max(0) + hints.inc_w / 2) / hints.inc_w;
-                    g.w = (base + n * hints.inc_w).max(0) as u32;
-                }
-                if hints.inc_h > 0 {
-                    let base = hints.base_h.max(0);
-                    let n = ((g.h as i32 - base).max(0) + hints.inc_h / 2) / hints.inc_h;
-                    g.h = (base + n * hints.inc_h).max(0) as u32;
-                }
+                g = snap_float_to_hints(g, hints);
                 if resize_l {
                     let right = start_geom.x + start_geom.w as i32;
                     g.x = right - g.w as i32;
@@ -664,10 +575,24 @@ impl WindowManager {
                     let bottom = start_geom.y + start_geom.h as i32;
                     g.y = bottom - g.h as i32;
                 }
-                // Keep the drag inside the monitor workarea (bug B5): floats are
-                // clamped elsewhere via `clamp_float_to_workarea`, but the drag
-                // path skipped it and could push the window off-screen.
+                // Normalizacion unica (ver `layout::normalize_float_geom`): el
+                // drag-resize comparte snap -> clamp con marco -> settle con el
+                // arrange y con `ConfigureRequest`, asi el rect arrastrado ya es
+                // punto fijo y el siguiente arrange no lo corrige (sin saltos).
+                // El re-anclaje de arriba se repite tras el settle porque este
+                // puede encoger `w/h` una linea de grid: la esquina agarrada
+                // sigue fija y la opuesta (anclada) no se mueve.
                 let wa = self.engine.state.monitors[mi].workarea;
+                g = clamp_float_to_workarea(g, wa, bw);
+                g = crate::core::layout::settle_to_grid(g, hints);
+                if resize_l {
+                    let right = start_geom.x + start_geom.w as i32;
+                    g.x = right - g.w as i32;
+                }
+                if resize_t {
+                    let bottom = start_geom.y + start_geom.h as i32;
+                    g.y = bottom - g.h as i32;
+                }
                 g = clamp_float_to_workarea(g, wa, bw);
                 (g.x, g.y, g.w, g.h)
             } else {
@@ -693,69 +618,11 @@ impl WindowManager {
                 .engine
                 .execute(crate::core::commands::MoveResize(win, rect));
             self.run_effects(effects)?;
-
-            // Tile-insertion preview: while *moving*, highlight the tiled
-            // window under the pointer so the user sees where release would
-            // insert the window. Resize drags skip the preview.
-            if !resize {
-                let mi = self.engine.state.mon_at(e.root_x as i32, e.root_y as i32);
-                self.preview_drop_target(win, mi, e.root_x as i32, e.root_y as i32);
-            }
         } else if self.engine.cfg.focus_mouse {
             // Focus-follows-mouse is handled via on_enter (EnterNotify)
             // to avoid an X11 query_tree round-trip on every motion event.
         }
         Ok(())
-    }
-
-    /// The tiled window under `(px, py)` that a dropped float would join, if
-    /// any. Ignores floats and overlay-presented (fullscreen/maximized) ones.
-    fn drop_candidate(&self, drag_win: Window, mi: usize, px: i32, py: i32) -> Option<Window> {
-        let state = &self.engine.state;
-        let mon = state.monitors.get(mi)?;
-        let ws = mon.workspaces.get(mon.active_ws)?;
-        for col in &ws.columns {
-            for &w in &col.windows {
-                if w == drag_win {
-                    continue;
-                }
-                let Some(c) = state.clients.get(&w) else {
-                    continue;
-                };
-                if c.is_fullscreen() || ws.presented_maximize == Some(w) {
-                    continue;
-                }
-                let g = &c.geom;
-                if px >= g.x && px < g.x + g.w as i32 && py >= g.y && py < g.y + g.h as i32 {
-                    return Some(w);
-                }
-            }
-        }
-        None
-    }
-
-    /// Highlight (or clear) the tile-insertion preview while a move drag hovers
-    /// a tiled window. Reverts the previously highlighted tile first.
-    fn preview_drop_target(&mut self, drag_win: Window, mi: usize, px: i32, py: i32) {
-        let target = self.drop_candidate(drag_win, mi, px, py);
-        if target == self.drag_target {
-            return;
-        }
-        if let Some(prev) = self.drag_target.take() {
-            let _ = self.conn.change_window_attributes(
-                prev,
-                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
-                    .border_pixel(self.engine.cfg.col_normal),
-            );
-        }
-        if let Some(t) = target {
-            let _ = self.conn.change_window_attributes(
-                t,
-                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
-                    .border_pixel(self.engine.cfg.col_focused),
-            );
-            self.drag_target = Some(t);
-        }
     }
 
     /// Mod4 + scroll wheel: drive the column-ribbon camera. We don't free-scroll

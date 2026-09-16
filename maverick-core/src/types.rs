@@ -14,37 +14,84 @@ use crate::wallpaper::{WallpaperMode, WallpaperSource, WallpaperSpec};
 /// Window` / `as WindowId`). A future Wayland backend would map its own surface
 /// handles onto this same id space instead. The frontier is strict: the core
 /// speaks only `WindowId`, the backend does the conversion.
+///
+/// # Invariant
+///
+/// `WindowId` values are stable for the lifetime of a managed window. The
+/// backend must not reuse an id after unmanaging a window, because X11
+/// itself guarantees that XIDs are never reused within a session. This
+/// invariant is what lets `State::clients` use the id as a key and lets
+/// focus stacks and deferred-focus slots reference windows by id without
+/// stale-reference risk.
 pub type WindowId = u32;
 
 // ─── Geometry ────────────────────────────────────────────────────────────────
 
+/// Screen-aligned rectangle in pixel coordinates.
+///
+/// This is the authoritative rectangle type for the entire Maverick
+/// domain model. It uses `i32` for position to allow negative values
+/// (e.g. when a window is dragged partially off-screen during an
+/// interactive move). The origin is screen-space, measured from the
+/// upper-left corner of each monitor. Width and height are `u32`
+/// to forbid degenerate zero/negative sizes — any operation that
+/// produces an invalid size clamps to at least 1px (the audit requirement
+/// "geometry must never be invalid" in Fase 12).
+///
+/// # Responsibilities
+///
+/// - Owns the authoritative position of tiled windows (projected from
+///   column layout) and floating windows (from client/rule geometry).
+/// - Used by `Client::geom` (WM-authoritative), `Client::saved_geom`
+///   (persistence), `Workspace::camera` (scroll origin), and many
+///   rendering/compositing calculations.
+/// - Does NOT own any X11 state — the backend owns the `xcb_window_t`
+///   geometry and the X11 property `_NET_FRAME_EXTENTS`.
+///
+/// # Invariants
+///
+/// - `w >= 1` and `h >= 1` for all active windows. Geometry that would
+///   be zero or negative is clamped to 1px (see `arrange_columns`). The
+///   compositor never presents a window with a zero-area rect.
+/// - X11 hit-testing (pointer warp, input focus) reads `client.geom` directly.
+/// - The composition layer (`core::present`) uses the same rect values
+///   for rendering; any mismatch would leave pixels uncovered or
+///   incorrectly drawn.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rect {
+    /// X coordinate of the top-left corner.
     pub x: i32,
+    /// Y coordinate of the top-left corner.
     pub y: i32,
+    /// Width in pixels.
     pub w: u32,
+    /// Height in pixels.
     pub h: u32,
 }
 
 impl Rect {
+    /// Create a rect at `(x, y)` with size `w × h`.
     #[inline]
     pub fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
         Self { x, y, w, h }
     }
+    /// True when point `(px, py)` lies inside `self` (half-open on right/bottom).
+    /// Saturating: hostile `w = u32::MAX` (`-1 as i32`) can never wrap `x + w`.
     #[inline]
     pub fn contains(&self, px: i32, py: i32) -> bool {
-        px >= self.x && px < self.x + self.w as i32 && py >= self.y && py < self.y + self.h as i32
+        px >= self.x && px < self.right() && py >= self.y && py < self.bottom()
     }
+    /// Area in pixels (`w * h` as `u64` to avoid `u32` overflow).
     #[inline]
     pub fn area(&self) -> u64 {
         self.w as u64 * self.h as u64
     }
-    /// True when `other` is entirely inside `self`. Used for occlusion culling
-    /// (Fase 12): a window fully behind a single opaque window above it is
-    /// hidden.
+    /// X coordinate of the right edge (`x + w`, saturating).
+    /// `w` is clamped to `i32::MAX` first: a hostile `u32::MAX` casts to
+    /// `-1 as i32` and would otherwise move the edge backwards.
     #[inline]
     pub fn right(&self) -> i32 {
-        self.x + self.w as i32
+        self.x.saturating_add(self.w.min(i32::MAX as u32) as i32)
     }
     /// True when `other` is entirely inside `self`. Used for occlusion culling
     /// (Fase 12): a window fully behind a single opaque window above it is
@@ -56,33 +103,87 @@ impl Rect {
             && self.right() >= other.right()
             && self.bottom() >= other.bottom()
     }
+    /// Y coordinate of the bottom edge (`y + h`, saturating).
     #[inline]
     pub fn bottom(&self) -> i32 {
-        self.y + self.h as i32
+        self.y.saturating_add(self.h.min(i32::MAX as u32) as i32)
     }
     /// Smallest rect containing both `self` and `other`. Used for animation
     /// damage (Fase 7): a window that slides from one rect to another must
     /// repaint the union so neither the pixels it left nor the ones it slid
-    /// into linger.
+    /// into linger. Saturating: opposite `±2G` origins can never wrap the cast.
     #[inline]
     pub fn union(&self, other: Rect) -> Rect {
         let x0 = self.x.min(other.x);
         let y0 = self.y.min(other.y);
         let x1 = self.right().max(other.right());
         let y1 = self.bottom().max(other.bottom());
-        Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32)
+        Rect::new(
+            x0,
+            y0,
+            (x1 as i64 - x0 as i64).clamp(0, u32::MAX as i64) as u32,
+            (y1 as i64 - y0 as i64).clamp(0, u32::MAX as i64) as u32,
+        )
     }
 }
 
 // ─── Window flags ─────────────────────────────────────────────────────────────
 
+/// Bit-packed flags attached to every `Client`, controlling its layout and
+/// presentation behavior. Each bit encodes a distinct policy; flags are
+/// independently set/clear/toggled by the WM, window rules, and commands
+/// (`ToggleFloat`, `ToggleFullscreen`, etc.).
+///
+/// # Responsibilities
+///
+/// - `FLOAT` — window participates in `Workspace::floats`, excluded from
+///   columnar layout (`arrange_columns`). Its `geom` is client-defined and
+///   not derived from the tiling algorithm.
+/// - `FULLSCREEN` — window has requested fullscreen; its presentation mode
+///   (floating column vs exclusive overlay) is governed by
+///   `Client::fullscreen_policy` (see `FullscreenPolicy::Normal`,
+///   `Deny`, `True`).
+/// - `URGENT` — visual indicator (border color) that the window has been
+///   marked as needing the user's attention.
+/// - `NO_FOCUS` — window does not want keyboard/mouse input; usually set
+///   via ICCCM `WM_HINTS`.
+/// - `FIXED` — window has explicit size hints (`wm_size_hints`) enforcing
+///   fixed dimensions; prevents column resizing from changing its geometry.
+/// - `MAXIMIZED_V` / `MAXIMIZED_H` — `_NET_WM_STATE_MAXIMIZED_VERT` /
+///   `_NET_WM_STATE_MAXIMIZED_HORZ` bits from EWMH. Both must be on for a
+///   window to be considered "maximized" (`is_maximized()`).
+/// - `STICKY` — window is sticky: visible on every workspace of its monitor.
+///   It conceptually floats above all layout decisions.
+/// - `FS_WAS_FLOAT` — remembers that a window was floating before it entered
+///   fullscreen, so leaving fullscreen can restore the float (and `saved_geom`)
+///   instead of dropping it back as a tiled column.
+/// - `FLOAT_NATIVE` — window was born floating at map time (via window type,
+///   transient-for, size hints, or rules). This origin is never cleared,
+///   enabling backend drag semantics to distinguish native floats from
+///   user-torn-off tiles (see `WinFlags::FLOAT_NATIVE` docs).
+///
+/// # Invariants
+///
+/// - Bits 0-9 are used; bits >= 10 are reserved/future.
+/// - `MAXIMIZED` is defined as `MAXIMIZED_V | MAXIMIZED_H`; using
+///   `has(MAXIMIZED)` tests only *bit overlap*, which is true if either
+///   axis is set individually — so callers must check both axes via
+///   `is_maximized_v() && is_maximized_h()`.
+/// - A window with `STICKY` is always conceptually floating; it is always
+///   in `Workspace::floats` and excluded from column layout.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WinFlags(u16);
 impl WinFlags {
+    /// Window participates in `Workspace::floats` (`Client::geom` is authoritative).
     pub const FLOAT: u16 = 1 << 0;
+    /// Window has requested fullscreen (`WinFlags::FULLSCREEN`); presentation
+    /// governed by `Client::fullscreen_policy`.
     pub const FULLSCREEN: u16 = 1 << 1;
+    /// Urgent hint — visual border indicator that attention is needed.
     pub const URGENT: u16 = 1 << 2;
+    /// Window does not want input (`WM_HINTS` `InputHint` false).
     pub const NO_FOCUS: u16 = 1 << 3;
+    /// Fixed size hints — column resizing must not change geometry.
     pub const FIXED: u16 = 1 << 4;
     /// Maximized *vertically* — `_NET_WM_STATE_MAXIMIZED_VERT`. The window's
     /// height (and y) come from the workarea; its width/x stay whatever the
@@ -115,18 +216,22 @@ impl WinFlags {
     /// so a native float is never dropped into the tiling tree by accident.
     pub const FLOAT_NATIVE: u16 = 1 << 9;
 
+    /// Set bit(s) `f`.
     #[inline]
     pub fn set(&mut self, f: u16) {
         self.0 |= f;
     }
+    /// Clear bit(s) `f`.
     #[inline]
     pub fn clear(&mut self, f: u16) {
         self.0 &= !f;
     }
+    /// Toggle bit(s) `f`.
     #[inline]
     pub fn toggle(&mut self, f: u16) {
         self.0 ^= f;
     }
+    /// True when any bit in `f` is set (bit-overlap test, not exact equality).
     #[inline]
     pub fn has(&self, f: u16) -> bool {
         self.0 & f != 0
@@ -135,19 +240,76 @@ impl WinFlags {
 
 // ─── Size hints ───────────────────────────────────────────────────────────────
 
+/// ICCCM `WM_NORMAL_HINTS` size constraints for one window.
+///
+/// All fields are raw hints as reported by the client; `valid` indicates
+/// whether any hint was actually set. The layout clamps tiled geometry against
+/// these hints where applicable.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SizeHints {
+    /// Base width for increment calculations.
     pub base_w: i32,
+    /// Base height for increment calculations.
     pub base_h: i32,
+    /// Width increment.
     pub inc_w: i32,
+    /// Height increment.
     pub inc_h: i32,
+    /// Maximum width (0 = unconstrained).
     pub max_w: i32,
+    /// Maximum height (0 = unconstrained).
     pub max_h: i32,
+    /// Minimum width.
     pub min_w: i32,
+    /// Minimum height.
     pub min_h: i32,
+    /// Minimum aspect ratio (`w/h`).
     pub min_aspect: f32,
+    /// Maximum aspect ratio (`w/h`).
     pub max_aspect: f32,
+    /// Raw `XSizeHints.flags` word. Not a constraint: it says which fields are
+    /// *defined* and which authority the client claims over its own geometry
+    /// ([`SizeHints::claims_position`]). Kept raw so the parser stays a pure
+    /// transcription of the wire format (ICCCM 4.1.2.3).
+    pub flags: u32,
+    /// True when at least one hint field is meaningful.
     pub valid: bool,
+}
+
+impl SizeHints {
+    // `XSizeHints.flags` bits, ICCCM 4.1.2.3 / `X11/Xutil.h`. They are the
+    // wire contract of `WM_NORMAL_HINTS`; the parser and every reader below
+    // share them so a bit test can never drift from the word it indexes.
+    /// The *user* asked for this position.
+    pub const U_S_POSITION: u32 = 1 << 0;
+    /// The *user* asked for this size.
+    pub const U_S_SIZE: u32 = 1 << 1;
+    /// The *program* asked for this position.
+    pub const P_POSITION: u32 = 1 << 2;
+    /// The *program* asked for this size.
+    pub const P_SIZE: u32 = 1 << 3;
+    /// `min_w`/`min_h` are defined.
+    pub const P_MIN_SIZE: u32 = 1 << 4;
+    /// `max_w`/`max_h` are defined.
+    pub const P_MAX_SIZE: u32 = 1 << 5;
+    /// `inc_w`/`inc_h` are defined.
+    pub const P_RESIZE_INC: u32 = 1 << 6;
+    /// `min_aspect`/`max_aspect` are defined.
+    pub const P_ASPECT: u32 = 1 << 7;
+    /// `base_w`/`base_h` are defined.
+    pub const P_BASE_SIZE: u32 = 1 << 8;
+    /// The gravity word (index 17) is defined. Not modelled: the WM always
+    /// places windows with a `NorthWest` gravity.
+    pub const P_WIN_GRAVITY: u32 = 1 << 9;
+
+    /// True when the client claims authority over its own *position*
+    /// (`USPosition`/`PPosition`). ICCCM 4.1.2.3: the window manager should
+    /// place such a window where the client asked instead of inventing a
+    /// position — re-centering it is a visible teleport on map.
+    #[inline]
+    pub fn claims_position(&self) -> bool {
+        self.valid && self.flags & (Self::U_S_POSITION | Self::P_POSITION) != 0
+    }
 }
 
 // ─── Column (true scrolling, niri-style) ───────────────────────────────────────
@@ -169,11 +331,34 @@ pub struct SizeHints {
 // This means coordinates are ALWAYS derived from (col_x + scroll, row_y)
 // and never stored as mutable state — no drift possible.
 
+/// One vertical stack in the scrolling ribbon (`Workspace::columns`).
+///
+/// Each column holds one or more windows stacked top-to-bottom. Its `weight` is
+/// its width as a fraction of the workarea width, independent of every other
+/// column — weights do not sum to 1.0. This makes the layout a true scrolling
+/// ribbon rather than fit-to-screen: adding/growing/removing a column never
+/// resizes neighbors; the total width grows/shrinks and `Camera` scrolls to
+/// keep the focused column in view. Coordinates are always derived from
+/// `(col_x + scroll, row_y)` — never stored mutably, so no drift.
+///
+/// # Ownership
+///
+/// Owned by `Workspace::columns`. Windows inside are referenced by `WindowId`
+/// and must also exist in `State::clients` (invariant validated by
+/// `State::check_invariants`).
+///
+/// # Invariants
+///
+/// - `weight` in `[0.05, 1.0]`, finite; repaired by `Workspace::rebalance_weights`.
+/// - `focused < windows.len()` when non-empty; `boost` in `[0.0, 1.0]`.
 #[derive(Debug, Clone)]
 pub struct Column {
-    pub windows: Vec<WindowId>, // top-to-bottom
-    pub weight: f32,            // this column's own width, as a fraction of workarea width
-    pub focused: usize,         // index into `windows` that has focus
+    /// Windows top-to-bottom in this column.
+    pub windows: Vec<WindowId>,
+    /// This column's width as a fraction of the workarea width.
+    pub weight: f32,
+    /// Index into `windows` that has focus within this column.
+    pub focused: usize,
     /// Accordion boost for THIS column, animated 0→1. The focused column's boost
     /// eases to 1 while the others ease to 0, so changing focus makes the widths
     /// *glide* instead of snapping (bug C10). Replaces the old single global
@@ -183,12 +368,14 @@ pub struct Column {
 }
 
 impl Column {
+    /// Create a column with the given workarea-fraction `weight`.
     pub fn new(weight: f32) -> Self {
         Column {
             weight,
             ..Default::default()
         }
     }
+    /// Focused window in this column, if any.
     pub fn focused_win(&self) -> Option<WindowId> {
         self.windows.get(self.focused).copied()
     }
@@ -216,12 +403,31 @@ impl Default for Column {
 // without overshoot. It is never the source of truth for geometry
 // — `arrange_columns` derives each window's x from it, so there is no drift.
 
+/// 1D scroll camera for the ribbon layout.
+///
+/// `position` is the current scroll offset in px (world→screen); `target` is
+/// where focus wants the camera. A second-order spring-damper eases `position`
+/// toward `target`, giving inertia without overshoot. The camera is never the
+/// source of truth for geometry — `arrange_columns` derives each window's `x`
+/// from it, so no drift is possible.
+///
+/// # Invariants
+///
+/// - `position`, `target`, `velocity` are finite (NaN/Inf snaps to target).
+/// - `stiffness`/`damping` are clamped at integration time to
+///   `[MIN_STIFFNESS, MAX_SPRING]` / `[MIN_DAMPING, MAX_SPRING]` so the settle
+///   predicate is reachable even after direct field mutation.
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
+    /// Current scroll offset in px.
     pub position: f32,
+    /// Desired scroll offset — focus drives this, the spring follows.
     pub target: f32,
+    /// Current velocity (px/s).
     pub velocity: f32,
+    /// Spring stiffness (`220.0` default, clamped to `[MIN_STIFFNESS, MAX_SPRING]`).
     pub stiffness: f32,
+    /// Damper (`30.0` default, clamped to `[MIN_DAMPING, MAX_SPRING]`).
     pub damping: f32,
 }
 
@@ -246,6 +452,7 @@ pub(crate) const MIN_STIFFNESS: f32 = 1.0;
 pub(crate) const MIN_DAMPING: f32 = 0.1;
 
 impl Camera {
+    /// Create a camera at rest at `pos` (position = target, velocity = 0).
     pub fn new(pos: f32) -> Self {
         Self {
             position: pos,
@@ -302,18 +509,42 @@ impl Camera {
 
 // ─── Workspace ────────────────────────────────────────────────────────────────
 
+/// Focus pointer within a workspace's column tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Focus {
+    /// Index of the focused column in `Workspace::columns`.
     pub column_idx: usize,
 }
 
+/// One virtual desktop on a monitor. Holds both tiled columns and floating
+/// windows, plus per-workspace view state (camera, zoom/overview, viewport).
+///
+/// # Ownership
+///
+/// Owned by `Monitor::workspaces[active_ws]` (and siblings). Each workspace's
+/// `columns` and `floats` reference `WindowId`s that also live in
+/// `State::clients`. `presented_maximize` is derived state kept in sync by
+/// `State::sync_presented_maximize`.
+///
+/// # Invariants
+///
+/// - `focus.column_idx < columns.len()` when non-empty; each `Column::focused`
+///   in range.
+/// - `camera` is not the source of truth for geometry — arrangement derives
+///   positions from it.
+/// - `presented_maximize` (if `Some`) names a maximized client on this workspace
+///   and on the monitor's `focused` when the workspace is active.
 #[derive(Debug, Clone)]
 pub struct Workspace {
+    /// Workspace tag (0-based index as configured).
     pub tag: u32,
+    /// Tiled columns (scrolling ribbon).
     pub columns: Vec<Column>,
+    /// Focused column pointer.
     pub focus: Focus,
     /// Scroll camera (only meaningful in `LayoutKind::Column` / ribbon mode).
     pub camera: Camera,
+    /// Floating windows on this workspace (excluded from column layout; `Client::geom` authoritative).
     pub floats: Vec<WindowId>,
     /// Layout mode for this specific workspace — independent of every other workspace.
     pub layout: LayoutKind,
@@ -343,6 +574,7 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Create an empty workspace with `tag`.
     pub fn new(tag: u32) -> Self {
         Self {
             tag,
@@ -361,14 +593,17 @@ impl Workspace {
         }
     }
 
+    /// Alias for `new` — empty workspace with `tag`.
     pub fn empty(tag: u32) -> Self {
         Self::new(tag)
     }
 
+    /// True when no tiled columns and no floats.
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty() && self.floats.is_empty()
     }
 
+    /// Focused window from the focused column, if any.
     pub fn focused_win(&self) -> Option<WindowId> {
         self.columns.get(self.focus.column_idx)?.focused_win()
     }
@@ -379,7 +614,9 @@ impl Workspace {
     /// workarea, 0.1–1.0). The fraction is taken directly — callers pass
     /// `cfg.column_width`; no division happens here (T5).
     pub fn add_tiled(&mut self, window: WindowId, column_width: f32) {
-        let w = if column_width <= 0.0 {
+        // Sanitize: NaN fails `<= 0.0` and `clamp` passes NaN through,
+        // poisoning the tree (debug invariant panics, release NaN geometry).
+        let w = if !column_width.is_finite() || column_width <= 0.0 {
             1.0
         } else {
             column_width.clamp(0.1, 1.0)
@@ -399,13 +636,14 @@ impl Workspace {
         }
     }
 
-    /// Guard against degenerate weights (zero/negative from float drift or a
-    /// caller that never set one). Since columns are independently sized in
-    /// the true-scroll model, this no longer redistributes weight between
-    /// columns — it just gives any broken column a sane fallback width.
+    /// Guard against degenerate weights (zero/negative/NaN from float drift,
+    /// a caller that never set one, or a hostile session restore). Since
+    /// columns are independently sized in the true-scroll model, this no
+    /// longer redistributes weight between columns — it just gives any
+    /// broken column a sane fallback width.
     pub fn rebalance_weights(&mut self) {
         for col in &mut self.columns {
-            if col.weight <= 0.0 {
+            if !col.weight.is_finite() || col.weight <= 0.0 {
                 col.weight = 0.5;
             }
         }
@@ -572,30 +810,66 @@ pub enum WindowMode {
 /// leave. Replaces the overloaded `saved_geom` for fullscreen transitions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FullscreenSnapshot {
+    /// Mode immediately before entering fullscreen.
     pub prior: WindowMode,
+    /// Geometry immediately before entering fullscreen.
     pub rect: Rect,
+    /// Fullscreen policy immediately before entering fullscreen. Entering via
+    /// `ToggleFullscreen` promotes to `True` (exclusive overlay, per the
+    /// Column-only design); leaving restores this so a `Deny`/`True` rule is
+    /// never clobbered by one toggle cycle.
+    pub policy: FullscreenPolicy,
 }
 
 // ─── Client ───────────────────────────────────────────────────────────────────
 
+/// One managed window. Holds WM-authoritative geometry, flags, and placement.
+///
+/// # Ownership
+///
+/// - `geom` is WM-authoritative for floating windows and is the projected
+///   result of `arrange_columns` for tiled windows; `saved_geom` is the
+///   pre-float/pre-fullscreen persistence store. `monitor`/`workspace` must
+///   agree with the workspace the window is placed in (validated by
+///   `State::check_invariants`).
+/// - The backend owns X11 window creation/mapping and mirrors `WM_NAME`,
+///   `WM_CLASS`, `WM_TRANSIENT_FOR`, `_NET_WM_WINDOW_TYPE`, and size hints into
+///   these fields; the core never touches X11 directly.
+///
+/// # Invariants
+///
+/// - `geom.w >= 1 && geom.h >= 1` after arrangement.
+/// - `monitor < State::monitors.len()`, `workspace < Monitor::workspaces.len()`.
 #[derive(Debug, Clone)]
 pub struct Client {
+    /// Backend-agnostic window identifier.
     pub window: WindowId,
+    /// `WM_NAME` / `_NET_WM_NAME`.
     pub name: String,
+    /// `WM_CLASS` class.
     pub class: String,
+    /// `WM_CLASS` instance.
     pub instance: String,
+    /// WM-authoritative geometry (floats: client/rule-defined; tiled: projected by layout).
     pub geom: Rect,
+    /// Saved geometry for restore after float/fullscreen/maximize transitions.
     pub saved_geom: Rect,
+    /// Current border width in px.
     pub border_w: u32,
+    /// Previous border width (restored after fullscreen/maximize).
     pub old_border_w: u32,
     /// Window opacity as 0.0-1.0, from the best matching rule. Written to the
     /// X11 property `_NET_WM_WINDOW_OPACITY` at manage/rearrange time. `None`
     /// means "use the global default" (fully opaque).
     pub opacity: Option<f32>,
+    /// Bit-packed window flags (`FLOAT`, `FULLSCREEN`, `STICKY`, …).
     pub flags: WinFlags,
+    /// ICCCM size hints.
     pub hints: SizeHints,
+    /// Index of the monitor this window lives on.
     pub monitor: usize,
-    pub workspace: usize, // index into Monitor::workspaces
+    /// Index into `Monitor::workspaces` this window is placed in.
+    pub workspace: usize,
     /// The window this one is transient for (`WM_TRANSIENT_FOR`), when it was a
     /// known client at manage time. Used by the renderer to keep popups/dialogs
     /// of a fullscreen or maximized window above the presentation overlay.
@@ -603,6 +877,7 @@ pub struct Client {
     /// `_NET_WM_WINDOW_TYPE` values this window declared, as lowercase atom
     /// names (`"dialog"`, `"utility"`, `"toolbar"`, …). Used by window rules.
     pub window_types: Vec<String>,
+    /// Monotonic focus serial (bumped on focus changes).
     pub focus_serial: u64,
     /// Observability-only mirror of the last *desired* rect this client was
     /// arranged to (the `DesiredState` rect for it). Written by the render
@@ -612,8 +887,11 @@ pub struct Client {
     /// back via `ConfigureNotify` (X11 Real). Written by the events convergence
     /// path; NEVER read for layout/focus/overlay decisions. Fase 8.
     pub last_reported: Option<Rect>,
+    /// True when the window is unmanaged (not tiled/floated by the WM).
     pub is_unmanaged: bool,
+    /// True when the client wants input focus (`WM_HINTS` input).
     pub wants_input: bool,
+    /// True when the WM has hidden the window (offscreen/minimized).
     pub wm_hidden: bool,
     /// Forces the next `apply_geom` to re-emit its `ConfigureWindow` even when
     /// the computed rect equals `geom`.
@@ -643,9 +921,29 @@ pub struct Client {
     /// absent), Some(1)=force compositor ON, Some(2)=force bypass. Updated on
     /// `PropertyNotify` and read by `compositor_policy::bypass_candidate`.
     pub bypass_hint: Option<u32>,
+    /// True while the float's geometry was last claimed by the *client* (a
+    /// `ConfigureRequest` this WM adopted verbatim).
+    ///
+    /// This is the seal that closes the two-authorities loop: the WM adopted
+    /// the client's rect bit-for-bit (the only answer that terminates the
+    /// conversation), so the next `arrange` must project that same rect back
+    /// instead of re-normalizing it (snap to hints + workarea clamp), which
+    /// would rewrite it and restart the fight (client re-requests, WM re-writes
+    /// — the window "jumps around by itself"). While the seal is set, the float
+    /// projection is the adopted rect with only protocol-level sanity applied
+    /// (`adopt_client_float_geometry`).
+    ///
+    /// The seal is CLEARED whenever the WM itself decides the geometry again
+    /// (drag/resize, placement rules, `ToggleFloat`, a workarea or monitor
+    /// change — everywhere `normalize_float_geom` runs, see
+    /// `layout::settle_float_in_workarea`): the WM re-asserts a rect *it*
+    /// invented, which by construction is already the fixed point of the
+    /// client's own hint grid, so no bounce can come from reclaiming it.
+    pub float_client_authority: bool,
 }
 
 impl Client {
+    /// Create a client for `win` placed on `(mon, ws)` with default geometry/flags.
     pub fn new(win: WindowId, mon: usize, ws: usize) -> Self {
         Self {
             window: win,
@@ -673,9 +971,11 @@ impl Client {
             fs_snapshot: None,
             fullscreen_policy: FullscreenPolicy::Normal,
             bypass_hint: None,
+            float_client_authority: false,
         }
     }
 
+    /// True when the window is currently floating (`WinFlags::FLOAT`).
     #[inline]
     pub fn is_float(&self) -> bool {
         self.flags.has(WinFlags::FLOAT)
@@ -687,10 +987,12 @@ impl Client {
     pub fn is_native_float(&self) -> bool {
         self.flags.has(WinFlags::FLOAT_NATIVE)
     }
+    /// True when the window is fullscreen (`WinFlags::FULLSCREEN`).
     #[inline]
     pub fn is_fullscreen(&self) -> bool {
         self.flags.has(WinFlags::FULLSCREEN)
     }
+    /// True when the window is maximized on both axes (workarea overlay).
     #[inline]
     pub fn is_maximized(&self) -> bool {
         // Both axes must be on. `WinFlags::MAXIMIZED` is the union of the two
@@ -709,10 +1011,12 @@ impl Client {
     pub fn is_maximized_h(&self) -> bool {
         self.flags.has(WinFlags::MAXIMIZED_H)
     }
+    /// True when the window does not want focus (`WinFlags::NO_FOCUS`).
     #[inline]
     pub fn no_focus(&self) -> bool {
         self.flags.has(WinFlags::NO_FOCUS)
     }
+    /// True when the window is sticky (visible on every workspace of its monitor).
     #[inline]
     pub fn is_sticky(&self) -> bool {
         self.flags.has(WinFlags::STICKY)
@@ -755,9 +1059,13 @@ impl Client {
 /// Which screen edge a reservation pushes in from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Edge {
+    /// Top edge.
     Top,
+    /// Bottom edge.
     Bottom,
+    /// Left edge.
     Left,
+    /// Right edge.
     Right,
 }
 
@@ -765,7 +1073,9 @@ pub enum Edge {
 /// docks use their window id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReservedRegion {
+    /// Reservation owner (external dock's `WindowId`).
     pub owner: WindowId,
+    /// Edge the reservation pushes in from.
     pub edge: Edge,
     /// Thickness in px pushed in from `edge`.
     pub thickness: u32,
@@ -774,9 +1084,13 @@ pub struct ReservedRegion {
 /// Collapsed per-edge reservation totals derived from a set of regions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReservedArea {
+    /// Total reserved thickness on the top edge.
     pub top: u32,
+    /// Total reserved thickness on the bottom edge.
     pub bottom: u32,
+    /// Total reserved thickness on the left edge.
     pub left: u32,
+    /// Total reserved thickness on the right edge.
     pub right: u32,
 }
 
@@ -797,6 +1111,7 @@ impl ReservedArea {
         a
     }
 
+    /// True when no edge reserves any space.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.top == 0 && self.bottom == 0 && self.left == 0 && self.right == 0
@@ -805,17 +1120,39 @@ impl ReservedArea {
 
 // ─── Monitor ─────────────────────────────────────────────────────────────────
 
+/// One physical output. Owns its screen geometry, reservation-derived workarea,
+/// workspace slots, and focus state.
+///
+/// # Ownership
+///
+/// The backend owns RandR/Xinerama detection and calls `Monitor::new` /
+/// `recalc_geometry` / `reconcile_workspaces`; the core owns placement and
+/// focus within. `screen` is authoritative from the backend; `workarea` is
+/// always `screen` minus `reserved` (`ReservedArea::from_regions`).
+///
+/// # Invariants
+///
+/// - `workarea` is derived from `screen` and `reserved`; never set directly
+///   except via `recalc_geometry`.
+/// - `active_ws < workspaces.len()`; `focus_stack` contains no duplicates and
+///   only known clients.
 #[derive(Debug, Clone)]
 pub struct Monitor {
+    /// Full screen rect from the backend (RandR/Xinerama).
     pub screen: Rect,
-    pub workarea: Rect, // screen minus reserved (derived)
+    /// Workarea rect (`screen` minus `reserved`; derived via `recalc_geometry`).
+    pub workarea: Rect,
     /// Individual trackable reservations (one per external dock).
     pub reserved_regions: Vec<ReservedRegion>,
     /// Collapsed per-edge totals, derived from `reserved_regions`.
     pub reserved: ReservedArea,
+    /// Workspace slots on this monitor.
     pub workspaces: Vec<Workspace>,
+    /// Index of the active workspace in `workspaces`.
     pub active_ws: usize,
+    /// Logically focused window on this monitor (WM intent; may be `None`).
     pub focused: Option<WindowId>,
+    /// MRU focus stack for this monitor (most-recent last).
     pub focus_stack: Vec<WindowId>,
     /// Set when this monitor's window geometry changed and its cached live
     /// placements (used by the GLX compositor) must be recomputed. Cleared by
@@ -825,6 +1162,7 @@ pub struct Monitor {
 }
 
 impl Monitor {
+    /// Create a monitor with `screen` geometry and `n_tags` empty workspaces.
     pub fn new(screen: Rect, n_tags: usize) -> Self {
         let workspaces = (0..n_tags).map(|i| Workspace::new(i as u32)).collect();
         let mut m = Self {
@@ -842,11 +1180,35 @@ impl Monitor {
         m
     }
 
+    /// Active workspace (immutable). Clamps a stale `active_ws` to the
+    /// last workspace instead of panicking (hotplug / session restore can
+    /// leave it out of range for one frame; callers repair it right after).
+    /// Panics only if there are zero workspaces, which violates the
+    /// `reconcile_workspaces(max(1))` invariant.
     pub fn ws(&self) -> &Workspace {
-        &self.workspaces[self.active_ws]
+        assert!(
+            !self.workspaces.is_empty(),
+            "Monitor::ws with zero workspaces (reconcile invariant broken)"
+        );
+        let i = self.active_ws.min(self.workspaces.len() - 1);
+        &self.workspaces[i]
     }
+    /// Active workspace (mutable). Same clamping contract as [`Self::ws`].
     pub fn ws_mut(&mut self) -> &mut Workspace {
-        &mut self.workspaces[self.active_ws]
+        assert!(
+            !self.workspaces.is_empty(),
+            "Monitor::ws_mut with zero workspaces (reconcile invariant broken)"
+        );
+        let i = self.active_ws.min(self.workspaces.len() - 1);
+        &mut self.workspaces[i]
+    }
+    /// Fallible accessors for new code that wants to handle OOB explicitly.
+    pub fn try_ws(&self) -> Option<&Workspace> {
+        self.workspaces.get(self.active_ws)
+    }
+    pub fn try_ws_mut(&mut self) -> Option<&mut Workspace> {
+        let i = self.active_ws;
+        self.workspaces.get_mut(i)
     }
 
     // ── Reservation management ──────────────────────────────────────────────
@@ -911,7 +1273,10 @@ impl Monitor {
     /// state for indices that survive. Growing appends fresh empty workspaces;
     /// shrinking drops trailing slots (windows still assigned there are clamped
     /// to the last surviving workspace by the caller). Keeps `active_ws` in range.
+    /// `n_tags == 0` is clamped to 1: zero workspaces would make every
+    /// subsequent `ws()` panic.
     pub fn reconcile_workspaces(&mut self, n_tags: usize) {
+        let n_tags = n_tags.max(1);
         while self.workspaces.len() < n_tags {
             self.workspaces
                 .push(Workspace::new(self.workspaces.len() as u32));
@@ -925,29 +1290,38 @@ impl Monitor {
     }
 }
 
-// ─── Direction ────────────────────────────────────────────────────────────────
-
+/// Navigation / movement direction for focus and column operations.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Dir {
+    /// Next in MRU / tiling order.
     Next,
+    /// Previous in MRU / tiling order.
     Prev,
+    /// Left (previous column).
     Left,
+    /// Right (next column).
     Right,
+    /// Up (previous row within a column).
     Up,
+    /// Down (next row within a column).
     Down,
 }
 
-// ─── Layout kind ─────────────────────────────────────────────────────────────
-
+/// Workspace layout kind. Currently only the scrolling column ribbon exists;
+///
+/// kept as an enum so a future layout can be added without changing `Workspace`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayoutKind {
+    /// Scrolling column ribbon (niri-style).
     Column,
 }
 
 impl LayoutKind {
+    /// Parse a layout name. Currently always returns `Column` (stable for config).
     pub fn from_str(_s: &str) -> Self {
         Self::Column
     }
+    /// Short symbol for status display (`[|]` for column).
     pub fn symbol(&self) -> &'static str {
         "[|]"
     }
@@ -963,20 +1337,33 @@ impl LayoutKind {
 // ribbon_geom`) so the user can inspect a column up close; `PageSnap` then
 // scrolls the camera by one screen-width. It is deliberately *not* called
 // "fullscreen" — fullscreen is a window/EWMH state, this is a workspace view.
+/// Workspace viewport display mode. Orthogonal to window fullscreen and to
+/// Overview zoom-out. `Zoomed` enlarges the ribbon (`alpha > 1` in
+/// `ribbon_geom`) for inspection; `PageSnap` then scrolls by one screen-width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewportMode {
+    /// Normal (1.0) viewport.
     #[default]
     Normal,
+    /// Zoomed-in viewport for inspection.
     Zoomed,
 }
 
+/// WM command dispatched from keybindings or IPC. Pure intent — the core
+/// decides placement/focus; the backend applies geometry/focus to X11.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    /// Spawn an external command.
     Spawn(Vec<String>),
+    /// Kill the focused window.
     Kill,
+    /// Focus movement in `Dir`.
     FocusDir(Dir),
+    /// Move focused window/column in `Dir`.
     MoveDir(Dir),
+    /// Toggle floating for the focused window.
     ToggleFloat,
+    /// Toggle fullscreen for the focused window.
     ToggleFullscreen,
     /// Toggle the maximized (workarea-filling, border 0) presentation state of
     /// the focused window. Like fullscreen but respects reserved regions and is
@@ -984,14 +1371,23 @@ pub enum Action {
     /// `core::present`). Previously only reachable via a client's
     /// `_NET_WM_STATE` request, so the keyboard path was missing (bug C18).
     ToggleMaximize,
+    /// Set layout kind for the active workspace.
     SetLayout(LayoutKind),
-    GrowCol(i32),    // pixels to grow/shrink column width
-    NewColumn,       // move focused window into a new column to the right
-    CollapseColumn,  // merge column into previous
-    View(usize),     // switch to workspace n
-    MoveToWs(usize), // move window to workspace n
+    /// Grow/shrink the focused column by `i32` pixels.
+    GrowCol(i32),
+    /// Move focused window into a new column to the right.
+    NewColumn,
+    /// Merge the focused column into the previous one.
+    CollapseColumn,
+    /// Switch to workspace `n`.
+    View(usize),
+    /// Move focused window to workspace `n`.
+    MoveToWs(usize),
+    /// Focus monitor in `Dir`.
     FocusMon(Dir),
+    /// Move focused window to monitor in `Dir`.
     MoveMon(Dir),
+    /// Restart the WM (re-exec).
     Restart,
     /// Quit immediately (sets `running = false`). No confirmation dialog.
     /// This is not bound to a default key — the Mod4+Shift+Q default shells
@@ -1055,13 +1451,31 @@ pub struct PendingFocus {
 
 // ─── Global state ────────────────────────────────────────────────────────────
 
+/// Global WM state — the single source of truth for placement, focus, and
+/// reservations. Owns all `Client`s and `Monitor`s; the backend and compositor
+/// only read it.
+///
+/// # Ownership
+///
+/// Core owns `State`. Mutations flow through the invariant-checked command
+/// pipeline; the backend mirrors X11 state into `clients`/`monitors`.
+///
+/// # Invariants
+///
+/// See `State::check_invariants` and the crate docs in `maverick_core::lib`.
 #[derive(Debug)]
 pub struct State {
+    /// All managed clients keyed by `WindowId`.
     pub clients: HashMap<WindowId, Client>,
+    /// Monitors / outputs in backend order.
     pub monitors: Vec<Monitor>,
+    /// Selected monitor index.
     pub sel_mon: usize,
+    /// Monotonic focus serial.
     pub focus_serial: u64,
+    /// False when the WM should exit.
     pub running: bool,
+    /// Status text for the bar.
     pub status: String,
     /// The window the X server currently reports as having the input focus
     /// (`GetInputFocus`), mirrored from `FocusIn`/`FocusOut` events. This is the
@@ -1094,6 +1508,7 @@ pub struct State {
 }
 
 impl State {
+    /// Create an empty state (no monitors/clients).
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
@@ -1110,14 +1525,15 @@ impl State {
         }
     }
 
-    pub fn mon(&self) -> &Monitor {
-        // Defensive: even with debug_assert, avoid panic in release by using get.
-        let i = self.sel_mon.min(self.monitors.len().saturating_sub(1));
-        &self.monitors[i]
+    /// Selected monitor (clamped), if any.
+    pub fn mon(&self) -> Option<&Monitor> {
+        let i = self.sel_mon.min(self.monitors.len().checked_sub(1)?);
+        self.monitors.get(i)
     }
-    pub fn mon_mut(&mut self) -> &mut Monitor {
-        let i = self.sel_mon.min(self.monitors.len().saturating_sub(1));
-        &mut self.monitors[i]
+    /// Selected monitor mutably (clamped), if any.
+    pub fn mon_mut(&mut self) -> Option<&mut Monitor> {
+        let i = self.sel_mon.min(self.monitors.len().checked_sub(1)?);
+        self.monitors.get_mut(i)
     }
 
     /// Pick the best window to focus on `mon_idx`'s active workspace. Pure (no X11).
@@ -1230,11 +1646,7 @@ impl State {
     /// monitor's active workspace) and the core EWMH `_NET_ACTIVE_WINDOW` policy
     /// (which must test the *requesting* window's own (monitor, workspace), not
     /// necessarily the active one).
-    pub(crate) fn presented_overlay_owner_in(
-        &self,
-        mon_idx: usize,
-        ws_idx: usize,
-    ) -> Option<WindowId> {
+    pub fn presented_overlay_owner_in(&self, mon_idx: usize, ws_idx: usize) -> Option<WindowId> {
         let mon = self.monitors.get(mon_idx)?;
         let ws = mon.workspaces.get(ws_idx)?;
         // A window that is *both* fullscreen and maximized is owned exclusively
@@ -1271,7 +1683,7 @@ impl State {
     /// the EXACT `#8c` condition. This is the single shared definition used by
     /// BOTH `check_invariants` (#8c) and the post-command reconciliation hook
     /// (`reconcile_pending_focus_after_transition`) so they can never disagree.
-    pub(crate) fn pending_focus_owner_presented(&self) -> bool {
+    pub fn pending_focus_owner_presented(&self) -> bool {
         let pf = match self.pending_focus {
             Some(p) => p,
             None => return false,
@@ -1290,6 +1702,7 @@ impl State {
         })
     }
 
+    /// Monitor index containing `(x, y)`, or `sel_mon` if outside all screens.
     pub fn mon_at(&self, x: i32, y: i32) -> usize {
         for (i, m) in self.monitors.iter().enumerate() {
             if m.screen.contains(x, y) {
@@ -1299,11 +1712,13 @@ impl State {
         self.sel_mon
     }
 
+    /// Bump and return the next focus serial.
     pub fn next_serial(&mut self) -> u64 {
         self.focus_serial += 1;
         self.focus_serial
     }
 
+    /// Insert a client into `self.clients` (does not place it in a workspace).
     pub fn add_client(&mut self, c: Client) {
         let win = c.window;
         self.clients.insert(win, c);
@@ -1319,6 +1734,8 @@ impl State {
         )
     }
 
+    /// Remove `win` from `clients` and all placement/overlay/focus structures.
+    /// Returns the removed client, if any.
     pub fn remove_client(&mut self, win: WindowId) -> Option<Client> {
         let c = self.clients.remove(&win)?;
         // Drop every transient reference to the window that just died, so the
@@ -1345,6 +1762,11 @@ impl State {
         let clients = &self.clients;
         self.pending_transients
             .retain(|w| clients.get(w).is_some_and(|c| c.transient_parent.is_some()));
+        if let Some(pf) = self.pending_focus {
+            if pf.window == win || pf.owner == win {
+                self.pending_focus = None;
+            }
+        }
         if self.monitors.is_empty() {
             return Some(c);
         }
@@ -1373,16 +1795,6 @@ impl State {
         if c.workspace < mon.workspaces.len() {
             let ws_i = c.workspace;
             mon.workspaces[ws_i].remove_window(win);
-            // A deferred (pending) focus that pointed at this window — either
-            // because this window was the *target* (`pf.window`) or the *owner*
-            // overlay (`pf.owner`) — is now dangling and must be dropped. (When the
-            // owner overlay dies, the deferred window is re-focused by the caller's
-            // unmanage/consume path rather than staying orphaned.)
-            if let Some(pf) = self.pending_focus {
-                if pf.window == win || pf.owner == win {
-                    self.pending_focus = None;
-                }
-            }
             // Keep the workspace focus pointer (column + row) in lock-step with
             // the logical focus (`mon.focused`). `remove_window` only shifts/
             // clamps the column index relative to the surviving tree; it does not
@@ -1438,6 +1850,11 @@ impl State {
                     .map_or(0, |c| c.windows.len()),
             )
         };
+        // Stale focus after restore/shrink: `ci` can exceed the column list
+        // (col_len == 0 above). Bail instead of indexing `columns[ci]`.
+        if ci >= n_cols {
+            return false;
+        }
 
         // P3: mutate in-place, no clone
         match dir {
@@ -1719,6 +2136,30 @@ impl State {
             }
         }
 
+        // 11. Column weight bounds — GrowColumn debe poder llegar a 1.0 (pantalla
+        // completa) y nunca salir de [0.05, 1.0]; el viejo límite 0.95 con 2 columnas
+        // bloqueaba el segundo mosaico.
+        for (mi, mon) in self.monitors.iter().enumerate() {
+            for (ws_i, ws) in mon.workspaces.iter().enumerate() {
+                for (ci, col) in ws.columns.iter().enumerate() {
+                    if !(0.05 - 1e-6..=1.0 + 1e-6).contains(&col.weight) {
+                        v.push(format!(
+                            "monitor {mi} ws {ws_i} col {ci}: weight {} fuera de [0.05, 1.0]",
+                            col.weight
+                        ));
+                    }
+                    if !col.weight.is_finite() {
+                        v.push(format!("monitor {mi} ws {ws_i} col {ci}: weight no finito"));
+                    }
+                }
+            }
+        }
+
+        // 12. Float — geometría validada vía `render::clamp_is_idempotent` y
+        // `arrange` (ver `src/backend/x11/render.rs`), no como invariante
+        // estructural aquí: fixtures crean rects temporales 0x0/oversize antes
+        // del primer `arrange` y el clamp se aplica en el pipeline.
+
         if v.is_empty() {
             Ok(())
         } else {
@@ -1798,6 +2239,30 @@ impl State {
             any |= anim;
         }
         any
+    }
+
+    /// Snap all animated values to their targets immediately (no interpolation).
+    /// Used when `animations.enabled = false` so the WM never requests animation
+    /// frames.
+    pub fn snap_animations(&mut self) {
+        for mon in &mut self.monitors {
+            for ws in &mut mon.workspaces {
+                ws.camera.snap(ws.camera.target);
+                let focus_i = ws.focus.column_idx;
+                for (i, col) in ws.columns.iter_mut().enumerate() {
+                    let target = if ws.overview {
+                        0.0
+                    } else if i == focus_i {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    col.boost = target;
+                }
+                ws.zoom = ws.zoom_target;
+                ws.page_zoom = ws.page_zoom_target;
+            }
+        }
     }
 }
 

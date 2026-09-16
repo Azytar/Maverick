@@ -1,4 +1,5 @@
-use super::render::clamp_float_to_workarea;
+use super::render::adopt_float_request;
+
 use super::*;
 #[cfg(feature = "compositor-opengl")]
 use x11rb::protocol::damage::NotifyEvent as DamageNotifyEvent;
@@ -98,11 +99,11 @@ impl WindowManager {
                     event: e.window,
                     window: e.window,
                     above_sibling: x11rb::NONE,
-                    x: geom.x as i16,
-                    y: geom.y as i16,
-                    width: geom.w as u16,
-                    height: geom.h as u16,
-                    border_width: bw as u16,
+                    x: geom.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                    y: geom.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                    width: geom.w.clamp(1, u16::MAX as u32) as u16,
+                    height: geom.h.clamp(1, u16::MAX as u32) as u16,
+                    border_width: bw.clamp(0, u16::MAX as u32) as u16,
                     override_redirect: false,
                 };
                 let _ = self
@@ -128,11 +129,11 @@ impl WindowManager {
                     event: e.window,
                     window: e.window,
                     above_sibling: x11rb::NONE,
-                    x: geom.x as i16,
-                    y: geom.y as i16,
-                    width: geom.w as u16,
-                    height: geom.h as u16,
-                    border_width: bw as u16,
+                    x: geom.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                    y: geom.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                    width: geom.w.clamp(1, u16::MAX as u32) as u16,
+                    height: geom.h.clamp(1, u16::MAX as u32) as u16,
+                    border_width: bw.clamp(0, u16::MAX as u32) as u16,
                     override_redirect: false,
                 };
                 let _ = self
@@ -141,16 +142,27 @@ impl WindowManager {
                 return Ok(());
             }
         }
-        // floating (or fullscreen) managed client: honor the request through the
-        // single geometry sink so `AppliedState` stays coherent with the client's
-        // desired geometry. The per-field writes below start from the current
-        // `client.geom`/`border_w` and only override the masked fields, exactly
-        // as the old code did; `apply_geom` then re-applies them and diffs
-        // `AppliedState`. (Stacking bits are intentionally dropped — float
-        // restacks are handled by the normal `arrange`/`stack_overlay`.)
+        // Floating managed client: the *client* owns its geometry, so the request
+        // is adopted verbatim (see `adopt_float_request`) — no hint snap, no
+        // workarea clamp. That is the whole stability contract: the answer is
+        // bit-for-bit what the client asked for, so a toolkit that re-asserts
+        // "its" rect whenever a `ConfigureNotify` disagrees with it has nothing
+        // left to correct and the conversation ends on the first request. Every
+        // transformation the WM added here (snap to the client's increment grid,
+        // clamp into the workarea) can only make the answer differ from the
+        // request, and a differing answer is a fight — measured as a window that
+        // jumps between two geometries with the WM burning a core.
+        //
+        // The per-field writes start from the current `client.geom`/`border_w`
+        // and override only the masked fields: a lone `XResizeWindow` therefore
+        // resizes in place instead of dragging the window to (0, 0), and a
+        // request with no position keeps the placement the WM or the user chose.
+        // (Stacking bits are dropped — float restacks are owned by
+        // `arrange`/`stack_overlay`.)
         if let Some(client) = self.engine.state.clients.get(&e.window) {
             let mut geom = client.geom;
             let mut bw = client.border_w;
+            let hidden = client.wm_hidden;
             if e.value_mask.contains(ConfigWindow::X) {
                 geom.x = e.x as i32;
             }
@@ -166,28 +178,41 @@ impl WindowManager {
             if e.value_mask.contains(ConfigWindow::BORDER_WIDTH) {
                 bw = e.border_width as u32;
             }
-            // WM policy for floats: the client may size/move itself, but the
-            // rect must stay inside the workarea (no 0x0, no overflow off-screen,
-            // no negative-size frames). Clamp at this single geometry sink so the
-            // desired logical float rect AND Applied/X11 all receive the
-            // normalized rect; the model and X11 never disagree on a degenerate.
-            if let Some(wa) = self
-                .engine
-                .state
-                .monitors
-                .get(client.monitor)
-                .map(|m| m.workarea)
-            {
-                geom = clamp_float_to_workarea(geom, wa, bw);
+            let geom = adopt_float_request(geom);
+            // Autoridad: este rect lo pidio el cliente y el WM lo adopto
+            // verbatim. Sellar al cliente como autoridad de su flotante para
+            // que el proximo `arrange` lo proyecte tal cual (solo sanidad de
+            // protocolo) en vez de re-normalizarlo y reabrir el ping-pong
+            // (cliente re-pide → WM re-escribe: el flotante "salta solo").
+            // El sello se limpia cuando el WM vuelve a decidir la geometria
+            // (drag, reglas, `ToggleFloat`, cambio de workarea/monitor — ver
+            // `layout::settle_float_in_workarea`).
+            if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
+                c.float_client_authority = true;
             }
-            // `client` borrow ends here (geom/bw are copies); now take &mut self.
+            if hidden {
+                // Parked off-screen because its workspace is not the active one:
+                // record the new logical rect so it comes back with the right
+                // size, but configure the window *parked*. Configuring the model
+                // rect here is what used to resurrect a background window onto
+                // the workspace the user was actually looking at (a float
+                // "appearing out of nowhere" every time it self-resized).
+                if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
+                    c.geom = geom;
+                    c.border_w = bw;
+                }
+                self.apply_parked(e.window)?;
+                return Ok(());
+            }
+            // `client` borrow ends here (geom/bw/hidden are copies); now &mut self.
             self.apply_geom(e.window, geom, bw, true)?;
             return Ok(());
         }
         // Unmanaged (override-redirect / not-yet-tracked) window: honor geometry
         // directly. These windows have no `AppliedState` entry, so the single
         // sink is a no-op for them; emit the raw configure to keep them correctly
-        // placed. Stacking bits are intentionally dropped.
+        // placed. Stacking bits are intentionally dropped. Sizes are clamped
+        // to >= 1: a 0 width/height is a `BadValue` the server would reject.
         let mut aux = ConfigureWindowAux::new();
         if e.value_mask.contains(ConfigWindow::X) {
             aux = aux.x(e.x as i32);
@@ -196,10 +221,10 @@ impl WindowManager {
             aux = aux.y(e.y as i32);
         }
         if e.value_mask.contains(ConfigWindow::WIDTH) {
-            aux = aux.width(e.width as u32);
+            aux = aux.width((e.width as u32).max(1));
         }
         if e.value_mask.contains(ConfigWindow::HEIGHT) {
-            aux = aux.height(e.height as u32);
+            aux = aux.height((e.height as u32).max(1));
         }
         if e.value_mask.contains(ConfigWindow::BORDER_WIDTH) {
             aux = aux.border_width(e.border_width as u32);
@@ -220,75 +245,63 @@ impl WindowManager {
         // of these for every client (ICCCM requires it), and because the WM
         // selects `STRUCTURE_NOTIFY` on each managed window the server hands it
         // straight back to us. Its `above_sibling` is a hard-coded `None`, which
-        // in X means "this window went to the very bottom" — replaying that
-        // would bury every window the WM just configured. Geometry from a
-        // synthetic event is redundant too (we are the ones who set it), so the
-        // whole event is dropped.
+        // in a `ConfigureNotify` means "no sibling above this window" (it would
+        // read as "raise to the top" if replayed, and the geometry is redundant
+        // anyway — we are the ones who set it), so the whole event is dropped.
         if e.response_type & 0x80 != 0 {
             return Ok(());
         }
-        // ── Convergence (step 3): treat this as an *observation* of X11 Real,
-        // not an instruction. Only the root-targeted (SubstructureNotify) copy is
-        // authoritative here; the window also delivers a StructureNotify copy
-        // that the compositor sync below consumes. Compare the reported geometry
-        // to what we last APPLIED: a match is our own echo / a compliant client
-        // -> ignore. A mismatch means the client resized itself.
+        // ── Observation of X11 Real, never an instruction ──────────────────
+        //
+        // Only the root-targeted (SubstructureNotify) copy is considered here;
+        // the window also delivers a StructureNotify copy that the compositor
+        // sync below consumes.
+        //
+        // While this WM holds `SUBSTRUCTURE_REDIRECT` on the root the server
+        // never applies a client's `ConfigureWindow` to a viewable child of the
+        // root, so a reported rect can only be the echo of a request *we* issued
+        // — possibly an older one still in flight. Classifying that echo
+        // (`classify_configure`) may therefore never lead to adopting it into the
+        // model: answering the client's *newest* request with a geometry the WM
+        // has already left behind is what made floats jump between two positions
+        // /sizes forever (measured: ~150 configures/s ping-pong, one core burnt).
+        // Client intent arrives through `ConfigureRequest`, which is the sink that
+        // owns `client.geom`.
         if e.event == self.root {
             let reported = Rect::new(e.x as i32, e.y as i32, e.width as u32, e.height as u32);
             let reported_bw = e.border_width as u32;
-            // Observability-only: mirror the *real* geometry the client reported
-            // back (X11 Real). Never read for layout/focus/overlay decisions.
-            if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
+            // Observability-only: mirror the *real* geometry X11 reported back.
+            // Never read for layout/focus/overlay decisions.
+            let model = if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
                 c.last_reported = Some(reported);
-            }
-            let is_dragged = self.drag.as_ref().is_some_and(|d| d.win == e.window);
-            let observation = {
-                let clients = &self.engine.state.clients;
-                let applied = &self.applied.windows;
-                match (clients.get(&e.window), applied.get(&e.window)) {
-                    (Some(client), Some(applied_win)) => {
-                        Some(crate::backend::x11::reconciler::classify_configure(
-                            reported,
-                            reported_bw,
-                            applied_win,
-                            client,
-                            is_dragged,
-                        ))
-                    }
-                    _ => None,
-                }
+                Some((c.geom, c.border_w, c.wm_hidden))
+            } else {
+                None
             };
-            if let Some(crate::backend::x11::reconciler::ConfigureObservation::Diverged {
-                follow,
-            }) = observation
-            {
-                if follow {
-                    // Float: the WM allows external geometry — adopt the client's
-                    // rect into the model instead of fighting it. Route through the
-                    // single sink: the redundant `client.geom` write below is
-                    // followed by `apply_geom`, whose `AppliedState::diff` updates
-                    // `AppliedState` to `reported`. Because `applied == reported`
-                    // afterwards, the NEXT `ConfigureNotify` classifies as
-                    // `Compliant` and no loop is created.
-                    if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
-                        c.geom = reported;
-                        c.border_w = reported_bw;
-                    }
-                    self.apply_geom(e.window, reported, reported_bw, true)?;
-                } else {
-                    // WM authority (tiled/fullscreen): force a re-emit of the
-                    // desired geometry so the client snaps back. `geometry_dirty`
-                    // makes `apply_geom` emit even though Desired == Applied.
-                    if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
-                        c.geometry_dirty = true;
-                    }
-                    let desired = self
-                        .engine
-                        .state
-                        .clients
+            if let Some((model_rect, model_bw, hidden)) = model {
+                // A parked window (its workspace is not the monitor's active one)
+                // is configured by the WM to the off-screen parking spot on
+                // purpose: never "correct" it back on-screen from an echo.
+                if !hidden {
+                    let verdict = self
+                        .applied
+                        .windows
                         .get(&e.window)
-                        .map_or((reported, reported_bw), |c| (c.geom, c.border_w));
-                    self.apply_geom(e.window, desired.0, desired.1, true)?;
+                        .map(|a| reconciler::classify_configure(reported, reported_bw, a));
+                    match verdict {
+                        // Our own echo: X11 agrees, nothing to do.
+                        Some(reconciler::ConfigureObservation::Compliant) | None => {}
+                        // Stale echo (or a genuinely external change): re-assert
+                        // the *model*, never the reported rect. When X11 already
+                        // matches the model — the normal case, because the
+                        // divergence is our own older request — the reconciler's
+                        // diff emits nothing at all, so a stale echo costs a hash
+                        // lookup and no protocol traffic (this is what kills the
+                        // ping-pong).
+                        Some(reconciler::ConfigureObservation::Stale) => {
+                            self.apply_geom(e.window, model_rect, model_bw, true)?;
+                        }
+                    }
                 }
             }
         }
@@ -452,7 +465,7 @@ impl WindowManager {
                 for (new_mon, old_mon) in new_mons.iter().zip(self.engine.state.monitors.iter_mut())
                 {
                     old_mon.screen = new_mon.screen;
-                    old_mon.workarea = new_mon.workarea;
+                    old_mon.recalc_geometry();
                 }
                 // Reposition floating windows to stay within the new workarea.
                 for i in 0..self.engine.state.monitors.len() {
@@ -494,10 +507,12 @@ impl WindowManager {
         }
         // A dock changing (or clearing) its strut updates its reservation. This
         // fires for unmanaged windows too, so handle it before the DELETE guard
-        // and before the client lookup.
-        if (e.atom == self.atoms.net_wm_strut_partial || e.atom == self.atoms.net_wm_strut)
-            && !self.engine.state.clients.contains_key(&e.window)
-        {
+        // and before the client lookup. No `!contains_key` gate: a dock that
+        // lost the map/manage race is already managed when its strut notify
+        // arrives, and skipping the refresh would leave a stale reservation.
+        // `apply_dock_strut` is idempotent (re-registers / clears), and windows
+        // without any strut property fall through to a no-op `remove_dock`.
+        if e.atom == self.atoms.net_wm_strut_partial || e.atom == self.atoms.net_wm_strut {
             self.apply_dock_strut(e.window)?;
             return Ok(());
         }
@@ -518,6 +533,32 @@ impl WindowManager {
                 }
             } else if let Some(cl) = self.engine.state.clients.get_mut(&e.window) {
                 cl.bypass_hint = None;
+            }
+            return Ok(());
+        }
+
+        // `WM_NORMAL_HINTS`: keep `client.hints` fresh so the float
+        // `ConfigureRequest` snap (and drag-resize) uses the client's *current*
+        // min/max/increment constraints. Dialogs that rewrite their hints
+        // mid-life as content changes (Qt download/progress dialogs do exactly
+        // this while rows complete) would otherwise be snapped to stale
+        // constraints and answer every update with a corrective resize — the
+        // sustained bigger/smaller flicker. Handled even on DELETE (property
+        // removed → constraints withdrawn). Only the `hints` struct is
+        // refreshed here: flags (`FLOAT`/`FIXED`) are map-time layout
+        // decisions and must never yank a window mid-life.
+        if e.atom == u32::from(AtomEnum::WM_NORMAL_HINTS) {
+            // Read before the mutable client borrow below (`read_size_hints`
+            // only needs `&self`).
+            let fresh = (e.state != Property::DELETE)
+                .then(|| self.read_size_hints(e.window))
+                .flatten();
+            if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
+                if e.state == Property::DELETE {
+                    c.hints = SizeHints::default();
+                } else if let Some(h) = fresh {
+                    c.hints = h;
+                }
             }
             return Ok(());
         }
@@ -545,10 +586,9 @@ impl WindowManager {
             } else if e.atom == u32::from(AtomEnum::WM_HINTS) {
                 self.refresh_hints(win)?;
             }
-            // Other property changes (size hints, ICCCM state, etc.) need no
-            // action here — `publish_state()` in the event loop diffs the JSON
-            // snapshot and pushes updates to IPC subscribers (external bars,
-            // maverickctl) exactly when something visible changed.
+            // `WM_NORMAL_HINTS` is handled by its own early arm above (fresh
+            // `client.hints` for the float snap); anything else just flows to
+            // `publish_state()` below.
         }
         Ok(())
     }
@@ -786,7 +826,24 @@ impl WindowManager {
                 }
             }
             if let Some(cw) = self.find_client(e.event) {
-                if self.engine.state.monitors[self.engine.state.sel_mon].focused != Some(cw) {
+                // Compare against the entered window's own monitor, not
+                // `sel_mon`: with the pointer on another monitor this used to
+                // compare (and refocus) against the wrong monitor's focus.
+                // `find_client` resolves the client; its monitor is the
+                // authority here. Guarded for a stale `sel_mon` after hotplug.
+                let mon_of = self
+                    .engine
+                    .state
+                    .clients
+                    .get(&cw)
+                    .map_or(self.engine.state.sel_mon, |c| c.monitor);
+                let focused = self
+                    .engine
+                    .state
+                    .monitors
+                    .get(mon_of)
+                    .and_then(|m| m.focused);
+                if focused != Some(cw) {
                     self.focus(Some(cw))?;
                 }
             }

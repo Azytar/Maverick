@@ -1,3 +1,4 @@
+use super::render::normalize_float_request;
 use super::*;
 use crate::core::layout::fs_ctx;
 
@@ -257,36 +258,15 @@ impl WindowManager {
                 }
             }
 
-            // Process size hints
+            // Process size hints through the single pure parser shared with the
+            // `PropertyNotify` refresh, so map-time and mid-life constraints
+            // can never disagree on the same window.
             if let Ok(ref prop) = c_size.reply() {
                 if let Some(vals) = prop.value32() {
                     let v: Vec<u32> = vals.collect();
-                    if v.len() >= 18 {
-                        let f = v[0];
-                        let h = &mut client.hints;
-                        if f & 16 != 0 {
-                            h.min_w = v[9] as i32;
-                            h.min_h = v[10] as i32;
-                        }
-                        if f & 32 != 0 {
-                            h.max_w = v[11] as i32;
-                            h.max_h = v[12] as i32;
-                        }
-                        if f & 64 != 0 {
-                            h.inc_w = v[13] as i32;
-                            h.inc_h = v[14] as i32;
-                        }
-                        if f & 128 != 0 {
-                            let denom = v[16].max(1);
-                            h.min_aspect = v[15] as f32 / denom as f32;
-                            h.max_aspect = v[17] as f32 / denom as f32;
-                        }
-                        if f & 256 != 0 {
-                            h.base_w = v[7] as i32;
-                            h.base_h = v[8] as i32;
-                        }
-                        h.valid = true;
-                        if h.max_w > 0 && h.max_h > 0 && h.max_w == h.min_w && h.max_h == h.min_h {
+                    if let Some(h) = parse_wm_normal_hints(&v) {
+                        client.hints = h;
+                        if fixed_size_hints(&h) {
                             client.flags.set(WinFlags::FIXED);
                             client.flags.set(WinFlags::FLOAT);
                         }
@@ -394,13 +374,10 @@ impl WindowManager {
             };
             if client.monitor < self.engine.state.monitors.len() {
                 let wa = self.engine.state.monitors[client.monitor].workarea;
-                let cx = target
-                    .x
-                    .clamp(wa.x, (wa.x + wa.w as i32 - target.w as i32).max(wa.x));
-                let cy = target
-                    .y
-                    .clamp(wa.y, (wa.y + wa.h as i32 - target.h as i32).max(wa.y));
-                client.geom = Rect::new(cx, cy, target.w, target.h);
+                // Normalizacion unica con hints (ver `layout::normalize_float_geom`):
+                // el recien nacido ya es punto fijo, asi el primer arrange no lo
+                // corrige (temblor del nuevo float hasta moverlo con Mod+drag).
+                client.geom = normalize_float_request(target, client.hints, wa, client.border_w);
             } else {
                 client.geom = target;
             }
@@ -417,11 +394,11 @@ impl WindowManager {
             client.saved_geom = g;
         }
 
-        // configure border
-        let _ = self.conn.configure_window(
-            win,
-            &ConfigureWindowAux::new().border_width(client.border_w),
-        );
+        // El borde lo aplica el Reconciler vía `arrange` (único dueño de
+        // `configure_window`). Emitirlo aquí creaba una carrera con `arrange`:
+        // dos configures (borde suelto + geometría completa) y dos
+        // `ConfigureNotify` con posiciones distintas; para un float eso se
+        // adopta (`follow=true`) y rebota hasta el siguiente `arrange`.
         let _ = self.conn.change_window_attributes(
             win,
             &ChangeWindowAttributesAux::new()
@@ -593,6 +570,7 @@ impl WindowManager {
         // Drop the reconciler's record of this window so a remap re-emits a full
         // configure (its previous applied rect is no longer valid).
         self.applied.forget(win);
+        self.shape_mask_cache.remove(&win);
 
         // Announce the departure on the typed EventBus.
         self.engine
@@ -744,12 +722,20 @@ impl WindowManager {
                 // client so a `[[rules]]` entry actually does what the example
                 // config promises.
                 //
-                // Pin to a specific workspace. `rule.ws` is already 0-based and
-                // bounds-checked by `parse_rules`, so it is a valid index into
-                // `Monitor::workspaces`. Captured into `ws_i` below and used for
-                // placement (manage sets `_NET_WM_DESKTOP` from it too).
+                // Pin to a specific workspace. `rule.ws` is 0-based and was
+                // bounds-checked by `parse_rules` — against the `n_tags` of
+                // the config that parsed it. A later `reload` with fewer tags
+                // (or a hotplug-restored monitor with fewer workspaces) can
+                // leave it out of range, stranding the window off-tree and
+                // invisible. Clamp to the live workspace count.
                 if let Some(ws) = rule.ws {
-                    c.workspace = ws;
+                    let n = self
+                        .engine
+                        .state
+                        .monitors
+                        .get(c.monitor)
+                        .map_or(self.engine.cfg.n_tags.max(1), |m| m.workspaces.len());
+                    c.workspace = ws.min(n.saturating_sub(1));
                 }
                 // Per-rule opacity: copied into the client so the
                 // `_NET_WM_WINDOW_OPACITY` write in manage() (gated on
@@ -848,14 +834,12 @@ impl WindowManager {
                 c.geom.x = wa.x + x;
                 c.geom.y = wa.y + y;
             }
-            // Clamp fully inside the workarea (allow full-workarea sizes).
-            let max_x = (wa.x + wa.w as i32 - c.geom.w as i32).max(wa.x);
-            let max_y = (wa.y + wa.h as i32 - c.geom.h as i32).max(wa.y);
-            c.geom.x = c.geom.x.clamp(wa.x, max_x);
-            c.geom.y = c.geom.y.clamp(wa.y, max_y);
-            c.geom.w = c.geom.w.min(wa.w);
-            c.geom.h = c.geom.h.min(wa.h);
+            // Normalizacion unica con hints para no discrepar de `arrange`.
+            c.geom = normalize_float_request(c.geom, c.hints, wa, c.border_w);
             c.saved_geom = c.geom;
+            // El WM reclamo la geometria con una regla: el sello de autoridad
+            // del cliente muere aqui (el rect ya no es una peticion suya).
+            c.float_client_authority = false;
         }
     }
 
@@ -935,17 +919,16 @@ impl WindowManager {
                 AtomEnum::CARDINAL,
                 &[1],
             );
+            // Preserve negative origins: the reader (`read_float_prefs`)
+            // reinterprets via `as i32`, so `x as u32` round-trips while
+            // `x.max(0)` would strand a left-of-primary float on monitor 0
+            // after `--replace`/restart.
             let _ = self.conn.change_property32(
                 PropMode::REPLACE,
                 win,
                 self.atoms.maverick_geom,
                 AtomEnum::CARDINAL,
-                &[
-                    c.geom.x.max(0) as u32,
-                    c.geom.y.max(0) as u32,
-                    c.geom.w,
-                    c.geom.h,
-                ],
+                &[c.geom.x as u32, c.geom.y as u32, c.geom.w, c.geom.h],
             );
         } else {
             let _ = self.conn.delete_property(win, self.atoms.maverick_float);
@@ -1046,13 +1029,24 @@ impl WindowManager {
                 // screen during a workspace switch, and we never read its live
                 // X position for exactly that reason.
                 let cg = c.geom;
-                c.geom = Rect::new(
+                let centered = Rect::new(
                     pgeom.x + ((pgeom.w as i32).saturating_sub(cg.w as i32)) / 2,
                     pgeom.y + ((pgeom.h as i32).saturating_sub(cg.h as i32)) / 2,
                     cg.w,
                     cg.h,
                 );
+                // Normalizacion unica para que el hijo reenlazado nazca punto
+                // fijo y `arrange` no lo desplace en el siguiente frame.
+                let wa = self
+                    .engine
+                    .state
+                    .monitors
+                    .get(pmon)
+                    .map_or(Rect::new(0, 0, 800, 600), |m| m.workarea);
+                c.geom = normalize_float_request(centered, c.hints, wa, c.border_w);
                 c.saved_geom = c.geom;
+                // Reenlace del WM: geometria reclamada por el WM (sello fuera).
+                c.float_client_authority = false;
                 c.geometry_dirty = true;
                 if pmon < self.engine.state.monitors.len()
                     && pws < self.engine.state.monitors[pmon].workspaces.len()
@@ -1100,6 +1094,28 @@ impl WindowManager {
             }
         }
         Ok(())
+    }
+
+    /// Re-read `WM_NORMAL_HINTS` for `win` through the shared pure parser.
+    /// Returns `None` when the property is absent, unreadable, or malformed —
+    /// the caller then keeps the previous hints (a transient read failure must
+    /// never drop constraints, per the R3 philosophy).
+    pub(super) fn read_size_hints(&self, win: Window) -> Option<SizeHints> {
+        let reply = self
+            .conn
+            .get_property(
+                false,
+                win,
+                AtomEnum::WM_NORMAL_HINTS,
+                AtomEnum::WM_SIZE_HINTS,
+                0,
+                18,
+            )
+            .ok()?
+            .reply()
+            .ok()?;
+        let words: Vec<u32> = reply.value32()?.collect();
+        parse_wm_normal_hints(&words)
     }
 
     pub(super) fn find_client(&self, mut win: Window) -> Option<Window> {

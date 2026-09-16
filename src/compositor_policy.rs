@@ -46,7 +46,7 @@
 //! desktop that still needs the compositor must never be bypassed.
 
 use crate::config::Cfg;
-use crate::types::{Client, Monitor, State, WindowId};
+use crate::types::{Client, Monitor, State, StateExt, WindowId};
 
 /// The composition mode for one output, as decided by the [`CompositionPolicy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

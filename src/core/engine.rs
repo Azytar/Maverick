@@ -9,6 +9,8 @@ use crate::core::effect::Effect;
 use crate::core::event::{Event, EventBus, EventHandler};
 use crate::types::*;
 
+/// Central state machine: owns `State` + `Cfg` and is the sole path that
+/// mutates them. Backends observe via `Effect`s; bars/tests via `EventBus`.
 pub struct Engine {
     pub state: State,
     pub cfg: Cfg,
@@ -72,6 +74,11 @@ impl Engine {
     /// Execute a single command: applies it to `State`/`Cfg`, publishes its
     /// domain event, and returns the effects for the backend. A single user
     /// gesture maps to one command, so one state publish here is correct.
+    ///
+    /// Safety net: before returning, reconciles any `pending_focus` whose overlay
+    /// owner is no longer presented (invariant #8c) via
+    /// `reconcile_pending_focus_after_transition`, appending `FocusWindow` if no
+    /// such effect already exists, then checks `assert_invariants` in debug.
     pub fn execute(&mut self, mut cmd: impl Command) -> Vec<Effect> {
         let report = cmd.execute(&mut self.state, &mut self.cfg);
         if let Some(ev) = &report.event {
@@ -88,7 +95,14 @@ impl Engine {
         if let Some(w) =
             crate::core::commands::reconcile_pending_focus_after_transition(&mut self.state)
         {
-            if !effects.iter().any(|e| matches!(e, Effect::FocusWindow(_))) {
+            // Match only `Some`: a command that already emitted
+            // `FocusWindow(None)` (e.g. `ViewWorkspace` with no focus target)
+            // must NOT suppress the reconciled `Some(w)` — otherwise the
+            // logical focus the safety net just installed never reaches X.
+            if !effects
+                .iter()
+                .any(|e| matches!(e, Effect::FocusWindow(Some(_))))
+            {
                 effects.push(Effect::FocusWindow(Some(w)));
             }
         }
@@ -100,6 +114,11 @@ impl Engine {
     /// Execute a batch of commands as ONE transaction. This is the answer to
     /// "macro publishes 50 times": N commands here coalesce into a single
     /// state publish, no matter how many mutate state or fire events.
+    ///
+    /// Safety net: same `pending_focus` reconciliation as `execute` — after all
+    /// commands have run and events have been published, any orphaned
+    /// `pending_focus` (owner no longer presented) is resolved and a
+    /// `FocusWindow` appended if needed, before `assert_invariants`.
     pub fn execute_batch(
         &mut self,
         commands: impl IntoIterator<Item = Box<dyn Command>>,
@@ -132,7 +151,11 @@ impl Engine {
         if let Some(w) =
             crate::core::commands::reconcile_pending_focus_after_transition(&mut self.state)
         {
-            if !all.iter().any(|e| matches!(e, Effect::FocusWindow(_))) {
+            // Same `Some`-only rule as `execute` (see above).
+            if !all
+                .iter()
+                .any(|e| matches!(e, Effect::FocusWindow(Some(_))))
+            {
                 all.push(Effect::FocusWindow(Some(w)));
             }
         }

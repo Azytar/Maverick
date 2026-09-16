@@ -304,11 +304,12 @@ impl CompWin {
     /// floating-freeze fix, happens once per frame in `compute_scene`, never
     /// synchronously inside the event handler.
     fn observe_configure(&mut self, x: i32, y: i32, w: u32, h: u32, bw: u32) -> bool {
+        let frame = bw.saturating_mul(2);
         let new_outer = Rect::new(
             x.saturating_sub(bw as i32),
             y.saturating_sub(bw as i32),
-            w + 2 * bw,
-            h + 2 * bw,
+            w.saturating_add(frame),
+            h.saturating_add(frame),
         );
         let resized = new_outer.w != self.outer.w || new_outer.h != self.outer.h;
         self.outer = new_outer;
@@ -814,6 +815,12 @@ impl Compositor {
             crate::config::VsyncMode::Off => GlVsyncMode::Off,
             crate::config::VsyncMode::Adaptive => GlVsyncMode::Adaptive,
         };
+        // SAFETY: `dpy` is the `XDisplay` opened by `maverick_x11::open_x` and
+        // kept alive by both `WindowManager::dpy` and `Rc<XConn>` (which holds the
+        // `xcb_connection_t` with `should_drop=false`). The raw `Display*` is
+        // therefore live for the whole `Compositor::init` call and is only
+        // borrowed as a non-owning handle to probe GLX; `maverick_gl` does not
+        // take ownership or close it.
         let gl_dpy = unsafe { maverick_gl::XDisplay::from_raw(dpy.as_ptr()) };
         let mut renderer = match GlRenderer::new_with_vsync(
             gl_dpy,
@@ -1151,6 +1158,30 @@ impl Compositor {
         }
         if !self.wins.contains_key(&win) {
             self.track(win);
+        }
+        // Refresh the cached outer rect from the server BEFORE the overlap
+        // check below: at CreateNotify the window is typically still 1x1 at
+        // -1,-1, and `track()` cached exactly that. By map time the real size
+        // is known; checking against the stale 1x1 would keep a bypass that a
+        // now-fullscreen dialog actually covers. A failed query means "unknown"
+        // and conservatively disengages (same as the `_ => true` arm).
+        if let Some(g) = self
+            .conn
+            .get_geometry(win)
+            .ok()
+            .and_then(|c| c.reply().ok())
+        {
+            if let Some(cw) = self.wins.get_mut(&win) {
+                let bw = g.border_width as u32;
+                let frame = bw.saturating_mul(2);
+                cw.outer = Rect::new(
+                    (g.x as i32).saturating_sub(bw as i32),
+                    (g.y as i32).saturating_sub(bw as i32),
+                    (g.width as u32).saturating_add(frame),
+                    (g.height as u32).saturating_add(frame),
+                );
+                cw.border_w = bw;
+            }
         }
         // A previously-unknown window became visible while bypassing. Only
         // disengage if it overlaps the bypassed output (P0 overlap check).
@@ -1734,9 +1765,18 @@ impl Compositor {
 
     /// Engage bypass for `mon`, un-redirecting `win` so it presents directly.
     /// No-op if `mon` already bypasses `win`; otherwise any previous bypass on
-    /// `mon` is cleanly disengaged first.
+    /// `mon` is cleanly disengaged first. Refuses a candidate that is not
+    /// currently tracked+mapped (destroyed in a race, or never mapped): punching
+    /// the overlay hole for a dead XID would leave a permanent wallpaper hole.
+    /// The policy re-evaluates every turn, so a refused engage is simply
+    /// retried once the window is really there.
     pub fn engage_bypass(&mut self, mon: usize, win: Window) {
         if self.bypassed.get(&mon) == Some(&win) {
+            return;
+        }
+        let mapped = self.wins.get(&win).is_some_and(|cw| cw.mapped);
+        if !mapped {
+            self.disengage_bypass(mon);
             return;
         }
         if let Some(old) = self.bypassed.get(&mon).copied() {
@@ -1800,14 +1840,15 @@ impl Compositor {
         let coverage = overlay_coverage(self.screen_rect, &holes);
         // Translate coverage rects to overlay window coordinates (overlay at 0,0
         // covering screen_rect). For typical positive monitors this is identity;
-        // for union with negative origin we offset.
+        // for union with negative origin we offset. Clamped: raw `as i16/u16`
+        // truncates negative origins and >64k sizes into corrupt shapes.
         let rects: Vec<Rectangle> = coverage
             .iter()
             .map(|r| Rectangle {
-                x: (r.x - self.screen_rect.x) as i16,
-                y: (r.y - self.screen_rect.y) as i16,
-                width: r.w as u16,
-                height: r.h as u16,
+                x: (r.x - self.screen_rect.x).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                y: (r.y - self.screen_rect.y).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                width: r.w.clamp(1, u16::MAX as u32) as u16,
+                height: r.h.clamp(1, u16::MAX as u32) as u16,
             })
             .collect();
         let Ok(region) = self.conn.generate_id() else {
@@ -1873,13 +1914,27 @@ impl Compositor {
         self.mark_full(DirtyReason::SURFACE);
     }
 
-    /// True when `r` is fully contained by a currently-bypassed window's last
-    /// `outer` rect — used by `render` to skip drawing wallpaper under a window
-    /// that is presented directly (so the overlay stays transparent there).
+    /// True when `r` is covered by a currently-bypassed window's last `outer`
+    /// rect — used by `render` to skip drawing wallpaper under a window that
+    /// is presented directly (so the overlay stays transparent there).
+    /// Full containment, plus near-full overlap: a bypassed window 1px shy
+    /// of the output (borders) must still suppress the wallpaper beneath it
+    /// (otherwise the opaque wallpaper paints over the direct frame's edge
+    /// pixels) — but a stale-small bypass must NOT suppress the whole
+    /// output's wallpaper, hence the area tolerance instead of bare overlap.
     fn bypass_covers(&self, r: Rect) -> bool {
         for win in &self.bypassed_set {
             if let Some(cw) = self.wins.get(win) {
-                if cw.outer.contains_rect(r) {
+                let o = cw.outer;
+                if o.contains_rect(r) {
+                    return true;
+                }
+                // Saturating overlap test (no new `Rect` API needed).
+                let overlap = o.x < r.x.saturating_add(r.w.min(i32::MAX as u32) as i32)
+                    && r.x < o.x.saturating_add(o.w.min(i32::MAX as u32) as i32)
+                    && o.y < r.y.saturating_add(r.h.min(i32::MAX as u32) as i32)
+                    && r.y < o.y.saturating_add(o.h.min(i32::MAX as u32) as i32);
+                if overlap && o.area().saturating_add(16_384) >= r.area() {
                     return true;
                 }
             }
@@ -2672,10 +2727,15 @@ impl Compositor {
             return;
         }
         let format = cw.format;
+        // Zero sizes fall back to 1x1; >64k sizes are clamped — a raw
+        // `as u16` truncates (e.g. 65537 → 1) into a corrupt texture.
         let (w, h) = if cw.outer.w == 0 || cw.outer.h == 0 {
             (1u16, 1u16)
         } else {
-            (cw.outer.w as u16, cw.outer.h as u16)
+            (
+                cw.outer.w.clamp(1, u16::MAX as u32) as u16,
+                cw.outer.h.clamp(1, u16::MAX as u32) as u16,
+            )
         };
         // Reuse the existing named pixmap when retrying a failed bind, so we do
         // not leak a new server-side allocation on every damage repaint.

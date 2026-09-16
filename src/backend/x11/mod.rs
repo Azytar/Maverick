@@ -18,7 +18,10 @@ use crate::backend::atoms::Atoms;
 use crate::backend::x11::compositor::DirtyReason;
 use crate::backend::x11::framesched::FrameScheduler;
 use crate::config::Cfg;
-use crate::core::layout::{arrange, ideal_scroll, Placements, RibbonScratch};
+use crate::core::layout::{
+    arrange, fixed_size_hints, ideal_scroll, parse_wm_normal_hints, snap_float_to_hints,
+    Placements, RibbonScratch,
+};
 use crate::core::{parse_action, state_json, Effect, Engine};
 use crate::log;
 use crate::types::*;
@@ -46,57 +49,30 @@ use pointer::DragState;
 /// gap between them.
 const KBD_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Snapshot of everything that affects a monitor's *projected* window geometry
-/// except the live camera scroll position (`camera.position`). If this signature
-/// is unchanged between two frames, the only thing that moved is the camera, and
-/// the live placement set can be re-used by a cheap horizontal translation
-/// instead of re-running `arrange` (see `run_once`).
+// Presentation cache removed from WM — lives in compositor (see `compositor_gl::ProjSig`).
+
+/// The X11 backend — owns the single `Rc<XConn>` + `XDisplay`, the `State`/
+/// `Engine`, EWMH, grabs, and the compositor handle.
 ///
-/// It intentionally folds `accordion_boost * boost` per column (the width-
-/// contributing factor) rather than raw `boost`: with `accordion_boost == 0`
-/// (the default) every column's effective boost is 0 regardless of the spring,
-/// so the signature is stable across an entire focus scroll and the translation
-/// fast-path fires every frame. With `accordion_boost > 0` the glide changes
-/// widths per frame, the signature diverges, and we correctly fall back to a
-/// full `arrange`.
-#[derive(Clone, PartialEq)]
-struct ProjSig {
-    zoom: f32,
-    zoom_target: f32,
-    page_zoom: f32,
-    page_zoom_target: f32,
-    /// `accordion_boost * boost` per column, in column order.
-    eff_boost: Vec<f32>,
-}
-
-/// Build the [`ProjSig`] for one workspace.
-// Kept for potential future WM-side use; presentation cache now lives in the compositor.
-#[allow(dead_code)]
-fn proj_signature(ws: &Workspace, cfg: &Cfg) -> ProjSig {
-    let total_boost = cfg.accordion_boost.clamp(0.0, 0.9);
-    ProjSig {
-        zoom: ws.zoom,
-        zoom_target: ws.zoom_target,
-        page_zoom: ws.page_zoom,
-        page_zoom_target: ws.page_zoom_target,
-        eff_boost: ws.columns.iter().map(|c| total_boost * c.boost).collect(),
-    }
-}
-
-/// The live projection scale `alpha` (see `core::layout::ribbon_geom_into`) for
-/// the `Phase::Live` projection. Required to translate cached placements by the
-/// exact camera delta: `screen_x = wa.x + (world_x - cam) * alpha + cx`, so a
-/// camera change of `dcam` shifts every scrolling window by `-dcam * alpha`.
-#[allow(dead_code)]
-fn live_alpha(ws: &Workspace) -> f32 {
-    let a = ws.zoom.max(0.05);
-    if ws.viewport_mode == ViewportMode::Zoomed {
-        ws.page_zoom.max(0.05)
-    } else {
-        a
-    }
-}
-
+/// # Ownership
+///
+/// `Rc<XConn>` is shared with `Compositor` so both issue requests over the same
+/// `xcb_connection_t` (sequence-number coherent, one socket). `XDisplay` is
+/// `Copy` / non-`Drop` with `should_drop=false` (invariant proved by
+/// `maverick_x11::open_x`): the `Display*` stays live as long as either `Rc`
+/// holder lives.
+///
+/// # Lifecycle
+///
+/// Created by `WindowManager::new` (opens X, claims `SUBSTRUCTURE_REDIRECT`,
+/// scans windows, arranges), driven by `run` → `run_once` (flush → drain →
+/// animate → present → wait → keyboard → control), torn down by `cleanup`.
+///
+/// # Protocol why
+///
+/// `SubstructureRedirect` is the ICCCM WM election; `_NET_SUPPORTING_WM_CHECK` +
+/// `_NET_SUPPORTED` advertise EWMH; `RandR` monitors drive `workarea`; XKB +
+/// core `MappingNotify` drive keymap refresh.
 pub struct WindowManager {
     /// The one X connection. It is an `XCBConnection` (not `RustConnection`)
     /// because it is the *same* `xcb_connection_t` the Xlib `Display` below
@@ -148,6 +124,14 @@ pub struct WindowManager {
     /// actually been written to X11. `apply_geom` diffs every desired placement
     /// against this so `configure_window` fires only on real changes.
     applied: crate::backend::x11::reconciler::AppliedState,
+    /// No-compositor rounded-corner path (`round_corners`): last (`outer_w`,
+    /// `outer_h`, radius) a Shape `BOUNDING` mask was actually set for, per
+    /// window. `emit_geometry` runs on every `Configure` effect, including
+    /// pure position moves (camera scroll/animation touches every visible
+    /// window's `x` every frame) — without this cache a SHAPE `SET` request
+    /// was reissued every such frame even though the mask geometry (a pure
+    /// function of size, not position) hadn't changed.
+    shape_mask_cache: std::collections::HashMap<Window, (u32, u32, i32)>,
     /// P12: Reusable buffers for `hide_offscreen` — avoids reallocation per arrange.
     hide_ws_set: std::collections::HashSet<Window>,
     hide_mon_vec: Vec<Window>,
@@ -212,10 +196,6 @@ pub struct WindowManager {
     /// `CurrentTime`, which a few strict toolkits (some Java/Emacs builds)
     /// refuse to act on.
     last_event_time: u32,
-    /// Tiled window currently highlighted by the drag-to-tile preview (its
-    /// border is painted `col_focused`). Reverted when the pointer moves away
-    /// or the drag ends.
-    drag_target: Option<Window>,
     /// Timestamp of the previous animation frame, for `dt` in `tick_animations`.
     last_frame: Instant,
     /// True while any camera/zoom/accordion spring is still moving; drives the
@@ -335,8 +315,18 @@ impl WindowManager {
             }
         }
     }
+    /// Tear down WM-owned X resources (grabs, root event mask, EWMH props,
+    /// check window) and remove the control socket / identity ficha. Safe to
+    /// call before `exec` in `restart`.
     pub fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let _ = self.conn.ungrab_key(0u8, self.root, ModMask::ANY);
+
+        // A drag in flight holds an active pointer grab: release it so
+        // `restart`/`quit` never depends on the server disconnect to free it.
+        if self.drag.is_some() {
+            let _ = self.conn.ungrab_pointer(x11rb::CURRENT_TIME);
+            self.drag = None;
+        }
 
         // Restore root event mask: remove SUBSTRUCTURE_REDIRECT so that
         // the next WM doesn't fail on startup.
@@ -571,34 +561,17 @@ impl WindowManager {
                 // running every animation 15–150x slow (B8).
             }
         } else {
-            let nmon = self.engine.state.monitors.len();
-            if self.anim_per_mon.len() != nmon {
-                self.anim_per_mon = vec![false; nmon];
-            }
-            let anim_enabled = crate::config::animations_enabled(&self.engine.cfg);
-            let mut anim = false;
-            if anim_enabled {
-                for sub in compositor::substep_bounds(dt) {
-                    anim |= self
-                        .engine
-                        .state
-                        .tick_animations_multi(sub, &mut self.anim_per_mon);
-                }
-            } else {
-                self.engine.state.snap_animations();
-                self.anim_per_mon.fill(false);
-            }
-            self.animating = anim;
-            sched = FrameScheduler::from_compositor(self.animating, false, DirtyReason::NONE);
-            if self.animating {
-                for i in 0..self.engine.state.monitors.len() {
-                    // Reconfigure only the monitors that are actually animating
-                    // (or whose layout is dirty); idle monitors stay put.
-                    if self.anim_per_mon[i] || self.engine.state.monitors[i].layout_dirty {
-                        let _ = self.arrange_live(i);
-                    }
-                }
-            }
+            // No compositor: dwm-style, zero animation. Every state change has
+            // already landed on its final geometry through the single
+            // `Effect::ArrangeMonitor` → `arrange` (Phase::Settled) path, so
+            // there is nothing to animate and nothing to reconfigure per
+            // frame. The camera springs snap straight to their target so the
+            // logical state stays settled; the loop then goes idle (100 ms
+            // poll) exactly like the compositor path does when static.
+            self.engine.state.snap_animations();
+            self.anim_per_mon.fill(false);
+            self.animating = false;
+            sched = FrameScheduler::from_compositor(false, false, DirtyReason::NONE);
         }
 
         // The present (if any) just consumed the accumulated dirty reasons; only
@@ -657,6 +630,9 @@ impl WindowManager {
         // Loop back → flush_client_list() rewrites _NET_CLIENT_LIST at most once per batch.
         Ok(())
     }
+    /// Drive the WM until `state.running` is false or the X connection is lost.
+    /// One iteration is `run_once`; graceful `quit` waits up to `SHUTDOWN_BUDGET`
+    /// for clients, then `force_kill_remaining`.
     pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         while self.engine.state.running {
             if let Err(e) = self.run_once() {
@@ -682,6 +658,10 @@ impl WindowManager {
         }
         Ok(())
     }
+    /// Open X, claim the screen (or `--replace`), detect `RandR` monitors, build
+    /// `Engine`, optionally initialise the GL compositor, scan existing windows
+    /// and arrange. `config_path` is the exact file to re-read on `reload`;
+    /// `launch_args` are replayed verbatim on `restart`.
     pub fn new(
         cfg: Cfg,
         replace: bool,
@@ -808,6 +788,7 @@ impl WindowManager {
             client_list_dirty: false,
             stack_dirty: false,
             applied: crate::backend::x11::reconciler::AppliedState::default(),
+            shape_mask_cache: std::collections::HashMap::new(),
             hide_ws_set: std::collections::HashSet::with_capacity(32),
             hide_mon_vec: Vec::with_capacity(64),
             desired: Placements::with_capacity(32),
@@ -825,7 +806,6 @@ impl WindowManager {
             docks: std::collections::HashMap::new(),
             pointer_guard_until: None,
             last_event_time: 0,
-            drag_target: None,
             last_frame: std::time::Instant::now(),
             animating: false,
             last_stack_order: std::collections::HashMap::new(),
@@ -1023,7 +1003,17 @@ fn fetch_keyboard_state(conn: &XConn) -> Result<KeyboardState, Box<dyn std::erro
     let setup = conn.setup();
     let min = setup.min_keycode;
     let max = setup.max_keycode;
-    let count = (max as u16 - min as u16 + 1) as u8;
+    // `count` is a `u8` (CARD8): `max - min + 1` can only exceed 255 with a
+    // hostile/broken Setup (`min=0, max=255` → 256 → truncates to 0 and the
+    // mapping comes back empty, silently dropping all binds). Reject an
+    // inverted range and clamp the count instead of wrapping.
+    if max < min {
+        return Err("keyboard: inverted keycode range in Setup".into());
+    }
+    let count = (max as u16 - min as u16 + 1).min(u8::MAX as u16) as u8;
+    if count == 0 {
+        return Err("keyboard: empty keycode range in Setup".into());
+    }
 
     let c_kb = conn.get_keyboard_mapping(min, count)?;
     let c_mod = conn.get_modifier_mapping()?;

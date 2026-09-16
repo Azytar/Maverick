@@ -18,7 +18,7 @@
 // geometry change.
 
 use crate::core::desired::DesiredState;
-use crate::types::{Client, Rect, State, WindowId};
+use crate::types::{Rect, State, WindowId};
 
 // ── window-trace instrumentation (feature `window-trace`) ─────────────────────
 // Observability-only macro for the reconcile/desired→applied pipeline. No-op
@@ -91,6 +91,26 @@ impl AppliedState {
     pub fn forget(&mut self, win: WindowId) {
         self.windows.remove(&win);
     }
+
+    /// Record what X11 currently shows **without emitting a configure**.
+    ///
+    /// `Applied` means "what X11 has", so an observation of a rect the window
+    /// genuinely has (e.g. a `ConfigureRequest` we just adopted) must move the
+    /// record without poking the window again. Re-issuing `configure_window` for
+    /// a rect the window already has is pure protocol noise, and for a float it
+    /// is worse than noise: it emits a fresh `ConfigureNotify` that a toolkit may
+    /// answer with another `ConfigureRequest` — the feedback loop that reads on
+    /// screen as a window that moves by itself.
+    // Kept for the unit tests below (they install already-applied geometry to
+    // exercise the echo/Stale contract); the production sink currently records
+    // through `diff` only, so the non-test build sees no caller.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn observe(&mut self, win: WindowId, rect: Rect, border_w: u32) {
+        let prev = self.windows.entry(win).or_default();
+        prev.rect = rect;
+        prev.border_w = border_w;
+        prev.seen = true;
+    }
 }
 
 /// A geometry operation the backend must apply to X11 to make it match Desired.
@@ -149,58 +169,66 @@ pub fn reconcile(
 ///   written to X11, so unchanged placements are never re-emitted. `Desired`
 ///   and `Applied` are independent records; the `Reconciler` never writes
 ///   `Desired` — it only reads `Desired` and mutates `Applied`.
-/// * **X11 Real** — what the client *actually* shows, observed externally via
-///   `ConfigureNotify`. This is deliberately NOT trusted as state: a self-
-///   resizing client (Firefox, Wine, a game) reports a geometry that diverges
-///   from `Applied`, and we use that divergence only to decide whether to
-///   re-assert `Desired` (WM authority) or to adopt it (a float).
+/// * **X11 Real** — what X11 *reports*, observed externally via
+///   `ConfigureNotify`. This is deliberately NOT trusted as state — and, with
+///   `SUBSTRUCTURE_REDIRECT` held on the root, it is not even a client message:
+///   the server never applies a client's `ConfigureWindow` to a viewable child of
+///   the root, so a reported rect can only be the echo of a request *this WM*
+///   issued (possibly an older one still in flight). `Real` is therefore used
+///   for observability and to detect that a configure is owed; it never becomes
+///   the model.
 ///
 /// `diff` takes the *desired* `(win, rect, border_w)` and the *applied*
 /// `AppliedWindow` and returns the configure only when they differ.
 ///
 /// The verdict of comparing an external `ConfigureNotify` against `Applied`.
-/// `Desired` (`client.geom`) is the third side: when we re-assert we emit
-/// `Desired`, never the client's reported rect, so the WM stays the authority
-/// for tiled/fullscreen windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigureObservation {
-    /// Reported geometry equals what we last applied: the echo of our own
-    /// `configure_window`, or a compliant client. Nothing to do.
+    /// Reported geometry equals what we last applied: our own echo. Nothing to do.
     Compliant,
-    /// The client moved on its own (`X11 Real != Applied`). `follow` says
-    /// whether the WM yields to it:
-    ///   * `false` — the WM is the authority (tiled/fullscreen): re-emit
-    ///     `Desired` so the client snaps back to where the WM put it.
-    ///   * `true`  — the window is allowed external geometry (a float): adopt
-    ///     the reported rect into the model instead of fighting it.
-    Diverged { follow: bool },
+    /// X11 reports a geometry other than the last applied one. The caller
+    /// re-asserts the *model* (`client.geom`), never the reported rect, and the
+    /// `AppliedState::diff` inside that path suppresses the write when X11
+    /// already matches — which is the normal outcome, because the divergence is
+    /// usually an echo of our own *older* request.
+    Stale,
 }
 
-/// Classify an external `ConfigureNotify` for a managed window. Pure: it only
-/// reads `AppliedState` and `Client` plus the drag authority flag, so the
-/// convergence policy is unit-tested without an X server. The caller acts on
-/// the verdict (see `on_configure_notify`).
+/// Classify an external `ConfigureNotify` for a managed window. Pure: it reads
+/// only the reported rect/border and `AppliedState`, so the policy is
+/// unit-tested without an X server. The caller acts on the verdict (see
+/// `on_configure_notify`).
+///
+/// # Why there is no "follow the client" verdict
+///
+/// The WM holds `SUBSTRUCTURE_REDIRECT` on the root, so for a viewable managed
+/// window the server turns every client `ConfigureWindow` into a
+/// `ConfigureRequest` and leaves the window untouched: **only this WM moves
+/// managed windows**. A `ConfigureNotify` is thus an *echo*, and one that
+/// diverges from `Applied` is a *stale* echo (an older request of ours whose
+/// event was queued behind newer traffic). Adopting it — as this code used to —
+/// overwrites the model with a geometry the WM already left behind and
+/// re-configures the window onto it, so the client's next request is answered
+/// with the past: measured as a ~150 configures/s ping-pong between two
+/// geometries (the window visibly jumping between two sizes/positions) with the
+/// WM burning a core.
 pub(crate) fn classify_configure(
     reported_rect: Rect,
     reported_bw: u32,
     applied: &AppliedWindow,
-    client: &Client,
-    is_dragged: bool,
 ) -> ConfigureObservation {
     if applied.rect == reported_rect && applied.border_w == reported_bw {
-        return ConfigureObservation::Compliant;
+        ConfigureObservation::Compliant
+    } else {
+        ConfigureObservation::Stale
     }
-    // Diverged. Floats may size themselves; tiled/fullscreen are WM-owned.
-    // While a float is being dragged, WM authority is temporarily exclusive
-    // (I1/I3): never follow client geometry during drag.
-    let follow = client.is_float() && !client.is_fullscreen() && !is_dragged;
-    ConfigureObservation::Diverged { follow }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::desired::DesiredWindow;
-    use crate::types::WinFlags;
+    use crate::types::{Client, WinFlags};
 
     #[test]
     fn first_apply_always_emits() {
@@ -261,93 +289,114 @@ mod tests {
         );
     }
 
-    // ── Step 3: convergence — external ConfigureNotify vs Applied ──────────
+    // ── Convergence: external ConfigureNotify vs Applied ────────────────────
     //
-    // These encode the concrete desync scenarios the WM must survive: a client
-    // that resizes itself (Firefox / Wine / a game) must NOT drag the model
-    // with it. For tiled/fullscreen the WM is the authority and must re-assert;
-    // for a float it may adopt the new geometry.
+    // A managed window's `ConfigureNotify` is an *echo* of a request this WM
+    // issued: `SUBSTRUCTURE_REDIRECT` on the root means the server never applies
+    // a client's `ConfigureWindow` to a viewable child of the root. The scenarios
+    // below are the ones that used to produce the erratic-float ping-pong by
+    // treating a stale echo as a client decision.
 
-    /// A tiled 1000x800; the client attempts 400x300 → divergence the WM must
-    /// re-assert (snap back), never follow.
+    /// The echo of our own latest request is Compliant — nothing to do. Pinned
+    /// for a float and for a tiled window (authority does not enter here: both
+    /// are echoes).
     #[test]
-    fn tiled_self_resize_is_authority_diverged() {
-        let c = Client::new(1, 0, 0); // tiled: not a float
+    fn matching_echo_is_compliant() {
         let applied = AppliedWindow {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
             sequence: None,
         };
-        let obs = classify_configure(Rect::new(0, 0, 400, 300), 2, &applied, &c, false);
-        assert!(
-            matches!(obs, ConfigureObservation::Diverged { follow: false }),
-            "tiled self-resize must be re-asserted, not followed"
+        assert_eq!(
+            classify_configure(Rect::new(0, 0, 1000, 800), 2, &applied),
+            ConfigureObservation::Compliant
+        );
+        // A border-only difference is still our own (stale) configure.
+        assert_eq!(
+            classify_configure(Rect::new(0, 0, 1000, 800), 0, &applied),
+            ConfigureObservation::Stale
         );
     }
 
-    /// A fullscreen window; the client attempts a resize → must stay fullscreen
-    /// (re-assert), even though the reported rect differs wildly.
+    /// A reported rect that is not the last applied one is `Stale`, *regardless*
+    /// of the window being a float: the verdict carries no `follow` bit anymore,
+    /// because with the redirect in place the client cannot have moved it.
     #[test]
-    fn fullscreen_self_resize_is_authority_diverged() {
-        let mut c = Client::new(1, 0, 0);
-        c.flags.set(WinFlags::FULLSCREEN);
-        let applied = AppliedWindow {
-            rect: Rect::new(0, 0, 1920, 1080),
-            border_w: 0,
-            seen: true,
-            sequence: None,
-        };
-        let obs = classify_configure(Rect::new(40, 40, 640, 480), 0, &applied, &c, false);
-        assert!(
-            matches!(obs, ConfigureObservation::Diverged { follow: false }),
-            "fullscreen must re-assert and stay fullscreen"
-        );
-    }
-
-    /// Our own configure echo (or a compliant client) reports exactly what we
-    /// applied → must be ignored, not flagged as a divergence.
-    #[test]
-    fn compliant_echo_is_ignored() {
-        let c = Client::new(1, 0, 0); // tiled
+    fn diverging_echo_is_stale_not_client_intent() {
         let applied = AppliedWindow {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
             sequence: None,
         };
-        let obs = classify_configure(Rect::new(0, 0, 1000, 800), 2, &applied, &c, false);
-        assert!(
-            matches!(obs, ConfigureObservation::Compliant),
-            "matching geometry must be treated as our own echo"
+        assert_eq!(
+            classify_configure(Rect::new(0, 0, 400, 300), 2, &applied),
+            ConfigureObservation::Stale
+        );
+        // Degenerate reported rects (hostile client) classify the same way; they
+        // never reach the model because the verdict is not "adopt".
+        assert_eq!(
+            classify_configure(Rect::new(0, 0, 0, 0), 2, &applied),
+            ConfigureObservation::Stale
         );
     }
 
-    /// A float that resizes itself is allowed external geometry → the model
-    /// follows (adopts the reported rect) rather than fighting it.
+    /// Regression pin for the erratic-float bug (measured as a ~150
+    /// configures/s ping-pong between two geometries): a stale echo, issued while
+    /// the model has already moved on, must neither move the model nor produce a
+    /// configure — the caller re-asserts the model and the diff suppresses the
+    /// write because X11 already shows it.
     #[test]
-    fn float_self_resize_follows_model() {
-        let mut c = Client::new(1, 0, 0);
-        c.flags.set(WinFlags::FLOAT);
-        let applied = AppliedWindow {
-            rect: Rect::new(0, 0, 1000, 800),
-            border_w: 2,
-            seen: true,
-            sequence: None,
-        };
-        let obs = classify_configure(Rect::new(0, 0, 400, 300), 2, &applied, &c, false);
-        assert!(
-            matches!(obs, ConfigureObservation::Diverged { follow: true }),
-            "a float may resize itself; the model should follow"
+    fn stale_echo_causes_no_configure_storm() {
+        let mut applied = AppliedState::default();
+        let model = Rect::new(490, 260, 605, 306);
+        // The client's `ConfigureRequest` was adopted: the model IS the request,
+        // and X11 already shows it (the sink records it via `observe`).
+        assert_eq!(applied.diff(1, model, 2, false), Some((model, 2)));
+        applied.observe(1, model, 2);
+        assert_eq!(
+            applied.diff(1, model, 2, false),
+            None,
+            "adopting a request must not re-poke the window"
+        );
+
+        // An echo of our *older* request (the previous geometry) arrives.
+        let stale = Rect::new(490, 260, 300, 200);
+        assert_eq!(
+            classify_configure(stale, 2, &applied.windows[&1]),
+            ConfigureObservation::Stale
+        );
+        // What the caller does with a `Stale` verdict: re-assert the MODEL.
+        // Because X11 already matches, this emits nothing — no ping-pong.
+        assert_eq!(
+            applied.diff(1, model, 2, false),
+            None,
+            "a stale echo must not generate a configure"
         );
     }
 
-    /// A tiled + B tiled; B self-resizes. A must be Compliant (unaffected), B
-    /// Diverged (re-assert). Per-window authority — focus and scroll untouched.
+    /// `observe` adopts what X11 really shows without emitting, and the entry is
+    /// then `seen`: the `ConfigureRequest` sink's entry point.
     #[test]
-    fn ab_tiled_independent() {
-        let a = Client::new(1, 0, 0); // tiled
-        let b = Client::new(2, 0, 0); // tiled
+    fn observe_records_real_geometry_without_emitting() {
+        let mut applied = AppliedState::default();
+        applied.observe(7, Rect::new(5, 5, 50, 50), 2);
+        let w = &applied.windows[&7];
+        assert_eq!(w.rect, Rect::new(5, 5, 50, 50));
+        assert!(w.seen);
+        assert_eq!(applied.diff(7, Rect::new(5, 5, 50, 50), 2, false), None);
+        // A different rect still emits (the record is not a no-op stub).
+        assert_eq!(
+            applied.diff(7, Rect::new(6, 6, 60, 60), 2, false),
+            Some((Rect::new(6, 6, 60, 60), 2))
+        );
+    }
+
+    /// Two windows: A's echo matches, B's is stale. Per-window records never
+    /// bleed into each other.
+    #[test]
+    fn ab_independent() {
         let applied_a = AppliedWindow {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
@@ -360,47 +409,33 @@ mod tests {
             seen: true,
             sequence: None,
         };
-        let obs_a = classify_configure(Rect::new(0, 0, 1000, 800), 2, &applied_a, &a, false);
-        let obs_b = classify_configure(Rect::new(0, 0, 400, 300), 2, &applied_b, &b, false);
-        assert!(
-            matches!(obs_a, ConfigureObservation::Compliant),
-            "A did not move → ignore"
+        assert_eq!(
+            classify_configure(Rect::new(0, 0, 1000, 800), 2, &applied_a),
+            ConfigureObservation::Compliant
         );
-        assert!(
-            matches!(obs_b, ConfigureObservation::Diverged { follow: false }),
-            "B diverged → re-assert"
+        assert_eq!(
+            classify_configure(Rect::new(0, 0, 400, 300), 2, &applied_b),
+            ConfigureObservation::Stale
         );
     }
 
-    /// A fullscreen + B fullscreen; A attempts a resize. A must re-assert, B
-    /// must stay fullscreen (unaffected) — the two snapshots don't interfere.
+    /// A fullscreen window's echo of its own overlay rect is Compliant; a stale
+    /// one is Stale. Fullscreen is not special: it is just another rect.
     #[test]
-    fn ab_fullscreen_independent() {
-        let mut a = Client::new(1, 0, 0);
-        a.flags.set(WinFlags::FULLSCREEN);
-        let mut b = Client::new(2, 0, 0);
-        b.flags.set(WinFlags::FULLSCREEN);
-        let applied_a = AppliedWindow {
+    fn fullscreen_echo_is_not_special() {
+        let applied = AppliedWindow {
             rect: Rect::new(0, 0, 1920, 1080),
             border_w: 0,
             seen: true,
             sequence: None,
         };
-        let applied_b = AppliedWindow {
-            rect: Rect::new(0, 0, 1920, 1080),
-            border_w: 0,
-            seen: true,
-            sequence: None,
-        };
-        let obs_a = classify_configure(Rect::new(40, 40, 640, 480), 0, &applied_a, &a, false);
-        let obs_b = classify_configure(Rect::new(0, 0, 1920, 1080), 0, &applied_b, &b, false);
-        assert!(
-            matches!(obs_a, ConfigureObservation::Diverged { follow: false }),
-            "A re-asserts its fullscreen rect"
+        assert_eq!(
+            classify_configure(Rect::new(0, 0, 1920, 1080), 0, &applied),
+            ConfigureObservation::Compliant
         );
-        assert!(
-            matches!(obs_b, ConfigureObservation::Compliant),
-            "B is untouched and stays fullscreen"
+        assert_eq!(
+            classify_configure(Rect::new(40, 40, 640, 480), 0, &applied),
+            ConfigureObservation::Stale
         );
     }
 
@@ -636,27 +671,24 @@ mod tests {
     //
     // A hostile client (Firefox / Wine / a game) asks for 0×0, a 60000×60000
     // monster, or a rect parked off the monitor. For a *tiled* (WM-owned) window
-    // the verdict MUST be `Diverged { follow: false }` — the WM re-asserts its
-    // own Desired and never adopts the bogus rect. `classify_configure` is pure
-    // (no layout knowledge), so the verdict is the same regardless of *which*
-    // invalid rect is reported; what matters is that the model refuses to follow.
+    // the old verdict was `Diverged { follow: false }` — the WM re-asserted its
+    // own Desired and never adopted the bogus rect. The follow decision no
+    // longer lives in `classify_configure` at all: a reported rect that differs
+    // from `Applied` is a `Stale` echo the caller re-asserts over, and the
+    // verdict is the same regardless of *which* invalid rect is reported or of
+    // the window being tiled or a float.
     fn tiled_invalid_is_diverged(reported: Rect) {
-        let c = Client::new(1, 0, 0); // tiled: not a float
         let applied = AppliedWindow {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
             sequence: None,
         };
-        match classify_configure(reported, 2, &applied, &c, false) {
-            ConfigureObservation::Diverged { follow } => {
-                assert!(
-                    !follow,
-                    "tiled invalid ConfigureRequest must NOT be followed"
-                );
-            }
-            ConfigureObservation::Compliant => panic!("invalid rect cannot be our own echo"),
-        }
+        assert_eq!(
+            classify_configure(reported, 2, &applied),
+            ConfigureObservation::Stale,
+            "a report differing from Applied must be Stale — never adopted, re-asserted over"
+        );
     }
 
     #[test]
@@ -677,34 +709,51 @@ mod tests {
 
     // ── Fase 1.3: invalid geometry ConfigureRequest on a FLOAT ───────────────
     //
-    // A float IS allowed external geometry, so the verdict is
-    // `Diverged { follow: true }` — but the backend's single geometry sink then
-    // routes the reported rect through `clamp_float_to_workarea`, so a 0×0 /
-    // overflow / off-monitor request is normalized to a valid in-workarea rect
-    // and never reaches X11 as a degenerate configure (X11 rejects 0×0 with
-    // BadValue).
+    // A float *is* allowed external geometry: the old verdict was
+    // `Diverged { follow: true }`, with the backend's single geometry sink then
+    // routing the reported rect through `clamp_float_to_workarea`. That adopt
+    // decision moved into the sink; the classification only separates *our
+    // echo* (Compliant) from *stale traffic* (Stale) — a 0×0 report on a float
+    // is Stale exactly like on a tile, and never reaches X11 as a degenerate
+    // configure (X11 rejects 0×0 with BadValue).
 
     #[test]
     fn float_invalid_configure_request_is_followed_then_clamped() {
-        let mut c = Client::new(1, 0, 0);
-        c.flags.set(WinFlags::FLOAT);
         let applied = AppliedWindow {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
             sequence: None,
         };
-        let obs = classify_configure(Rect::new(0, 0, 0, 0), 2, &applied, &c, false);
-        assert!(
-            matches!(obs, ConfigureObservation::Diverged { follow: true }),
-            "a float may follow an external (even invalid) rect"
+        assert_eq!(
+            classify_configure(Rect::new(0, 0, 0, 0), 2, &applied),
+            ConfigureObservation::Stale,
+            "an invalid float report is stale traffic: the sink normalizes and re-asserts"
+        );
+        // The contract is pure geometry equality, not window policy: had the
+        // sink adopted and applied this exact rect, the echo would be
+        // Compliant — Stale is about "not what we last applied", nothing else.
+        let adopted = AppliedWindow {
+            rect: Rect::new(0, 0, 0, 0),
+            ..applied
+        };
+        assert_eq!(
+            classify_configure(Rect::new(0, 0, 0, 0), 2, &adopted),
+            ConfigureObservation::Compliant
         );
     }
 
     // ── I1/I2/I3: drag authority table ─────────────────────────────────────
+    //
+    // The old table mapped (float, fullscreen, dragged) → follow. Authority is
+    // no longer a `classify_configure` output: the sink owns the drag policy.
+    // What classify still guarantees — and what this table now pins — is that
+    // the verdict depends ONLY on geometry equality, never on the window's
+    // flags or the drag state: any divergent report is Stale (the caller
+    // re-asserts over it), any echo of Applied is Compliant.
     #[test]
     fn drag_authority_table() {
-        let mk = |is_float: bool, is_fs: bool, dragged: bool, expect_follow: bool| {
+        let mk = |is_float: bool, is_fs: bool| {
             let mut c = Client::new(1, 0, 0);
             if is_float {
                 c.flags.set(WinFlags::FLOAT);
@@ -718,60 +767,76 @@ mod tests {
                 seen: true,
                 sequence: None,
             };
-            let obs = classify_configure(Rect::new(10, 10, 200, 200), 2, &applied, &c, dragged);
-            match obs {
-                ConfigureObservation::Diverged { follow } => assert_eq!(
-                    follow, expect_follow,
-                    "float={is_float} fullscreen={is_fs} dragged={dragged} => follow={follow} expected {expect_follow}"
-                ),
-                ConfigureObservation::Compliant => panic!("expected diverged"),
-            }
+            let (obs, echo_obs) = (
+                classify_configure(Rect::new(10, 10, 200, 200), 2, &applied),
+                classify_configure(Rect::new(0, 0, 100, 100), 2, &applied),
+            );
+            assert_eq!(
+                obs,
+                ConfigureObservation::Stale,
+                "float={is_float} fullscreen={is_fs}: a divergent report must be Stale"
+            );
+            assert_eq!(
+                echo_obs,
+                ConfigureObservation::Compliant,
+                "float={is_float} fullscreen={is_fs}: our own echo must be Compliant"
+            );
         };
-        mk(false, false, false, false);
-        mk(false, false, true, false);
-        mk(true, true, false, false);
-        mk(true, true, true, false);
-        mk(true, false, false, true);
-        mk(true, false, true, false);
+        mk(false, false);
+        mk(true, false);
+        mk(false, true);
+        mk(true, true);
     }
 
     #[test]
     fn float_dragged_does_not_follow() {
-        let mut c = Client::new(1, 0, 0);
-        c.flags.set(WinFlags::FLOAT);
         let applied = AppliedWindow {
             rect: Rect::new(0, 0, 100, 100),
             border_w: 2,
             seen: true,
             sequence: None,
         };
-        let obs = classify_configure(Rect::new(5, 5, 50, 50), 2, &applied, &c, true);
-        assert!(
-            matches!(obs, ConfigureObservation::Diverged { follow: false }),
-            "dragged float must not follow client geometry"
+        // The drag policy moved to the sink; classify still guarantees that the
+        // dragged float's reported rect is never mistaken for our own echo.
+        assert_eq!(
+            classify_configure(Rect::new(5, 5, 50, 50), 2, &applied),
+            ConfigureObservation::Stale,
+            "a dragged float's divergent report must be Stale, never treated as our echo"
+        );
+        // ...and the rect the sink will re-assert (Applied) classifies as our
+        // echo — the only Compliant outcome.
+        assert_eq!(
+            classify_configure(Rect::new(0, 0, 100, 100), 2, &applied),
+            ConfigureObservation::Compliant
         );
     }
 
     #[test]
     fn drag_ends_restores_float_authority() {
-        let mut c = Client::new(1, 0, 0);
-        c.flags.set(WinFlags::FLOAT);
         let applied = AppliedWindow {
             rect: Rect::new(0, 0, 100, 100),
             border_w: 2,
             seen: true,
             sequence: None,
         };
-        let during = classify_configure(Rect::new(5, 5, 50, 50), 2, &applied, &c, true);
-        assert!(matches!(
-            during,
-            ConfigureObservation::Diverged { follow: false }
-        ));
-        let after = classify_configure(Rect::new(5, 5, 50, 50), 2, &applied, &c, false);
-        assert!(matches!(
-            after,
-            ConfigureObservation::Diverged { follow: true }
-        ));
+        // During the drag and after it, classification is flag-blind: a
+        // divergent report is Stale either way. What the drag end changes is
+        // the sink's decision (re-assert during, adopt after) — pinned here as
+        // the geometry contract classify feeds.
+        let during = classify_configure(Rect::new(5, 5, 50, 50), 2, &applied);
+        assert_eq!(during, ConfigureObservation::Stale);
+        let after = classify_configure(Rect::new(5, 5, 50, 50), 2, &applied);
+        assert_eq!(after, ConfigureObservation::Stale);
+        // Had the sink adopted (Applied := reported), the echo would be
+        // Compliant — the only path back to a quiet classification.
+        let adopted = AppliedWindow {
+            rect: Rect::new(5, 5, 50, 50),
+            ..applied
+        };
+        assert_eq!(
+            classify_configure(Rect::new(5, 5, 50, 50), 2, &adopted),
+            ConfigureObservation::Compliant
+        );
     }
 
     // ── Fase 1.3: `clamp_float_to_workarea` — the single normalizer ──────────
