@@ -1,20 +1,32 @@
-// CLI control tools shared by the `maverickctl` and `maverick-msg` binaries.
-//
-// The two binaries are the "everything the WM shouldn't do itself" tools:
-// discover running instances, query their state, run structured queries, send
-// actions, stream events, and quit them — all over the per-instance Unix
-// control socket exposed by `maverick-sys`. The WM stays minimal; the policy
-// lives here.
-//
-// `maverickctl` is the general-purpose admin tool; `maverick-msg` is the
-// dwm-style variant that takes *any* line (action, `query <topic>`, or raw
-// protocol word) and forwards it verbatim — same engine underneath.
-//
-// Instance selection:
-//   * `--name <id>` picks an instance explicitly.
-//   * else `$MAVERICK_INSTANCE` (exported by the WM to its children).
-//   * else, if exactly one instance is running, that one.
-//   * else the tool lists candidates and refuses to guess.
+//! CLI control tools shared by the `maverickctl` and `maverick-msg` binaries.
+//!
+//! The two binaries are the "everything the WM shouldn't do itself" tools:
+//! discover running instances, query their state, run structured queries, send
+//! actions, stream events, and quit them — all over the per-instance Unix
+//! control socket exposed by `maverick-sys`. The WM stays minimal; the policy
+//! lives here.
+//!
+//! `maverickctl` is the general-purpose admin tool; `maverick-msg` is the
+//! dwm-style variant that takes *any* line (action, `query <topic>`, or raw
+//! protocol word) and forwards it verbatim — same engine underneath.
+//!
+//! # Instance-selection precedence
+//!
+//! [`resolve_target`] resolves the target `session_id` in this order (first
+//! match wins):
+//!
+//! 1. `--session <sid>` — explicit session id, validated via [`crate::identity::read_meta`].
+//! 2. `--name <label>` — human label or sid, via [`crate::discover::find_by_name`].
+//! 3. `$MAVERICK_INSTANCE` — session id the WM exported to its children.
+//! 4. Caller context — `DISPLAY` + controlling TTY (`/proc/self/stat` field 7);
+//!    if that yields a single live candidate, it is chosen.
+//! 5. Singleton — if exactly one live instance exists globally, that one.
+//! 6. Otherwise the tool lists candidates and returns `None` (refuses to guess).
+//!
+//! # Ownership
+//!
+//! Stateless CLI dispatch; no handles are retained across invocations. Confirmation
+//! prompts try `maverick-dialog` → `zenity`/`kdialog` → TTY fallback.
 
 use std::process::ExitCode;
 

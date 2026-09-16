@@ -1,31 +1,23 @@
-// maverick/src/core/present.rs
-// Presentation layer: turns the pure layout geometry (layout_rect) produced by
-// `core::layout::arrange` into the final geometry applied to X11 (rendered_rect).
-//
-// There is a presentation overlay per workspace that is *not* tied to focus:
-//
-//   * FULLSCREEN (only in `LayoutKind::Column`) — a fullscreen window covers the
-//     whole `screen` (border 0), ignoring reserved regions, and is raised above
-//     everything. In `LayoutKind::Column` a fullscreen window is NOT an overlay:
-//     it is a normal participant of the scrolling ribbon (see `core::layout`),
-//     so it scrolls with the camera and can be scrolled away from — the niri
-//     behaviour.
-//   * MAXIMIZED — a maximized window fills the `workarea` (screen minus
-//     reserved regions) with border 0, on the axes it actually asked for.
-//     `_NET_WM_STATE_MAXIMIZED_VERT` and `_..._HORZ` are two independent EWMH
-//     states, so a vertical-only maximize stretches y/h and leaves x/w at the
-//     tile the layout produced (and vice versa). It is raised like fullscreen
-//     but never paints over reserved regions, and only while it is the focused
-//     window.
-//
-// A maximized window in either layout is presented as long as its flags say so,
-// focused or not. The tiles underneath are still computed by the layout
-// (unchanged), so exiting the overlay restores the workspace exactly where it
-// was — and because the geometry does not depend on focus, moving focus never
-// resizes anything. The renderer layers the *focused* tile above the overlay
-// (peek) or moves the focus entirely without resizing the presented window.
-//
-// Fullscreen takes precedence over maximized if a window somehow has both flags.
+//! Presentation overlay — rewrites layout geometry into final X geometry.
+//!
+//! What owns: `present_into` / `present` (in-place rewrite of `Placements` plus
+//! `raise` stacking order) and `maximized_rect` per-axis logic.
+//!
+//! Exposes: `present_into(state, mon, placements, raise)` — the single
+//! place that turns `layout_rect` (from `layout::arrange`) into
+//! `rendered_rect` (what the reconciler applies to X11).
+//!
+//! Leaves to others: coordinate computation (`layout::arrange` + `ribbon_geom`),
+//! reconciler diff vs `AppliedState`, and backend `ConfigureWindow`/restack.
+//!
+//! Invariants: `fullscreen > maximized` — fullscreen (checked via
+//! `is_fullscreen_overlay`) covers `mon.screen` with border 0 and wins if both
+//! flags are set; otherwise the maximized window (`presented_maximize`) fills
+//! `mon.workarea` with border 0, per-axis (vert/horz independently) via
+//! `maximized_rect`. In `LayoutKind::Column` a tiled fullscreen is a ribbon
+//! participant, not a pinned overlay (see `layout::FsCtx`); exclusive
+//! `FullscreenPolicy::True` is always an overlay. Tiles underneath are still
+//! computed unchanged, so exiting the overlay restores the workspace exactly.
 
 use crate::core::layout::Placements;
 use crate::types::{Monitor, Rect, State, WindowId};
@@ -38,7 +30,10 @@ use crate::core::layout::RibbonScratch;
 /// Rewrite `placements` in place, applying the presentation overlay for `mon`,
 /// and collect every presented window into `raise` (cleared first) in
 /// `placements` order — focused last, so the caller can raise them in that
-/// order and the focused one lands on top.
+/// order and the focused one lands on top. Precedence is `fullscreen >
+/// maximized`: `is_fullscreen_overlay()` rewrites to `mon.screen` (border 0)
+/// and wins if both flags are set; otherwise `presented_maximize` rewrites via
+/// `maximized_rect` (per-axis, workarea, border 0).
 ///
 /// `raise` is caller-owned rather than returned because the two production
 /// callers (`arrange_full_phase` and the compositor's `live_placements`) both

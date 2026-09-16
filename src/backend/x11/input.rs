@@ -1,3 +1,37 @@
+//! Root setup, XKB, key/button grabs.
+//!
+//! # Root window
+//!
+//! `setup_root` sets the root event mask to
+//! `SUBSTRUCTURE_REDIRECT|SUBSTRUCTURE_NOTIFY|BUTTON_PRESS|
+//! POINTER_MOTION|ENTER_WINDOW|STRUCTURE_NOTIFY|PROPERTY_CHANGE`,
+//! publishes `_NET_SUPPORTED`, sets `_NET_SUPPORTING_WM_CHECK`
+//! on `root+check_win`, sets the `b"maverick"` name, sets
+//! `net_number`/`current_desktop`, grabs keys, sets up XKB,
+//! and enables `RandR` `randr_select_input`.
+//!
+//! # XKB
+//!
+//! `setup_xkb` requests `NEW_KEYBOARD_NOTIFY|MAP_NOTIFY`
+//! events. No `StateNotify` (strict group-1 policy).
+//! The keymap is normalised to lowercase (R8).
+//!
+//! # Key grabs
+//!
+//! `plan_key_grabs` uses a strict group-1 policy:
+//! only group-1 keysyms are bound; group-2 (`AltGr`)
+//! falls back to a recorded keysym. `grab_buttons` installs
+//! a catch-all `SYNC`/`ASYNC` grab on managed windows
+//! (pointer freeze until `AllowEvents`; keyboard must be
+//! `ASYNC` or shortcuts freeze).
+//!
+//! # Modifiers
+//!
+//! `clean_mask` strips XKB group bits so the mask is
+//! portable across layouts. `compute_numlock` derives the
+//! numlock mask from the modifier map. `keysym_to_codes_group1`
+//! resolves only columns 0-1 (R1 fix).
+
 use super::*;
 
 // ── input-trace instrumentation (feature `input-trace`) ───────────────────────

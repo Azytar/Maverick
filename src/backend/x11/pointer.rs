@@ -1,3 +1,50 @@
+//! Pointer interaction: grabs, drag/resize, focus-on-click, scroll wheel.
+//!
+//! # Pointer authority (I1/I2)
+//!
+//! During a drag the WM re-asserts its geometry on every
+//! `ConfigureRequest`. The client cannot move/resize a
+//! floating window while the drag is in progress — the
+//! drag is the authoritative source of geometry until the
+//! button release.
+//!
+//! # Grab lifecycle
+//!
+//! `on_button_press` grabs the pointer (`SYNC` mode) so
+//! all subsequent motion/release events are delivered to
+//! the WM. `on_motion` computes the delta and routes via
+//! `MoveResize` Command → `run_effects`. `on_button_release`
+//! ungrab and arranges. The `SyncGrabGuard` `Drop`
+//! guarantees `AllowEvents` on every exit path (freeze-risk
+//! log).
+//!
+//! # Focus-on-click
+//!
+//! Clicking a window focuses it (unless `NO_FOCUS`).
+//! Focus-follows-mouse is guarded by `pointer_guard_until`
+//! (50 ms after a keypress to avoid conflicting with
+//! keyboard focus).
+//!
+//! # Scroll wheel
+//!
+//! `Mod4+wheel` scrolls the camera (reuses `FocusDir`
+//! action + `focus_column_at` via `column_screen_extents`).
+//! Plain wheel 4/7 replays to the focused window.
+//!
+//! # Quadrant resize
+//!
+//! Drag from a corner/edge resizes that corner:
+//! top-left, top-right, bottom-left, bottom-right.
+//! The `snap_float_to_hints` + `clamp_float_to_workarea`
+//! normalisation keeps the float in-bounds after every
+//! motion event.
+//!
+//! # Safety
+//!
+//! `grab_pointer`/`ungrab_pointer` are X11 FFI calls.
+//! The `SyncGrabGuard` ensures `AllowEvents` is always
+//! sent on drop, even on panic.
+
 use super::render::clamp_float_to_workarea;
 use super::*;
 

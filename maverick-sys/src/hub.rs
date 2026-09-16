@@ -1,22 +1,37 @@
-// maverick-sys/src/hub.rs
-// The bridge between the control-socket server thread and the WM's single
-// X11 event-loop thread.
-//
-// The WM keeps all of its (non-Send) state on the main thread. The control
-// server runs on its own thread and must never touch that state directly.
-// `ControlHub` is the safe seam between them:
-//
-//   * commands  — clients send `dispatch`/`quit`/`restart`/`reload`; the server
-//     thread pushes a `ControlCommand` onto an MPSC queue that the WM drains
-//     once per event-loop iteration and executes there.
-//   * state     — the WM publishes a cheap JSON snapshot after each change; the
-//     server answers `state` by reading the cached string (no cross-thread
-//     access to live WM structures).
-//   * events    — the WM emits event lines (focus/workspace/layout/window);
-//     `subscribe` connections receive them as they happen.
-//
-// Everything here is plain safe std: `Arc`, `Mutex`, and `mpsc`. No `unsafe`,
-// no extra dependencies.
+//! Bridge between the control-socket server thread and the WM's single X11 event-loop thread.
+//!
+//! The WM keeps all of its (non-`Send`) state on the main thread. The control
+//! server runs on its own thread and must never touch that state directly.
+//! [`ControlHub`] is the safe seam between them:
+//!
+//! * **commands** — clients send `dispatch`/`quit`/`restart`/`reload`; the server
+//!   thread pushes a [`ControlCommand`] onto an MPSC queue that the WM drains
+//!   once per event-loop iteration and executes there.
+//! * **state** — the WM publishes a cheap JSON snapshot after each change; the
+//!   server answers `state` by reading the cached string (no cross-thread
+//!   access to live WM structures).
+//! * **events** — the WM emits event lines (focus/workspace/layout/window);
+//!   `subscribe` connections receive them as they happen.
+//!
+//! Everything here is plain safe `std`: [`std::sync::Arc`], [`std::sync::Mutex`],
+//! and [`std::sync::mpsc`]. No `unsafe`, no extra dependencies.
+//!
+//! # Ownership and thread model
+//!
+//! [`ControlHub`] is `#[derive(Clone)]` and cloning is **cheap**: it clones an
+//! `Arc<Inner>` so all clones share the same command queue, state cache, and
+//! subscriber list. One clone is moved into the [`crate::control::ControlServer`]
+//! accept thread (and further cloned per connection); the original stays on the
+//! WM thread. No additional synchronization is needed beyond the inner
+//! `Mutex`es.
+//!
+//! # Invariants
+//!
+//! - `ControlCommand::Query` carries a one-shot `Sender<String>` reply channel;
+//!   therefore `ControlCommand` is not `Eq`/`PartialEq` — callers use `matches!`.
+//! - `drain_commands` never blocks (`try_recv` loop); `publish_state`/`emit` hold
+//!   their `Mutex` only long enough to swap/clone.
+//! - `emit` prunes dead subscribers (`send` returns `Err`) on every call.
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};

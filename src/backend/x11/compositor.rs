@@ -1,13 +1,30 @@
-// maverick/src/backend/x11/compositor.rs
-//
-// Thin feature gate for the compositor. With `compositor-opengl` enabled, the
-// full OpenGL/GLX implementation (`compositor_gl`) is compiled in and its public
-// API is re-exported here. Without the feature, the WM core still compiles: it
-// sees a zero-overhead placeholder so `Option<Compositor>` in `WindowManager`
-// has a consistent type, and every `.compositor.as_mut()` call site simply
-// observes `None` / a do-nothing implementation. The compositor never runs,
-// never touches X extensions, and never spawns a render/animator loop — pure
-// X11 WM with minimal CPU/RAM.
+//! Compositor feature gate — selects the real GL compositor or a zero-cost stub.
+//!
+//! With `compositor-opengl` enabled, the full OpenGL/GLX implementation
+//! (`compositor_gl`) is compiled in and its public API is re-exported here.
+//! Without the feature, the WM core still compiles: it sees a placeholder so
+//! `Option<Compositor>` in `WindowManager` has a consistent type and every
+//! `.compositor.as_mut()` call site observes `None` / no-ops. The compositor
+//! never runs, never touches X extensions, and never spawns a render loop —
+//! pure X11 path with minimal CPU/RAM.
+//!
+//! # Ownership & lifecycle
+//!
+//! `WindowManager` holds `Option<Compositor>`; `Compositor::init` is the only
+//! constructor and returns `None` on any GL/compositor failure. The stub's
+//! `Compositor::init` always returns `None` so the type still exists.
+//!
+//! # Bypass
+//!
+//! `DirtyReason` bitflags and `FrameScheduler` stubs exist so the event loop
+//! compiles regardless of whether the compositor is enabled. The real versions
+//! live in `compositor_gl.rs`.
+//!
+//! # Safety
+//!
+//! No `unsafe` in this gate; the GL module's `unsafe` is guarded by
+//! `maverick_x11::open_x` (`Display*` live while `Rc<XConn>` holds the
+//! `xcb_connection_t` with `should_drop=false`).
 
 #[cfg(feature = "compositor-opengl")]
 #[path = "compositor_gl.rs"]

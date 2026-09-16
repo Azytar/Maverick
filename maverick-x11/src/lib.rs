@@ -1,16 +1,52 @@
-// maverick-x11/src/lib.rs
-//
-// Shared X11 bootstrap for Maverick: open an Xlib display, hand its event queue
-// to XCB, and wrap the resulting `xcb_connection_t*` in x11rb's
-// `XCBConnection`. Both the WM core and the GLX/Vulkan backends share this so
-// there is exactly one connection, one sequence-number space, and one event
-// queue.
-//
-// Golden rule: after `open_x`, never call an Xlib event function
-// (`XNextEvent`, `XPending`, `XPeekEvent`, ...). XCB owns the queue; Xlib
-// would either block forever or steal events the window manager needs. Only
-// GLX/Vulkan entry points and x11rb are allowed. `XSync` is fine (it flushes,
-// it does not dequeue).
+//! Shared X11 bootstrap — single XCB+Xlib connection for the whole process.
+//!
+//! Opens an Xlib `Display*`, hands its event queue to XCB with
+//! `XSetEventQueueOwner(XCB_OWNS_EVENT_QUEUE)`, and wraps the underlying
+//! `xcb_connection_t*` (via `XGetXCBConnection`) in `x11rb::xcb_ffi::XCBConnection`.
+//! The WM core and the GLX/Vulkan backends share the same socket so there is
+//! exactly one connection, one sequence-number space, and one event queue.
+//!
+//! # Ownership
+//!
+//! `open_x` returns `(XDisplay, XConn, screen)`. The `XConn` is constructed
+//! with `should_drop = false` — it borrows the `Display*`'s
+//! `xcb_connection_t*` and never calls `xcb_disconnect`. The `Display*` remains
+//! the owner; the `XCBConnection` must not outlive it. In the window manager
+//! the connection is shared as `Rc<XConn>` between the WM core and the
+//! compositor so both see the same sequence space and event queue. `XDisplay`
+//! is deliberately not `Drop` — closing it first would leave the borrowed
+//! `Rc<XConn>` dangling. Both live for the process lifetime; the kernel closes
+//! the socket at exit. `XDisplay::close` is only sound when every
+//! `XCBConnection` wrapping this display is already dropped and no GLX/Vulkan
+//! resource remains alive.
+//!
+//! # The golden rule
+//!
+//! After [`open_x`], **never** call an Xlib event function (`XNextEvent`,
+//! `XPending`, `XPeekEvent`, ...). XCB owns the queue; Xlib would either block
+//! forever or steal events the window manager needs. Only GLX/Vulkan entry
+//! points and x11rb are allowed. `XSync` is fine (it flushes, it does not
+//! dequeue).
+//!
+//! # Safety
+//!
+//! This crate contains `unsafe` blocks for every X11 FFI call. The safety
+//! invariants are:
+//! - `XDisplay` is not `Drop` because the `XCBConnection` borrows its
+//!   `xcb_connection_t*` with `should_drop = false`; closing the display first
+//!   would leave that connection dangling (see Ownership above).
+//! - `silent_error_handler` records the error code synchronously; callers must
+//!   follow `clear_x_error` → request → `XSync` → `take_x_error`.
+//! - `XDisplay::close` must not be called while any `XCBConnection` wrapping
+//!   this display is still alive.
+//! - `from_raw` requires the pointer to be a valid `Display*` returned by
+//!   `XOpenDisplay`.
+//!
+//! # Thread safety
+//!
+//! `XDisplay` is `Send` because the pointer is only ever touched from the WM
+//! thread; the `Send` bound is needed purely so structs holding it stay
+//! `Send`.
 
 use std::cell::Cell;
 use std::os::raw::{c_char, c_int, c_uchar, c_ulong, c_void};

@@ -1,3 +1,35 @@
+//! Engine→X11 effect bridge.
+//!
+//! `do_action` dispatches via `engine.dispatch`, captures
+//! toggle diagnostics, and runs the effects. `execute` is
+//! the single match arm for every `Effect` variant — a
+//! future Wayland backend replaces only this module.
+//!
+//! # Effect semantics
+//!
+//! Each `Effect` variant is a semantic instruction from the
+//! core. The backend translates it into X11 protocol calls:
+//! - `ArrangeMonitor` → `render::arrange_full`
+//! - `FocusWindow` → `set_input_focus` + `WM_TAKE_FOCUS`
+//! - `ConfigureWindow` → `configure_window` + fake
+//!   `ConfigureNotifyEvent`
+//! - `SetFullscreen` → `_NET_WM_BYPASS_COMPOSITOR` +
+//!   `_NET_WM_STATE` rewrite
+//! - `KillWindow` → `WM_DELETE_WINDOW` or `KillClient`
+//! - `Spawn` → `Command::spawn`
+//! - `PublishIpcState` → `hub.publish_state`
+//!
+//! # Restart
+//!
+//! `restart()` cleans up, sets `FD_CLOEXEC` on the new
+//! process, and `exec`s the current binary. The old
+//! process is replaced in place — no fork.
+//!
+//! # Safety
+//!
+//! X11 FFI calls are safe because the connection is alive
+//! and the WM thread owns the connection.
+
 use super::*;
 
 use std::os::unix::io::AsRawFd;
@@ -173,6 +205,11 @@ impl WindowManager {
         // Close the X connection fd on exec (explicit, not assumed): the new
         // process must open its own connection, not inherit this one's identity.
         let fd = self.conn.as_raw_fd();
+        // SAFETY: `fd` is the fd of the live `Rc<XConn>`'s `xcb_connection_t`
+        // (still owned by `self.conn` at this point); `fcntl(F_GETFD/F_SETFD)`
+        // is a pure fd-flag operation with no allocation and is async-signal-safe
+        // to issue from the WM thread before `exec`. The connection itself is
+        // closed on exec via `FD_CLOEXEC`, not here.
         unsafe {
             let flags = libc::fcntl(fd, libc::F_GETFD);
             if flags >= 0 {

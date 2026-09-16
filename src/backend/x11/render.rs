@@ -1,3 +1,72 @@
+//! Geometry projection, stacking, and the X11 apply pipeline.
+//!
+//! This module turns `State` into X11 `ConfigureWindow` calls. It
+//! is the only place the WM writes geometry to X11 — every other
+//! path (manage, events, pointer) routes through here.
+//!
+//! # Pipeline (per monitor, per frame)
+//!
+//! ```text
+//! arrange_full → arrange_full_phase
+//!     → layout::arrange (Placements)
+//!     → present::present_into (fullscreen/max rewrite)
+//!     → DesiredState::from_placements
+//!     → reconciler::reconcile (diff vs AppliedState)
+//!     → emit_geometry (single X sink)
+//!     → stack_overlay (focus order)
+//!     → compositor.invalidate
+//! ```
+//!
+//! # Geometry authority
+//!
+//! `SUBSTRUCTURE_REDIRECT` is held on the root (`input.rs::setup_root`), so for
+//! a *viewable* managed window the X server never applies a client's
+//! `ConfigureWindow`: it arrives as a `ConfigureRequest` and only this WM can
+//! move the window. That single fact decides who owns geometry:
+//!
+//! - **Tiled / fullscreen** — the WM owns it. A `ConfigureRequest` is answered
+//!   with a synthetic `ConfigureNotify` carrying the model rect and X is left
+//!   alone (`arrange` is the only writer).
+//! - **Floating** — the *client* owns it. `ConfigureRequest` is adopted verbatim
+//!   ([`adopt_float_request`], only non-representable values are saned) so the
+//!   client's own correction function has a fixed point on its first request.
+//!   The WM only ever normalizes rects *it* invents ([`normalize_float_request`]:
+//!   initial placement, rules, drag/resize, `ToggleFloat`, `reposition_floats`),
+//!   which lands them on the client's own hint grid so the client accepts them
+//!   as-is.
+//! - **Fullscreen** — `present_into` rewrites the rect to
+//!   `mon.screen` (the full presentation overlay).
+//! - **Maximized** — `present_into` rewrites the rect to
+//!   `maximized_rect` (workarea, per-axis) only while the
+//!   window is focused; tiles underneath are still computed.
+//!
+//! A `ConfigureNotify` is therefore never an *instruction*: it is the echo of
+//! one of our own requests (possibly a stale one still in flight). See
+//! `reconciler::classify_configure`.
+//!
+//! # Stacking
+//!
+//! `stack_overlay` computes the per-monitor focus order:
+//! floats → sticky → presented exclusive-fullscreen/maximized
+//! (sorted by `focus_stack`) → focused floating peek → transient
+//! popups. The `last_stack_order` dedup prevents per-frame raise
+//! storms (C6).
+//!
+//! # Focus
+//!
+//! `focus` validates the window, handles `NO_FOCUS`, unfocuses
+//! the previous window, sets `sel_mon`, calls `set_input_focus`
+//! (PARENT if `wants_input` else `POINTER_ROOT`) with
+//! `last_event_time`, writes `WM_TAKE_FOCUS`, updates the
+//! focus stack *before* `reconcile_focus` (return-to-workspace
+//! bug fix), and calls `stack_overlay`.
+//!
+//! # Safety
+//!
+//! This module contains `unsafe` blocks for X11 FFI (Shape
+//! rectangles are fire-and-forget; no X11 error handling beyond
+//! the silent error handler).
+
 use super::*;
 use crate::backend::x11::reconciler::{reconcile, GeometryEffect};
 use crate::core::commands::retarget_focus_to_window;

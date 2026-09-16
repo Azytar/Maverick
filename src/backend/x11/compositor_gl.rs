@@ -1,39 +1,53 @@
-// maverick/src/backend/x11/compositor.rs
-//
-// The OpenGL/GLX compositor.
-//
-// It sits *on top* of the existing window manager, sharing the same X
-// connection (so the same sequence-number space and event queue). What it
-// changes is not *what* the WM does but *how often*:
-//
-//   * Without it, every animation frame re-`ConfigureWindow`s each window and
-//     re-issues the XShape mask — a storm of X round-trips and client
-//     repaints, with no vsync.
-//   * With it, the WM writes a window's *final* geometry exactly once (the
-//     `Settled` arrange), then the compositor draws that window's texture at a
-//     *live* (current-instant) transform every frame. The spring is a GPU
-//     matrix, not a configure storm; `glXSwapIntervalEXT(1)` makes `swap`
-//     block until the vertical blank, which is the real vsync the old loop
-//     could only approximate with a 16 ms guess.
-//
-// Design notes (see the plan for the full rationale):
-//
-//   * One overlay window (`CompositeGetOverlayWindow`) covers the whole root;
-//     we draw into it directly. It's never redirected, and its *input* shape is
-//     made empty so clicks fall through to the real windows underneath.
-//   * Every managed window is redirected `Manual` (only when actually damaged
-//     does Composite copy up), `NameWindowPixmap` turns the off-screen storage
-//     into a GL texture via `GLX_EXT_texture_from_pixmap`, and
-//     `XDamageSubtract` re-arms the per-window `Damage` so we only rebind a
-//     texture when the client actually repainted.
-//   * Alpha is **premultiplied** (X Render convention). The border, content and
-//     descendants are all in one pixmap (Composite guarantees that), so a
-//     single quad per window is enough — the rounded-corner SDF and opacity are
-//     shader uniforms, not CPU tessellation, and not an X Shape mask (which
-//     would destroy the client's own shape).
-//   * If GL is missing, the 3.3 context can't be created, or another compositor
-//     already owns `_NET_WM_CM_S0`, `init` returns `None` and the WM keeps the
-//     classic path. This is the entire fallback story.
+//! OpenGL/GLX compositor — the GPU presentation path for the X11 backend.
+//!
+//! The compositor sits *on top* of the window manager and shares the single
+//! `Rc<XConn>` / `XDisplay` pair so both see the same `xcb_connection_t`
+//! sequence space and event queue. Without it every animation frame
+//! re-`ConfigureWindow`s each window; with it the WM writes final (settled)
+//! geometry once and the compositor draws each window's redirected pixmap as a
+//! live-transformed GL quad.
+//!
+//! # Ownership & lifecycle
+//!
+//! - The WM creates the compositor via [`Compositor::init`] which claims
+//!   `_NET_WM_CM_S0`, redirects root subwindows to [`Redirect::MANUAL`],
+//!   acquires the `CompositeGetOverlayWindow` overlay, and builds the GLX
+//!   context. Any failure (no libGL, missing visual/fbconfig, selection owned)
+//!   returns `None` and the WM stays on the plain X11 path.
+//! - `Compositor` owns per-window [`CompWin`] state (pixmap, texture, damage,
+//!   opacity, transform) plus the `Damage` objects and the overlay window.
+//!   `Drop` / `disable` unredirects and releases the CM selection.
+//! - The overlay is never redirected; its input shape is emptied via Xfixes so
+//!   pointer events fall through to real clients.
+//!
+//! # Protocol — why each piece exists
+//!
+//! - **Overlay** (`CompositeGetOverlayWindow`): the sole drawable we render into.
+//!   It sits above all redirected windows by definition, so no stacking dance is
+//!   needed for the framebuffer itself.
+//! - **Composite `MANUAL`**: windows are not automatically copied; the server
+//!   keeps their off-screen storage but does not composite. We bind only when
+//!   `Damage` fires, avoiding per-frame copies for idle windows.
+//! - **TFP (`GLX_EXT_texture_from_pixmap`)**: `NameWindowPixmap` + `glXBindTexImage`
+//!   turns the redirected pixmap into a sampled `Texture` without a CPU readback.
+//!   The fbconfig is chosen per-window visual (looked up in `formats`), never
+//!   inferred from depth alone.
+//! - **Damage `CAP32` / `NON_EMPTY`**: per-window `Damage` with `ReportLevel`
+//!   tracking; `XDamageSubtract` re-arms after each bind. `DamageRegion::CAP`
+//!   is 32 rects; overflow forces a full repaint — bounded, allocation-free.
+//! - **Occlusion** (`occluder_rects`, `fully_covered_by`): top-to-bottom pass
+//!   marks windows fully covered by a single opaque, square-cornered occluder
+//!   as `occluded` so they are not drawn.
+//! - **`VSync` (`SwapBuffers`)**: `glXSwapIntervalEXT(1)` makes `swap` block on
+//!   the vertical retrace; the frame scheduler's 0 ms / 100 ms poll merely
+//!   decides *whether* to render, never synthesizes a vblank.
+//!
+//! # Safety
+//!
+//! Raw `Display*` is only reconstituted from `XDisplay::as_ptr()` inside
+//! `Compositor::init` while the original `XDisplay` (backed by the live
+//! `Rc<XConn>`'s `xcb_connection_t` with `should_drop=false`) is still alive;
+//! verified by `maverick_x11::open_x`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;

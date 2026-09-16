@@ -1,10 +1,60 @@
-//! Safe, optional TOML configuration layered over Maverick's compiled defaults.
+//! Optional TOML overlay on the compiled baseline — never fatal.
 //!
-//! Parses the file with `maverick-toml`, a strict, zero-dependency TOML-subset
-//! parser (replacing `toml` + `serde`). Syntax failures reject the whole file
-//! — the WM starts with compiled defaults and logs the offending line.
-//! Semantic failures are isolated to the offending value or list entry and
-//! never abort WM startup.
+//! Role: loads an optional TOML file via `maverick-toml`'s strict event stream
+//! and layers it over `config::compiled_config`. `parse_user` consumes the
+//! `Event` stream into a private `UserConfig` (`GeneralCfg`/`ColorsCfg`/
+//! `CompositorEntry`/`AnimationsEntry`/`WallpaperEntry`/`KeybindEntry`/`RuleEntry`
+//! /`AutostartCfg`); `merge_config` folds that into an owned `Cfg`. Syntax
+//! failure rejects the whole file; semantic failures are isolated to the
+//! offending value/entry and recorded in `Diagnostics`.
+//!
+//! `compiled_config()` is the pure baseline (no workspace keybinds); this
+//! crate's `default_config()` is `compiled_config()` plus auto-generated
+//! `Super+1..n`/`Super+Shift+1..n` binds so a missing/broken file still yields
+//! reachable workspaces. `load_from_path` is the fail-safe `→ (Cfg, Diagnostics)`
+//! primitive; `load_config` wraps it with XDG fallback and `dump_diagnostics`.
+//! `--check-config` consumes the returned `Diagnostics` directly.
+//!
+//! # Config pipeline
+//!
+//! ```text
+//! compiled_config()                          // pure baseline (config.rs)
+//!        │
+//!        ▼
+//! load_config(path?) ──► config_path() / XDG fallback
+//!        │
+//!        ▼
+//! load_from_path ──► read_to_string ──► parse_user(Event stream) ──► UserConfig
+//!        │                                              │
+//!        └────────► merge_config(baseline, UserConfig) ◄─┘
+//!                          │
+//!                          ▼
+//!                   Cfg ──► Engine::apply_camera_cfg / Engine::new
+//! ```
+//!
+//! `parse_user` rejects the whole file on syntax error; `merge_config` applies
+//! the overlay entry-by-entry with isolated diagnostics. The resulting [`crate::config::Cfg`]
+//! is handed to `Engine::new` at startup and to `Engine::apply_camera_cfg` on
+//! reload (camera/compositor fields only).
+//!
+//! Boundary: owns file I/O, TOML tokenization, alias/deprecation handling,
+//! keybind `key`→`(mods, keysym)` and `action` parsing (delegated to
+//! `core::action::parse`), and range filtering. Does not own `Cfg`'s type
+//! definitions (`config.rs`), presentation, or X atom/connection state.
+//!
+//! # Ownership
+//!
+//! `UserConfig` is a transient parse artifact — not stored after `merge_config`
+//! returns. `Cfg` is owned by the caller (`main` → `Engine`); `Diagnostics`
+//! is an owned value-tuple alongside it so callers decide logging vs exit-code.
+//! `config_path()` derives the XDG path without creating files.
+//!
+//! # Invariants
+//!
+//! Config is never fatal (B10): a missing file or syntax error returns the
+//! default baseline with diagnostics; an unknown key/type or out-of-range value
+//! drops only that entry and pushes a warning/error. Duplicate `(mods, keysym)`
+//! resolves first-wins.
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;

@@ -1,5 +1,38 @@
-// maverick/src/main.rs
-
+//! Binary entry — process lifecycle, CLI, and handover to the X backend.
+//!
+//! Role: parses `--name`/`--replace`/`--config`/`--check-config`/`-v`/`-h`,
+//! detaches from the terminal, installs signal handlers, writes the per-session
+//! identity ficha, spawns the control socket (`ControlHub`/`ControlServer`),
+//! loads `Cfg` via `config::load_config`, constructs `backend::x11::WindowManager`,
+//! spawns `autostart` commands, flips `state.running` and drives `run()` → `cleanup()`.
+//!
+//! Boundary: owns process-level resources only — argv, `MAVERICK_INSTANCE` env,
+//! terminal detachment, signal disposition, runtime-dir identity, and the control
+//! socket hub. Does not own logical state (`maverick-core` `Engine`/`State`),
+//! rendering/compositor decisions (`compositor_policy`, `backend::renderer`), or
+//! X11 protocol details (`maverick-x11`, `maverick-sys` signal/poll internals).
+//!
+//! # Ownership
+//!
+//! `main` owns the `ControlHub`/`ControlServer`/`InstanceInfo` handles and the
+//! `config_path`/`launch_args` used for reload/restart; they are handed to
+//! `WindowManager` via `set_session_id`/`set_hub`/`set_control`. The `Cfg` is
+//! moved into `WindowManager::new`, which owns the X connection (`Rc<XConn>`)
+//! and the event loop.
+//!
+//! # Invariants
+//!
+//! `--check-config` never starts the backend — it loads the TOML, dumps
+//! diagnostics, prints a summary, and exits 0/1. Signal handlers are installed
+//! after `detach_from_terminal` and before the X connection is opened, so
+//! `SIGTERM`/`SIGCONT`/`SIGPIPE` disposition is defined for the full session.
+//!
+//! # Lifecycle
+//!
+//! `init log` → `parse args` → `check-config?` → `detach+signals` →
+//! `write identity` → `spawn control` → `load Cfg` → `WindowManager::new` →
+//! `autostart` → `running=true` → `run()` → `cleanup()` on clean exit, or
+//! `cleanup_meta` + `exit(1)` on init failure.
 // Opt into clippy's pedantic lint set for higher code quality, then allow the
 // handful of categories that are inherent to an X11 window manager and would
 // only add noise if "fixed":

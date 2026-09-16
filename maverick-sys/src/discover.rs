@@ -1,10 +1,30 @@
-// maverick-sys/src/discover.rs
-// Discovery + remote control for Maverick instances.
-//
-// Scans the per-user runtime dir for `*.json` fichas, enriches them with live
-// /proc data (DISPLAY, tty_nr), and offers operations to quit one or all
-// instances by name. This is what lets a tool tell three Mavericks on three
-// different TTYs/DISPLAYs apart and target the right one.
+//! Discovery and remote control for Maverick instances.
+//!
+//! Scans the per-user runtime dir for `*.json` fichas, enriches them with live
+//! `/proc` data (`DISPLAY`, `tty_nr`), and offers operations to quit one or all
+//! instances by name. This is what lets a tool tell three Mavericks on three
+//! different TTYs/`DISPLAY`s apart and target the right one.
+//!
+//! # Ownership and lifecycle
+//!
+//! No owned handles — all functions are stateless and re-scan
+//! [`crate::identity::runtime_dir`] on every call. File I/O is best-effort;
+//! a missing or unreadable ficha is silently skipped.
+//!
+//! # Stale-socket and PID-reuse guard
+//!
+//! [`list_instances`] marks an entry `alive` only when **both** conditions hold:
+//!
+//! 1. The control socket answers [`crate::control::ping`] (proves a live listener).
+//! 2. The recorded `pid`'s `/proc/<pid>/stat` start time matches the ficha's
+//!    `start_time` (field 22). If the WM crashed and the kernel recycled the
+//!    PID, the start time will differ and the entry is considered stale even if
+//!    some unrelated process now holds that PID or a dead socket file remains.
+//!
+//! The socket's own stale file was already handled at spawn by
+//! [`crate::control::ControlServer::spawn`] (TOCTOU-safe `is_socket` check
+//! before unlink), but a `SIGKILL`'d instance may still leave a dead socket
+//! that rejects connections — the `ping` check catches it.
 
 use std::fs;
 

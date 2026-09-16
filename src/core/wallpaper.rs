@@ -1,10 +1,19 @@
-// maverick/src/core/wallpaper.rs
-//
-// The wallpaper *domain model* — kept entirely free of any GL/X11 type so the
-// upper layers (State, Engine, WindowManager) never name OpenGL. The actual GPU
-// work goes through the `WallpaperGpu` trait (implemented inside the x11/GL
-// backend as `GlWallpaper`), which is the seam the plan requires for a future
-// Vulkan backend.
+//! Wallpaper domain + GPU seam.
+//!
+//! What owns: re-exports of the pure model from `maverick-core` (`WallpaperMode`,
+//! `WallpaperSource`/`WallpaperSpec`, `GpuImage`, helpers) and the `WallpaperGpu`
+//! trait (GL abstraction). Exercises no X11 itself.
+//!
+//! Exposes: `WallpaperMode`/`WallpaperSource`/`WallpaperSpec`/`GpuImage`,
+//! `compute_wallpaper_rects`/`shader_is_animated`, and (with `compositor-opengl`)
+//! `WallpaperGpu` (`upload_image`, `compile_shader`, `draw_image`/`draw_shader`).
+//!
+//! Leaves to others: the pure parsing/geometry stays in `maverick-core`; all GL
+//! calls and shader compilation live in the `x11/GL` backend (`GlWallpaper`); a
+//! future Vulkan backend implements the same `WallpaperGpu`.
+//!
+//! Invariants: core never speaks GL directly; `ShaderId` is opaque and
+//! backend-owned. Re-export shim only — no state duplicated here.
 
 pub use maverick_core::wallpaper::WallpaperMode as _WallpaperModeCheck;
 /// Re-exported pure helpers/types from `maverick-core`.

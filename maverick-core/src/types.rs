@@ -1,5 +1,30 @@
-// maverick/src/types.rs
-// Core state — niri-style columnar layout, clean coordinates, no drift.
+//! Pure domain model — authoritative logical state for placement, focus,
+//! workspace membership, layout geometry, floats, cameras, and reservations.
+//!
+//! This is the `maverick-core` counterpart of `maverick::core::layout` and
+//! `maverick::types::StateExt`: it owns the types that are independent of any
+//! concrete layout implementation, X11/GL backend, or compositor. Everything
+//! here is `std`-only, `unsafe`-free, and deterministic — suitable for
+//! property-based testing without an X server.
+//!
+//! # Ownership
+//!
+//! - Core owns `State` and all logical placement (`Client`, `Monitor`,
+//!   `Workspace`, `Column`, `Camera`, `ReservedRegion`). The backend mirrors
+//!   X11 state into the core and applies `Client::geom` via `ConfigureWindow`;
+//!   the compositor reads `State` for rendering. Neither mutates `State`
+//!   except through the command/invariant pipeline.
+//! - `Client::geom` is WM-authoritative for floating and for tiled geometry
+//!   *after* arrangement; `Client::saved_geom` and `FullscreenSnapshot` are
+//!   persistence/transition stores. `Monitor::workarea` is always derived from
+//!   `Monitor::screen` minus `ReservedArea` (see `recalc_geometry`).
+//! - `WindowId` is backend-agnostic (`u32`), stable for the lifetime of a
+//!   managed window.
+//!
+//! # Invariants
+//!
+//! Validated by `State::check_invariants` after every transition — see
+//! `maverick_core::lib` crate docs for the full list.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

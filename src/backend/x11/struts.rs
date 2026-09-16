@@ -1,3 +1,42 @@
+//! Dock strut → workarea reservation.
+//!
+//! Reads `_NET_WM_STRUT_PARTIAL` (preferred, 12 CARDINAL)
+//! or `_NET_WM_STRUT` (fallback, 4 CARDINAL) from dock
+//! windows and reserves the corresponding screen regions.
+//! Reserved regions shrink the workarea used for tiled
+//! layout.
+//!
+//! # Protocol semantics
+//!
+//! `_NET_WM_STRUT_PARTIAL` defines reserved edges per
+//! monitor: left/right/top/bottom in pixels, plus
+//! `left_start_y`/`left_end_y` etc. for partial struts.
+//! Maverick collapses all regions into a single
+//! `ReservedArea` (saturating add per edge).
+//!
+//! # Monitor assignment
+//!
+//! `monitor_for_strut` uses the strut's perpendicular
+//! midpoint + window centre to assign the dock to a
+//! monitor, falling back to `mon_at` (window geometry
+//! centre) then monitor 0.
+//!
+//! # Camera retarget
+//!
+//! When a dock is added/removed, `retarget_cameras`
+//! recalculates `ideal_scroll` for every workspace on
+//! the affected monitor using the spring target
+//! (not a snap), so the scroll position animates
+//! smoothly into the new workarea.
+//!
+//! # Invariants
+//!
+//! - A dock's previous reservation is cleared before
+//!   the new one is set (no accumulation).
+//! - `arrange` + `update_workarea` are called after
+//!   every strut change so the layout and EWMH
+//!   properties stay consistent.
+
 use super::*;
 use crate::core::layout::fs_ctx;
 

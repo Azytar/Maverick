@@ -1,23 +1,22 @@
-// maverick/src/core/framebench.rs
-//
-// A measuring instrument, not a feature: a per-thread heap-allocation counter,
-// so "this change removed the per-frame allocations" is a number in a test
-// instead of a claim in a commit message.
-//
-// It exists because the whole per-frame projection the compositor runs
-// (`layout::arrange` → `present::present_into`, driven by
-// `compositor::live_placements`) is a pure function of `State`. It needs no X
-// server, no GL context and no window manager, so it can be measured from an
-// ordinary `cargo test` — see `compositor::frame_alloc_tests`.
-//
-// Test-only: `#[global_allocator]` and the counter are compiled out of the
-// shipped binary entirely, so this costs production nothing.
-//
-// The counter is thread-local on purpose. `cargo test` runs test functions on
-// several threads at once, and a global counter would report whatever the rest
-// of the suite happened to allocate concurrently — a flaky assertion that would
-// get deleted within a week. Counting per thread makes each measurement
-// independent, so these tests need no `--test-threads=1`.
+//! Per-thread heap-allocation counter — measuring instrument, not a feature.
+//!
+//! What owns: `Counting` (`#[global_allocator]` shim), `ALLOCS`/`ARMED`
+//! thread-locals, and `CountAllocs` guard (`start`/`finish`). `#[cfg(test)]`
+//! only — compiled out of the shipped binary; production cost is zero.
+//!
+//! Exposes: `Counting` (global allocator) and `CountAllocs` (arm for the live
+//! guard, `finish` returns allocations) plus self-tests and
+//! `frame_alloc_tests::an_animation_frame_allocates_nothing`.
+//!
+//! Leaves to others: the per-frame projection it measures (`layout::arrange` →
+//! `present::present_into` via `compositor::live_placements`), which is pure
+//! over `State` so it needs no X/GL. Rendering and X application stay in the
+//! backend.
+//!
+//! Invariants: thread-local counting (so `cargo test` parallelism doesn't make
+//! measurements flaky); `realloc` counts; `ALLOCS` is `const`-initialized to
+//! avoid allocating inside the allocator. Warm-up allocations are excluded by
+//! calling `CountAllocs::start` after buffers reach steady-state capacity.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -34,7 +33,7 @@ thread_local! {
     static ARMED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// The system allocator, plus a per-thread tally.
+/// The system allocator plus a per-thread allocation tally.
 pub struct Counting;
 
 unsafe impl GlobalAlloc for Counting {

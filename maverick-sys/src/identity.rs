@@ -1,15 +1,34 @@
-// maverick-sys/src/identity.rs
-// Instance identity + discovery helpers for Maverick.
-//
-// Every Maverick instance gets a name (from `--name`, default "default") and
-// advertises itself under a per-user runtime dir, inside a per-session
-// sub-directory named by its random session id (`sid`):
-//   <runtime_dir>/<sid>/control.sock   — Unix control socket (see `control`)
-//   <runtime_dir>/<sid>/<sid>.json     — identity ficha (pid, tty, display, …)
-//
-// This module is what lets an external tool tell three Mavericks on three
-// different TTYs/DISPLAYs apart: each ficha records `display` and `tty_nr`,
-// and we can also read /proc/<pid> directly as a fallback.
+//! Instance identity and discovery helpers for Maverick.
+//!
+//! Every Maverick instance gets a name (from `--name`, default `"default"`) and
+//! advertises itself under a per-user runtime dir, inside a per-session
+//! sub-directory named by its random session id (`sid`):
+//! ```text
+//!   <runtime_dir>/<sid>/control.sock   — Unix control socket (see [`crate::control`])
+//!   <runtime_dir>/<sid>/<sid>.json     — identity ficha (pid, tty, display, …)
+//! ```
+//!
+//! This module is what lets an external tool tell three Mavericks on three
+//! different TTYs/`DISPLAY`s apart: each ficha records `display` and `tty_nr`,
+//! and we can also read `/proc/<pid>` directly as a fallback.
+//!
+//! # Ownership and lifecycle
+//!
+//! All paths are derived from [`runtime_dir`] → [`session_dir`] →
+//! [`sock_path`]/[`meta_path`]. The per-session directory is created `0700` by
+//! [`set_private_dir`]. [`write_meta`] creates the directory and writes the
+//! JSON ficha; [`cleanup_meta`] removes both the ficha and the socket on clean
+//! shutdown.
+//!
+//! # `SUN_LEN` invariant
+//!
+//! Unix sockets are bound as `sockaddr_un.sun_path`, which is 108 bytes on
+//! Linux (107 usable + NUL). [`sock_path`] uses a **fixed** filename
+//! `control.sock` inside the per-session directory so the random `sid`
+//! contributes to the path only once (as the directory name). An `assert!`
+//! panics if the resulting path would exceed `SUN_LEN` rather than silently
+//! truncating. See `identity::tests::sock_path_fits_sun_len` for the
+//! regression guard.
 
 use std::io;
 use std::path::{Path, PathBuf};

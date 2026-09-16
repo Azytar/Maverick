@@ -1,3 +1,35 @@
+//! Compiled configuration baseline and policy gates.
+//!
+//! Role: defines the pure `Cfg` family (`Cfg`, `CompositorCfg`, `AnimationsCfg`,
+//! `WallpaperCfg`, `Rule`, `CompositorBackend`, `VsyncMode`), the hardcoded
+//! `compiled_config()` baseline, and the predicates `compositor_enabled`,
+//! `animations_enabled`, `validate_compositor_backend`, and `theme_palette`.
+//! `load_config` is a thin delegating entry that forwards to `userconfig`
+//! (the real file-I/O + TOML overlay). This is the authority for "what the
+//! defaults are" and "which backend is allowed given compiled features."
+//!
+//! Boundary: owns no I/O, no X connection, and no atom interning. File
+//! existence, TOML tokenization (`maverick-toml` event stream), keybind/range
+//! diagnostics, and XDG path resolution live in `userconfig`; X geometry and
+//! string interning live in `backend::atoms` and `maverick-x11`.
+//!
+//! # Ownership
+//!
+//! `Cfg` is a plain owned value cloned by the caller. `compiled_config()`
+//! returns a fresh baseline with zero `Rule`/`autostart` side-effects beyond
+//! the built-in keybinds/rules; `Default` is a minimal test baseline (no
+//! keybinds/rules). `load_config` borrows an optional `Path` and returns an
+//! owned `Cfg`; the caller (`main` → `Engine`) owns the result for the
+//! session.
+//!
+//! # Invariants
+//!
+//! `compositor_enabled` is gated on both `Cfg::compositor.enabled` and the
+//! absence of `MAVERICK_NO_COMPOSITOR`. `validate_compositor_backend` is a
+//! no-op when neither `compositor-opengl` nor `compositor-vulkan` is compiled
+//! and when the compositor is disabled, and otherwise rejects a requested
+//! backend that lacks its feature.
+
 use std::path::Path;
 
 use crate::types::{Action, Dir, LayoutKind};

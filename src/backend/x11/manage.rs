@@ -1,3 +1,54 @@
+//! Window lifecycle: scan, manage, unmanage, apply rules.
+//!
+//! `manage` is the core of the client lifecycle. It creates
+//! a `Client`, pipelines 8 property reads (P1), parses
+//! title/class/window-type/state/size-hints/bypass-hint,
+//! applies rules, and maps the window. `unmanage` reverses
+//! it: remove from state, clean up the compositor texture,
+//! refocus.
+//!
+//! # Manage pipeline (8-property read, P1)
+//!
+//! All 8 `get_property` cookies are pipelined before any
+//! `.reply()` is called — one RTT for all properties,
+//! not 8. The properties are: title, class, instance,
+//! window type, state, hints, size hints, bypass hint.
+//!
+//! # Transient deferral
+//!
+//! If a window's `WM_TRANSIENT_FOR` parent is not yet
+//! managed, the window is deferred into `pending_transients`
+//! and re-homed when the parent is managed (`relink_pending_transients`).
+//! The inherited workspace is the parent's workspace.
+//!
+//! # Fullscreen/Maximize on map
+//!
+//! Map-time `_NET_WM_STATE` flags are handled via
+//! `FullscreenPolicy::Deny` (the default): the client's
+//! request is dropped and the window opens as a normal tile.
+//! This is the WM invariant — apps that "remember" being
+//! maximized/fullscreen must not force that on the user.
+//! A per-rule `honor_initial_state` escape hatch exists
+//! for legitimate cases.
+//!
+//! # Portal detection
+//!
+//! Classes/titles matching known portal patterns
+//! (`xdg-desktop-portal`, file choosers, pinentry) are
+//! forced to float so they appear above other windows.
+//!
+//! # Focus on manage
+//!
+//! `decide_manage_focus` chooses between deferring focus
+//! (global `PendingFocus` slot, used when the overlay owner
+//! must stay focused) and focusing the new window.
+//!
+//! # Safety
+//!
+//! `sync_window_prefs` is fire-and-forget: two properties
+//! written on every manage/toggle with no error handling.
+//! The X11 calls are safe because the connection is alive.
+
 use super::render::normalize_float_request;
 use super::*;
 use crate::core::layout::fs_ctx;

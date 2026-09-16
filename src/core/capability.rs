@@ -1,5 +1,19 @@
 //! Capability Layer: la API pública de **lectura** de Maverick.
 //!
+//! What owns: `Query<'a>` (borrow of `&State`) and `WindowInfo` — stable,
+//! read-only projections for bars/hooks/tests. No mutation, no handles.
+//!
+//! Exposes: `Query` (`monitor_count`, `selected_monitor`, `active_workspace`,
+//! `workspace_count`, `current_layout`, `focused_window`, `visible_windows`,
+//! `window`/`windows`) and `WindowInfo` (decoupled from internal `Client`).
+//!
+//! Leaves to others: all mutation via `Engine::execute(Command)`; X11/GL;
+//! layout math; event publishing. Internal `State`/`Monitor`/`Workspace`/
+//! `Client` remain private and free to evolve without breaking consumers.
+//!
+//! Invariants: read-only (`&self` only), three-consumer rule (each query must
+//! serve a bar, a hook, and a test), clamping on selected monitor.
+//!
 //! Una barra, un hook o una herramienta externa NO debería navegar por el
 //! `State`, `Monitor`, `Workspace` o `Client` internos — esos pueden cambiar
 //! en cualquier versión. En su lugar pregunta a esta capa consultas estables:
@@ -45,16 +59,19 @@ pub struct Query<'a> {
 }
 
 impl<'a> Query<'a> {
+    /// Borrow `State` for read-only queries. No mutation path exists on `Query`.
     pub fn new(state: &'a State) -> Self {
         Self { state }
     }
 
     // ── Monitores ───────────────────────────────────────────────────────────
 
+    /// Number of live monitors.
     pub fn monitor_count(&self) -> usize {
         self.state.monitors.len()
     }
 
+    /// Selected monitor index, clamped to `monitor_count - 1`.
     pub fn selected_monitor(&self) -> usize {
         self.state
             .sel_mon
@@ -63,6 +80,7 @@ impl<'a> Query<'a> {
 
     // ── Workspace activo ────────────────────────────────────────────────────
 
+    /// Active workspace index on the selected monitor.
     pub fn active_workspace(&self) -> usize {
         self.state
             .monitors
@@ -70,6 +88,7 @@ impl<'a> Query<'a> {
             .map_or(0, |m| m.active_ws)
     }
 
+    /// Number of workspaces on the selected monitor.
     pub fn workspace_count(&self) -> usize {
         self.state
             .monitors
@@ -79,6 +98,7 @@ impl<'a> Query<'a> {
 
     // ── Layout ──────────────────────────────────────────────────────────────
 
+    /// Layout active on the selected monitor's active workspace.
     pub fn current_layout(&self) -> LayoutKind {
         self.state
             .monitors
@@ -89,6 +109,7 @@ impl<'a> Query<'a> {
 
     // ── Foco ────────────────────────────────────────────────────────────────
 
+    /// Focused window on the selected monitor, if any.
     pub fn focused_window(&self) -> Option<WindowId> {
         self.state
             .monitors

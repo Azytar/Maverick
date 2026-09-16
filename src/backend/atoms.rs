@@ -1,10 +1,26 @@
-// maverick/src/backend/atoms.rs
-// EWMH and ICCCM atom definitions and helpers.
-//
-// Every atom here is actually referenced by the WM logic (manage, arrange,
-// focus, struts, client-messages). Atoms that were interned but never read or
-// written were removed: this struct mirrors exactly what the code speaks, and
-// `_NET_SUPPORTED` only advertises atoms we really handle.
+//! EWMH/ICCCM atom cache — pipelined `InternAtom` at startup.
+//!
+//! Role: defines the `Atoms` struct (ICCCM `WM_*`, EWMH `_NET_*`, private
+//! `_MAVERICK_*`, and `UTF8_STRING`) and interns them all with one pipelined
+//! round-trip via `Atoms::new`. `supported_list` builds the exact
+//! `_NET_SUPPORTED` advertisement — only atoms the backend actually reads/writes
+//! are included.
+//!
+//! Boundary: owns only the `u32` atom ids. Does not own the X connection,
+//! window properties, or client state — it is a lookup table for those owners.
+//! No atom beyond this set is interned or advertised.
+//!
+//! # Ownership
+//!
+//! `Atoms` is `Copy` and owned by `backend::x11::WindowManager` for the
+//! lifetime of the X connection. Created once via `Atoms::new(&conn)` during
+//! `WindowManager::new`; not re-interned on reload or per-window.
+//!
+//! # Lifecycle
+//!
+//! `new()` fires all `intern_atom` requests without awaiting replies, then
+//! collects replies in order (X11 pipelining — 1 RTT instead of N). The
+//! resulting ids are immutable for the session.
 
 use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
@@ -66,7 +82,11 @@ pub struct Atoms {
 }
 
 impl Atoms {
-    /// Initialize all atoms with a single batch intern
+    /// Intern all atoms with a single pipelined round-trip.
+    ///
+    /// Fires every `intern_atom` request without awaiting replies, then collects
+    /// replies in order. This is 1 RTT instead of N (X11 request pipelining).
+    /// The returned ids are immutable for the lifetime of the X connection.
     pub fn new<C: Connection>(conn: &C) -> Result<Self, ReplyError> {
         // We intern all atoms in parallel, then collect
         // This is faster than sequential because X11 pipelining

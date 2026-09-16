@@ -1,9 +1,25 @@
-// maverick/src/core/layout.rs
-// Columnar layout engine (niri-style).
-//
-// Key idea: coordinates are COMPUTED, never stored.
-// Column positions = f(scroll offset, column widths, gap).
-// No mutable geom drift — every arrange() is a pure function over State.
+//! Columnar layout engine (niri-style) — pure coordinate computation.
+//!
+//! What owns: `Layout` trait, `LayoutRegistry`, `Phase` (`Live` vs `Settled`),
+//! `RibbonScratch`/`RibbonGeom`, `FsCtx`, and the `arrange`/`arrange_columns`
+//! projection. Coordinates are *computed*, never stored — `arrange` is a pure
+//! function over `State` + `Cfg` + `Phase`.
+//!
+//! Exposes: `Layout` (pluggable strategy), `LayoutRegistry` (kind → impl),
+//! `Phase::Live`/`Phase::Settled` (GPU-transform vs X-rest geometry),
+//! `Placements` (scratch tuple-vec), `RibbonScratch` (zero-alloc reuse), and
+//! `ribbon_geom` / `ideal_scroll` / `column_screen_extents` — all derived from
+//! the single `ribbon_geom` source of truth so renderer, camera, and hit-test
+//! can never drift apart.
+//!
+//! Leaves to others: presentation overlays (`present::present_into` rewrites
+//! placements after layout), reconciler/`AppliedState`, and backend X11/GL.
+//!
+//! Invariants: `ribbon_geom` is the sole geometry source; `Live` reads
+//! `camera.position`/`boost`/`zoom` (what the compositor draws each frame),
+//! `Settled` reads `camera.target`/`zoom_target`/boost targets (where X rests
+//! at animation end). Float clamping and `SizeHints` snapping share one
+//! projection.
 
 use std::collections::HashMap;
 

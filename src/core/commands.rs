@@ -1,5 +1,23 @@
 //! Sistema de comandos tipado para Maverick.
 //!
+//! What owns: `Command` trait (`execute(&mut State, &mut Cfg) → CommandReport`)
+//! plus every typed command (`FocusDirection`, `MoveWindow`, `ToggleFullscreen`,
+//! `ToggleMaximize`, `GrowColumn`, `ViewportZoom`, `PageSnap`, …) and pure
+//! helpers (`apply_fullscreen_topology`, `apply_maximize`, `decide_manage_focus`,
+//! `reconcile_pending_focus_after_transition`).
+//!
+//! Exposes: `Command` (single mutation entry point for `Engine::execute`), each
+//! `Command` impl (pure `State`/`Cfg` → `Effect`s + `Event`), and the shared
+//! focus/overlay helpers used by both keyboard and EWMH paths.
+//!
+//! Leaves to others: X11/GL execution (backend drains `Effect`s), `layout::arrange`
+//! geometry, `present::present_into` overlay, and `EventBus` dispatch.
+//!
+//! Invariants: commands are pure over `State`/`Cfg` — never touch X11/GPU;
+//! every command declares its own `Event` (never knows its consumers); the
+//! `pending_focus` safety net (`reconcile_pending_focus_after_transition`) is
+//! the centralized #8c fix called by `Engine::execute`/`execute_batch`.
+//!
 //! Cada comando es una transformación **pura** sobre `State`/`Cfg` que:
 //! - produce los `Effect` que el backend debe ejecutar, y
 //! - declara el **evento de dominio** que representa (ver `core::event`).

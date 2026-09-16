@@ -1,15 +1,15 @@
-// maverick/src/backend/x11/hubevents.rs
-//
-// The production subscriber of the typed `EventBus`. It renders domain events
-// into the `subscribe` wire protocol of the control hub, so external
-// `maverickctl subscribe` clients keep receiving the same `focus <id>` and
-// `workspace <ws> <mon>` lines they always did — but now derived from the
-// single, typed event stream instead of a hand-written string diff in
-// `publish_state`.
-//
-// The sink dedupes on its last-known values: commands and the backend's own
-// focus handling both announce the same transition, and the dedupe collapses
-// the duplicates into one line while never dropping a *real* change.
+//! `EventBus` subscriber: renders domain events to the
+//! control-hub wire protocol.
+//!
+//! Deduplicates events (commands + backend both fire
+//! the same events) and emits `focus <id>` and
+//! `workspace <ws> <mon>` lines for `maverickctl subscribe`.
+//!
+//! # Invariants
+//!
+//! - `last_focus`/`last_ws` prevent duplicate events.
+//! - Only focus/workspace events are forwarded; other
+//!   events are ignored.
 
 use crate::core::event::{Event, EventHandler};
 use crate::types::WindowId;

@@ -1,3 +1,37 @@
+//! EWMH property publishing on the root window.
+//!
+//! `_NET_SUPPORTED` advertises exactly the atoms Maverick
+//! handles — no phantom atoms. The root properties are
+//! updated on workspace/monitor changes, fullscreen
+//! transitions, and client list/stack changes.
+//!
+//! # Protocol semantics
+//!
+//! - `_NET_WORKAREA` — `mon.workarea` × `n_tags`.
+//!   The workarea is the screen minus reserved regions
+//!   (docks). Written as a flat CARDINAL array.
+//! - `_NET_DESKTOP_GEOMETRY` — the full screen rect.
+//! - `_NET_NUMBER_OF_DESKTOPS` — `n_tags`.
+//! - `_NET_DESKTOP_NAMES` — nul-separated UTF-8.
+//! - `_NET_CURRENT_DESKTOP` — reset to 0 on workspace
+//!   changes (Maverick manages workspaces, not the
+//!   client).
+//! - `_NET_CLIENT_LIST` / `_NET_CLIENT_LIST_STACKING`
+//!   — bottom-to-top: tiled → floats → `focus_stack` →
+//!   remaining. Updated lazily (deferred dirty coalesce).
+//! - `_NET_WM_STATE` — `WM_STATE` normal (1) on manage;
+//!   `write_net_wm_state` rewrites the atom list
+//!   preserving urgent.
+//! - `_NET_ACTIVE_WINDOW` — set on focus; uses real
+//!   timestamp for `WM_TAKE_FOCUS`, `CurrentTime` fallback.
+//!
+//! # Invariants
+//!
+//! - `flush_client_list` is deferred (dirty coalesce) so
+//!   multiple changes in one frame produce one write.
+//! - `update_ewmh_desktops` resets `_NET_CURRENT_DESKTOP`
+//!   to 0 because Maverick owns the workspace numbering.
+
 use super::*;
 
 impl WindowManager {

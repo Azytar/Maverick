@@ -1,20 +1,49 @@
-// maverick-sys/src/control.rs
-// Unix-socket control channel for Maverick.
-//
-// The WM opens a `UnixListener` at `identity::sock_path(name)` and answers a
-// small line-based text protocol:
-//   ping                 -> pong <name>
-//   identify             -> JSON ficha (so a tool can tell TTYs/DISPLAYs apart)
-//   state                -> latest WM state snapshot (JSON)
-//   dispatch <action>    -> enqueue an action; replies "ok"
-//   quit                 -> enqueue quit; replies "ok", then disconnects
-//   restart              -> enqueue restart; replies "ok"
-//   reload               -> enqueue config reload; replies "ok"
-//   subscribe            -> stream event lines until the client disconnects
-//
-// The server runs on its own thread so it never blocks the X11 event loop.
-// It never touches WM state directly: it talks to a `ControlHub` that queues
-// commands for the WM thread and caches the state snapshot / event stream.
+//! Unix-socket control channel for Maverick.
+//!
+//! The WM opens a [`UnixListener`] at [`crate::identity::sock_path`] and answers a
+//! small line-based text protocol:
+//! ```text
+//!   ping                 -> pong <name>
+//!   identify             -> JSON ficha (so a tool can tell TTYs/DISPLAYs apart)
+//!   state                -> latest WM state snapshot (JSON)
+//!   dispatch <action>    -> enqueue an action; replies "ok"
+//!   quit                 -> enqueue quit; replies "ok", then disconnects
+//!   restart              -> enqueue restart; replies "ok"
+//!   reload               -> enqueue config reload; replies "ok"
+//!   subscribe            -> stream event lines until the client disconnects
+//! ```
+//!
+//! # Thread model
+//!
+//! [`ControlServer::spawn`] binds the socket and spawns a **background accept
+//! thread** (non-blocking `UnixListener` + 50 ms poll). Each accepted
+//! connection is handed to its own **per-connection thread** that blocks on
+//! `BufReader::read_line` with a 500 ms read timeout. `subscribe` hijacks its
+//! connection thread into [`stream_events`], which blocks on `hub.subscribe()`.
+//!
+//! The server never touches WM state directly: it talks to a [`crate::hub::ControlHub`]
+//! that queues [`crate::hub::ControlCommand`]s for the WM thread and caches the
+//! state snapshot / event stream. The WM drains commands once per event-loop
+//! iteration.
+//!
+//! Back-pressure is enforced via an `AtomicUsize` counter capped at 32 concurrent
+//! handlers; excess accepts sleep 100 ms before retrying.
+//!
+//! # Ownership and lifecycle
+//!
+//! [`ControlServer`] owns the socket path (`name`) and a shared `stop` flag
+//! (`Arc<AtomicBool>`). [`ControlServer::shutdown`] sets the flag and unlinks
+//! the socket; [`Drop`] calls `shutdown` so dropping the handle always cleans
+//! up. The accept thread exits on the next poll after `stop` is set. Per-
+//! connection threads exit on EOF, read error, or after `quit`/`subscribe`.
+//!
+//! # Invariants
+//!
+//! - The parent directory is created `0700` via [`crate::identity::set_private_dir`].
+//! - A stale socket file is only unlinked if it is a socket (`FileTypeExt::is_socket`)
+//!   to avoid TOCTOU symlink attacks.
+//! - Commands containing `'\n'` are rejected in [`send_command`] to prevent
+//!   line-protocol injection.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::FileTypeExt;

@@ -1,19 +1,31 @@
-// maverick-dialog — a tiny, dependency-light X11 confirmation dialog.
-//
-// It exists so `maverickctl quit --confirm` can pop a native prompt without
-// pulling GTK/Qt or shelling out to zenity. It is a *separate* binary and the
-// only place in the project that links x11rb outside the WM itself — the WM
-// never draws dialogs.
-//
-// Usage:
-//   maverick-dialog --question "Quit Maverick?"
-//
-// Exit code:
-//   0  user confirmed (Yes / Enter / y)
-//   1  user declined  (No / Esc / n / window closed)
-//   2  usage or X11 error
-//
-// Controls: click Yes/No, or press y/Enter (yes) or n/Esc (no).
+//! Standalone X11 confirmation dialog binary.
+//!
+//! Exists so `quit --confirm` can prompt without GTK/Qt or shelling out to
+//! `zenity`. This is the only binary outside the window manager that links
+//! `x11rb`; the WM never draws dialogs.
+//!
+//! Role: parse `--question <text>` (or `-q` / bare positional), open a centered
+//! `override_redirect` window (380×130), draw the question and Yes/No buttons
+//! with core `image_text8` (Latin-1, 255-byte cap), and wait for input. Exit
+//! codes: 0 confirmed (Yes/Enter/y), 1 declined (No/Esc/n/close), 2
+//! usage/X11 error. Controls are click on button bounds or keycodes 36
+//! (Return→yes), 9 (Escape→no), 29 (y→yes), 57 (n→no).
+//!
+//! Boundary: owns its X connection, window, and GC; does not own or touch WM
+//! state, compositor, or control socket. Keyboard is grabbed so Enter/Esc work
+//! without focus.
+//!
+//! # Ownership
+//!
+//! `run` owns the connection, window, and GC for the process lifetime;
+//! `cleanup` ungrabs keyboard, frees GC, destroys window, and flushes. Buttons
+//! are stack values hit-tested in the event loop.
+//!
+//! # Invariants
+//!
+//! Window is `override_redirect` and centered from `screen.width_in_pixels`.
+//! Text is converted via `to_latin1`, replacing non-Latin-1 with `?` and
+//! truncating at 255 bytes.
 
 use std::process::ExitCode;
 

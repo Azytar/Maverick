@@ -1,22 +1,33 @@
-// maverick/src/backend/x11/framesched.rs
-//
-// Fase 9 — Frame scheduler.
-//
-// The render loop used to fold "do I need a frame? why? when should I next
-// wake?" into the middle of `run_once`, tangled with event draining, animation
-// and the vsync wait. This module extracts that *scheduling* decision into a
-// small, pure, allocation-free abstraction so the policy is unit-testable away
-// from X11 and GL.
-//
-// It answers the three questions the plan asks of it:
-//
-//   * ¿necesito frame?      -> `needs_frame()`
-//   * ¿por qué?             -> the `FrameReason` bits it was told about
-//   * ¿cuándo producirlo?   -> `timeout_ms(...)` (the poll window until the
-//                              next forced wake, e.g. a vblank or a command)
-//
-// The scheduler knows *nothing* about windows, textures or the renderer. It is
-// fed reasons; it reports them back.
+//! Frame scheduler — pure pacing policy for the X11 render loop (Fase 9).
+//!
+//! Previously `WindowManager::run_once` interleaved "do I need a frame? why?
+//! when next wake?" with event draining, spring stepping and the vsync wait.
+//! This module extracts that *scheduling* decision into a small, allocation-free
+//! abstraction so the policy is unit-testable away from X11 and GL.
+//!
+//! It answers the three questions the loop asks each turn:
+//!
+//! - ¿necesito frame?    → [`FrameScheduler::needs_frame`]
+//! - ¿por qué?           → [`FrameScheduler::reasons`] / [`FrameReason`] bits
+//! - ¿cuándo producirlo? → [`FrameScheduler::timeout_ms`] poll window
+//!
+//! # Ownership & lifecycle
+//!
+//! `FrameScheduler` is ephemeral — constructed once per `run_once` turn via
+//! [`FrameScheduler::from_compositor`] from the WM-side `animating` flag plus
+//! the compositor's [`DirtyReason`] bits, consulted for both the render gate
+//! and the socket poll timeout, then `clear_dirty` before the wait phase. No
+//! X11 or GL state is held.
+//!
+//! # Protocol why
+//!
+//! - `clamp_frame_dt` (B8) bounds `dt` to `ONE_REFRESH` on first animating
+//!   frame and `2*ONE_REFRESH` thereafter so a long idle gap cannot inject an
+//!   absurd spring step and the swap-blocked present interval *is* the `dt`.
+//! - `timeout_ms` returns 0 ms when a frame is needed (render now, poll without
+//!   delay; the swap is the only synchroniser) and 100 ms when idle so the
+//!   control socket and `MapNotify` are still drained promptly. No separate
+//!   vblank branch (B1).
 
 use crate::backend::x11::compositor::DirtyReason;
 
@@ -212,6 +223,46 @@ impl FrameScheduler {
 
 #[cfg(test)]
 mod tests {
+    //! Frame scheduling — when to render the next frame.
+    //!
+    //! Extracted from `mod.rs::run_once` (Fase 9) to separate
+    //! the scheduling decision from the event loop. The
+    //! `FrameScheduler` decides whether a frame is needed
+    //! and how long to wait for the next event.
+    //!
+    //! # Frame reasons
+    //!
+    //! Multiple reasons are coalesced into a single pending
+    //! frame. The `DirtyReason` bitflags are:
+    //! - `DAMAGE` — `XDamage` reported a region change.
+    //! - `GEOMETRY` — a window moved/resized.
+    //! - `SURFACE` — a new surface (pixmap/texture) appeared.
+    //! - `FOCUS` — focus/raise changed stacking.
+    //! - `WALLPAPER` — wallpaper animation tick.
+    //!
+    //! # Animation pacing
+    //!
+    //! `clamp_frame_dt` bounds `dt` to [0, 2×refresh] and
+    //! includes `glXSwapBuffers` blocking time in the measurement
+    //! (B8 fix). The scheduler does NOT re-seed after present;
+    //! the blocking time is already accounted for.
+    //!
+    //! # Idle pacing
+    //!
+    //! When no frame is needed, `timeout_ms` returns 100 ms
+    //! (B1: the swap buffer is the only synchroniser, so no
+    //! idle busy-wait is needed). The event loop polls the
+    //! X11 socket with this timeout.
+    //!
+    //! # Invariants
+    //!
+    //! - `Animation`/`WallpaperAnimation` reasons survive
+    //!   `clear_dirty` so the scheduler always wakes up for
+    //!   the next animation tick.
+    //! - A 0 ms timeout means "render now, then re-evaluate".
+    //! - `is_animating` is true whenever any animation
+    //!   reason is pending.
+
     use super::*;
 
     #[test]

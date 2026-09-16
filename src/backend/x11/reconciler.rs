@@ -1,21 +1,56 @@
-// maverick/src/backend/x11/reconciler.rs
-//
-// The single owner of "what geometry/stack has actually been written to X11".
-//
-// Before this module, geometry writes were scattered across `render`, `manage`
-// and `events`, each re-deriving "has this changed?" with its own heuristic
-// (plan 1786564084575, Fase 1, gap #1: "múltiples dueños de configure_window").
-// The `Reconciler` keeps one `AppliedState` — the last *applied* rect/border per
-// window — and diffs every *desired* placement against it, emitting only the
-// `configure_window` calls that actually changed.
-//
-// Crucially the diff reproduces the old `apply_geom` skip rule: an unchanged
-// rect+border is NOT re-emitted, so a busy `arrange` (once per animating monitor
-// per frame) does not spam the X server with identical reconfigures (the exact
-// thing the `geometry_dirty` flag and the `geom == client.geom` comparison were
-// guarding). A pending state transition (`geometry_dirty`) still forces the
-// reconfigure even when the rect is identical — borders/state changed without a
-// geometry change.
+//! Reconciliation — the single owner of "what geometry/stack has
+//! actually been written to X11".
+//!
+//! Before this module, geometry writes were scattered across `render`,
+//! `manage` and `events`, each re-deriving "has this changed?" with its
+//! own heuristic. The `Reconciler` keeps one `AppliedState` — the last
+//! *applied* rect/border per window — and diffs every *desired*
+//! placement against it, emitting only the `configure_window` calls that
+//! actually changed.
+//!
+//! # Pipeline
+//!
+//! ```text
+//! State + Cfg + Phase → layout::arrange → Placements
+//!     → present::present_into → DesiredState
+//!     → Reconciler::reconcile → Vec<GeometryEffect>
+//!     → emit_geometry → X11
+//! ```
+//!
+//! # Source of truth
+//!
+//! - **Desired** — the pure layout+present snapshot (`DesiredState`).
+//! - **Applied** — what X11 *currently* shows (`AppliedState`).
+//! - **Real** — what X11 *reports* via `ConfigureNotify`
+//!   (observed in `events.rs::on_configure_notify`). With
+//!   `SUBSTRUCTURE_REDIRECT` on the root this is always the echo of one of our
+//!   own requests, so it never becomes the model (see `classify_configure`).
+//!
+//! The reconciler diffs Desired vs Applied; client intent arrives only through
+//! `ConfigureRequest`, which the float sink adopts and records with
+//! `AppliedState::observe`.
+//!
+//! # Idempotency
+//!
+//! Reconciliation is safe to repeat: the diff only emits when the
+//! desired rect/border actually changed from what was last applied.
+//! A no-op reconcile (desired == applied) emits nothing, so repeated
+//! calls from `arrange_full_phase` (once per animating monitor per
+//! frame) do not spam the X server.
+//!
+//! # Invariants
+//!
+//! - `diff` never mutates `State`.
+//! - A `geometry_dirty` flag forces emission even when the rect is
+//!   identical (border/state changes without geometry change).
+//! - `forget` on unmanage ensures the window is re-emitted if it
+//!   reappears.
+//! - Float geometry is always clamped to the workarea via
+//!   `clamp_float_to_workarea` before emission (no degenerate
+//!   0×0 or off-screen rects ever reach X11).
+//! - The `seen` flag tracks whether the window has ever been
+//!   applied — a freshly-mapped window always gets its first
+//!   configure emitted regardless of rect equality.
 
 use crate::core::desired::DesiredState;
 use crate::types::{Rect, State, WindowId};

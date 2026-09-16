@@ -1,8 +1,13 @@
-// maverick-sys/src/json.rs
-// Minimal JSON string helpers shared by the whole project (no serde
-// dependency). One canonical copy replaces the three duplicated escapers that
-// used to live in `identity::serde_free_json`, `control::json_esc` and
-// `maverick/src/core/ipc.rs::esc`.
+//! Minimal JSON string helpers shared by the whole project (no `serde` dependency).
+//!
+//! One canonical copy replaces the three duplicated escapers that used to live
+//! in `identity::serde_free_json`, `control::json_esc` and
+//! `maverick/src/core/ipc.rs::esc`.
+//!
+//! # Ownership
+//!
+//! Pure functions on `&str` → `String`; no allocation beyond the returned
+//! string, no global state.
 
 /// Escape `s` for use inside a JSON string literal, WITHOUT adding the
 /// surrounding quotes. Quotes, backslashes and C0 control characters are

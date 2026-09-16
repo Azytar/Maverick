@@ -1,11 +1,48 @@
-// maverick-vk/src/lib.rs
-//
-// Public surface of the crate: [`SurfaceTarget`] (a raw xcb handle bundle the
-// caller owns) and [`Vulkan`], the minimal bootstrap + clear/present loop. There
-// is deliberately no shader, no pipeline and no render pass: this phase only
-// proves the backend can bring up Vulkan on X11 and present cleared frames using
-// `vkCmdClearColorImage`. Window/compositor integration is a later phase; this
-// crate is not referenced by `maverick` or `maverick-gl`.
+//! Minimal Vulkan/X11 backend — scaffold / proof of concept, not the primary path.
+//!
+//! Proves that Vulkan can be brought up on X11 and present cleared frames via
+//! `vkCmdClearColorImage`. There is no shader, pipeline, or render pass; the
+//! primary rendering path remains the OpenGL/GLX compositor in `maverick-gl`.
+//! Active only when the `compositor-vulkan` feature is enabled and
+//! `[compositor].backend = "vulkan"`; initialization failure falls back to
+//! the OpenGL path.
+//!
+//! Role is `instance → surface → device → swapchain` plus a one-shot command
+//! buffer and synchronization objects (`image_available`, `render_finished`,
+//! `in_flight` fence). `recreate_swapchain` is used on resize; `report`,
+//! `extent`, and `format` expose diagnostics without transferring ownership.
+//!
+//! What is not owned: [`SurfaceTarget::xcb_connection`] is a borrowed raw
+//! `xcb_connection_t*` and the `window` XID; both must outlive the [`Vulkan`]
+//! instance and remain valid for the surface's lifetime. The X connection
+//! itself is owned by the caller.
+//!
+//! # Ownership
+//!
+//! Field declaration order is drop order. [`Vulkan::drop`] explicitly destroys
+//! semaphores, fence, and command pool before fields unwind, then
+//! `swapchain → device → surface → instance` unwind in that order, so
+//! `instance` is declared last. [`instance::Instance`] destroys its debug
+//! messenger before `VkInstance`. The fence is created signaled so the first
+//! `wait_for_fences` does not block. `recreate_swapchain` waits on `in_flight`
+//! before replacing the swapchain handle.
+//!
+//! # Invariants
+//!
+//! Swapchain creation uses pure helpers ([`choose_surface_format`],
+//! [`choose_present_mode`], [`clamp_extent`], [`choose_image_count`]) that do
+//! not touch Vulkan handles and are unit-testable. Image layout transitions
+//! are `UNDEFINED → TRANSFER_DST_OPTIMAL → PRESENT_SRC_KHR` with
+//! `TRANSFER_WRITE → BOTTOM_OF_PIPE/MEMORY_READ` barriers. Validation layers
+//! are enabled only when `MAVERICK_VK_VALIDATION=1` and the Khronos layer is
+//! present.
+//!
+//! # Safety
+//!
+//! All Vulkan calls are `unsafe` FFI via `ash`; the caller must ensure the
+//! instance/device outlive every submission and that queues are not used after
+//! device destruction. `SurfaceTarget.xcb_connection` must be a live
+//! `xcb_connection_t*` for the surface lifetime.
 
 mod device;
 mod error;

@@ -1,5 +1,29 @@
-// maverick/src/types.rs
-// Core state — niri-style columnar layout, clean coordinates, no drift.
+//! Compatibility shim that re-exports the pure domain model and hosts the
+//! single layout-dependent helper that cannot live in `maverick-core`.
+//!
+//! `maverick-core` is the single source of truth for all pure types (`State`,
+//! `Client`, `Monitor`, `Workspace`, `Column`, `Camera`, `Rect`, …). This
+//! module exists only so existing import paths (`crate::types::State`) keep
+//! compiling and so code that depends on the real scrolling ribbon (`fs_ctx`,
+//! `LayoutKind::Column`, per-workspace `overview`) has a place to live without
+//! coupling the core to layout/config.
+//!
+//! # Ownership
+//!
+//! This crate owns window management, layout, and presentation policy. The core
+//! owns the *logical* state; this shim owns the *composition* of that state
+//! with layout-specific predicates such as "which window covers the screen".
+//!
+//! # Why `StateExt` lives here and not in `maverick-core`
+//!
+//! `State::covering_fullscreen_window` delegates to `crate::core::layout::fs_ctx`,
+//! which is layout-specific: it inspects `Workspace::layout == LayoutKind::Column`,
+//! `Workspace::overview`, and the column tree to decide which columns/windows
+//! are fullscreen participants. Moving that predicate into `maverick-core` would
+//! force the core to depend on the ribbon/column implementation and on
+//! layout-specific config. Keeping it behind `StateExt` here preserves the
+//! core's purity (no layout/config coupling, testable without an X server) while
+//! retaining ergonomic method syntax at call sites.
 
 #![allow(unused_imports)]
 

@@ -1,5 +1,67 @@
-// maverick/src/backend/x11/mod.rs
-// Window manager core — niri-style columnar layout, clean coords.
+//! Window manager core — niri-style columnar layout, clean coords.
+//!
+//! This is the main X11 backend. It owns the X connection, the event
+//! loop, the window lifecycle, the compositor, and the translation
+//! from `Effect` (the core's semantic vocabulary) into X11 protocol
+//! calls.
+//!
+//! # Architecture
+//!
+//! ```text
+//! X11 events → dispatch → Command::execute → State mutation → Effect
+//!     → Backend::execute → DesiredState → Reconciler → AppliedState → X11
+//! ```
+//!
+//! - **`WindowManager`** owns the X connection (`Rc<XConn>` shared with
+//!   the compositor), the event loop, the keymap, the pointer grab
+//!   state, and the compositor handle.
+//! - **`dispatch`** handles every X11 event and translates it into a
+//!   `Command` that the `Engine` executes.
+//! - **`manage`/`unmanage`** handle the client lifecycle (scan, map,
+//!   focus, unmap, destroy).
+//! - **`render`** is the arrange+stack+reconcile pipeline that turns
+//!   `State` into `DesiredState` and applies it to X11.
+//! - **`pointer`** handles pointer grabs, drag/resize, and
+//!   focus-follows-mouse.
+//! - **`input`** sets up the root window, XKB, and key/button grabs.
+//! - **`ewmh`** publishes EWMH properties on the root window.
+//! - **`struts`** translates dock strut properties into workarea
+//!   reservations.
+//! - **`rootwall`** applies the wallpaper as a root pixmap when the
+//!   compositor is disabled.
+//! - **`actions`** bridges `Effect` into X11 calls (the future
+//!   Wayland backend replaces only this module).
+//! - **`framesched`** decides when to render based on animation,
+//!   damage, and geometry changes.
+//! - **`reconciler`** diffs Desired vs Applied geometry and emits only
+//!   the `ConfigureWindow` calls that actually changed.
+//! - **`compositor`/`compositor_gl`** handle the OpenGL compositor
+//!   lifecycle and the per-frame render pipeline.
+//! - **`events`** handles X11 event callbacks dispatched from `mod.rs`.
+//! - **`hubevents`** bridges domain events to the control-hub wire
+//!   protocol.
+//!
+//! # X11 connection sharing
+//!
+//! The `conn: Rc<XConn>` is shared with the compositor so both see the
+//! same sequence-number space and event queue. `XDisplay` is `Copy`
+//! not `Drop` because the `XCBConnection` borrows its
+//! `xcb_connection_t*` with `should_drop = false` — see
+//! `maverick_x11` for the safety invariants.
+//!
+//! # Safety
+//!
+//! This module contains `unsafe` blocks for X11 FFI calls. The safety
+//! invariants are documented in `maverick_x11` and `maverick_gl`.
+//!
+//! # Invariants
+//!
+//! - Every X11 request goes through the same `XCBConnection` — never
+//!   two sockets.
+//! - `AppliedState` is the sole gate for `ConfigureWindow` calls.
+//! - `classify_configure` decides whether a client's reported geometry
+//!   is followed or re-asserted.
+//! - Float geometry is clamped to the workarea before emission.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

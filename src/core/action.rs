@@ -1,12 +1,24 @@
-// maverick/src/core/action.rs
-// Single source of truth for the *vocabulary* of actions — the canonical name
-// of every `Action` variant, and one parser that both the TOML config and the
-// IPC/`maverickctl` channels delegate to.
-//
-// Keeping the vocabulary in one place (and deriving `name()` via an exhaustive
-// `match` over `Action`) is what prevents the two channels from drifting apart
-// again: if a new `Action` variant is added without a name here, this module
-// stops compiling (B2/B8 guard).
+//! Single source of truth for the *vocabulary* of actions — the canonical
+//! name of every `Action` variant, and one parser that both the TOML config
+//! and the IPC/`maverickctl` channels delegate to.
+//!
+//! Keeping the vocabulary in one place (and deriving `name()` via an exhaustive
+//! `match` over `Action`) is what prevents the two channels from drifting apart
+//! again: if a new `Action` variant is added without a name here, this module
+//! stops compiling (B2/B8 guard).
+//!
+//! # Parser contract
+//!
+//! `parse` accepts both the canonical `verb:arg` form and legacy
+//! dash-separated forms (`focus-left`). The `ArgKind` table defines the
+//! machine-checkable contract for every verb. Round-trip tests verify
+//! every `Action` variant has a name entry and every `ArgKind` is parsed.
+//!
+//! # Invariants
+//!
+//! Every `Action` variant must have a `name()` entry — compile error if
+//! missing. `ws_from` rejects workspace index 0 (workspaces are 1-indexed
+//! in the config/protocol vocabulary).
 
 use crate::core::wallpaper::WallpaperMode;
 use crate::types::{Action, Dir, LayoutKind, WallpaperCmd};

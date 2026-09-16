@@ -1,12 +1,42 @@
-// maverick-img — dependency-free image decode for Maverick's native wallpaper.
-//
-// Decodes the formats the compositor needs without pulling in any runtime
-// crate: a from-scratch PNG decoder (zlib/DEFLATE inflater + filters + all
-// bit-depths/colour-types), plus trivial formats (PPM, QOI, BMP, farbfeld).
-// Anything we don't decode natively (JPEG/WebP/AVIF/…) is delegated to an
-// external converter (ffmpeg/convert) that dumps raw RGBA — the *hybrid* path
-// mandated by the plan. The native path is the fast, no-fork default; the
-// external one is the safety net.
+//! Dependency-free image decode for wallpapers.
+//!
+//! Returns [`Rgba8`] (8-bit RGBA, row-major, top-left) without runtime
+//! dependencies. Native decoders: PNG from scratch (zlib/DEFLATE inflater +
+//! filters + all bit-depths/colour-types), plus trivial PPM/PNM (P6), QOI,
+//! BMP (24/32-bit `BI_RGB`), and farbfeld (16-bit → 8-bit). Anything else
+//! (JPEG/WebP/AVIF/…) is delegated to [`decode_external`].
+//!
+//! PNG path: parses `IHDR`/`PLTE`/`tRNS`/`IDAT`/`IEND`, inflates the
+//! zlib-wrapped DEFLATE stream via [`inflate`] (port of Mark Adler's `puff.c`;
+//! handles stored/fixed/dynamic blocks, Huffman construction, length/distance
+//! codes and back-references), then unfilters scanlines (`None`/`Sub`/`Up`/
+//! `Average`/`Paeth` where [`paeth`] implements the PNG Paeth predictor on
+//! `a=left, b=above, c=upper-left`), unpacks bit depths 1/2/4/8/16 and colour
+//! types 0/2/3/4/6 with `tRNS` handling, and emits RGBA.
+//!
+//! Dispatch: [`decode`] infers format from the lowercased file extension; on
+//! unknown extension or any native error it falls back to `decode_external`,
+//! which probes `ffmpeg`/`convert`/`magick` via `which` and parses their PPM
+//! output through `ppm_from_bytes`. [`Rgba8::is_valid`] checks
+//! `data.len() == w*h*4`.
+//!
+//! # Invariants
+//!
+//! `inflate` rejects over-subscribed Huffman trees, invalid codes, bad
+//! length/distance symbols, and back-references past start. QOI uses wrapping
+//! arithmetic for `DIFF`/`LUMA` per spec. PPM/farbfeld/BMP validate magic,
+//! dimensions, and truncation before emitting.
+//!
+//! # Safety
+//!
+//! The inflater is `unsafe`-free; QOI `LUMA` wrapping is intentional. External
+//! converters are spawned as child processes and their PPM output is trusted
+//! only after header validation.
+//!
+//! # Errors
+//!
+//! All decoders return `Err(String)` on malformed input. `decode` returns a
+//! clear error only when every path failed.
 
 use std::path::Path;
 

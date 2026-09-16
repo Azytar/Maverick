@@ -1,3 +1,62 @@
+//! X11 event handlers dispatched from `mod.rs::dispatch`.
+//!
+//! Each function handles one X11 event type and translates it into a `Command`
+//! (executed by `Engine`) or a direct side effect (compositor track/damage,
+//! EWMH update).
+//!
+//! # Ownership & lifecycle
+//!
+//! `WindowManager::dispatch` owns the event queue; each `on_*` borrows
+//! `&mut self` and may mutate `State`, `AppliedState`, focus, or the compositor.
+//! No handler retains a borrow across the X round-trip — cookies are collected
+//! before any reply-driven branch.
+//!
+//! # Event flow
+//!
+//! ```text
+//! X11 event → dispatch → events::<handler>
+//!     → Command::execute (state mutation)
+//!     → Effect (backend execution)
+//!     → render::arrange_full (re-apply geometry)
+//! ```
+//!
+//! # Important semantics
+//!
+//! - **`ConfigureRequest`** — drag authority (I1/I2): during a drag the WM
+//!   re-asserts its geometry; tiled windows ignore client requests (model A);
+//!   floats normalize + adopt via `normalize_float_request`.
+//! - **`ConfigureNotify`** — convergence step 3: compares the client's reported
+//!   rect against `AppliedState` via `classify_configure`. Floats adopt
+//!   (follow); tiled re-asserts the desired rect.
+//! - **`MapRequest`** — manages the window (creates `Client`, applies rules).
+//! - **DestroyNotify/UnmapNotify** — unmanages, cleans compositor texture,
+//!   refocuses; the synthetic `SendEvent` `ConfigureNotify` is discarded
+//!   (`response_type & 0x80`).
+//! - **`ClientMessage`** — `_NET_WM_STATE` fullscreen/maximize via
+//!   `FullscreenPolicy::Deny` + `ToggleFullscreen` funnel; `_NET_ACTIVE_WINDOW`
+//!   via `decide_active_window`; `_NET_CLOSE_WINDOW` → kill.
+//! - **`KeyPress`** — updates `last_event_time`, `clean_mask`, `keysym_at_col`
+//!   (group 0/shifted), `resolve_binding` (group 1 + fallback), rate-limits
+//!   via `last_key_times`, then `do_action` and arms `pointer_guard_until`.
+//! - **`EnterNotify`** — focus-follows-mouse guard (50 ms after key to avoid
+//!   fighting keyboard focus).
+//! - **MappingNotify/XkbMapNotify/NewKeyboardNotify** — coalesced 50 ms keyboard
+//!   refresh window (`KBD_REFRESH_DELAY`).
+//!
+//! # Invariants
+//!
+//! - Synthetic `SendEvent` `ConfigureNotifies` are discarded.
+//! - `Inferior`/`POINTER` focus events and non-`NORMAL` grab modes are ignored
+//!   (INV-C).
+//! - `last_event_time` is updated on every key/pointer event so
+//!   `WM_TAKE_FOCUS` timestamps are monotonic and never `CurrentTime`.
+//!
+//! # Safety
+//!
+//! No `unsafe` in this module; all X11 interaction goes through `x11rb` safe
+//! wrappers over the shared `Rc<XConn>` (see `maverick_x11::open_x` for the
+//! `Display*`/`xcb_connection_t` invariant).
+
 use super::render::adopt_float_request;
 
 use super::*;

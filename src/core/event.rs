@@ -1,5 +1,20 @@
 //! `EventBus` tipado: el pegamento entre el dominio y sus observadores.
 //!
+//! What owns: `Event` (domain facts), `CommandReport` (`Effect`s + optional
+//! `Event`), `EventHandler` trait, and `EventBus` (publish/subscribe).
+//!
+//! Exposes: `Event` variants (`WindowMapped`, `FocusChanged`,
+//! `WorkspaceChanged`, …), `CommandReport::new`/`with_event`, `EventHandler`,
+//! `EventBus::subscribe`/`publish`.
+//!
+//! Leaves to others: mutation (`Command::execute`) and X11/GL (`Effect`
+//! execution). Handlers never mutate back into the command path.
+//!
+//! Invariants: `Command → Event → Effect` ordering; a `Command` declares its
+//! own `Event` but never knows its consumers; `Event`s are semantic (not X11
+//! calls). Exists to make extension cheap: new consumers subscribe instead of
+//! polling `State`.
+//!
 //! Modelo (según la auditoría): `Command → Domain Event → Effect`.
 //!
 //! - Un `Command` muta `State`/`Cfg`, produce los `Effect` que el backend

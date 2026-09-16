@@ -1,10 +1,56 @@
-// maverick-sys/src/lib.rs
-// Safe (well, safer) wrappers around the bits of libc Maverick needs at
-// startup, plus instance identity and a Unix-socket control channel so an
-// external tool can discover and close Maverick instances (even several on
-// different TTYs/DISPLAYs). The only `unsafe` in the whole project lives
-// here, isolated in one small crate. Everything the rest of the codebase
-// touches is a plain safe function or an AtomicBool.
+//! System boundary — the only crate with `unsafe` in the workspace.
+//!
+//! Centralizes all `libc` FFI: POSIX signal handlers (`sigaction`), `poll(2)`
+//! for the event-loop socket, and `/proc`/`getuid` reads. Everything else in
+//! the workspace stays `unsafe`-free and never touches raw statics; the event
+//! loop polls the [`AtomicBool`] flags exported here.
+//!
+//! What is not owned: the X11 connection fd passed to [`wait_readable`], the
+//! terminal fds touched by [`detach_from_terminal`], and the WM state itself
+//! (the control channel only queues commands via [`ControlHub`]).
+//!
+//! Submodules:
+//! - [`control`] — per-session `UnixListener` at [`identity::sock_path`],
+//!   line-based protocol (`ping`/`identify`/`state`/`dispatch`/`quit`/
+//!   `restart`/`reload`/`subscribe`/`query`), background accept thread, talks
+//!   to the WM only through [`hub::ControlHub`].
+//! - [`hub`] — `Arc`/`Mutex`/`mpsc` bridge between the server thread and the
+//!   single WM thread: command queue, cached state snapshot, and `subscribe`
+//!   event sinks. Cloning is cheap and shares the same queues.
+//! - [`discover`] — scans [`identity::runtime_dir`] fichas, enriches with live
+//!   `/proc` data (`DISPLAY`/`tty_nr`/`exe`), checks liveness via
+//!   `ping` + `start_time` against PID reuse, and offers `quit`/`prune`.
+//! - [`identity`] — [`InstanceInfo`], `session_id` generation, `runtime_dir`/
+//!   `session_dir`/`sock_path`/`meta_path` (0700, fixed `control.sock` under
+//!   `SUN_LEN`), `/proc/<pid>/stat`/`environ`/`exe` readers, and minimal JSON
+//!   ficha I/O without `serde`.
+//! - [`json`] — canonical `json_escape`/`json_quote`/`json_unescape` used by
+//!   `identity` and `control`; single copy, no `serde`.
+//! - [`ctl`] — shared CLI engine for `maverickctl`/`maverick-msg`: instance
+//!   selection (`--session`/`--name`/`$MAVERICK_INSTANCE`/DISPLAY+TTY
+//!   context/singleton), `list`/`state`/`query`/`msg`/`subscribe`/`quit`/
+//!   `restart`/`reload`/`prune`, and confirmation via `maverick-dialog`/
+//!   `zenity`/`kdialog`/TTY.
+//!
+//! # Ownership
+//!
+//! [`Signal`] owns the handler/ignore lists; [`Signal::install`] consumes it
+//! and installs `SIGCHLD` (`SA_NOCLDWAIT|SA_RESTART`) plus the configured
+//! handlers. Static flags (`QUIT_REQUESTED`, `NEED_REGRAB`) are written by
+//! `extern "C"` trampolines and read by the WM thread via
+//! [`quit_requested`]/[`need_regrab`]. [`ControlServer`] owns the listener and
+//! a `stop` flag; [`ControlHub`] is shared via `Arc` between server and WM
+//! threads. `detach_from_terminal` is called once at startup before the X
+//! connection is opened; [`wait_readable`] is called each event-loop iteration.
+//!
+//! # Safety
+//!
+//! `sigaction` installs use `zeroed` + `sigemptyset` and `SA_RESTART`; only
+//! `AtomicBool::store` with `SeqCst` runs inside handlers. `poll` wraps a
+//! valid `pollfd` and treats `EINTR`/errors as wakeups. `detach_from_terminal`
+//! is best-effort, never calls `setsid`, and only redirects stdin/stdout to
+//! `/dev/null` when `isatty(STDIN)` is true. `getuid` and `/proc` reads are
+//! the only other `unsafe`/FFI.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

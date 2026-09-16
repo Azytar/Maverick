@@ -1,36 +1,25 @@
-// maverick/src/core/session.rs
-//
-// Session persistence + recovery for Maverick.
-//
-// A "session" is the *logical* topology of the desktop that must survive a
-// reload / restart: which windows live on which workspace, in which columns,
-// their weights, which workspace is active, and what had focus. It is NOT the
-// full `State` — everything that is runtime (XIDs as handles are fine to store
-// as *identity keys*, but geometry, camera springs, zoom/overview animation,
-// grid caches, compositor state and presenting windows are reconstructed, never
-// trusted from disk).
-//
-// The pipeline is strictly staged, and each stage is observable:
-//
-//     PersistedSession            (versioned, serializable — pure data)
-//         │  parse + schema check
-//         ▼
-//     PersistedSession            (decoded from file)
-//         │  validate()           (internal invariants, no X11)
-//         ▼
-//     ValidatedSession
-//         │  commit()             (reconcile against live X11 windows, build
-//         │                        a fresh RuntimeState topology)
-//         ▼
-//     State                       (single atomic swap — the old State is
-//                                  untouched until commit succeeds)
-//
-// A session file is NEVER trusted end-to-end: `parse_json` decodes it, the
-// schema version is checked, `validate` rejects structurally impossible state,
-// and `commit` re-checks every window reference against the windows that are
-// actually alive on the X server. A failure at any stage leaves the current
-// visible session intact (the caller decides whether to fall back to a
-// config-only reload, but never applies a partially-built State).
+//! Session persistence + recovery — logical topology only.
+//!
+//! What owns: `PersistedSession`/`PersistedMonitor`/`PersistedWorkspace`/
+//! `PersistedColumn` (versioned serializable data), `ValidatedSession` (type-
+//! state after `validate`), `SessionStage`/`SessionError`, and the staged
+//! pipeline `snapshot → parse_json → validate → commit → commit_state`.
+//!
+//! Exposes: `PersistedSession::snapshot` (State → pure data),
+//! `parse_json`/`to_json` (JSON codec), `validate` → `ValidatedSession`, and
+//! `ValidatedSession::commit` + `commit_state` (reconcile against live X11 ids
+//! and atomically swap `State`).
+//!
+//! Leaves to others: runtime geometry/camera/zoom/compositor state (reconstructed,
+//! never trusted from disk); live X11 window set (provided by backend); monitor
+//! screen/workarea/reserved regions (X11-derived). The file is never trusted
+//! end-to-end — schema, `validate`, and `commit`'s live-id re-check each reject.
+//!
+//! Invariants: staged and observable — `PersistedSession` (versioned) →
+//! `validate` (no X11) → `ValidatedSession` → `commit` (reconcile, fresh
+//! `State` topology) → atomic swap; failure at any stage leaves visible `State`
+//! untouched. A "session" is the logical topology (columns/weights/active
+//! workspace/focus), not the full `State`.
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;

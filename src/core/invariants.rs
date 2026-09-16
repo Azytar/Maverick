@@ -1,44 +1,29 @@
-// maverick/src/core/invariants.rs
-//
-// Regression suite for the fullscreen+mouse focus contract.
-//
-// THE CONTRACT (invariant A): for every focus path — keyboard
-// (`FocusDirection` → `Effect::ArrangeMonitor`), mouse (`Backend::focus`),
-// and EWMH (`_NET_ACTIVE_WINDOW` → `self.focus`) — at REST (camera settled,
-// i.e. `camera.position == camera.target`) the geometry X11 uses for input
-// MUST equal the projection of the logical ribbon at that camera value:
-//
-//     client.geom == projection(camera.target, layout_state)   [at rest]
-//
-// The compositor draws the *Live* phase (`camera.position`); those two may
-// differ mid-animation but MUST converge at rest. Input hit-testing
-// (`find_client`) and the pointer warp both read `client.geom`, so a
-// divergence between `camera.target` and `client.geom` means a click/enter
-// goes to the wrong window. The fullscreen audit found exactly this bug:
-// mouse `focus()` retargeted `camera.target` WITHOUT re-projecting, so
-// `client.geom` lagged the camera and a neighbour was clickable at the
-// focused window's old rect. (The fix lives in the backend `focus()` →
-// `arrange` wiring; this suite locks the resulting end-state contract.)
-//
-// Secondary invariants pinned down here:
-//   B  settled projection uses the same camera value the backend projects
-//      with at rest (`camera.target`, which equals `camera.position` once
-//      settled). The pure suite simulates "at rest" by snapping
-//      `camera.position = camera.target` after a focus retarget.
-//   C  `present()` overlays fullscreen (always) and maximized (only while
-//      focused) on top of the settled projection; `client.geom` equals the
-//      post-present rect, which equals the pre-present projection otherwise.
-//   D  `border_w` is part of the geometry; assertions are border-aware.
-//   E  mid-animation, Live may differ from Settled; once `Camera::step`
-//      converges, Live == Settled == projection(target). Never assert
-//      `position == target` mid-flight.
-//   F  mouse / keyboard / EWMH focus paths converge to the same final
-//      `client.geom`. The pure suite proves the geometry the two core paths
-//      produce is identical; the actual `Backend::focus()`→`arrange` wiring
-//      gap is covered end-to-end by `tests/xephyr-suite.sh`.
-//
-// SCOPE: only the backend `focus()`→`arrange` fix (already landed) is in
-// scope; no further production changes are made here.
+//! Regression suite for the fullscreen+mouse focus contract (`#[cfg(test)]` only).
+//!
+//! What owns: the pure harness (`apply_settled`, `snap_all`, `settle_on_column`,
+//! `focus_step`) and the `#[test]` cases that pin invariant A–F. No production
+//! code — compiled out of the shipped binary.
+//!
+//! Exposes: nothing to production; test helpers assert the end-state contract
+//! that `Backend::focus() → arrange` must uphold.
+//!
+//! Leaves to others: the actual `Backend::focus()` → `arrange` wiring (the fix
+//! lives there); `layout::arrange` + `present::present`; X11 hit-testing and
+//! pointer warp (`client.geom` readers).
+//!
+//! Invariants (the contract under test):
+//! - A: at rest (`camera.position == camera.target`) `client.geom ==`
+//!   `projection(camera.target, layout_state)`. Divergence means a click goes
+//!   to the wrong window (the audited mouse-focus bug).
+//! - B: settled projection reads `camera.target` (snapped to `position` at rest).
+//! - C: `present()` overlays fullscreen/maximized on the settled projection.
+//! - D: `border_w` is part of geometry.
+//! - E: `Live` may differ mid-animation; `Live == Settled == projection(target)`
+//!   after `Camera::step` converges.
+//! - F: mouse / keyboard / EWMH focus paths converge to the same `client.geom`.
+//!
+//! SCOPE: only the `focus() → arrange` fix (already landed); no further
+//! production changes here. End-to-end wiring is covered by `tests/xephyr-suite.sh`.
 
 use crate::config::Cfg;
 use crate::core::commands::{

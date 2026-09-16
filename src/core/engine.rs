@@ -1,3 +1,21 @@
+//! Central mutation entry point — the only writer of `State`/`Cfg`.
+//!
+//! What owns: `Engine` (`State` + `Cfg` + `EventBus`), and the wiring that maps
+//! a wire `Action` into typed `Command`s via `dispatch`.
+//!
+//! Exposes: `Engine::new`, `apply_camera_cfg`, `subscribe`/`notify`, `query`,
+//! `execute` (single command), `execute_batch` (coalesced transaction), and
+//! `dispatch` (canonical wire → command adapter).
+//!
+//! Leaves to others: all X11/GL side-effects (owned by `Backend::execute` over
+//! `Effect`s), layout projection (`layout::arrange`), presentation overlays
+//! (`present::present_into`), and the `AppliedState`/reconciler diff.
+//!
+//! Invariants: every mutation funnels through `execute`/`execute_batch`, which
+//! publish exactly one `Event` stream and append a centralized `pending_focus`
+//! safety net (`reconcile_pending_focus_after_transition`) before the debug-only
+//! `assert_invariants`. Batches coalesce effects/events into a single publish.
+
 use crate::config::Cfg;
 use crate::core::commands::{
     CollapseColumn, Command, FocusDirection, FocusMonitor, GrowColumn, KillWindow, MoveToWorkspace,
