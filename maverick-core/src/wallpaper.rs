@@ -90,11 +90,12 @@ pub fn shader_is_animated(src: &str) -> bool {
 
 /// Drop GLSL `//` line comments and `/* … */` block comments from `src` so the
 /// shader-animation probe cannot be fooled by an identifier that only appears in
-/// a comment. Input is expected to be ASCII (GLSL source); non-ASCII bytes are
-/// copied through unchanged.
+/// a comment. Operates on bytes but pushes `char` only for ASCII; non-ASCII
+/// bytes are copied through as bytes to preserve UTF-8 boundaries
+/// (`bytes[i] as char` would corrupt multibyte sequences).
 fn strip_glsl_comments(src: &str) -> String {
     let bytes = src.as_bytes();
-    let mut out = String::with_capacity(bytes.len());
+    let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0usize;
     let mut block = false;
     while i < bytes.len() {
@@ -118,10 +119,12 @@ fn strip_glsl_comments(src: &str) -> String {
             i += 2;
             continue;
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    // Input was valid UTF-8 and we only removed ASCII comment bytes, so the
+    // remainder is still valid UTF-8; fall back lossily (never panic).
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 impl WallpaperSource {
@@ -195,7 +198,12 @@ pub fn compute_wallpaper_rects(
                 let u0 = (1.0 - fw) / 2.0;
                 let v0 = (1.0 - fh) / 2.0;
                 (
-                    Rect::new(x as i32, y as i32, disp_w as u32, disp_h as u32),
+                    Rect::new(
+                        x as i32,
+                        y as i32,
+                        (disp_w as u32).max(1),
+                        (disp_h as u32).max(1),
+                    ),
                     [u0, v0, u0 + fw, v0 + fh],
                 )
             }
@@ -213,7 +221,7 @@ pub fn compute_wallpaper_rects(
                     let x = o.x as f64 + (ow - iw) / 2.0;
                     let y = o.y as f64 + (oh - ih) / 2.0;
                     (
-                        Rect::new(x as i32, y as i32, iw as u32, ih as u32),
+                        Rect::new(x as i32, y as i32, (iw as u32).max(1), (ih as u32).max(1)),
                         [0.0, 0.0, 1.0, 1.0],
                     )
                 }

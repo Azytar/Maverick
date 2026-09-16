@@ -492,6 +492,10 @@ impl WindowManager {
                     .map(|m| m.screen)
                     .collect();
                 comp.set_outputs(&outs);
+            } else {
+                // No compositor: re-paint the root-pixmap wallpaper so it
+                // covers the new (possibly resized/rearranged) monitors.
+                self.apply_root_wallpaper();
             }
         }
         Ok(())

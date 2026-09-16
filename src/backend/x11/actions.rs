@@ -367,6 +367,15 @@ impl WindowManager {
                 self.engine.state.wallpaper.source = crate::core::wallpaper::WallpaperSource::None;
             }
             comp.set_wallpaper(&self.engine.state.wallpaper);
+        } else {
+            // No compositor: re-paint the root-pixmap wallpaper from the
+            // freshly reloaded config (same trigger as startup).
+            if let Some(path) = self.engine.cfg.wallpaper.path.clone() {
+                self.engine.state.wallpaper.source =
+                    crate::core::wallpaper::WallpaperSource::from_path(path.into());
+                self.engine.state.wallpaper.mode = self.engine.cfg.wallpaper.mode;
+            }
+            self.apply_root_wallpaper();
         }
 
         // Republish EWMH desktop state for external bars/taskbars. Only the

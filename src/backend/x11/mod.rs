@@ -37,6 +37,7 @@ mod manage;
 mod pointer;
 pub(crate) mod reconciler;
 mod render;
+mod rootwall;
 mod struts;
 #[cfg(test)]
 mod tests;
@@ -132,6 +133,15 @@ pub struct WindowManager {
     /// was reissued every such frame even though the mask geometry (a pure
     /// function of size, not position) hadn't changed.
     shape_mask_cache: std::collections::HashMap<Window, (u32, u32, i32)>,
+    /// No-compositor wallpaper (`rootwall.rs`): the pixmap ID last installed as
+    /// the root background, if any. `apply_root_wallpaper` runs repeatedly
+    /// (startup, config reload, monitor reconfiguration, GL-failure fallback)
+    /// and every call previously allocated a brand-new root-sized pixmap
+    /// without freeing the last one — a full-screen (`root_w`*`root_h`*4 byte)
+    /// leak in the X server on every reload/RandR event for as long as the
+    /// session runs. Freed right after the new one replaces it as the root's
+    /// `background_pixmap`, once nothing but our own creation still holds it.
+    last_root_pixmap: Option<Pixmap>,
     /// P12: Reusable buffers for `hide_offscreen` — avoids reallocation per arrange.
     hide_ws_set: std::collections::HashSet<Window>,
     hide_mon_vec: Vec<Window>,
@@ -353,6 +363,12 @@ impl WindowManager {
             .delete_property(self.root, self.atoms.net_client_list);
         let _ = self.conn.destroy_window(self.check_win);
 
+        // The last root pixmap is root-sized: free it here (it was only
+        // freed on replace before, leaking one full-screen pixmap per exit).
+        if let Some(pm) = self.last_root_pixmap.take() {
+            let _ = self.conn.free_pixmap(pm);
+        }
+
         self.conn.flush()?;
 
         // Tear down the control socket + identity ficha so external tools stop
@@ -549,6 +565,9 @@ impl WindowManager {
                         c.disable();
                     }
                     self.compositor = None;
+                    // The desktop must not go black: paint the configured
+                    // wallpaper on the root (feh-style) and keep going.
+                    self.apply_root_wallpaper();
                 }
                 // NOTE: the frame clock is *not* re-seeded here. `last_frame`
                 // was already stamped at the top of the animation phase, so the
@@ -789,6 +808,7 @@ impl WindowManager {
             stack_dirty: false,
             applied: crate::backend::x11::reconciler::AppliedState::default(),
             shape_mask_cache: std::collections::HashMap::new(),
+            last_root_pixmap: None,
             hide_ws_set: std::collections::HashSet::with_capacity(32),
             hide_mon_vec: Vec::with_capacity(64),
             desired: Placements::with_capacity(32),
@@ -821,6 +841,12 @@ impl WindowManager {
         for i in 0..wm.engine.state.monitors.len() {
             wm.arrange(i)?;
         }
+
+        // No compositor: paint the configured wallpaper on the root window
+        // (feh-style) now — the WM is fully loaded, owns the screen and knows
+        // the final monitor layout. This is exactly the moment `feh` would be
+        // launched, except it needs no race-prone external process.
+        wm.apply_root_wallpaper();
 
         wm.conn.flush()?;
         log::info!("maverick ready");
