@@ -94,10 +94,54 @@ pub fn runtime_dir() -> PathBuf {
     PathBuf::from(format!("/run/user/{uid}/maverick"))
 }
 
+/// Maximum accepted session-id length. Our own ids are ~30 chars
+/// (`{pid:x}-{nanos:x}-{rand:x}`); 64 leaves headroom while bounding
+/// `sockaddr_un` length and filesystem use from external input.
+pub const MAX_SID_LEN: usize = 64;
+
+/// True if `sid` is safe to use as a single path component:
+/// non-empty, bounded length, only `[A-Za-z0-9_-]`.
+/// Rejects `/`, `.`, `..`, empty and overlong ids (traversal safe).
+pub fn is_valid_sid(sid: &str) -> bool {
+    if sid.is_empty() || sid.len() > MAX_SID_LEN {
+        return false;
+    }
+    if sid == "." || sid == ".." {
+        return false;
+    }
+    sid.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Validate `sid`, mapping failures to `io::ErrorKind::InvalidInput`.
+fn validate_sid(sid: &str) -> io::Result<()> {
+    if is_valid_sid(sid) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid session id: {sid:?}"),
+        ))
+    }
+}
+
 /// Per-session sub-directory: `<runtime_dir>/<sid>/`. Created `0700` so other
 /// UIDs cannot interfere with this session's socket/ficha.
+///
+/// Prefer [`try_session_dir`] when `sid` comes from external input
+/// (CLI, env, directory listing); this wrapper keeps backward compat for
+/// internally-generated ids.
 pub fn session_dir(sid: &str) -> PathBuf {
-    runtime_dir().join(sid)
+    match try_session_dir(sid) {
+        Ok(p) => p,
+        Err(_) => runtime_dir().join("__invalid__"),
+    }
+}
+
+/// Fallible version of [`session_dir`]: rejects traversal/overlong ids.
+pub fn try_session_dir(sid: &str) -> io::Result<PathBuf> {
+    validate_sid(sid)?;
+    Ok(runtime_dir().join(sid))
 }
 
 /// Full path to the control socket for session `sid`.
@@ -110,18 +154,41 @@ pub fn session_dir(sid: &str) -> PathBuf {
 /// `path must be shorter than SUN_LEN` failure that occurred when `sid` was
 /// embedded both as the directory AND as `<sid>.sock`.
 pub fn sock_path(sid: &str) -> PathBuf {
-    let path = session_dir(sid).join("control.sock");
+    match try_sock_path(sid) {
+        Ok(p) => p,
+        // Never panic on external input; return a sentinel that will
+        // fail at bind/connect with a clear OS error instead.
+        Err(_) => runtime_dir().join("__invalid__").join("control.sock"),
+    }
+}
+
+/// Fallible version of [`sock_path`]: validates `sid` and enforces `SUN_LEN`.
+pub fn try_sock_path(sid: &str) -> io::Result<PathBuf> {
+    let path = try_session_dir(sid)?.join("control.sock");
     // Fail loudly (never silently truncate) if we ever exceed the kernel limit.
-    assert!(
-        path.as_os_str().len() < 108,
-        "control socket path exceeds SUN_LEN: {path:?}"
-    );
-    path
+    if path.as_os_str().len() >= 108 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("control socket path exceeds SUN_LEN: {path:?}"),
+        ));
+    }
+    Ok(path)
 }
 
 /// Full path to the identity ficha for session `sid`.
 pub fn meta_path(sid: &str) -> PathBuf {
-    session_dir(sid).join(format!("{sid}.json"))
+    match try_meta_path(sid) {
+        Ok(p) => p,
+        Err(_) => runtime_dir().join("__invalid__.json"),
+    }
+}
+
+/// Fallible version of [`meta_path`]: rejects traversal via `sid`.
+/// The ficha filename embeds `sid`, so validation is mandatory —
+/// otherwise `sid = "../../x"` would escape the runtime dir.
+pub fn try_meta_path(sid: &str) -> io::Result<PathBuf> {
+    validate_sid(sid)?;
+    Ok(try_session_dir(sid)?.join(format!("{sid}.json")))
 }
 
 /// Generate a fresh, unique-per-process session id.
@@ -153,8 +220,17 @@ fn read_urandom_u64() -> Option<u64> {
 }
 
 /// chmod a path to `0700` so other UIDs cannot read/modify it.
+/// Refuses to follow symlinks: if `path` is a symlink (or not a dir),
+/// returns an error instead of chmodding an attacker-controlled target.
 pub(crate) fn set_private_dir(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing to chmod non-dir/symlink: {path:?}"),
+        ));
+    }
     let perm = std::fs::Permissions::from_mode(0o700);
     std::fs::set_permissions(path, perm)
 }
@@ -252,18 +328,49 @@ pub fn read_proc_exe(pid: u32) -> String {
 
 /// Serialize `InstanceInfo` to the ficha JSON file.
 pub fn write_meta(info: &InstanceInfo) -> io::Result<()> {
-    let dir = session_dir(&info.session_id);
+    validate_sid(&info.session_id)?;
+    let dir = try_session_dir(&info.session_id)?;
     std::fs::create_dir_all(&dir)?;
     set_private_dir(&dir)?;
     let json = serde_free_json(info)?;
-    std::fs::write(meta_path(&info.session_id), json)?;
+    std::fs::write(try_meta_path(&info.session_id)?, json)?;
     Ok(())
 }
 
 /// Remove the ficha and socket for session `sid` (call on clean shutdown).
+/// Validates `sid` first (no deletion on invalid input) and only unlinks
+/// the socket if it really is a socket (via `symlink_metadata`, which does
+/// NOT follow symlinks) and the ficha if it is a regular file — never
+/// blindly `remove_file`.
 pub fn cleanup_meta(sid: &str) {
-    let _ = std::fs::remove_file(meta_path(sid));
-    let _ = std::fs::remove_file(sock_path(sid));
+    if validate_sid(sid).is_err() {
+        return;
+    }
+    let Ok(meta_p) = try_meta_path(sid) else {
+        return;
+    };
+    // Only remove regular files, never symlinks/dirs.
+    if let Ok(m) = std::fs::symlink_metadata(&meta_p) {
+        if m.file_type().is_file() {
+            let _ = std::fs::remove_file(&meta_p);
+        }
+    }
+    let Ok(sock_p) = try_sock_path(sid) else {
+        return;
+    };
+    if let Ok(m) = std::fs::symlink_metadata(&sock_p) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if m.file_type().is_socket() {
+                let _ = std::fs::remove_file(&sock_p);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = m;
+        }
+    }
 }
 
 /// Minimal JSON serializer (no serde dependency) — Maverick ships zero extra
@@ -287,6 +394,8 @@ fn serde_free_json(info: &InstanceInfo) -> io::Result<String> {
 
 /// Parse our minimal JSON ficha back into `InstanceInfo` (lenient: missing
 /// fields default to empty/0). Enough for our own format, not a general parser.
+/// Never panics: all slicing uses `str::get` (returns `None` on
+/// non-char-boundary) so a hostile ficha with multibyte UTF-8 cannot DoS us.
 fn parse_meta(json: &str) -> Option<InstanceInfo> {
     let mut info = InstanceInfo {
         name: String::new(),
@@ -325,7 +434,7 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
                 }
                 i += 1;
             }
-            let k = &body[start..i];
+            let k = body.get(start..i.min(len)).unwrap_or("");
             i += 1;
             k
         } else {
@@ -333,7 +442,7 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
             while i < len && bytes[i] != b':' && bytes[i] != b' ' {
                 i += 1;
             }
-            &body[start..i]
+            body.get(start..i).unwrap_or("")
         };
         // Skip ':' and whitespace
         while i < len && (bytes[i] == b':' || bytes[i] == b' ') {
@@ -353,7 +462,7 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
                 }
                 i += 1;
             }
-            let v = &body[start..i];
+            let v = body.get(start..i.min(len)).unwrap_or("");
             if i < len {
                 i += 1;
             }
@@ -363,9 +472,15 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
             while i < len && bytes[i] != b',' && bytes[i] != b'}' {
                 i += 1;
             }
-            body[start..i].trim()
+            body.get(start..i).unwrap_or("").trim()
         };
-        match key.trim_matches('"') {
+        // Strip exactly one pair of surrounding quotes, not all of them:
+        // `trim_matches` would peel `"a"` -> `a` but also `""a""` -> `a`.
+        let key = key
+            .strip_prefix('"')
+            .and_then(|k| k.strip_suffix('"'))
+            .unwrap_or(key);
+        match key {
             "name" => info.name = unquote(val),
             "session_id" => info.session_id = unquote(val),
             "pid" => info.pid = val.parse().unwrap_or(0),
@@ -379,7 +494,7 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
             _ => {}
         }
     }
-    if info.session_id.is_empty() {
+    if info.session_id.is_empty() || !is_valid_sid(&info.session_id) {
         None
     } else {
         Some(info)
@@ -387,7 +502,10 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
 }
 
 fn unquote(s: &str) -> String {
-    crate::json::json_unescape(s.trim().trim_matches('"'))
+    let t = s.trim();
+    let t = t.strip_prefix('"').unwrap_or(t);
+    let t = t.strip_suffix('"').unwrap_or(t);
+    crate::json::json_unescape(t)
 }
 
 /// Build the `InstanceInfo` for the current process under `name` (human label).
@@ -422,8 +540,9 @@ fn x_server_identity() -> String {
 }
 
 /// Read a ficha json file from disk, if present.
+/// Returns `None` for invalid `sid` (traversal-safe: no filesystem access).
 pub fn read_meta(sid: &str) -> Option<InstanceInfo> {
-    let p = meta_path(sid);
+    let p = try_meta_path(sid).ok()?;
     std::fs::read_to_string(p).ok().and_then(|s| parse_meta(&s))
 }
 

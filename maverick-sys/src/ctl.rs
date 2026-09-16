@@ -98,14 +98,28 @@ INSTANCE SELECTION:
 
 // ── option parsing ────────────────────────────────────────────────────────
 
+/// Parsed CLI options shared by all `ctl` commands.
+///
+/// Extracted from the raw `args` slice before command dispatch. `name`/`session`
+/// feed [`resolve_target`]; `confirm`/`yes` gate [`cmd_quit`]/[`cmd_quit_all`];
+/// `positional` carries the remaining action/topic words.
 struct Opts {
+    /// `--name` / `-n` human label or session id.
     name: Option<String>,
+    /// `--session` / `-s` explicit session id.
     session: Option<String>,
+    /// `--confirm` — require interactive confirmation.
     confirm: bool,
+    /// `--yes` / `-y` — bypass confirmation.
     yes: bool,
+    /// Non-flag positional arguments (action names, topics).
     positional: Vec<String>,
 }
 
+/// Parse `args` into [`Opts`], discarding flags listed in `keep_flags` without
+/// treating them as positional. `--name`/`--session` consume the next token;
+/// `--confirm`/`--yes` are booleans; everything else is positional unless it
+/// appears in `keep_flags`.
 fn parse_opts(args: &[String], keep_flags: &[&str]) -> Opts {
     let mut o = Opts {
         name: None,
@@ -131,13 +145,20 @@ fn parse_opts(args: &[String], keep_flags: &[&str]) -> Opts {
     o
 }
 
+/// Convenience wrapper around [`parse_opts`] with no kept flags.
 fn parse_opts_default(args: &[String]) -> Opts {
     parse_opts(args, &[])
 }
 
-/// Resolve the target instance session id given `--session`/`--name`/env/
-/// context/singleton rules. On ambiguity, prints the candidates and returns
-/// None. The returned string is a `session_id` (the filesystem key).
+/// Resolve the target instance `session_id` using the documented precedence.
+///
+/// Precedence (first match wins): `--session` → `--name` → `$MAVERICK_INSTANCE`
+/// → `DISPLAY`+TTY context → singleton. On ambiguity or no match prints the
+/// candidates to `stderr` and returns `None`. The returned string is the
+/// filesystem key (`session_id`), not the human label.
+///
+/// This function is `pub(crate)` so `cargo doc --document-private-items`
+/// includes it; it is not part of the public API.
 fn resolve_target(tool: &str, name: &Option<String>, session: &Option<String>) -> Option<String> {
     // 1. `--session <sid>` is an explicit, unambiguous session id.
     if let Some(s) = session {
@@ -199,6 +220,7 @@ fn resolve_target(tool: &str, name: &Option<String>, session: &Option<String>) -
 
 // ── commands ──────────────────────────────────────────────────────────────
 
+/// List all known instances with `alive`/`STALE` status (`list`/`ls`).
 fn cmd_list(_tool: &str) -> ExitCode {
     let instances = discover::list_instances();
     if instances.is_empty() {
@@ -221,6 +243,8 @@ fn cmd_list(_tool: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Print `res` as JSON on success or an error line on failure, returning the
+/// appropriate [`ExitCode`]. Used by `state`/`query`/`msg` passthrough.
 fn print_json<E: std::error::Error + 'static>(tool: &str, res: Result<String, E>) -> ExitCode {
     match res {
         Ok(json) => {
@@ -253,6 +277,7 @@ fn cmd_state(tool: &str, args: &[String], full_snapshot: bool) -> ExitCode {
     print_json(tool, control::query(&name, &line))
 }
 
+/// Dispatch an action string (`msg`/`dispatch`/`command`) to the resolved instance.
 fn cmd_msg(tool: &str, args: &[String]) -> ExitCode {
     let o = parse_opts_default(args);
     if o.positional.is_empty() {
@@ -280,6 +305,7 @@ fn cmd_msg(tool: &str, args: &[String]) -> ExitCode {
     }
 }
 
+/// Stream events from the resolved instance until the socket closes (`subscribe`/`sub`).
 fn cmd_subscribe(tool: &str, args: &[String]) -> ExitCode {
     let o = parse_opts_default(args);
     let name = match resolve_target(tool, &o.name, &o.session) {
@@ -299,6 +325,7 @@ fn cmd_subscribe(tool: &str, args: &[String]) -> ExitCode {
     }
 }
 
+/// Ask a single instance to quit, honouring `--confirm`/`--yes` (`quit`).
 fn cmd_quit(tool: &str, args: &[String]) -> ExitCode {
     let o = parse_opts_default(args);
     let name = match resolve_target(tool, &o.name, &o.session) {
@@ -326,6 +353,7 @@ fn cmd_quit(tool: &str, args: &[String]) -> ExitCode {
     }
 }
 
+/// Quit every live instance (`quit-all`), requiring `--yes` or confirmation.
 fn cmd_quit_all(tool: &str, args: &[String]) -> ExitCode {
     let o = parse_opts_default(args);
     if !o.yes && !confirm(tool, "Quit ALL Maverick instances?") {
@@ -354,6 +382,7 @@ fn cmd_quit_all(tool: &str, args: &[String]) -> ExitCode {
     }
 }
 
+/// Handle `restart`/`reload` — single verb dispatched via [`control::restart`]/[`control::reload`].
 fn cmd_simple(tool: &str, args: &[String], verb: &str) -> ExitCode {
     let o = parse_opts_default(args);
     let name = match resolve_target(tool, &o.name, &o.session) {
@@ -363,7 +392,10 @@ fn cmd_simple(tool: &str, args: &[String], verb: &str) -> ExitCode {
     let res = match verb {
         "restart" => control::restart(&name),
         "reload" => control::reload(&name),
-        _ => unreachable!(),
+        other => {
+            eprintln!("{tool}: unknown verb '{other}'");
+            return ExitCode::FAILURE;
+        }
     };
     match res {
         Ok(_) => {
@@ -377,6 +409,7 @@ fn cmd_simple(tool: &str, args: &[String], verb: &str) -> ExitCode {
     }
 }
 
+/// Remove stale fichas whose socket no longer answers (`prune`).
 fn cmd_prune(_tool: &str) -> ExitCode {
     let removed = discover::prune_stale();
     if removed.is_empty() {
@@ -399,6 +432,17 @@ fn cmd_forward(tool: &str, line: &str) -> ExitCode {
         None => return ExitCode::FAILURE,
     };
     use crate::identity::{DISPATCH_CMD, IDENTIFY_CMD, PING_CMD, QUERY_CMD};
+    // Require a whitespace delimiter after `query`/`dispatch`, mirroring the
+    // server (`control::dispatch_line`): `queryfoo` must fall through to
+    // dispatch, not be parsed as topic `foo`.
+    fn strip_cmd<'l>(line: &'l str, cmd: &str) -> Option<&'l str> {
+        let rest = line.strip_prefix(cmd)?;
+        if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) {
+            Some(rest.trim())
+        } else {
+            None
+        }
+    }
     let res: std::io::Result<String> = match line.trim() {
         "ping" => control::send_command(&name, PING_CMD),
         "identify" => control::send_command(&name, IDENTIFY_CMD),
@@ -411,15 +455,15 @@ fn cmd_forward(tool: &str, line: &str) -> ExitCode {
             true
         })
         .map(|_| "ok".to_string()),
-        l if l.starts_with(QUERY_CMD) => control::query(
-            &name,
-            l.strip_prefix(QUERY_CMD).map(str::trim).unwrap_or(""),
-        ),
-        l if l.starts_with(DISPATCH_CMD) => control::dispatch(
-            &name,
-            l.strip_prefix(DISPATCH_CMD).map(str::trim).unwrap_or(""),
-        ),
-        l => control::dispatch(&name, l),
+        l => {
+            if let Some(topic) = strip_cmd(l, QUERY_CMD) {
+                control::query(&name, topic)
+            } else if let Some(action) = strip_cmd(l, DISPATCH_CMD) {
+                control::dispatch(&name, action)
+            } else {
+                control::dispatch(&name, l)
+            }
+        }
     };
     print_json(tool, res)
 }
@@ -449,6 +493,7 @@ fn confirm(tool: &str, prompt: &str) -> bool {
     tty_confirm(tool, prompt)
 }
 
+/// Run `bin` with `args` and map exit status to confirmation. `None` on spawn failure.
 fn run_confirm(bin: &str, args: &[&str]) -> Option<bool> {
     std::process::Command::new(bin)
         .args(args)
@@ -457,6 +502,7 @@ fn run_confirm(bin: &str, args: &[&str]) -> Option<bool> {
         .map(|s| s.success())
 }
 
+/// TTY fallback for [`confirm`] — reads `y/N` from stdin, returns `false` if not a terminal.
 fn tty_confirm(tool: &str, prompt: &str) -> bool {
     use std::io::{IsTerminal, Write};
     let stdin = std::io::stdin();
@@ -473,11 +519,36 @@ fn tty_confirm(tool: &str, prompt: &str) -> bool {
     matches!(line.trim(), "y" | "Y" | "yes" | "YES")
 }
 
+/// Return `true` if `bin` exists in `$PATH` and is executable.
 fn which(bin: &str) -> bool {
+    // Reject path separators: only bare binary names are looked up in PATH.
+    if bin.is_empty() || bin.contains('/') {
+        return false;
+    }
     if let Ok(path) = std::env::var("PATH") {
         for dir in path.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
             let p = std::path::Path::new(dir).join(bin);
-            if p.is_file() {
+            // Must be a regular file AND have at least one exec bit —
+            // `is_file` alone announces non-executable files.
+            if !p.is_file() {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(m) = std::fs::metadata(&p) {
+                    if m.permissions().mode() & 0o111 != 0 {
+                        return true;
+                    }
+                    continue;
+                }
+                continue;
+            }
+            #[cfg(not(unix))]
+            {
                 return true;
             }
         }

@@ -245,8 +245,13 @@ fn main() {
             // example entries in config.rs / config.toml.
             for cmd in &manager.engine.cfg.autostart {
                 if let Some((bin, args)) = cmd.split_first() {
+                    // Detach stdio fully: an autostart child inheriting our
+                    // stdin (or the X fd) keeps the terminal/session alive
+                    // and can block a clean reset. (`actions::spawn` already
+                    // nulls all three; this is the same rule.)
                     if let Err(e) = std::process::Command::new(bin)
                         .args(args)
+                        .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
                         .spawn()

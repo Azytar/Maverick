@@ -127,13 +127,26 @@ fn run(question: &str) -> Result<bool, Box<dyn std::error::Error>> {
 
     conn.map_window(win)?;
     // Grab the keyboard so Enter/Esc work even without a WM giving us focus.
-    let _ = conn.grab_keyboard(
-        true,
-        win,
-        x11rb::CURRENT_TIME,
-        GrabMode::ASYNC,
-        GrabMode::ASYNC,
-    )?;
+    // Both the request AND the reply status matter: an `AlreadyGrabbed`
+    // success-less grab would leave the dialog deaf while holding a mapped
+    // window. On any failure destroy the window before returning (a mapped,
+    // unresponsive dialog is worse than none).
+    let grabbed = conn
+        .grab_keyboard(
+            true,
+            win,
+            x11rb::CURRENT_TIME,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+        )?
+        .reply()
+        .map(|r| u8::from(r.status) == 0)
+        .unwrap_or(false);
+    if !grabbed {
+        let _ = conn.destroy_window(win);
+        let _ = conn.flush();
+        return Err("grab keyboard failed (already grabbed?)".into());
+    }
     conn.flush()?;
 
     let buttons = [
@@ -157,12 +170,26 @@ fn run(question: &str) -> Result<bool, Box<dyn std::error::Error>> {
         },
     ];
 
-    loop {
-        let ev = conn.wait_for_event()?;
+    // The loop only exits via `break Err` (I/O, disconnect, draw failure);
+    // success paths `return` above after their own cleanup. Run cleanup here
+    // so the error path releases the keyboard grab too.
+    let result: Result<bool, Box<dyn std::error::Error>> = loop {
+        let ev = match conn.wait_for_event() {
+            Ok(ev) => ev,
+            // I/O error or disconnect: fall through to cleanup below instead
+            // of `?`-returning with the keyboard grab still held (which would
+            // freeze all keyboard input until the server resets).
+            Err(e) => break Err(e.into()),
+        };
         match ev {
             Event::Expose(_) => {
-                draw(&conn, win, gc, question, &buttons)?;
-                conn.flush()?;
+                // Same rule: a draw failure must still release the grab.
+                if let Err(e) = draw(&conn, win, gc, question, &buttons) {
+                    break Err(e);
+                }
+                if let Err(e) = conn.flush() {
+                    break Err(e.into());
+                }
             }
             Event::ButtonPress(e) => {
                 for b in &buttons {
@@ -197,7 +224,9 @@ fn run(question: &str) -> Result<bool, Box<dyn std::error::Error>> {
             }
             _ => {}
         }
-    }
+    };
+    cleanup(&conn, win, gc);
+    result
 }
 
 fn draw(

@@ -16,7 +16,7 @@
 // It never touches WM state directly: it talks to a `ControlHub` that queues
 // commands for the WM thread and caches the state snapshot / event stream.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,8 +32,39 @@ use crate::identity::{
 
 const ORD: Ordering = Ordering::SeqCst;
 const READ_TIMEOUT: Duration = Duration::from_millis(500);
+/// Maximum concurrent connection handler threads (short commands + subscribers).
+const MAX_CONCURRENT: usize = 32;
+/// Maximum concurrent `subscribe` streams. Subscribers hold their handler
+/// thread forever (by design — it's a stream), so without a separate cap 32
+/// subscribers would starve all short commands (`ping`/`dispatch`/`quit`).
+/// The subscribe path enforces this and rejects beyond it, always leaving
+/// command slots free. Same-UID local only, but a wedged bar must not be
+/// able to wedge WM control.
+pub const MAX_SUBSCRIBERS: usize = 16;
+/// Maximum accepted protocol line (64 KiB). Prevents a single client from
+/// OOMing the per-connection thread with a 1 GiB `read_line`.
+pub const MAX_LINE_LEN: usize = 64 * 1024;
+/// Maximum accepted command length for `send_command` (same bound).
+pub const MAX_CMD_LEN: usize = 64 * 1024;
 
 /// Handle to a running control server. Dropping it removes the socket file.
+///
+/// # Thread model
+///
+/// The accept loop runs on a dedicated thread; each connection is handled on
+/// its own thread. All threads share `stop` and an `AtomicUsize` active-count
+/// (capped at 32). The WM thread never blocks on this server.
+///
+/// # Ownership
+///
+/// Owns `name` (used to derive [`crate::identity::sock_path`]) and the shared
+/// `stop` flag. `hub` is cloned into the accept thread and per-connection
+/// threads.
+///
+/// # Lifecycle
+///
+/// Created by [`ControlServer::spawn`]; stopped by [`ControlServer::shutdown`]
+/// or `Drop`. Socket file is unlinked on both paths.
 pub struct ControlServer {
     name: String,
     stop: Arc<AtomicBool>,
@@ -46,22 +77,35 @@ impl ControlServer {
     /// the WM thread: `dispatch`/`quit`/`restart`/`reload` become
     /// `ControlCommand`s the WM drains, `state` reads the hub snapshot, and
     /// `subscribe` streams hub events.
+    ///
+    /// # Errors
+    ///
+    /// Returns `io::Error` if the session directory cannot be created or the
+    /// socket cannot be bound.
     pub fn spawn(name: &str, identity_json: String, hub: ControlHub) -> std::io::Result<Self> {
-        let path = identity::sock_path(name);
+        // Validate early: reject traversal/overlong session ids before touching fs.
+        let path = identity::try_sock_path(name)?;
         // Ensure the per-session dir exists (bind won't create parent dirs) and
         // is private (0700) so other UIDs can't interfere.
-        let dir = identity::session_dir(name);
+        let dir = identity::try_session_dir(name)?;
         std::fs::create_dir_all(&dir)?;
         identity::set_private_dir(&dir)?;
         // Stale socket from a previous crashed instance: unlink so bind works.
-        // Defend against TOCTOU symlink attacks: only remove if it's a socket.
-        if path.exists() {
-            if let Ok(meta) = std::fs::metadata(&path) {
+        // TOCTOU-hardened: use `symlink_metadata` (does NOT follow symlinks).
+        // A symlink — even one pointing at a socket — reports as `symlink`,
+        // not `socket`, so we never unlink attacker-planted links; bind then
+        // fails safely instead of deleting arbitrary files.
+        if let Ok(meta) = std::fs::symlink_metadata(&path) {
+            #[cfg(unix)]
+            {
                 if meta.file_type().is_socket() {
                     let _ = std::fs::remove_file(&path);
-                } else {
-                    // Not a socket — leave it alone; bind will fail with a clear error.
                 }
+                // Else: not a socket — leave it alone; bind will fail clearly.
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = meta;
             }
         }
         let sock = UnixListener::bind(&path)?;
@@ -69,7 +113,6 @@ impl ControlServer {
         let stop = Arc::new(AtomicBool::new(false));
         // Limit concurrent connection handler threads to prevent resource exhaustion.
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        const MAX_CONCURRENT: usize = 32;
 
         let srv_name = name.to_string();
         let srv_stop = stop.clone();
@@ -120,7 +163,17 @@ impl ControlServer {
     pub fn shutdown(&self) {
         self.stop.store(true, ORD);
         // Best-effort unlink; cleanup_meta also handles it.
-        let _ = std::fs::remove_file(identity::sock_path(&self.name));
+        // Only unlink if it really is a socket (no symlink following).
+        if let Ok(p) = identity::try_sock_path(&self.name) {
+            if let Ok(m) = std::fs::symlink_metadata(&p) {
+                #[cfg(unix)]
+                {
+                    if m.file_type().is_socket() {
+                        let _ = std::fs::remove_file(&p);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -130,6 +183,10 @@ impl Drop for ControlServer {
     }
 }
 
+/// Handle a single client connection on its own thread (documented for
+/// `cargo doc --document-private-items`). Reads line-delimited commands,
+/// dispatches them via [`dispatch_line`], and hijacks the connection for
+/// [`stream_events`] on `subscribe`.
 fn handle_conn(
     stream: UnixStream,
     name: &str,
@@ -151,13 +208,32 @@ fn handle_conn(
             Ok(_) => {}
             Err(_) => break,
         }
-        let cmd = line.trim_end().trim();
+        // Bound memory: a hostile client sending a 1 GiB line without `\n`
+        // would otherwise OOM this thread via unbounded `read_line` growth.
+        if line.len() > MAX_LINE_LEN {
+            let _ = writer.write_all(b"error line too long\n");
+            break;
+        }
+        // Strip `\n` and also `\r` (telnet-style clients). `trim_end` alone
+        // leaves interior `\r` which enables terminal/log spoofing.
+        let cmd = line.trim_end_matches(['\n', '\r']).trim();
         if cmd.is_empty() {
+            continue;
+        }
+        // Reject interior control chars that would break framing/logs.
+        if cmd.contains(['\n', '\r']) {
+            let _ = writer.write_all(b"error invalid command\n");
             continue;
         }
 
         // `subscribe` hijacks the connection into a streaming loop.
         if cmd == SUBSCRIBE_CMD {
+            // Subscriber cap (see `MAX_SUBSCRIBERS`): reject instead of
+            // holding one of the 32 handler slots forever.
+            if hub.subscriber_count() >= MAX_SUBSCRIBERS {
+                let _ = writer.write_all(b"error subscribe: too many subscribers\n");
+                break;
+            }
             let _ = writer.write_all(b"ok subscribe\n");
             stream_events(&mut writer, hub, stop);
             break;
@@ -176,10 +252,22 @@ fn handle_conn(
 
 /// Turn a single request line into a response, enqueuing commands as needed.
 fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -> String {
+    // `name` comes from `--name` (external input): sanitize for the
+    // line protocol so `pong evil\ninject` cannot break framing.
+    let safe_name: String = name.chars().filter(|c| !c.is_control()).take(128).collect();
+    // All hub-published payloads must be single-line; a WM bug emitting
+    // `\n` would otherwise desync `subscribe_stream`'s `lines()` framing.
+    fn single_line(s: &str) -> String {
+        let mut out: String = s.replace(['\n', '\r'], " ");
+        if out.len() > MAX_LINE_LEN {
+            out.truncate(MAX_LINE_LEN);
+        }
+        out
+    }
     match cmd {
-        PING_CMD => format!("pong {name}\n"),
-        IDENTIFY_CMD => format!("{identity_json}\n"),
-        STATE_CMD => format!("{}\n", hub.snapshot()),
+        PING_CMD => format!("pong {safe_name}\n"),
+        IDENTIFY_CMD => format!("{}\n", single_line(identity_json)),
+        STATE_CMD => format!("{}\n", single_line(&hub.snapshot())),
         QUIT_CMD => {
             hub.push_command(ControlCommand::Quit);
             "ok\n".to_string()
@@ -193,52 +281,68 @@ fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -
             "ok\n".to_string()
         }
         tmp => {
-            // `dispatch <action>`
-            if let Some(action) = tmp.strip_prefix(DISPATCH_CMD) {
-                let action = action.trim();
-                if action.is_empty() {
-                    return "error dispatch: missing action\n".to_string();
+            // `dispatch <action>` — require a whitespace delimiter so that
+            // `dispatchfoo` is rejected as unknown-command instead of running `foo`.
+            if let Some(rest) = tmp.strip_prefix(DISPATCH_CMD) {
+                if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) {
+                    let action = rest.trim();
+                    if action.is_empty() {
+                        return "error dispatch: missing action\n".to_string();
+                    }
+                    hub.push_command(ControlCommand::Dispatch(action.to_string()));
+                    return "ok\n".to_string();
                 }
-                hub.push_command(ControlCommand::Dispatch(action.to_string()));
-                return "ok\n".to_string();
             }
-            // `query <topic>` — ask the WM to answer a structured query now.
-            if let Some(topic) = tmp.strip_prefix(QUERY_CMD) {
-                let topic = topic.trim();
-                if topic.is_empty() {
-                    return "error query: missing topic\n".to_string();
+            // `query <topic>` — same delimiter requirement.
+            if let Some(rest) = tmp.strip_prefix(QUERY_CMD) {
+                if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) {
+                    let topic = rest.trim();
+                    if topic.is_empty() {
+                        return "error query: missing topic\n".to_string();
+                    }
+                    // The WM thread computes the reply from live state (it is the
+                    // only thread allowed to touch it); we block on its answer.
+                    // 2s is generous: the WM loop wakes at least every 100ms.
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    if !hub.push_command(ControlCommand::Query {
+                        topic: topic.to_string(),
+                        reply: tx,
+                    }) {
+                        return "error query: WM not accepting commands\n".to_string();
+                    }
+                    return match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                        Ok(json) => format!("{}\n", single_line(&json)),
+                        Err(_) => "error query: timed out\n".to_string(),
+                    };
                 }
-                // The WM thread computes the reply from live state (it is the
-                // only thread allowed to touch it); we block on its answer.
-                // 2s is generous: the WM loop wakes at least every 100ms.
-                let (tx, rx) = std::sync::mpsc::channel();
-                if !hub.push_command(ControlCommand::Query {
-                    topic: topic.to_string(),
-                    reply: tx,
-                }) {
-                    return "error query: WM not accepting commands\n".to_string();
-                }
-                return match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                    Ok(json) => format!("{json}\n"),
-                    Err(_) => "error query: timed out\n".to_string(),
-                };
             }
-            format!("error unknown-command: {tmp}\n")
+            // Never echo raw input: it enables log/terminal injection and
+            // unbounded replies. Truncate + strip control chars.
+            let safe: String = tmp.chars().filter(|c| !c.is_control()).take(64).collect();
+            format!("error unknown-command: {safe}\n")
         }
     }
 }
 
 /// Stream hub events to a subscribed client until it disconnects or the server
 /// stops. Blocks on this connection's thread only.
+/// Enforces single-line framing and a write timeout so one slow client
+/// cannot wedge its thread forever.
 fn stream_events(writer: &mut UnixStream, hub: &ControlHub, stop: &Arc<AtomicBool>) {
     let rx = hub.subscribe();
+    let _ = writer.set_write_timeout(Some(Duration::from_secs(2)));
     loop {
         if stop.load(ORD) {
             break;
         }
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(line) => {
-                if writer.write_all(line.as_bytes()).is_err() || writer.write_all(b"\n").is_err() {
+                let clean = line.replace(['\n', '\r'], " ");
+                let mut out = clean;
+                if out.len() > MAX_LINE_LEN {
+                    out.truncate(MAX_LINE_LEN);
+                }
+                if writer.write_all(out.as_bytes()).is_err() || writer.write_all(b"\n").is_err() {
                     break;
                 }
                 let _ = writer.flush();
@@ -255,21 +359,38 @@ fn stream_events(writer: &mut UnixStream, hub: &ControlHub, stop: &Arc<AtomicBoo
 /// Connect to a running instance's control socket and send one command,
 /// returning the first reply line. Used by discovery/ctl tools.
 pub fn send_command(name: &str, cmd: &str) -> std::io::Result<String> {
-    // Reject embedded newlines to prevent command injection in the line-based protocol.
-    if cmd.contains('\n') {
+    // Reject embedded CR/LF to prevent command injection in the line protocol,
+    // and bound length to avoid amplifying a huge caller string.
+    if cmd.contains(['\n', '\r']) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "command contains newline",
         ));
     }
-    let path = identity::sock_path(name);
+    if cmd.len() > MAX_CMD_LEN {
+        return Err(std::io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "command too long",
+        ));
+    }
+    // Validate session id before touching the filesystem (traversal-safe).
+    let path = identity::try_sock_path(name)?;
     let mut stream = UnixStream::connect(&path)?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
     stream.write_all(format!("{cmd}\n").as_bytes())?;
-    let mut reader = BufReader::new(stream);
+    let reader = BufReader::new(stream);
     let mut reply = String::new();
-    reader.read_line(&mut reply)?;
-    Ok(reply.trim_end().to_string())
+    // Bound the reply as well: a compromised server must not OOM the client.
+    let mut limited = reader.take((MAX_LINE_LEN + 16) as u64);
+    limited.read_line(&mut reply)?;
+    if reply.len() > MAX_LINE_LEN + 16 {
+        return Err(std::io::Error::new(
+            io::ErrorKind::InvalidData,
+            "reply too long",
+        ));
+    }
+    Ok(reply.trim_end_matches(['\n', '\r']).to_string())
 }
 
 /// Probe a running instance: connect, `ping`, and confirm it answers.
@@ -306,6 +427,12 @@ pub fn state(name: &str) -> std::io::Result<String> {
 /// Send a `dispatch <action>` to a running instance (execute an action as if
 /// it were a keybind). Returns the server reply.
 pub fn dispatch(name: &str, action: &str) -> std::io::Result<String> {
+    if action.contains(['\n', '\r']) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "action contains newline",
+        ));
+    }
     send_command(name, &format!("{DISPATCH_CMD} {action}"))
 }
 
@@ -313,6 +440,12 @@ pub fn dispatch(name: &str, action: &str) -> std::io::Result<String> {
 /// "tree", "focused", …). The WM answers from its live state; this blocks
 /// until the reply arrives. Used by `maverick-msg query …`.
 pub fn query(name: &str, topic: &str) -> std::io::Result<String> {
+    if topic.contains(['\n', '\r']) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "topic contains newline",
+        ));
+    }
     send_command(name, &format!("{QUERY_CMD} {topic}"))
 }
 
@@ -323,16 +456,31 @@ pub fn subscribe_stream<F>(name: &str, mut on_line: F) -> std::io::Result<()>
 where
     F: FnMut(&str) -> bool,
 {
-    let path = identity::sock_path(name);
+    let path = identity::try_sock_path(name)?;
     let mut stream = UnixStream::connect(&path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
     stream.write_all(format!("{SUBSCRIBE_CMD}\n").as_bytes())?;
     let reader = BufReader::new(stream);
+    let mut acked = false;
     for line in reader.lines() {
         let line = line?;
-        let trimmed = line.trim_end();
-        // Skip the initial "ok subscribe" acknowledgement.
-        if trimmed == "ok subscribe" {
+        if line.len() > MAX_LINE_LEN {
             continue;
+        }
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        // Skip the initial "ok subscribe" acknowledgement. A server-side
+        // rejection (e.g. subscriber cap) arrives here instead: surface it
+        // as an error rather than feeding it to `on_line` as an event.
+        if !acked {
+            acked = true;
+            if trimmed == "ok subscribe" {
+                continue;
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                format!("subscribe rejected: {trimmed}"),
+            ));
         }
         if !on_line(trimmed) {
             break;

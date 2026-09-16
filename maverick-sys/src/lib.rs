@@ -143,29 +143,39 @@ fn install_regrab(sig: libc::c_int) {
 
 /// Install a handler whose address is a plain `extern "C" fn` (no captured
 /// state) — safe to pass straight to `sigaction`.
-fn install_raw_fn(func: extern "C" fn(libc::c_int), sig: libc::c_int, flags: libc::c_int) {
+/// Returns `false` instead of panicking: a transient `sigaction` failure
+/// (seccomp, bad sig) must not take down the WM from inside a library.
+fn install_raw_fn(func: extern "C" fn(libc::c_int), sig: libc::c_int, flags: libc::c_int) -> bool {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
+        // NOTE: without SA_SIGINFO the kernel uses the `sa_handler` union
+        // member (1-arg handler), which shares storage with `sa_sigaction`.
+        // Our trampolines are 1-arg `extern "C" fn(c_int)`, so this assignment
+        // is correct as long as callers never add SA_SIGINFO.
         sa.sa_sigaction = func as *const () as usize;
         sa.sa_flags = flags;
         libc::sigemptyset(&mut sa.sa_mask);
         if libc::sigaction(sig, &sa, std::ptr::null_mut()) != 0 {
-            panic!("sigaction({sig}) failed");
+            eprintln!("maverick-sys: sigaction({sig}) failed; continuing");
+            return false;
         }
     }
+    true
 }
 
 /// Install a handler from a `sighandler_t` constant (SIG_DFL / SIG_IGN).
-fn install_raw(sig: libc::c_int, action: usize, flags: libc::c_int) {
+fn install_raw(sig: libc::c_int, action: usize, flags: libc::c_int) -> bool {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = action;
         sa.sa_flags = flags;
         libc::sigemptyset(&mut sa.sa_mask);
         if libc::sigaction(sig, &sa, std::ptr::null_mut()) != 0 {
-            panic!("sigaction({sig}) failed");
+            eprintln!("maverick-sys: sigaction({sig}) failed; continuing");
+            return false;
         }
     }
+    true
 }
 
 // ─── Terminal detachment ─────────────────────────────────────────────────────

@@ -32,13 +32,23 @@ pub fn list_instances() -> Vec<InstanceInfo> {
     for entry in entries.flatten() {
         let path = entry.path();
         // Each session is its own subdirectory named after the session id.
-        if !path.is_dir() {
+        // Use `symlink_metadata` (no following): a symlink farm pointing at
+        // `/etc` etc. must not be traversed.
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
             continue;
         }
         let sid = match path.file_name().and_then(|s| s.to_str()) {
             Some(s) => s.to_string(),
             None => continue,
         };
+        // Reject traversal ids (`..`, `a/b`, overlong) before any fs access.
+        if !identity::is_valid_sid(&sid) {
+            continue;
+        }
         let mut info = match identity::read_meta(&sid) {
             Some(i) => i,
             None => continue,
