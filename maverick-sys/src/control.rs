@@ -611,4 +611,51 @@ mod tests {
 
         server.shutdown();
     }
+
+    #[test]
+    fn subscribe_cap_rejects_beyond_max() {
+        let name = "testsubcap";
+        let info = InstanceInfo {
+            name: name.into(),
+            session_id: name.into(),
+            pid: std::process::id(),
+            display: ":9".into(),
+            tty_nr: 0,
+            x_server_identity: "?".into(),
+            start_time: 0,
+            exe: String::new(),
+            started_at: 1,
+            alive: true,
+        };
+        let hub = ControlHub::new();
+        let server =
+            ControlServer::spawn(name, identity_json(&info), hub.clone()).expect("server binds");
+
+        // Fill every subscriber slot with blocking subscribers.
+        let mut handles = Vec::new();
+        for _ in 0..MAX_SUBSCRIBERS {
+            let nm = name.to_string();
+            handles.push(std::thread::spawn(move || {
+                let _ = subscribe_stream(&nm, |_| true);
+            }));
+        }
+        for _ in 0..250 {
+            if hub.subscriber_count() >= MAX_SUBSCRIBERS {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(hub.subscriber_count(), MAX_SUBSCRIBERS);
+
+        // The next subscribe must be rejected (as an Err, not an event line),
+        // and short commands must still work on the remaining slots.
+        let err = subscribe_stream(name, |_| true).expect_err("cap must reject");
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
+        assert!(ping(name).is_ok(), "commands must survive full subs");
+
+        server.shutdown();
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
 }

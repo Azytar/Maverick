@@ -1500,6 +1500,58 @@ mod tests {
         );
     }
 
+    // ── Regresión: clamp único del float no debe temblar ──────────────────────
+    #[test]
+    fn clamp_is_idempotent_and_stable() {
+        let wa = workarea();
+        for bw in [0u32, 2, 6] {
+            for g in [
+                Rect::new(100, 100, 640, 480),
+                Rect::new(-100, -100, 800, 600),
+                Rect::new(1900, 1000, 640, 480),
+                Rect::new(0, 0, 5000, 5000),
+                Rect::new(0, 0, 1, 1),
+            ] {
+                let a = clamp_float_to_workarea(g, wa, bw);
+                let b = clamp_float_to_workarea(a, wa, bw);
+                assert_eq!(a, b, "clamp debe ser idempotente para {g:?} bw={bw}");
+                assert!(
+                    fits(a, wa, bw),
+                    "resultado debe encajar: {a:?} wa={wa:?} bw={bw}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clamp_matches_layout_float_path() {
+        // El nuevo float no debe discrepar entre `manage`/`layout`/`drag`:
+        // todos usan `clamp_float_to_workarea` con marco 2*bw. Un wa centrado
+        // sin marco desplazaría el float 4px en el siguiente `arrange` → temblor.
+        let wa = workarea();
+        let bw = 2;
+        let centered = Rect::new(
+            wa.x + (wa.w as i32 - 400) / 2,
+            wa.y + (wa.h as i32 - 300) / 2,
+            400,
+            300,
+        );
+        let clamped = clamp_float_to_workarea(centered, wa, bw);
+        assert_eq!(
+            clamped, centered,
+            "centrado debe quedar igual con marco 2*bw"
+        );
+        let at_edge = Rect::new(wa.x + wa.w as i32 - 400, wa.y + wa.h as i32 - 300, 400, 300);
+        let clamped_edge = clamp_float_to_workarea(at_edge, wa, bw);
+        // Sin marco at_edge encajaría, con marco debe retroceder 4px.
+        assert_eq!(
+            clamped_edge.x,
+            wa.x + wa.w as i32 - 400 - 2 * bw as i32,
+            "borde en el filo debe retroceder 2*bw"
+        );
+        assert!(fits(clamped_edge, wa, bw));
+    }
+
     // ── Riesgo 4: "covering fullscreen" must never be conflated with "overlay owner" ──
     // A `Column` fullscreen covers the screen (it is the covering fullscreen used
     // by hit-testing) but is NOT the presentation overlay owner. A `presented_maximize`
@@ -1588,5 +1640,363 @@ mod tests {
             None,
             "a presented_maximize window is NOT a covering fullscreen"
         );
+    }
+
+    // ── Float resize-storm convergence (PrismLauncher download dialog) ──────
+    //
+    // Bug: a floating window that resizes itself rapidly (a Qt progress /
+    // download dialog updating its contents dozens of times per second)
+    // flickered bigger/smaller on every update. Root cause: the float
+    // `ConfigureRequest` sink answered with the raw requested size, ignoring
+    // the client's own `WM_NORMAL_HINTS`. A hint-respecting toolkit corrects
+    // any hint-violating size with an immediate follow-up `ConfigureRequest`,
+    // so EVERY update bounced once (answer → correction) — the visible jump.
+    // The `ConfigureNotify` follow path additionally adopted the reported
+    // rect raw, with no clamp at all.
+    //
+    // Fix: both float sinks route through `normalize_float_request`
+    // (hints snap, then workarea clamp, then a final settle onto the
+    // increment grid). The invariant pinned below is INV-FLOAT-CONVERGE: the
+    // WM's answer is a fixed point of the toolkit's correction function, so a
+    // resize storm terminates in exactly one configure per distinct size and
+    // can never oscillate.
+
+    use crate::core::layout::{fixed_size_hints, parse_wm_normal_hints, snap_float_to_hints};
+
+    /// A terminal-style hint set: aligned min, base + increment grid, no max.
+    fn term_hints() -> SizeHints {
+        SizeHints {
+            base_w: 0,
+            base_h: 0,
+            inc_w: 10,
+            inc_h: 10,
+            max_w: 0,
+            max_h: 0,
+            min_w: 100,
+            min_h: 100,
+            min_aspect: 0.0,
+            max_aspect: 0.0,
+            // Same "no flag bits" default every other test literal uses
+            // (`..SizeHints::default()`); the hint-snap path reads only the
+            // constraint fields, never the raw wire word.
+            flags: 0,
+            valid: true,
+        }
+    }
+
+    /// A Qt-dialog-style hint set: minimum size only (what `QDialog` with a
+    /// layout publishes; cf. the `PrismLauncher` `minimum size: 480x138` log),
+    /// no increment grid.
+    fn dialog_hints() -> SizeHints {
+        SizeHints {
+            min_w: 480,
+            min_h: 138,
+            valid: true,
+            ..SizeHints::default()
+        }
+    }
+
+    /// Model of a hint-respecting toolkit's correction when it observes a
+    /// `ConfigureNotify` (Qt/Xt behaviour: clamp into [min, max], floor-snap
+    /// onto the increment grid, hard bounds as the final word). When the WM's
+    /// answer `a` satisfies `toolkit_correct(a) == a`, the toolkit sends no
+    /// follow-up request and the exchange terminates.
+    fn toolkit_correct(g: Rect, h: SizeHints) -> Rect {
+        if !h.valid {
+            return g;
+        }
+        let mut w = g.w as i32;
+        let mut hh = g.h as i32;
+        if h.min_w > 0 {
+            w = w.max(h.min_w);
+        }
+        if h.min_h > 0 {
+            hh = hh.max(h.min_h);
+        }
+        if h.max_w > 0 {
+            w = w.min(h.max_w);
+        }
+        if h.max_h > 0 {
+            hh = hh.min(h.max_h);
+        }
+        if h.inc_w > 0 {
+            let base = h.base_w.max(0);
+            w = if w >= base {
+                base + (w - base) / h.inc_w * h.inc_w
+            } else {
+                base
+            };
+        }
+        if h.inc_h > 0 {
+            let base = h.base_h.max(0);
+            hh = if hh >= base {
+                base + (hh - base) / h.inc_h * h.inc_h
+            } else {
+                base
+            };
+        }
+        if h.min_w > 0 {
+            w = w.max(h.min_w);
+        }
+        if h.min_h > 0 {
+            hh = hh.max(h.min_h);
+        }
+        if h.max_w > 0 {
+            w = w.min(h.max_w);
+        }
+        if h.max_h > 0 {
+            hh = hh.min(h.max_h);
+        }
+        Rect::new(g.x, g.y, w.max(1) as u32, hh.max(1) as u32)
+    }
+
+    fn hint_sets() -> Vec<SizeHints> {
+        let mut fixed = term_hints();
+        fixed.max_w = 200;
+        fixed.max_h = 200;
+        fixed.min_w = 200;
+        fixed.min_h = 200;
+        // Non-zero base with its own grid (decorations-aware toolkits).
+        let mut based = term_hints();
+        based.base_w = 4;
+        based.base_h = 4;
+        based.inc_w = 8;
+        based.inc_h = 8;
+        vec![
+            SizeHints::default(),
+            term_hints(),
+            dialog_hints(),
+            fixed,
+            based,
+        ]
+    }
+
+    fn storm_requests() -> Vec<Rect> {
+        let mut out = Vec::new();
+        // Degenerate, tiny, grid-aligned, grid-misaligned, fitting, huge and
+        // off-screen requests — the shapes a download dialog emits while its
+        // contents churn.
+        for &(x, y) in &[(300, 300), (0, 0), (1500, 900), (-400, -300), (5000, 5000)] {
+            for &(w, h) in &[
+                (0, 0),
+                (1, 1),
+                (4, 4),
+                (99, 99),
+                (100, 100),
+                (104, 104),
+                (105, 105),
+                (480, 138),
+                (481, 139),
+                (640, 480),
+                (9000, 7000),
+            ] {
+                out.push(Rect::new(x, y, w, h));
+            }
+        }
+        out
+    }
+
+    fn fits_normalized(g: Rect, wa: Rect, bw: u32) -> bool {
+        let frame = 2 * bw as i32;
+        g.x >= wa.x
+            && g.y >= wa.y
+            && g.x + g.w as i32 + frame <= wa.x + wa.w as i32
+            && g.y + g.h as i32 + frame <= wa.y + wa.h as i32
+    }
+
+    // ── INV-FLOAT-CONVERGE ────────────────────────────────────────────────
+    //
+    // For every request shape and every well-formed hint set, the normalized
+    // answer is a fixed point of the toolkit correction: the client observes
+    // a size it accepts and sends no follow-up `ConfigureRequest`. A burst of
+    // N distinct self-resizes therefore costs exactly N configures — never
+    // the 2N answer/correction pairs that read as bigger/smaller flicker.
+    #[test]
+    fn float_answer_is_toolkit_fixed_point() {
+        let wa = Rect::new(0, 0, 1920, 1080);
+        let bw = 2;
+        for hints in hint_sets() {
+            for req in storm_requests() {
+                let answer = normalize_float_request(req, hints, wa, bw);
+                assert_eq!(
+                    toolkit_correct(answer, hints),
+                    answer,
+                    "INV-FLOAT-CONVERGE violated: req={req:?} hints={hints:?} answer={answer:?} would be corrected to {:?}",
+                    toolkit_correct(answer, hints),
+                );
+            }
+        }
+    }
+
+    /// Regression pin for the bug itself: the pre-fix pipeline (workarea
+    /// clamp only, no hints snap) answers 104px to a 104px request, but the
+    /// toolkit floors 104 to the 10px grid (100) and re-requests — one
+    /// corrective bounce per update. The fixed pipeline answers 100 directly.
+    #[test]
+    fn clamp_only_pipeline_bounces_but_normalized_does_not() {
+        let wa = Rect::new(0, 0, 1920, 1080);
+        let bw = 2;
+        let hints = term_hints();
+        let req = Rect::new(300, 300, 104, 104);
+        let old = clamp_float_to_workarea(req, wa, bw);
+        assert_eq!(old, req, "a fitting request used to be honored as-is");
+        assert_ne!(
+            toolkit_correct(old, hints),
+            old,
+            "pre-fix answer must be toolkit-corrected (this is the flicker bounce)"
+        );
+        let new = normalize_float_request(req, hints, wa, bw);
+        assert_eq!(new, Rect::new(300, 300, 100, 100));
+        assert_eq!(toolkit_correct(new, hints), new);
+    }
+
+    /// A fixed-size dialog (min == max) never moves no matter what it
+    /// requests: rapid content updates cannot change its geometry at all.
+    #[test]
+    fn fixed_size_dialog_request_is_pinned() {
+        let wa = Rect::new(0, 0, 1920, 1080);
+        let h = SizeHints {
+            min_w: 480,
+            min_h: 300,
+            max_w: 480,
+            max_h: 300,
+            valid: true,
+            ..SizeHints::default()
+        };
+        assert!(fixed_size_hints(&h));
+        for req in storm_requests() {
+            let a = normalize_float_request(req, h, wa, 2);
+            assert_eq!((a.w, a.h), (480, 300), "fixed dialog must not resize");
+            assert_eq!(toolkit_correct(a, h), a);
+        }
+    }
+
+    /// Idempotence of the snap itself: `snap(snap(x)) == snap(x)` for every
+    /// request shape and hint set, so the WM can never chase its own answer.
+    #[test]
+    fn snap_is_idempotent() {
+        for hints in hint_sets() {
+            for req in storm_requests() {
+                let once = snap_float_to_hints(req, hints);
+                assert_eq!(
+                    snap_float_to_hints(once, hints),
+                    once,
+                    "snap must be idempotent for req={req:?} hints={hints:?}"
+                );
+            }
+        }
+    }
+
+    /// Full-pipeline idempotence when the hints are satisfiable inside the
+    /// workarea: normalizing twice changes nothing, so alternating
+    /// request/notify observations converge instead of oscillating.
+    #[test]
+    fn normalize_is_idempotent_when_hints_fit_workarea() {
+        let wa = Rect::new(0, 0, 1920, 1080);
+        for hints in [SizeHints::default(), term_hints(), dialog_hints()] {
+            for req in storm_requests() {
+                let once = normalize_float_request(req, hints, wa, 2);
+                assert_eq!(
+                    normalize_float_request(once, hints, wa, 2),
+                    once,
+                    "normalize must be idempotent for req={req:?} hints={hints:?}"
+                );
+            }
+        }
+    }
+
+    /// Containment + validity through the new entry point: no degenerate
+    /// (`0x0`) geometry ever reaches X11 (`BadValue`) and nothing escapes the
+    /// workarea — including hinted requests, which the old notify-follow path
+    /// adopted raw.
+    #[test]
+    fn normalize_never_degenerate_never_escapes() {
+        let wa = Rect::new(0, 22, 1920, 1058);
+        for hints in hint_sets() {
+            for req in storm_requests() {
+                let g = normalize_float_request(req, hints, wa, 2);
+                assert!(g.w >= 1 && g.h >= 1, "degenerate: {g:?}");
+                assert!(
+                    fits_normalized(g, wa, 2),
+                    "escaped workarea: {g:?} wa={wa:?} req={req:?} hints={hints:?}"
+                );
+            }
+        }
+    }
+
+    /// Snap honors min/max bounds and rounds to the increment grid with the
+    /// same rounding the drag path historically used.
+    #[test]
+    fn snap_enforces_bounds_and_grid() {
+        let h = term_hints();
+        // Below min → min (already grid-aligned).
+        assert_eq!(snap_float_to_hints(Rect::new(0, 0, 40, 40), h).w, 100);
+        // Misaligned → nearest grid multiple (104→100, 105→110).
+        assert_eq!(snap_float_to_hints(Rect::new(0, 0, 104, 104), h).w, 100);
+        assert_eq!(snap_float_to_hints(Rect::new(0, 0, 105, 104), h).w, 110);
+        assert_eq!(snap_float_to_hints(Rect::new(0, 0, 109, 109), h).w, 110);
+        // Position is never touched.
+        let p = snap_float_to_hints(Rect::new(31, 47, 104, 104), h);
+        assert_eq!((p.x, p.y), (31, 47));
+        // Max wins over grid growth.
+        let mut capped = term_hints();
+        capped.max_w = 105;
+        capped.max_h = 105;
+        let c = snap_float_to_hints(Rect::new(0, 0, 9000, 9000), capped);
+        assert_eq!((c.w, c.h), (105, 105));
+        // Invalid hints → identity (old pass-through preserved).
+        let plain = Rect::new(300, 300, 104, 104);
+        assert_eq!(snap_float_to_hints(plain, SizeHints::default()), plain);
+    }
+
+    /// The wire parser accepts the full 18-word body, rejects short bodies
+    /// (caller keeps previous hints), and treats a zero-flags body as
+    /// "valid, no constraints" — exactly the old manage-time semantics.
+    #[test]
+    fn parse_wm_normal_hints_wire_format() {
+        assert!(parse_wm_normal_hints(&[0u32; 5]).is_none());
+        assert!(parse_wm_normal_hints(&[0u32; 17]).is_none());
+        let empty = parse_wm_normal_hints(&[0u32; 18]).unwrap();
+        assert!(empty.valid);
+        assert_eq!(empty.flags, 0, "an all-zero body carries no flag bits");
+        assert_eq!(
+            (empty.min_w, empty.inc_w, empty.max_w, empty.base_w),
+            (0, 0, 0, 0)
+        );
+
+        // flags = PMinSize|PMaxSize|PResizeInc|PAspect|PBaseSize. The body is the
+        // C `XSizeHints` struct serialized: x/y/w/h at 1..4, min at 5/6, max at
+        // 7/8, inc at 9/10, aspect x/y pairs at 11..14, base at 15/16 (see
+        // `parse_wm_normal_hints` — the indices are the ICCCM contract).
+        let mut v = vec![0u32; 18];
+        v[0] = 16 | 32 | 64 | 128 | 256;
+        v[5] = 100;
+        v[6] = 100; // min
+        v[7] = 800;
+        v[8] = 600; // max
+        v[9] = 10;
+        v[10] = 10; // inc
+        v[11] = 16;
+        v[12] = 9; // min aspect 16/9
+        v[13] = 16;
+        v[14] = 9; // max aspect 16/9
+        v[15] = 4;
+        v[16] = 4; // base
+        let h = parse_wm_normal_hints(&v).unwrap();
+        assert!(h.valid);
+        assert_eq!(h.flags, v[0], "the raw flags word must round-trip");
+        assert_eq!((h.min_w, h.min_h), (100, 100));
+        assert_eq!((h.max_w, h.max_h), (800, 600));
+        assert_eq!((h.inc_w, h.inc_h), (10, 10));
+        assert_eq!((h.base_w, h.base_h), (4, 4));
+        assert!((h.min_aspect - 16.0 / 9.0).abs() < 1e-6);
+        assert!(!fixed_size_hints(&h));
+
+        // min == max → fixed.
+        let mut f = v.clone();
+        f[7] = 100;
+        f[8] = 100;
+        let fh = parse_wm_normal_hints(&f).unwrap();
+        assert!(fixed_size_hints(&fh));
     }
 }
