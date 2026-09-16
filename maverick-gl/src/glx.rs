@@ -83,12 +83,10 @@ macro_rules! glx_api {
             pub fn load(lib: &Lib) -> Result<Self, String> {
                 Ok(Self {
                     $( $rname: unsafe {
-                        std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($rargty),*) $(-> $rret)?>(
-                            lib.sym(stringify!($rname))?
-                        )
+                        Lib::cast_fn(lib.sym(stringify!($rname))?)
                     }, )+
                     $( $oname: lib.sym_opt(stringify!($oname)).map(|p| unsafe {
-                        std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($oargty),*) $(-> $oret)?>(p)
+                        Lib::cast_fn(p)
                     }), )+
                 })
             }

@@ -48,6 +48,7 @@ pub const XCB_OWNS_EVENT_QUEUE: c_int = 1;
 
 #[link(name = "X11")]
 extern "C" {
+    pub fn XInitThreads() -> c_int;
     pub fn XOpenDisplay(name: *const c_char) -> *mut Display;
     pub fn XCloseDisplay(dpy: *mut Display) -> c_int;
     pub fn XDefaultScreen(dpy: *mut Display) -> c_int;
@@ -147,8 +148,11 @@ pub fn x_error_name(code: u8) -> &'static str {
 #[derive(Debug, Clone, Copy)]
 pub struct XDisplay(*mut Display);
 
-// The pointer is only ever touched from the WM thread; `Send` is needed purely
-// so structs holding it stay `Send`.
+// `Send` is sound because `open_x` calls `XInitThreads()` before any other
+// Xlib call, enabling Xlib's internal locking; in practice the pointer is
+// additionally only ever touched from the WM thread. `Send` is needed purely
+// so structs holding it stay `Send`. (`Sync` is NOT granted: concurrent
+// `&`-shared Xlib calls would still need external locking.)
 unsafe impl Send for XDisplay {}
 
 impl XDisplay {

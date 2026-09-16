@@ -72,9 +72,7 @@ macro_rules! gl_api {
             pub fn load(lib: &Lib) -> Result<Self, String> {
                 Ok(Self {
                     $( $name: unsafe {
-                        std::mem::transmute::<*mut c_void, unsafe extern "C" fn($($argty),*) $(-> $ret)?>(
-                            lib.sym(stringify!($name))?
-                        )
+                        Lib::cast_fn(lib.sym(stringify!($name))?)
                     }, )+
                 })
             }

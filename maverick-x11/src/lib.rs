@@ -42,6 +42,7 @@ pub const XCB_OWNS_EVENT_QUEUE: c_int = 1;
 
 #[link(name = "X11")]
 extern "C" {
+    pub fn XInitThreads() -> c_int;
     pub fn XOpenDisplay(name: *const c_char) -> *mut Display;
     pub fn XCloseDisplay(dpy: *mut Display) -> c_int;
     pub fn XDefaultScreen(dpy: *mut Display) -> c_int;
@@ -125,8 +126,9 @@ pub fn x_error_name(code: u8) -> &'static str {
 #[derive(Debug, Clone, Copy)]
 pub struct XDisplay(*mut Display);
 
-// The pointer is only ever touched from the WM thread; `Send` is needed purely
-// so structs holding it stay `Send`.
+// `Send` is sound because `open_x` calls `XInitThreads()` before any other
+// Xlib call; in practice the pointer is additionally only ever touched from
+// the WM thread. Needed purely so structs holding it stay `Send`.
 unsafe impl Send for XDisplay {}
 
 impl XDisplay {
@@ -176,6 +178,8 @@ impl XDisplay {
 /// process.
 pub fn open_x() -> Result<(XDisplay, XConn, usize), String> {
     unsafe {
+        // First Xlib call in the process (see `Send` docs above).
+        XInitThreads();
         let dpy = XOpenDisplay(std::ptr::null());
         if dpy.is_null() {
             let target = std::env::var("DISPLAY").unwrap_or_else(|_| "<unset>".into());

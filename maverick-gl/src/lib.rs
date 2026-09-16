@@ -60,6 +60,11 @@ pub type XConn = XCBConnection;
 /// process — see [`XDisplay`] for why that is deliberate.
 pub fn open_x() -> Result<(XDisplay, XConn, usize), String> {
     unsafe {
+        // Must be the FIRST Xlib call in the process: it enables locking
+        // inside Xlib, which is what makes holding `Display*` across threads
+        // (and the `Send` impls on `XDisplay`/`Lib`) sound. No-op on
+        // already-initialised libX11; returns non-zero on success.
+        xlib::XInitThreads();
         let dpy = xlib::XOpenDisplay(std::ptr::null());
         if dpy.is_null() {
             let target = std::env::var("DISPLAY").unwrap_or_else(|_| "<unset>".into());

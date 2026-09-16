@@ -26,31 +26,50 @@ pub struct Lib {
 }
 
 unsafe impl Send for Lib {}
+// `Send` (but deliberately NOT `Sync`): every GL call in the compositor runs
+// on the WM thread, and `XInitThreads` (see `open_x`) makes the underlying
+// libGL/Xlib locking valid if the handle ever crosses threads during setup.
+// Sharing `&Lib` across threads would need `Sync`, which is NOT granted.
+
+/// Absolute system paths probed BEFORE the bare soname, in order. A bare
+/// `dlopen("libGL.so.1")` honours `LD_LIBRARY_PATH`/`LD_PRELOAD`, so a hostile
+/// environment could inject code into the WM process; absolute paths are not
+/// subject to search-path hijacking. The soname stays as a last resort so
+/// exotic layouts (Nix store, etc.) keep working.
+const GL_CANDIDATES: &[&str] = &[
+    "/usr/lib/x86_64-linux-gnu/libGL.so.1",
+    "/usr/lib/aarch64-linux-gnu/libGL.so.1",
+    "/usr/lib64/libGL.so.1",
+    "/usr/lib/libGL.so.1",
+    "libGL.so.1",
+];
 
 impl Lib {
     /// Load `libGL.so.1` and resolve `glXGetProcAddressARB`.
     pub fn open_gl() -> Result<Self, String> {
-        let name = CString::new("libGL.so.1").expect("static string has no NUL");
-        // RTLD_LAZY: we only ever call symbols we successfully resolved, and a
-        // lazy load avoids paying for every relocation in the driver.
-        let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
-        if handle.is_null() {
-            return Err(format!("dlopen(libGL.so.1) failed: {}", last_error()));
+        let mut last_err = String::from("no libGL candidate tried");
+        for cand in GL_CANDIDATES {
+            let name = CString::new(*cand).expect("static string has no NUL");
+            // RTLD_NOW: fail fast here on missing relocations instead of
+            // crashing mid-frame on the first call into a half-bound driver.
+            let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+            if handle.is_null() {
+                last_err = format!("dlopen({cand}) failed: {}", last_error());
+                continue;
+            }
+            let mut lib = Lib {
+                handle,
+                get_proc: None,
+            };
+            let raw = lib.dlsym("glXGetProcAddressARB");
+            if raw.is_null() {
+                last_err = format!("{cand} has no glXGetProcAddressARB");
+                continue;
+            }
+            lib.get_proc = Some(unsafe { Self::cast_fn(raw) });
+            return Ok(lib);
         }
-        let mut lib = Lib {
-            handle,
-            get_proc: None,
-        };
-        let raw = lib.dlsym("glXGetProcAddressARB");
-        if raw.is_null() {
-            return Err("libGL.so.1 has no glXGetProcAddressARB".into());
-        }
-        lib.get_proc = Some(unsafe {
-            std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*const c_uchar) -> *mut c_void>(
-                raw,
-            )
-        });
-        Ok(lib)
+        Err(last_err)
     }
 
     fn dlsym(&self, name: &str) -> *mut c_void {
@@ -88,6 +107,22 @@ impl Lib {
         } else {
             Some(p)
         }
+    }
+
+    /// Cast a resolved, non-null symbol to a typed entry point. Single choke
+    /// point for every `transmute` in the crate (`gl.rs`/`glx.rs` go through
+    /// here), so the safety contract lives in one place.
+    ///
+    /// # Safety
+    /// `p` must be a non-null pointer to a function with signature `T`,
+    /// obtained from [`Lib::sym`] (i.e. from `glXGetProcAddressARB`/`dlsym`
+    /// for exactly `name`). A driver returning a non-null *stub* for a
+    /// missing extension would still be UB to call — which is why callers
+    /// must treat optional symbols via `sym_opt` + extension-string checks,
+    /// never by nullness alone.
+    pub unsafe fn cast_fn<T>(p: *mut c_void) -> T {
+        debug_assert!(!p.is_null());
+        unsafe { std::mem::transmute_copy::<*mut c_void, T>(&p) }
     }
 }
 
