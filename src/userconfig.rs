@@ -518,13 +518,24 @@ fn apply_keybind_key(row: &mut KeybindEntry, key: &str, value: &Value<'_>) {
 
 /// Map one `[[rules]]` key onto the current row.
 fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
+    // Rule bools are plain `bool` (not `Option`), so they need their own
+    // setter: warn on a wrong type instead of silently defaulting to false
+    // (`float = "yes"` used to become `false` with no diagnostic, unlike
+    // every neighbouring key).
+    fn set_rule_bool(slot: &mut bool, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
+        if let Some(v) = value.as_bool() {
+            *slot = v;
+        } else {
+            warn_bad(diag, key);
+        }
+    }
     match key {
         "class" => set_string(&mut row.class, key, value, diag),
         "instance" => set_string(&mut row.instance, key, value, diag),
         "window_type" | "type" => set_string(&mut row.window_type, key, value, diag),
         "title" => set_string(&mut row.title, key, value, diag),
-        "float" => row.float = value.as_bool().unwrap_or(false),
-        "sticky" => row.sticky = value.as_bool().unwrap_or(false),
+        "float" => set_rule_bool(&mut row.float, key, value, diag),
+        "sticky" => set_rule_bool(&mut row.sticky, key, value, diag),
         "workspace" | "ws" => set_usize(&mut row.workspace, key, value, diag),
         "size" => {
             if let Some([w, h]) = int_pair(value) {
@@ -543,13 +554,13 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
         "opacity" => set_f32(&mut row.opacity, key, value, diag),
         "border_width" | "border_w" => set_u32(&mut row.border_width, key, value, diag),
         "ignore_initial_state" | "no_initial_state" | "no_maximize" => {
-            row.ignore_initial_state = value.as_bool().unwrap_or(false);
+            set_rule_bool(&mut row.ignore_initial_state, key, value, diag);
         }
         "deny_fullscreen" | "no_fullscreen" => {
-            row.deny_fullscreen = value.as_bool().unwrap_or(false);
+            set_rule_bool(&mut row.deny_fullscreen, key, value, diag);
         }
         "true_fullscreen" | "exclusive_fullscreen" => {
-            row.true_fullscreen = value.as_bool().unwrap_or(false);
+            set_rule_bool(&mut row.true_fullscreen, key, value, diag);
         }
         _ => {}
     }
@@ -629,6 +640,9 @@ fn warn_bad(diag: &mut Diagnostics, key: &str) {
 
 // ── merge ──────────────────────────────────────────────────────────────────
 
+/// Fold [`UserConfig`] into the baseline [`Cfg`], recording per-entry
+/// diagnostics. Part of the `compiled_config → parse_user → merge_config → Cfg`
+/// pipeline; the resulting `Cfg` is later applied via `Engine::apply_camera_cfg`.
 fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
     let auto_ws = user
         .general

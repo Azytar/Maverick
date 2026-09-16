@@ -2,6 +2,12 @@ use std::path::Path;
 
 use crate::types::{Action, Dir, LayoutKind};
 
+/// Root window-manager configuration, built from [`compiled_config`] and an
+/// optional TOML overlay via [`load_config`].
+///
+/// This is the owned value passed to `Engine::new` and mutated on reload via
+/// `Engine::apply_camera_cfg` (camera/compositor fields). All other consumers
+/// borrow it.
 #[derive(Debug, Clone)]
 pub struct Cfg {
     pub border_w: u32,
@@ -150,6 +156,7 @@ impl std::fmt::Display for CompositorBackend {
     }
 }
 
+/// Compositor sub-configuration (see [`Cfg::compositor`]).
 #[derive(Debug, Clone)]
 pub struct CompositorCfg {
     /// Master switch. Default `true`: on by default, with automatic fallback.
@@ -184,6 +191,7 @@ impl Default for CompositorCfg {
 /// Animation configuration, exposed as `[animations]` in the TOML.
 /// Independent from `[compositor]`: animations can be disabled while keeping
 /// vsync, and vice versa.
+/// Animation sub-configuration (see [`Cfg::animations`]).
 #[derive(Debug, Clone)]
 pub struct AnimationsCfg {
     /// Master switch for spring animations (scroll, zoom, accordion). Default `true`.
@@ -207,6 +215,7 @@ impl Default for AnimationsCfg {
 
 /// Native wallpaper configuration, exposed as `[wallpaper]` in the TOML.
 /// `path = null` (default) ⇒ no native wallpaper is set.
+/// Wallpaper sub-configuration (see [`Cfg::wallpaper`]).
 #[derive(Debug, Clone)]
 pub struct WallpaperCfg {
     /// Path to a wallpaper image or GLSL shader. `None` ⇒ disabled.
@@ -224,6 +233,7 @@ impl Default for WallpaperCfg {
     }
 }
 
+/// Window-matching rule evaluated at map time by `manage::apply_rules`.
 #[derive(Debug, Clone, Default)]
 pub struct Rule {
     pub class: Option<String>,
@@ -441,27 +451,6 @@ pub fn compiled_config() -> Cfg {
             // for apps whose own F11/EWMH fullscreen you want to refuse while
             // keeping `Mod4+Shift+F` working.
             Rule {
-                class: Some("xdg-desktop-portal".into()),
-                title: None,
-                float: true,
-                ws: None,
-                ..Default::default()
-            },
-            Rule {
-                class: Some("gpick".into()),
-                title: None,
-                float: true,
-                ws: None,
-                ..Default::default()
-            },
-            Rule {
-                class: Some("pinentry".into()),
-                title: None,
-                float: true,
-                ws: None,
-                ..Default::default()
-            },
-            Rule {
                 class: None,
                 title: Some("file upload".into()),
                 float: true,
@@ -531,6 +520,19 @@ pub fn animations_enabled(cfg: &Cfg) -> bool {
 /// actionable error when `backend = "vulkan"` is configured but the binary was
 /// built without `compositor-vulkan`.
 pub fn validate_compositor_backend(cfg: &Cfg) -> Result<(), String> {
+    // A binary with no compositor backend compiled in *is* the no-compositor
+    // build (dwm-style). There the `[compositor]` table is inert — the WM
+    // always runs on the classic X11 path — so the section is simply ignored:
+    // nothing to validate, no error, no warning.
+    if !cfg!(feature = "compositor-opengl") && !cfg!(feature = "compositor-vulkan") {
+        return Ok(());
+    }
+    // The backend is never consulted when the compositor is off (`enabled =
+    // false` or `MAVERICK_NO_COMPOSITOR`): validating it then only produces a
+    // spurious error for a setting that has no effect.
+    if !compositor_enabled(cfg) {
+        return Ok(());
+    }
     match cfg.compositor.backend {
         CompositorBackend::OpenGl => {
             if cfg!(feature = "compositor-opengl") {

@@ -32,6 +32,14 @@
 
 use std::borrow::Cow;
 
+/// Bounds against hostile config files: a 1 MiB `0x...` literal would
+/// otherwise burn CPU in `from_str_radix`, and a 100 MiB array would OOM
+/// despite the "never panics" contract.
+pub const MAX_NUMBER_LEN: usize = 64;
+pub const MAX_HEX_DIGITS: usize = 16;
+pub const MAX_STRING_LEN: usize = 1_000_000;
+pub const MAX_ARRAY_ELEMS: usize = 10_000;
+
 /// A structured parser failure. `line` is 1-based; `kind` is a short tag
 /// suitable for logging.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,6 +396,8 @@ impl<'a> Parser<'a> {
 
     /// Integers (`123`, `-5`), hex (`0x…`), floats (`0.6`, `-1.5`) — or an
     /// error. No exponents, digit separators, or trailing dots: all rejected.
+    /// Bounded: hex runs over 16 digits and numbers over 64 chars are
+    /// rejected to cap `from_str_radix`/`parse` CPU on hostile input.
     fn parse_number(&mut self) -> Result<Value<'a>, ParseError> {
         let start = self.pos;
         if self.byte(self.pos) == b'-' {
@@ -402,6 +412,9 @@ impl<'a> Parser<'a> {
             let hex_start = self.pos;
             while self.byte(self.pos).is_ascii_hexdigit() {
                 self.pos += 1;
+                if self.pos - hex_start > MAX_HEX_DIGITS {
+                    return Err(self.err("value"));
+                }
             }
             if self.pos == hex_start {
                 return Err(self.err("value"));
@@ -413,6 +426,9 @@ impl<'a> Parser<'a> {
         }
         while self.byte(self.pos).is_ascii_digit() {
             self.pos += 1;
+            if self.pos - start > MAX_NUMBER_LEN {
+                return Err(self.err("value"));
+            }
         }
         let int_end = self.pos;
         let is_float = self.byte(self.pos) == b'.' && self.byte(self.pos + 1).is_ascii_digit();
@@ -420,6 +436,9 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             while self.byte(self.pos).is_ascii_digit() {
                 self.pos += 1;
+                if self.pos - start > MAX_NUMBER_LEN {
+                    return Err(self.err("value"));
+                }
             }
             self.pos
         } else {
@@ -442,12 +461,17 @@ impl<'a> Parser<'a> {
     }
 
     /// Basic string `"…"` with `\" \\ \n \r \t`. Zero-copy when no escapes.
+    /// Bounded to [`MAX_STRING_LEN`] so a 100 MiB literal cannot OOM.
     fn parse_string(&mut self) -> Result<Cow<'a, str>, ParseError> {
         debug_assert_eq!(self.byte(self.pos), b'"');
         self.pos += 1;
         let content = self.pos;
         let mut has_escape = false;
         loop {
+            // Bail before scanning unbounded hostile strings.
+            if self.pos - content > MAX_STRING_LEN {
+                return Err(self.err("string"));
+            }
             match self.byte(self.pos) {
                 b'"' => break,
                 b'\\' => {
@@ -464,7 +488,7 @@ impl<'a> Parser<'a> {
         }
         let quote = self.pos;
         let value = if has_escape {
-            let mut buf = Vec::with_capacity(quote - content);
+            let mut buf = Vec::with_capacity((quote - content).min(MAX_STRING_LEN));
             let mut i = content;
             while i < quote {
                 match self.byte(i) {
@@ -497,9 +521,13 @@ impl<'a> Parser<'a> {
     }
 
     /// Body of a string list: `self.pos` just past the opening `[`.
+    /// Bounded to [`MAX_ARRAY_ELEMS`] elements.
     fn parse_string_list_body(&mut self) -> Result<Vec<Cow<'a, str>>, ParseError> {
         let mut out = Vec::new();
         loop {
+            if out.len() >= MAX_ARRAY_ELEMS {
+                return Err(self.err("array"));
+            }
             self.skip_ws_comments();
             match self.byte(self.pos) {
                 b']' => {
@@ -529,6 +557,7 @@ impl<'a> Parser<'a> {
     }
 
     /// A single integer array element: decimal or hex, optional sign.
+    /// Bounded like [`Self::parse_number`].
     fn parse_int_elem(&mut self) -> Result<i64, ParseError> {
         let start = self.pos;
         if self.byte(self.pos) == b'-' {
@@ -543,6 +572,9 @@ impl<'a> Parser<'a> {
             let hex_start = self.pos;
             while self.byte(self.pos).is_ascii_hexdigit() {
                 self.pos += 1;
+                if self.pos - hex_start > MAX_HEX_DIGITS {
+                    return Err(self.err("array"));
+                }
             }
             if self.pos == hex_start {
                 return Err(self.err("array"));
@@ -558,6 +590,9 @@ impl<'a> Parser<'a> {
         }
         while self.byte(self.pos).is_ascii_digit() {
             self.pos += 1;
+            if self.pos - start > MAX_NUMBER_LEN {
+                return Err(self.err("array"));
+            }
         }
         if self.pos == start {
             return Err(self.err("array"));
@@ -569,6 +604,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Any array value; classified by its first element.
+    /// All arms bounded to [`MAX_ARRAY_ELEMS`] total elements.
     fn parse_array(&mut self) -> Result<Value<'a>, ParseError> {
         debug_assert_eq!(self.byte(self.pos), b'[');
         self.pos += 1; // consume '['
@@ -583,9 +619,17 @@ impl<'a> Parser<'a> {
             b'"' => self.parse_string_list_body().map(Value::StrList),
             b'[' => {
                 let mut grid: Vec<Vec<Cow<'a, str>>> = Vec::new();
+                let mut total = 0usize;
                 loop {
+                    if grid.len() >= MAX_ARRAY_ELEMS {
+                        return Err(self.err("array"));
+                    }
                     self.pos += 1; // consume inner '['
                     let inner = self.parse_string_list_body()?;
+                    total += inner.len();
+                    if total > MAX_ARRAY_ELEMS {
+                        return Err(self.err("array"));
+                    }
                     grid.push(inner);
                     self.skip_ws_comments();
                     match self.byte(self.pos) {
@@ -608,6 +652,9 @@ impl<'a> Parser<'a> {
             b'0'..=b'9' | b'-' => {
                 let mut out: Vec<i64> = Vec::new();
                 loop {
+                    if out.len() >= MAX_ARRAY_ELEMS {
+                        return Err(self.err("array"));
+                    }
                     out.push(self.parse_int_elem()?);
                     self.skip_ws_comments();
                     match self.byte(self.pos) {

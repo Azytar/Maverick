@@ -70,6 +70,26 @@ auto_workspace_binds = true
 # camera_stiffness = 220.0
 # camera_damping = 30.0
 
+# Normalize the `_NET_WM_STATE_MAXIMIZED_*` / `_NET_WM_STATE_FULLSCREEN` a
+# window requests at map time, so every new client opens as a normal tile
+# regardless of `WM_CLASS` (Firefox, Zen and forks included). Set to true to
+# honour a window's launch maximized/fullscreen state; a single app can opt in
+# via `[[rules]] honor_initial_state = true`.
+honor_initial_state = false
+
+# Focus follows the mouse pointer.
+focus_mouse = false
+# Warp the cursor to the center of the newly focused window.
+warp_cursor = false
+
+# Workspace names (cosmetic; length should match n_tags).
+tag_names = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+
+# Color theme preset (overridden by the [colors] section below if present).
+# One of: nord, dracula, gruvbox, everforest, solarized,
+#         catppuccin-mocha, catppuccin-latte
+theme = "catppuccin-mocha"
+
 [compositor]
 # Master switch for the compositor. `false` forces pure X11 WM.
 # enabled = true
@@ -91,26 +111,6 @@ auto_workspace_binds = true
 # Spring tuning for the scroll camera.
 # stiffness = 220.0
 # damping = 30.0
-
-# Normalize the `_NET_WM_STATE_MAXIMIZED_*` / `_NET_WM_STATE_FULLSCREEN` a
-# window requests at map time, so every new client opens as a normal tile
-# regardless of `WM_CLASS` (Firefox, Zen and forks included). Set to true to
-# honour a window's launch maximized/fullscreen state; a single app can opt in
-# via `[[rules]] honor_initial_state = true`.
-honor_initial_state = false
-
-# Focus follows the mouse pointer.
-focus_mouse = false
-# Warp the cursor to the center of the newly focused window.
-warp_cursor = false
-
-# Workspace names (cosmetic; length should match n_tags).
-tag_names = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
-
-# Color theme preset (overridden by the [colors] section below if present).
-# One of: nord, dracula, gruvbox, everforest, solarized,
-#         catppuccin-mocha, catppuccin-latte
-theme = "catppuccin-mocha"
 
 [colors]
 # Colors are 0xRRGGBB. Both hex and decimal are accepted by the parser.

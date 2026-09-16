@@ -88,9 +88,10 @@ fn main() {
             }
             "--check-config" => {
                 // Optional path: consume the next token only if it is not
-                // another flag.
+                // another flag. Both `--flag` and `-f` forms are flags —
+                // checking only `--` used to swallow `-v`/`-h` as a path.
                 let path = match args.peek() {
-                    Some(next) if !next.starts_with("--") => args.next(),
+                    Some(next) if !next.starts_with('-') => args.next(),
                     _ => None,
                 };
                 check_config = Some(path);
