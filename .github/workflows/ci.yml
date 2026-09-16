@@ -10,8 +10,7 @@ env:
 
 jobs:
   # The WM and its runtime libraries live in the workspace. Lint + test them
-  # together so the dev loop is covered (maverick-installer is intentionally
-  # excluded from the workspace — see the root Cargo.toml).
+  # together so the dev loop is covered.
   wm:
     name: WM workspace (clippy + test)
     runs-on: ubuntu-latest
@@ -26,19 +25,11 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-  # maverick-installer is build/install tooling, excluded from the workspace so
-  # it does not slow down the WM build. It still gets its own lint + build gate
-  # here so it cannot silently bitrot.
-  installer:
-    name: maverick-installer (clippy + build)
+  # install.sh is plain bash — check its syntax so it cannot silently bitrot.
+  install-script:
+    name: install.sh (bash syntax)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --manifest-path maverick-installer/Cargo.toml -- -D warnings
-      - name: Build
-        run: cargo build --manifest-path maverick-installer/Cargo.toml
+      - name: bash -n
+        run: bash -n install.sh

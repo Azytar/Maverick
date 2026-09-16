@@ -7,7 +7,6 @@ members = [
     "maverick-gl",
     "maverick-dialog",
     "maverick-toml",
-    "maverick-installer",
     "maverick-img",
     "maverick-vk",
 ]

@@ -119,10 +119,6 @@ name = "maverick-img"
 version = "0.6.0"
 
 [[package]]
-name = "maverick-installer"
-version = "0.6.0"
-
-[[package]]
 name = "maverick-render"
 version = "0.6.0"
 
