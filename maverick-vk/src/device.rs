@@ -104,19 +104,25 @@ impl Device {
         let ext_ptrs = [swapchain_ext];
 
         // One queue create info per *distinct* family.
+        // NOTE: the priority slices must be named bindings, NOT `&[1.0f32]`
+        // temporaries inline in the `push` calls — a temporary dies at the end
+        // of its statement, leaving `DeviceQueueCreateInfo` with a dangling
+        // pointer that `create_device` dereferences below (classic ash UB).
+        let gfx_priorities = [1.0f32];
+        let present_priorities = [1.0f32];
         let mut qcis = Vec::new();
         let mut seen = std::collections::HashSet::new();
         seen.insert(graphics_family);
         qcis.push(
             vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(graphics_family)
-                .queue_priorities(&[1.0f32]),
+                .queue_priorities(&gfx_priorities),
         );
         if present_family != graphics_family && seen.insert(present_family) {
             qcis.push(
                 vk::DeviceQueueCreateInfo::default()
                     .queue_family_index(present_family)
-                    .queue_priorities(&[1.0f32]),
+                    .queue_priorities(&present_priorities),
             );
         }
 

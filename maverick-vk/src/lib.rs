@@ -84,7 +84,12 @@ impl Vulkan {
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
-        let command_buffer = unsafe { device.handle.allocate_command_buffers(&alloc_ci) }?[0];
+        // A driver could legally return fewer buffers than requested: index
+        // only after checking instead of panicking on `[0]`.
+        let command_buffer = unsafe { device.handle.allocate_command_buffers(&alloc_ci) }?
+            .into_iter()
+            .next()
+            .ok_or_else(|| VkError::Device("no command buffers allocated".into()))?;
 
         let sem_ci = vk::SemaphoreCreateInfo::default();
         let image_available = unsafe { device.handle.create_semaphore(&sem_ci, None) }?;
@@ -131,7 +136,12 @@ impl Vulkan {
                 .map_err(|e| VkError::Acquire(e.to_string()))?;
             self.current_image = idx;
 
-            let image = self.swapchain.images[idx as usize];
+            // The driver names any live image; a hostile/buggy driver could
+            // hand back an out-of-range index — `get` turns that into an
+            // error instead of a panic.
+            let image = *self.swapchain.images.get(idx as usize).ok_or_else(|| {
+                VkError::Acquire(format!("swapchain image index {idx} out of range"))
+            })?;
 
             dev.begin_command_buffer(
                 self.command_buffer,
@@ -206,7 +216,9 @@ impl Vulkan {
     }
 
     /// Recreate the swapchain (and image views) for a new size. The previous
-    /// swapchain handle is destroyed as part of this call.
+    /// swapchain's views and handle are destroyed exactly once, in spec order
+    /// (views first), via [`swapchain::Swapchain::destroy`]: the replaced
+    /// struct must NOT go through `Drop` afterwards (that would double-free).
     pub fn recreate_swapchain(&mut self, w: u32, h: u32) -> Result<(), VkError> {
         // Wait for the in-flight frame so we don't pull the swapchain out from
         // under a submission that still references it.
@@ -217,13 +229,12 @@ impl Vulkan {
                 .map_err(|e| VkError::Swapchain(e.to_string()))?;
         }
 
-        let old = self.swapchain.handle;
-        let new = swapchain::Swapchain::new(&self.device, &self.surface, w, h, Some(old))?;
-        // `new` already replaced `old` inside the create info; destroy old now.
-        unsafe {
-            self.swapchain.loader.destroy_swapchain(old, None);
-        }
-        self.swapchain = new;
+        let old_handle = self.swapchain.handle;
+        // Build the replacement first: on failure the live swapchain stays
+        // installed and usable (only its size is stale).
+        let new = swapchain::Swapchain::new(&self.device, &self.surface, w, h, Some(old_handle))?;
+        let old = std::mem::replace(&mut self.swapchain, new);
+        old.destroy();
         self.current_image = 0;
         Ok(())
     }

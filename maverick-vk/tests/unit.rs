@@ -22,7 +22,7 @@ fn format_prefers_bgra8_srgb() {
         fmt(vk::Format::B8G8R8A8_SRGB, vk::ColorSpaceKHR::SRGB_NONLINEAR),
     ];
     assert_eq!(
-        choose_surface_format(&formats).format,
+        choose_surface_format(&formats).expect("formats").format,
         vk::Format::B8G8R8A8_SRGB
     );
 }
@@ -33,7 +33,7 @@ fn format_undefined_single_allows_any() {
         vk::Format::UNDEFINED,
         vk::ColorSpaceKHR::SRGB_NONLINEAR,
     )];
-    let f = choose_surface_format(&formats);
+    let f = choose_surface_format(&formats).expect("formats");
     assert_eq!(f.format, vk::Format::B8G8R8A8_SRGB);
     assert_eq!(f.color_space, vk::ColorSpaceKHR::SRGB_NONLINEAR);
 }
@@ -45,9 +45,14 @@ fn format_falls_back_to_first() {
         vk::ColorSpaceKHR::SRGB_NONLINEAR,
     )];
     assert_eq!(
-        choose_surface_format(&formats).format,
+        choose_surface_format(&formats).expect("formats").format,
         vk::Format::R8G8B8_SRGB
     );
+}
+
+#[test]
+fn format_empty_is_none_not_panic() {
+    assert!(choose_surface_format(&[]).is_none());
 }
 
 #[test]
