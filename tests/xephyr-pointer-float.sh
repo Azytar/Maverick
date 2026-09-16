@@ -58,7 +58,30 @@ for lst in ([x for c in d['columns'] for x in c['windows']] + d['floats']):
 }
 geom_center() { # $1 = id → "X Y" (root coords of the window's centre)
     set -- $(win_geom "$1")
-    echo "$(( $1 + $3 / 2 )) $(( $2 + $4 / 2 ))"
+    echo "$(( ${1:-0} + ${3:-0} / 2 )) $(( ${2:-0} + ${4:-0} / 2 ))"
+}
+
+# Poll until the WM has MANAGED $1 (present in `query tree`), up to ~10s.
+# `hostile_winid` only proves the client mapped; manage() runs on the later
+# MapNotify, so geometry/float queries right after create race and yield
+# empty strings (which once produced negative click coordinates that killed
+# xdotool and tripped the ERR trap).
+wait_managed() { # $1 = decimal window id
+    local id="$1"
+    for _ in $(seq 1 50); do
+        tree | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ids=set()
+for m in d.get('monitors',[]):
+    for ws in m.get('workspaces',[]):
+        for c in ws.get('columns',[]):
+            ids.update(w['id'] for w in c['windows'])
+        ids.update(w['id'] for w in ws.get('floats',[]))
+sys.exit(0 if $id in ids else 1)" 2>/dev/null && return 0
+        sleep 0.2
+    done
+    return 1
 }
 
 # long-lived hostile sessions (same pattern as compat-matrix.sh)
@@ -105,19 +128,26 @@ echo "── building hostile client (if missing)"
 [ -x "$HOSTILE" ] || gcc -O2 -o "$HOSTILE" tests/hostile.c -lX11 || { echo "cannot build hostile"; exit 1; }
 
 echo "── starting Xephyr + maverick on $DISP"
+# Headless Xephyr is not a compositor target (GLX texture-from-pixmap fails
+# with a fatal XIO that kills the WM mid-suite) — same policy as
+# xephyr-suite.sh: validate focus/float logic on the plain X11 path.
+export MAVERICK_NO_COMPOSITOR=1
 mav_preflight
 start_xephyr "$DISP" 1280 720 >/dev/null
 mav_launch "$DISP" >/dev/null
 
 # Two tiled windows; switch to Grid so both are fully visible for clicking.
+# Two tiled windows side by side (Column-only since Grid was removed; both
+# tiles are visible for clicking without any layout switch).
 hostile_start A
 hostile_cmd A "create"
 WIN_A_DEC=$(( $(hostile_winid A) ))
+wait_managed "$WIN_A_DEC" || fail "window A never managed"
 hostile_start B
 hostile_cmd B "create"
 WIN_B_DEC=$(( $(hostile_winid B) ))
+wait_managed "$WIN_B_DEC" || fail "window B never managed"
 [ "$WIN_A_DEC" -gt 0 ] && [ "$WIN_B_DEC" -gt 0 ] || fail "hostile windows did not map"
-dispatch cycle_layout   # Column → Grid
 sleep 0.5
 
 echo "── SCENARIO A: click-to-focus must not warp the pointer"
@@ -146,10 +176,10 @@ else
 fi
 
 echo "── SCENARIO B: torn-off tile (tiled origin) may drop back into the tree"
-# Focus is on A (scenario A clicked it). Move keyboard focus to B (Grid: the
-# cell to the right), toggle it floating (same funnel as the Mod4+F keybind),
-# then drag it back over tiled window A and release: drop-to-tile must re-insert
-# it because its ORIGIN is tiled.
+# Focus is on A (scenario A clicked it). Move keyboard focus to B (the column
+# to the right), toggle it floating (same funnel as the keybind), then drag it
+# back over tiled window A and release: drop-to-tile must re-insert it because
+# its ORIGIN is tiled.
 dispatch focus-right
 sleep 0.3
 FOCUSED_NOW="$(DISPLAY="$DISP" "$MSG_BIN" query focused 2>/dev/null | grep -oE '"window":[0-9]+' | grep -oE '[0-9]+')"
@@ -175,6 +205,7 @@ hostile_cmd C "transient $(printf '0x%x' "$WIN_A_DEC")"
 hostile_cmd C "create"
 WIN_C_DEC=$(( $(hostile_winid C) ))
 [ "$WIN_C_DEC" -gt 0 ] || fail "transient window did not map"
+wait_managed "$WIN_C_DEC" || fail "transient window never managed"
 sleep 0.4
 FLOATS="$(float_ids)"; TILED="$(tiled_ids)"
 case " $FLOATS " in *" $WIN_C_DEC "*) pass "transient is floating (ws.floats)" ;;

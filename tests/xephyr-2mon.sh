@@ -42,26 +42,35 @@ XEPHYR_DISPLAY=":98"
 MW=1280          # monitor width
 MH=800           # monitor height
 TOTAL_W=2560     # MW*2
-MAVERICK_BIN="${MAVERICK_BIN:-./target/release/maverick}"
-MSG_BIN="${MSG_BIN:-./target/release/maverick-msg}"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/mv2m}"   # short -> avoids SUN_LEN
-# Start from a clean runtime dir so discovery never talks to a stale/dead socket.
-rm -rf "$XDG_RUNTIME_DIR"; mkdir -p "$XDG_RUNTIME_DIR"
+MAVERICK_BIN="${MAVERICK_BIN:-./target/debug/maverick}"
+MSG_BIN="${MSG_BIN:-./target/debug/maverick-msg}"
+# Private runtime dir (mktemp, like common.sh): never rm -rf the session's
+# $XDG_RUNTIME_DIR — a previous revision did exactly that when the variable
+# was already set, wiping the live user runtime dir. Short path avoids SUN_LEN.
+export XDG_RUNTIME_DIR="$(mktemp -d /tmp/mv2m.XXXXXX)"
 LOG="$(mktemp -t maverick-2mon.XXXXXX.log)"
 XEPHYR_LOG="$(mktemp -t xephyr-2mon.XXXXXX.log)"
 
 PASS=0
 FAIL=0
 SPIDS=()
+# PID file for spawned test clients. `spawn_win` runs inside `$( )`
+# (command substitution = subshell), so `SPIDS+=(...)` appends there NEVER
+# reach the parent shell — without this file no test window was ever reaped
+# and `kill "${SPIDS[-1]}"` crashed the script under `set -u`.
+SPIDS_FILE="$(mktemp -t mv2m-spids.XXXXXX)"
 
 ok()  { echo "PASS: $*"; PASS=$((PASS+1)); }
-bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
+bad()  { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
 info(){ echo "INFO: $*"; }
 
 cleanup() {
-    for p in "${SPIDS[@]:-}"; do kill "$p" 2>/dev/null; done
+    [ -f "$SPIDS_FILE" ] && xargs -r kill <"$SPIDS_FILE" 2>/dev/null
+    rm -f "$SPIDS_FILE"
     [ -n "${MAV_PID:-}" ] && kill "$MAV_PID" 2>/dev/null
     [ -n "${XEPHYR_PID:-}" ] && kill "$XEPHYR_PID" 2>/dev/null
+    [ -n "${KEEPER_PID:-}" ] && kill "$KEEPER_PID" 2>/dev/null
+    rm -rf "$XDG_RUNTIME_DIR"
 }
 trap cleanup EXIT
 
@@ -76,13 +85,23 @@ sleep 1.5
 
 export DISPLAY="$XEPHYR_DISPLAY"
 
-# Create the two RANDR monitors. Capture exact xrandr output for the report.
-info "RANDR setmonitor commands:"
-info "  xrandr --setmonitor MON-L ${MW}/340x${MH}/212+0+0 default"
-info "  xrandr --setmonitor MON-R ${MW}/340x${MH}/212+${MW}+0 none"
-L_OUT="$(xrandr --setmonitor MON-L ${MW}/340x${MH}/212+0+0 default 2>&1)"
-R_OUT="$(xrandr --setmonitor MON-R ${MW}/340x${MH}/212+${MW}+0 none 2>&1)"
-echo "$L_OUT" | grep -v 'gamma' ; echo "$R_OUT" | grep -v 'gamma'
+# Create the two RANDR monitors via the setmon helper (tests/setmon.c), NOT
+# xrandr(1): several xrandr builds fail to issue RRSetMonitor at all, and some
+# Xorg builds (observed 21.1.24) discard client-created monitors as soon as the
+# creating connection closes — so the setter must stay alive (`--hold`) for the
+# whole test. The keeper PID is tracked for cleanup.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+if [ ! -x "$HERE/setmon" ]; then
+    cc -O2 -o "$HERE/setmon" "$HERE/setmon.c" -lX11 -lXrandr 2>/dev/null \
+        || { echo "FAIL: could not build tests/setmon (need libXrandr headers)"; exit 1; }
+fi
+"$HERE/setmon" --hold "$XEPHYR_DISPLAY" "$TOTAL_W" "$MH" "$MW" >"$XEPHYR_LOG.setmon" 2>&1 &
+KEEPER_PID=$!
+sleep 0.5
+if ! kill -0 "$KEEPER_PID" 2>/dev/null; then
+    echo "FAIL: setmon keeper died: $(cat "$XEPHYR_LOG.setmon")"
+    exit 1
+fi
 info "listmonitors: $(xrandr --listmonitors 2>/dev/null | grep -v gamma | tr '\n' ' ')"
 
 if ! xprop -root >/dev/null 2>&1; then
@@ -112,26 +131,12 @@ tree()  { "$MSG_BIN" query tree  2>/dev/null; }
 
 selmon() { state | python3 -c "import sys,json;print(json.load(sys.stdin)['sel_mon'])"; }
 
-# Print one line per managed window: ID MON FS MX X Y W H TITLE
+# Print one line per managed window: ID MON FS MX X Y W H TITLE.
+# Implemented as tests/tree_lines.py (NOT an inline heredoc): `tree |
+# python3 - <<EOF` can never work — the heredoc replaces the pipe as python's
+# stdin, so every consumer silently got empty input.
 tree_lines() {
-    python3 - <<'PY'
-import sys,json
-try:
-    d=json.load(sys.stdin)
-except Exception as e:
-    sys.exit(0)
-def walk():
-    for m in d.get('monitors',[]):
-        for ws in m.get('workspaces',[]):
-            for col in ws.get('columns',[]):
-                for w in col.get('windows',[]): yield w
-            for w in ws.get('floats',[]): yield w
-for w in walk():
-    g=w.get('geom',[0,0,0,0])
-    print(w['id'], w.get('monitor',-1),
-          int(bool(w.get('fullscreen'))), int(bool(w.get('maximized'))),
-          g[0], g[1], g[2], g[3], w.get('title',''))
-PY
+    python3 "$HERE/tree_lines.py"
 }
 
 hexid()  { printf '0x%x' "$1"; }
@@ -167,14 +172,14 @@ setmon() {
 spawn_win() {
     local title="$1" id=""
     xterm -title "$title" -e bash -c 'sleep 120' >/dev/null 2>&1 &
-    SPIDS+=($!)
+    echo $! >>"$SPIDS_FILE"
     for _ in $(seq 1 50); do id="$(xdotool search --name "$title" 2>/dev/null | head -1)"; [ -n "$id" ] && break; sleep 0.2; done
     echo "$id"
 }
 
 kill_all() {
-    for p in "${SPIDS[@]:-}"; do kill "$p" 2>/dev/null; done
-    SPIDS=()
+    [ -f "$SPIDS_FILE" ] && xargs -r kill <"$SPIDS_FILE" 2>/dev/null
+    : >"$SPIDS_FILE"
     for _ in $(seq 1 30); do
         [ -z "$(tree | tree_lines)" ] && return 0
         sleep 0.2
@@ -343,10 +348,14 @@ for m in 0 1; do
     else
         bad "S6 mon$m: click did not reach B2 (got $GOT, expected $HEXB)"
     fi
-    # clean up these two for next iteration
-    kill "$SPIDS[-1]" 2>/dev/null; SPIDS=("${SPIDS[@]:0:${#SPIDS[@]}-1}")
+    # clean up these two for next iteration (guarded: the file may hold
+    # fewer than two pids if a spawn failed; never crash under `set -u`)
+    if [ -s "$SPIDS_FILE" ]; then
+        tail -n 1 "$SPIDS_FILE" | xargs -r kill 2>/dev/null
+        head -n -1 "$SPIDS_FILE" >"$SPIDS_FILE.tmp" 2>/dev/null && mv "$SPIDS_FILE.tmp" "$SPIDS_FILE"
+    fi
     pkill -f "R6_PF${m}_A" 2>/dev/null; pkill -f "R6_PF${m}_B" 2>/dev/null
-    SPIDS=(); sleep 0.5
+    : >"$SPIDS_FILE"; sleep 0.5
 done
 
 # ── summary ─────────────────────────────────────────────────────────────────────

@@ -95,9 +95,8 @@ A="$(wait_win WIN_A)"; A_H="$(hexid "$A")"
 echo "A = $A_H"
 sleep 0.4
 
-# Focus A, switch to Grid (whole-screen overlay in Grid), fullscreen A.
+# Focus A and fullscreen it (exclusive overlay in the Column-only design).
 xdotool mousemove 960 540 click 1; sleep 0.3
-xdotool key super+g; sleep 0.3
 xdotool key super+shift+f; sleep 0.5
 
 if xprop -id "$A" -notype _NET_WM_STATE 2>/dev/null | grep -q FULLSCREEN; then
@@ -207,11 +206,18 @@ else
 fi
 
 # ── Trace assertions ────────────────────────────────────────────────────────────
+# These need a `--features input-trace` build (see header). With a stock
+# binary the markers never appear — SKIP instead of FAILing, and say so.
+# (The deferral itself is still covered functionally above: focus stayed on
+# the overlay and the click-through applied the pending window.)
 echo
 echo "########## [INPUT-TRACE] assertions ##########"
+if ! grep -q 'INPUT-TRACE' "$LOG" 2>/dev/null; then
+    echo "SKIP: trace asserts need 'cargo build --bin maverick --features input-trace'"
+else
 bail="$(grep -c 'reconcile_focus BAIL' "$LOG")"
 freeze="$(grep -c 'FREEZE-RISK' "$LOG")"
-pending="$(grep -c 'SET pending_focus' "$LOG")"
+pending="$(grep -c 'manage() -> DEFER' "$LOG")"
 if [ "$bail" -eq 0 ]; then
     ok "reconcile_focus does not bail globally (count=$bail)"
 else
@@ -228,6 +234,7 @@ if [ "$pending" -ge 1 ]; then
     ok "manage() records pending_focus instead of advancing mon.focused past overlay"
 else
     bad "manage() did not record pending_focus"
+fi
 fi
 
 echo

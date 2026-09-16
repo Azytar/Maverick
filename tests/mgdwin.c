@@ -33,7 +33,9 @@ int main(int argc, char **argv) {
     const char *title = getenv("MGDTITLE");
     if (!title || !*title) title = "mgdwin";
     XStoreName(d, win, title);
-    XClassHint ch; char n[] = "mgdwin", c[] = "mgdwin";
+    XClassHint ch; char n[64] = "mgdwin", c[64] = "mgdwin";
+    const char *cls = getenv("MGDCLASS");
+    if (cls && *cls) { strncpy(c, cls, sizeof(c) - 1); c[sizeof(c) - 1] = '\0'; }
     ch.res_name = n; ch.res_class = c;
     XSetClassHint(d, win, &ch);
 

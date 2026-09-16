@@ -9,6 +9,10 @@
 # REQUIREMENTS (Debian/Ubuntu):
 #   apt-get install -y xephyr x11-utils xdotool xterm
 #   # firefox / mpv / a opengl game are optional but exercised when present.
+# REQUIREMENTS (Arch):
+#   pacman -S --needed xorg-server-xephyr xdotool xterm xorg-xwininfo xorg-xev
+# REQUIREMENTS (Fedora):
+#   dnf install -y xorg-x11-server-Xephyr xdotool xterm xorg-x11-utils
 #
 # Run:  DISPLAY=:1 ./tests/xephyr-suite.sh
 # The script manages its own nested DISPLAY; you normally just run it directly.
@@ -31,6 +35,7 @@ SCREEN_W=1920
 SCREEN_H=1080
 XEPHYR_DISPLAY=":99"
 MAVERICK_BIN="${MAVERICK_BIN:-./target/release/maverick}"
+MAVERICK_MSG="${MAVERICK_MSG:-./target/debug/maverick-msg}"
 CONFIG="${CONFIG:-./tests/xephyr-config.toml}"
 LOG="$(mktemp -t maverick-xephyr.XXXXXX.log)"
 PASS=0
@@ -97,24 +102,44 @@ ok "maverick started on $DISPLAY"
 # F11 produces) and confirming Maverick does NOT set _NET_WM_STATE_FULLSCREEN.
 if command -v firefox >/dev/null 2>&1; then
     firefox &>/dev/null &
-    sleep 2
-    FF="$(xdotool search --class Firefox | head -1)"
+    # Firefox maps several windows (children first); poll for a mapped,
+    # non-trivial main window instead of grabbing the first XID seen.
+    FF=""
+    for _t in $(seq 1 40); do
+        for c in $(xdotool search --class Firefox 2>/dev/null); do
+            if xwininfo -id "$c" 2>/dev/null | grep -q "Map State: IsViewable"; then
+                read -r fw fh < <(xwininfo -id "$c" 2>/dev/null | awk '/Width:/{w=$2} /Height:/{h=$2} END{print w, h}')
+                if [ "${fw:-0}" -ge 200 ] && [ "${fh:-0}" -ge 200 ]; then FF="$c"; break 2; fi
+            fi
+        done
+        sleep 0.25
+    done
     if [ -n "$FF" ]; then
-        # Fake the EWMH request F11 would send (toggle fullscreen).
-        timeout 8 xdotool windowactivate --sync "$FF" key F11
-        sleep 0.5
-        # A denied request must leave the window tiled: it must NOT carry
-        # _NET_WM_STATE_FULLSCREEN.
-        if xprop -id "$FF" _NET_WM_STATE 2>/dev/null | grep -q FULLSCREEN; then
-            bad "Firefox F11/EWMH fullscreen was NOT denied"
+        # Focus via synthetic click at the window center and VERIFY it landed:
+        # `windowactivate --sync` fails against real Firefox (it errors reading
+        # _NET_ACTIVE_WINDOW), which used to send every later key nowhere.
+        eval "$(xwininfo -id "$FF" 2>/dev/null | awk '/Absolute upper-left X/{x=$4} /Absolute upper-left Y/{y=$4} /Width:/{w=$2} /Height:/{h=$2} END{print "CX="x+w/2" CY="y+h/2}')"
+        xdotool mousemove "$CX" "$CY" click 1 >/dev/null 2>&1; sleep 0.6
+        ACT="$(xprop -root -notype _NET_ACTIVE_WINDOW 2>/dev/null | grep -oE '0x[0-9a-f]+' | head -1)"
+        FHEX="$(printf '0x%x' "$FF")"
+        if [ "$ACT" != "$FHEX" ]; then
+            bad "Firefox window $FF never took focus (active=$ACT) — keybind path untestable"
         else
-            ok "Firefox F11/EWMH fullscreen denied (stays tiled)"
+            # Fake the EWMH request F11 would send (toggle fullscreen).
+            xdotool key F11; sleep 0.5
+            # A denied request must leave the window tiled: it must NOT carry
+            # _NET_WM_STATE_FULLSCREEN.
+            if xprop -id "$FF" _NET_WM_STATE 2>/dev/null | grep -q FULLSCREEN; then
+                bad "Firefox F11/EWMH fullscreen was NOT denied"
+            else
+                ok "Firefox F11/EWMH fullscreen denied (stays tiled)"
+            fi
+            # Now the user keybind must still give a fullscreen.
+            xdotool key super+shift+f
+            sleep 0.5
+            assert_state "$FF" "FULLSCREEN"
+            xdotool key super+shift+f  # toggle back off
         fi
-        # Now the user keybind must still give a tiled fullscreen.
-        timeout 8 xdotool windowactivate --sync "$FF" key super+f
-        sleep 0.5
-        assert_state "$FF" "FULLSCREEN"
-        timeout 8 xdotool windowactivate --sync "$FF" key super+f  # toggle back off
     fi
 fi
 
@@ -124,7 +149,7 @@ if command -v mpv >/dev/null 2>&1; then
     sleep 2
     MPV="$(xdotool search --class mpv | head -1)"
     if [ -n "$MPV" ]; then
-        timeout 8 xdotool windowactivate --sync "$MPV" key super+f
+        timeout 8 xdotool windowactivate --sync "$MPV" key super+shift+f
         sleep 0.5
         assert_state "$MPV" "FULLSCREEN"
         # geometry must cover the screen, not be 0x0 / tiny.
@@ -134,7 +159,7 @@ if command -v mpv >/dev/null 2>&1; then
         else
             bad "mpv fullscreen collapsed to ${W}x${H}"
         fi
-        timeout 8 xdotool windowactivate --sync "$MPV" key super+f
+        timeout 8 xdotool windowactivate --sync "$MPV" key super+shift+f
     fi
 fi
 
@@ -216,23 +241,54 @@ if command -v xterm >/dev/null 2>&1; then
 fi
 
 # ── Viewport zoom + page-snap (Fases 8-11) ──────────────────────────────────
-# FASE 4: viewport zoom is a CAMERA/RENDER transform (visual scale), NOT an X11
-# resize of the client window. The correct invariant is therefore that the
-# client's real X11 geometry is UNCHANGED after zooming — proving zoom and
-# resize are distinct concepts. (Previous assertion required the X11 width to
-# grow, which would have been a real bug, not the intended behaviour.)
+# FASE 4: with the compositor, viewport zoom is a CAMERA/RENDER transform
+# (visual scale), NOT an X11 resize — the client's real geometry must stay
+# put. WITHOUT a compositor there is no GPU to do the transform, so zoom is
+# implemented as animated X11 geometry scaling instead (layout `alpha`
+# multiplies tile widths); there the invariant is a clean round-trip
+# (in, then out, restores the exact original rect).
 if command -v xterm >/dev/null 2>&1; then
-    xterm &>/dev/null &
+    xterm -title ZOOMT -e sleep 120 &>/dev/null &
     sleep 1
-    T="$(xdotool search --class xterm | head -1)"
-    read -r W0 _ < <(xwininfo -id "$T" | awk '/Width:/{print $2}')
-    timeout 8 xdotool windowactivate --sync "$T" key super+equal
-    sleep 0.6
-    read -r W1 _ < <(xwininfo -id "$T" | awk '/Width:/{print $2}')
-    if [ "${W1:-0}" -eq "${W0:-0}" ]; then
-        ok "viewport zoom left X11 geometry unchanged (${W0} == ${W1}); zoom is camera-scale, not resize"
+    T="$(xdotool search --name ZOOMT | head -1)"
+    read -r W0 _ < <(xwininfo -id "$T" 2>/dev/null | awk '/Width:/{print $2}')
+    # Focus via click and VERIFY it landed: `windowactivate --sync` fails
+    # against some clients (XGetWindowProperty error), silently sending the
+    # zoom key nowhere — or to the wrong window, producing mystery widths.
+    eval "$(xwininfo -id "$T" 2>/dev/null | awk '/Absolute upper-left X/{x=$4} /Absolute upper-left Y/{y=$4} /Width:/{w=$2} /Height:/{h=$2} END{print "CX="x+w/2" CY="y+h/2}')"
+    xdotool mousemove "$CX" "$CY" click 1 >/dev/null 2>&1; sleep 0.5
+    THEX="$(printf '0x%x' "$T")"
+    ACT="$(xprop -root -notype _NET_ACTIVE_WINDOW 2>/dev/null | grep -oE '0x[0-9a-f]+' | head -1)"
+    if [ "$ACT" != "$THEX" ]; then
+        bad "viewport zoom: focus never landed on T (active=$ACT, want $THEX) — key would hit the wrong window"
+    elif [ "${MAVERICK_NO_COMPOSITOR:-0}" = "1" ]; then
+        # No compositor => no GPU transform available, so zoom is implemented
+        # as (animated) X11 geometry scaling by design. Drive it via IPC, NOT
+        # via xdotool keys: XTEST through a nested Xephyr on a live host
+        # produces phantom autorepeats (40ms cadence long after release),
+        # which the WM dutifully dispatches — making key-driven zoom counts
+        # nondeterministic. IPC gives exactly one step per command.
+        # Round-trip: zoom in, then back out, must restore the exact geometry.
+        "$MAVERICK_MSG" msg "viewport_zoom 0.2" >/dev/null 2>&1
+        sleep 0.8
+        read -r W1 _ < <(xwininfo -id "$T" 2>/dev/null | awk '/Width:/{print $2}')
+        "$MAVERICK_MSG" msg "viewport_zoom -0.2" >/dev/null 2>&1
+        sleep 0.8
+        read -r W2 _ < <(xwininfo -id "$T" 2>/dev/null | awk '/Width:/{print $2}')
+        if [ "${W1:-0}" -ne "${W0:-0}" ] && [ "${W2:-0}" -eq "${W0:-0}" ]; then
+            ok "viewport zoom (no-compositor geometry path) scaled ${W0} -> ${W1} and restored ${W2}"
+        else
+            bad "viewport zoom round-trip broken (W0=${W0} in=${W1} out=${W2})"
+        fi
     else
-        bad "viewport zoom unexpectedly resized the X11 client (${W0} -> ${W1})"
+        xdotool key super+equal
+        sleep 0.6
+        read -r W1 _ < <(xwininfo -id "$T" 2>/dev/null | awk '/Width:/{print $2}')
+        if [ "${W1:-0}" -eq "${W0:-0}" ]; then
+            ok "viewport zoom left X11 geometry unchanged (${W0} == ${W1}); zoom is camera-scale, not resize"
+        else
+            bad "viewport zoom unexpectedly resized the X11 client (${W0} -> ${W1})"
+        fi
     fi
     # Page-snap right should shift the camera without erroring.
     timeout 8 xdotool windowactivate --sync "$T" key super+bracketright
@@ -335,12 +391,25 @@ if command -v xterm >/dev/null 2>&1; then
     done
     sleep 1
     xterm -title PH7_FINAL -e bash -c 'sleep 60' >/dev/null 2>&1 &
-    sleep 1
-    FINAL="$(xdotool search --name PH7_FINAL | head -1)"
-    if [ -n "$FINAL" ] && in_clients "$FINAL" && mav_alive; then
+    # Poll (not fixed sleep): under load the final xterm can take a while to
+    # map, and a fixed 1s sleep flakes.
+    FINAL=""
+    for _t in $(seq 1 50); do
+        FINAL="$(xdotool search --name PH7_FINAL 2>/dev/null | head -1)"
+        [ -n "$FINAL" ] && break
+        sleep 0.2
+    done
+    managed=0
+    for _m in $(seq 1 30); do
+        if [ -n "$FINAL" ] && in_clients "$FINAL"; then managed=1; break; fi
+        sleep 0.2
+    done
+    if [ -z "$FINAL" ]; then
+        bad "AUDIT P7.5/6 final xterm never mapped (mav_alive=$(mav_alive && echo yes || echo no))"
+    elif [ "$managed" -eq 1 ] && mav_alive; then
         ok "AUDIT P7.5/6 rapid create/destroy + destroy-during-reconcile: WM still manages ($(xprop -root _NET_CLIENT_LIST 2>/dev/null | grep -oE '0x[0-9a-f]+' | wc -l) clients)"
     else
-        bad "AUDIT P7.5/6 WM lost management under rapid create/destroy"
+        bad "AUDIT P7.5/6 FINAL not managed after create/destroy storm (managed=$managed, mav_alive=$(mav_alive && echo yes || echo no))"
     fi
 fi
 
