@@ -10,6 +10,46 @@
 
 use std::path::Path;
 
+/// Hard caps to turn hostile dimension headers into clean `Err` instead of
+/// wrap-around allocs or OOM aborts. 16384px per side is far beyond any
+/// wallpaper use; 64M pixels (256 MiB RGBA) bounds total allocation.
+pub const MAX_DIM: usize = 16_384;
+pub const MAX_PIXELS: usize = 64_000_000;
+/// Cap for external-converter stdout (PPM bytes) — same pixel budget * 3 + slack.
+const MAX_EXTERNAL_BYTES: usize = 200_000_000;
+
+/// Validate `w x h` against [`MAX_DIM`]/[`MAX_PIXELS`] using checked math.
+/// Returns `(w, h)` as usize on success.
+fn check_dims(w: usize, h: usize) -> Result<(usize, usize), String> {
+    if w == 0 || h == 0 {
+        return Err("zero dimension".into());
+    }
+    if w > MAX_DIM || h > MAX_DIM {
+        return Err(format!("dimensions too large: {w}x{h}"));
+    }
+    w.checked_mul(h)
+        .filter(|&n| n <= MAX_PIXELS)
+        .map(|_| (w, h))
+        .ok_or_else(|| format!("pixel count too large: {w}x{h}"))
+}
+
+/// `w as usize * h as usize * n` with overflow check.
+fn checked_buf(w: usize, h: usize, n: usize, what: &str) -> Result<usize, String> {
+    w.checked_mul(h)
+        .and_then(|p| p.checked_mul(n))
+        .ok_or_else(|| format!("{what}: size overflow"))
+}
+
+/// Convert a parsed `i64` header int to a bounded dimension. Rejects
+/// negatives BEFORE the `as u32` cast (`-1 as u32 == 4294967295` would
+/// otherwise pass the `w > 0` check and trigger a giant alloc).
+fn dim_from_i64(v: i64, what: &str) -> Result<usize, String> {
+    if v <= 0 || v as u64 > MAX_DIM as u64 {
+        return Err(format!("{what}: bad dimension {v}"));
+    }
+    Ok(v as usize)
+}
+
 /// A decoded image in 8-bit-per-channel RGBA, row-major, top-left origin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rgba8 {
@@ -21,7 +61,10 @@ pub struct Rgba8 {
 impl Rgba8 {
     /// `true` only when the buffer has exactly `w*h*4` bytes.
     pub fn is_valid(&self) -> bool {
-        self.w as usize * self.h as usize * 4 == self.data.len()
+        (self.w as usize)
+            .checked_mul(self.h as usize)
+            .and_then(|p| p.checked_mul(4))
+            .is_some_and(|n| n == self.data.len())
     }
 }
 
@@ -73,6 +116,11 @@ fn decode_ppm(path: &Path) -> Result<Rgba8, String> {
         let start = *i;
         while *i < bytes.len() && bytes[*i].is_ascii_digit() {
             *i += 1;
+            // Bound digit run: i64 has at most 19 digits; longer runs are
+            // hostile headers trying to burn CPU in BigInt-ish parse paths.
+            if *i - start > 19 {
+                return Err("ppm: bad int".into());
+            }
         }
         if *i == start {
             return Err("ppm: malformed header".into());
@@ -80,32 +128,36 @@ fn decode_ppm(path: &Path) -> Result<Rgba8, String> {
         let s = std::str::from_utf8(&bytes[start..*i]).map_err(|_| "ppm: bad int".to_string())?;
         s.parse::<i64>().map_err(|_| "ppm: bad int".to_string())
     };
-    let w = read_int(&mut i)? as u32;
-    let h = read_int(&mut i)? as u32;
+    let w_raw = read_int(&mut i)?;
+    let h_raw = read_int(&mut i)?;
     let maxval = read_int(&mut i)?;
     if maxval != 255 {
         return Err("ppm: only maxval 255 supported".into());
     }
-    if !(w > 0 && h > 0) {
-        return Err("ppm: zero dimension".into());
-    }
+    let w = dim_from_i64(w_raw, "ppm").map_err(|e| format!("ppm: {e}"))?;
+    let h = dim_from_i64(h_raw, "ppm").map_err(|e| format!("ppm: {e}"))?;
+    check_dims(w, h).map_err(|e| format!("ppm: {e}"))?;
     // single whitespace after maxval, then binary data.
     if i >= bytes.len() || !bytes[i].is_ascii_whitespace() {
         return Err("ppm: missing separator before data".into());
     }
     i += 1;
-    let need = w as usize * h as usize * 3;
-    if bytes.len() - i < need {
+    let need = checked_buf(w, h, 3, "ppm")?;
+    if bytes.len().saturating_sub(i) < need {
         return Err("ppm: truncated pixel data".into());
     }
-    let mut out = Vec::with_capacity(w as usize * h as usize * 4);
+    let mut out = Vec::with_capacity(checked_buf(w, h, 4, "ppm")?);
     for p in 0..need / 3 {
         let r = bytes[i + p * 3];
         let g = bytes[i + p * 3 + 1];
         let b = bytes[i + p * 3 + 2];
         out.extend_from_slice(&[r, g, b, 255]);
     }
-    Ok(Rgba8 { data: out, w, h })
+    Ok(Rgba8 {
+        data: out,
+        w: w as u32,
+        h: h as u32,
+    })
 }
 
 fn decode_farbfeld(path: &Path) -> Result<Rgba8, String> {
@@ -116,13 +168,16 @@ fn decode_farbfeld(path: &Path) -> Result<Rgba8, String> {
     let u32be = |o: usize| u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
     let w = u32be(8) as usize;
     let h = u32be(12) as usize;
-    let need = 16 + w * h * 8;
+    check_dims(w, h).map_err(|e| format!("farbfeld: {e}"))?;
+    let need = checked_buf(w, h, 8, "farbfeld")?
+        .checked_add(16)
+        .ok_or_else(|| "farbfeld: size overflow".to_string())?;
     if bytes.len() < need {
         return Err("farbfeld: truncated".into());
     }
-    let mut out = Vec::with_capacity(w * h * 4);
+    let mut out = Vec::with_capacity(checked_buf(w, h, 4, "farbfeld")?);
     let mut o = 16;
-    for _ in 0..w * h {
+    for _ in 0..w.checked_mul(h).ok_or("farbfeld: size overflow")? {
         let r = (u16::from_be_bytes([bytes[o], bytes[o + 1]]) >> 8) as u8;
         let g = (u16::from_be_bytes([bytes[o + 2], bytes[o + 3]]) >> 8) as u8;
         let b = (u16::from_be_bytes([bytes[o + 4], bytes[o + 5]]) >> 8) as u8;
@@ -149,25 +204,37 @@ fn decode_qoi(path: &Path) -> Result<Rgba8, String> {
     let h = u32be(8) as usize;
     let channels = bytes[12];
     let _colorspace = bytes[13];
-    if w == 0 || h == 0 || (channels != 3 && channels != 4) {
+    if channels != 3 && channels != 4 {
         return Err("qoi: bad header".into());
     }
+    check_dims(w, h).map_err(|e| format!("qoi: {e}"))?;
+    let total = checked_buf(w, h, 4, "qoi")?;
     let mut px = [0u8, 0, 0, 255];
     let mut index = [[0u8; 4]; 64];
-    let mut out = Vec::with_capacity(w * h * 4);
+    let mut out = Vec::with_capacity(total);
     let mut o = 14;
     let end = bytes.len().saturating_sub(8);
-    while out.len() < w * h * 4 && o < end {
+    // Helper: ensure `n` bytes available at `o` (and before `end`).
+    macro_rules! need {
+        ($n:expr) => {
+            if o + ($n) > end || o + ($n) > bytes.len() {
+                return Err("qoi: truncated stream".into());
+            }
+        };
+    }
+    while out.len() < total && o < end {
         let b1 = bytes[o];
         o += 1;
         if b1 == 0b1111_1111 {
             // QOI_OP_RGB
+            need!(3);
             px[0] = bytes[o];
             px[1] = bytes[o + 1];
             px[2] = bytes[o + 2];
             o += 3;
         } else if b1 == 0b1111_1110 {
             // QOI_OP_RGBA
+            need!(4);
             px[0] = bytes[o];
             px[1] = bytes[o + 1];
             px[2] = bytes[o + 2];
@@ -185,6 +252,7 @@ fn decode_qoi(path: &Path) -> Result<Rgba8, String> {
                 px[2] = px[2].wrapping_add((b1 & 3).wrapping_sub(1));
             } else if tag == 0b10 {
                 // LUMA: dg then dr=dg+(b2>>4-8), db=dg+(b2&0xf-8), all wrapping.
+                need!(1);
                 let b2 = bytes[o];
                 o += 1;
                 let dg = (b1 & 0x3f) as i32 - 32;
@@ -197,7 +265,7 @@ fn decode_qoi(path: &Path) -> Result<Rgba8, String> {
                 // RUN
                 let run = (b1 & 0x3f) as usize + 1;
                 for _ in 0..run {
-                    if out.len() < w * h * 4 {
+                    if out.len() < total {
                         out.extend_from_slice(&px);
                     }
                 }
@@ -221,7 +289,7 @@ fn decode_qoi(path: &Path) -> Result<Rgba8, String> {
             + px[3] as usize * 11)
             % 64] = px;
     }
-    if out.len() < w * h * 4 {
+    if out.len() < total {
         return Err("qoi: truncated stream".into());
     }
     Ok(Rgba8 {
@@ -252,6 +320,10 @@ fn decode_bmp(path: &Path) -> Result<Rgba8, String> {
     if w <= 0 || h == 0 {
         return Err("bmp: bad dimensions".into());
     }
+    // u32 headers can claim 2G x 2G; bound before any multiplication.
+    let bw_us = w.unsigned_abs() as usize;
+    let bh_us = h.unsigned_abs() as usize;
+    check_dims(bw_us, bh_us).map_err(|e| format!("bmp: {e}"))?;
     let bpp = u32le(28) as u16;
     let compression = u32le(30);
     if compression != 0 {
@@ -260,18 +332,49 @@ fn decode_bmp(path: &Path) -> Result<Rgba8, String> {
     if bpp != 24 && bpp != 32 {
         return Err(format!("bmp: unsupported bit-depth {bpp}"));
     }
-    let bw = w.unsigned_abs() as usize;
+    let bw = bw_us;
     let top_down = h < 0;
-    let bh = h.unsigned_abs() as usize;
+    let bh = bh_us;
     let channels = bpp as usize / 8;
-    let row_bytes = (bw * channels + 3) & !3; // 4-byte row stride
-    let mut out = Vec::with_capacity(bw * bh * 4);
+    let row_bytes = bw
+        .checked_mul(channels)
+        .and_then(|r| r.checked_add(3))
+        .map(|r| r & !3)
+        .ok_or_else(|| "bmp: size overflow".to_string())?;
+    // data_offset comes from the file: must point inside headers..eof and
+    // leave room for the pixel array (checked, no wrap).
+    if data_offset < 54 || data_offset > bytes.len() {
+        return Err("bmp: bad data offset".into());
+    }
+    // Require only the last pixel byte to exist, not full padding:
+    // some writers omit trailing row padding (e.g. 1x1 24-bit with 3
+    // bytes instead of 4). Padding bytes are simply skipped when present.
+    let row_data = bw.checked_mul(channels).ok_or("bmp: size overflow")?;
+    let last_row_off = (bh - 1)
+        .checked_mul(row_bytes)
+        .ok_or("bmp: size overflow")?;
+    let last_need = last_row_off
+        .checked_add(row_data)
+        .ok_or("bmp: size overflow")?;
+    if data_offset
+        .checked_add(last_need)
+        .is_none_or(|e| e > bytes.len())
+    {
+        return Err("bmp: truncated".into());
+    }
+    let mut out = Vec::with_capacity(checked_buf(bw, bh, 4, "bmp")?);
     for row in 0..bh {
         let src_row = if top_down { row } else { bh - 1 - row };
-        let base = data_offset + src_row * row_bytes;
+        let base = data_offset
+            .checked_add(src_row.checked_mul(row_bytes).ok_or("bmp: size overflow")?)
+            .ok_or("bmp: size overflow")?;
         for col in 0..bw {
-            let p = base + col * channels;
-            if p + 3 > bytes.len() {
+            let p = base
+                .checked_add(col.checked_mul(channels).ok_or("bmp: size overflow")?)
+                .ok_or("bmp: size overflow")?;
+            // Need `channels` bytes; for 24bpp the 4th byte read below
+            // is guarded by `channels == 4`.
+            if p.checked_add(channels).is_none_or(|e| e > bytes.len()) {
                 return Err("bmp: truncated".into());
             }
             let b = bytes[p];
@@ -305,9 +408,19 @@ fn decode_png(path: &Path) -> Result<Rgba8, String> {
     let mut trns: Vec<u8> = Vec::new();
     while i + 8 <= bytes.len() {
         let len = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
+        // Bound single-chunk growth: a 2 GiB `len` would otherwise drive
+        // `extend_from_slice` OOM before the overrun check below.
+        if len > MAX_EXTERNAL_BYTES {
+            return Err("png: chunk too large".into());
+        }
         let typ = &bytes[i + 4..i + 8];
-        let data_start = i + 8;
-        let data_end = data_start + len;
+        let data_start = i.checked_add(8).ok_or("png: size overflow")?;
+        let data_end = data_start.checked_add(len).ok_or("png: size overflow")?;
+        // `+4` CRC must also fit; checked to avoid wrap-around bypass.
+        let next = data_end.checked_add(4).ok_or("png: size overflow")?;
+        if data_end > bytes.len() || next > bytes.len().saturating_add(4) {
+            return Err("png: chunk overruns file".into());
+        }
         if data_end > bytes.len() {
             return Err("png: chunk overruns file".into());
         }
@@ -316,15 +429,39 @@ fn decode_png(path: &Path) -> Result<Rgba8, String> {
                 if len < 13 {
                     return Err("png: short IHDR".into());
                 }
-                width = u32::from_be_bytes(bytes[data_start..data_start + 4].try_into().unwrap());
-                height =
-                    u32::from_be_bytes(bytes[data_start + 4..data_start + 8].try_into().unwrap());
+                let w_b: [u8; 4] = bytes[data_start..data_start + 4]
+                    .try_into()
+                    .map_err(|_| "png: short IHDR".to_string())?;
+                let h_b: [u8; 4] = bytes[data_start + 4..data_start + 8]
+                    .try_into()
+                    .map_err(|_| "png: short IHDR".to_string())?;
+                width = u32::from_be_bytes(w_b);
+                height = u32::from_be_bytes(h_b);
                 bit_depth = bytes[data_start + 8];
                 color_type = bytes[data_start + 9];
             }
-            b"PLTE" => palette.extend_from_slice(&bytes[data_start..data_end]),
-            b"tRNS" => trns.extend_from_slice(&bytes[data_start..data_end]),
-            b"IDAT" => idat.extend_from_slice(&bytes[data_start..data_end]),
+            b"PLTE" => {
+                if palette.len().checked_add(len).is_none_or(|n| n > 3 * 256) {
+                    return Err("png: PLTE too large".into());
+                }
+                palette.extend_from_slice(&bytes[data_start..data_end]);
+            }
+            b"tRNS" => {
+                if trns.len().checked_add(len).is_none_or(|n| n > 256) {
+                    return Err("png: tRNS too large".into());
+                }
+                trns.extend_from_slice(&bytes[data_start..data_end]);
+            }
+            b"IDAT" => {
+                if idat
+                    .len()
+                    .checked_add(len)
+                    .is_none_or(|n| n > MAX_EXTERNAL_BYTES)
+                {
+                    return Err("png: IDAT too large".into());
+                }
+                idat.extend_from_slice(&bytes[data_start..data_end]);
+            }
             b"IEND" => break,
             _ => {}
         }
@@ -333,10 +470,11 @@ fn decode_png(path: &Path) -> Result<Rgba8, String> {
     if width == 0 || height == 0 {
         return Err("png: missing/zero IHDR".into());
     }
+    check_dims(width as usize, height as usize).map_err(|e| format!("png: {e}"))?;
     if !(bit_depth == 1 || bit_depth == 2 || bit_depth == 4 || bit_depth == 8 || bit_depth == 16) {
         return Err(format!("png: unsupported bit depth {bit_depth}"));
     }
-    let channels = match color_type {
+    let channels: usize = match color_type {
         0 => 1,
         2 => 3,
         3 => 1,
@@ -353,11 +491,25 @@ fn decode_png(path: &Path) -> Result<Rgba8, String> {
     let w = width as usize;
     let h = height as usize;
     let bd = bit_depth as usize;
-    let bpp = (channels * bd).div_ceil(8); // bytes per pixel (filter neighbour distance)
-    let stride = (w * channels * bd).div_ceil(8); // bytes per scanline (raw)
+    let bpp = channels
+        .checked_mul(bd)
+        .map(|n| n.div_ceil(8))
+        .ok_or("png: size overflow")?;
+    let stride = w
+        .checked_mul(channels)
+        .and_then(|n| n.checked_mul(bd))
+        .map(|n| n.div_ceil(8))
+        .ok_or("png: size overflow")?;
+    // Bound decompressed buffers before allocating: `h * stride` and
+    // `w * h * 4` for the RGBA output.
+    let plane = h.checked_mul(stride).ok_or("png: size overflow")?;
+    if plane > MAX_PIXELS * 4 + h {
+        return Err("png: image too large".into());
+    }
+    let _ = checked_buf(w, h, 4, "png")?;
 
     // Unfilter byte-by-byte into a per-row byte buffer.
-    let mut unfiltered = vec![0u8; h * stride];
+    let mut unfiltered = vec![0u8; plane];
     let mut prev = vec![0u8; stride];
     let mut pos = 0usize;
     for y in 0..h {
@@ -393,10 +545,13 @@ fn decode_png(path: &Path) -> Result<Rgba8, String> {
     }
 
     // Unpack samples (handles bit depths) then map to RGBA.
-    let samples_per_row = w * channels;
-    let mut out = Vec::with_capacity(w * h * 4);
+    let samples_per_row = w.checked_mul(channels).ok_or("png: size overflow")?;
+    let mut out = Vec::with_capacity(checked_buf(w, h, 4, "png")?);
     for y in 0..h {
-        let row = &unfiltered[y * stride..y * stride + stride];
+        let row = unfiltered
+            .get(y.checked_mul(stride).ok_or("png: size overflow")?..)
+            .and_then(|r| r.get(..stride))
+            .ok_or("png: truncated image data")?;
         let mut samples = Vec::with_capacity(samples_per_row);
         if bd == 16 {
             for p in 0..samples_per_row {
@@ -622,6 +777,10 @@ mod inflate {
         out: &mut Vec<u8>,
     ) -> Result<(), String> {
         loop {
+            // Zip-bomb guard: DEFLATE can expand ~1000x; bound output before push.
+            if out.len() > super::MAX_EXTERNAL_BYTES {
+                return Err("inflate: output too large".into());
+            }
             let symbol = decode(bits, lencode)?;
             if symbol < 0 {
                 return Err("inflate: bad symbol".into());
@@ -752,6 +911,9 @@ mod inflate {
         let mut bits = Bits::new(data);
         let mut out = Vec::new();
         loop {
+            if out.len() > super::MAX_EXTERNAL_BYTES {
+                return Err("inflate: output too large".into());
+            }
             let last = bits.take(1)? == 1;
             let btype = bits.take(2)?;
             if btype == 0 {
@@ -798,22 +960,21 @@ fn inflate(data: &[u8]) -> Result<Vec<u8>, String> {
 /// Used when no native decoder applies (JPEG/WebP/AVIF/…) or the native one
 /// errored. Returns `Err` only when every converter is unavailable or fails.
 fn decode_external(path: &Path) -> Result<Rgba8, String> {
-    let path = path.to_string_lossy().into_owned();
+    let path_str = path.to_string_lossy().into_owned();
     let mut last_err = String::from("no external image converter found");
     for cmd in ["ffmpeg", "convert", "magick"] {
-        let which = std::process::Command::new("which")
-            .arg(cmd)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !which {
-            continue;
-        }
+        // Resolve to an absolute path once and exec it directly: avoids the
+        // `which` + `Command::new(cmd)` TOCTOU where PATH changes between
+        // probe and exec, and rejects non-executable files.
+        let bin = match resolve_exec(cmd) {
+            Some(b) => b,
+            None => continue,
+        };
         let output = if cmd == "ffmpeg" {
-            std::process::Command::new(cmd)
+            std::process::Command::new(&bin)
                 .args([
                     "-i",
-                    &path,
+                    &path_str,
                     "-vframes",
                     "1",
                     "-f",
@@ -824,30 +985,68 @@ fn decode_external(path: &Path) -> Result<Rgba8, String> {
                 ])
                 .output()
         } else {
-            std::process::Command::new(cmd)
-                .args([&path, "ppm:-"])
+            std::process::Command::new(&bin)
+                .args([&path_str, "ppm:-"])
                 .output()
         };
         match output {
             Ok(out) if out.status.success() && !out.stdout.is_empty() => {
+                // Bound stdout before parsing: a compromised converter must
+                // not OOM us via unbounded pipe output.
+                if out.stdout.len() > MAX_EXTERNAL_BYTES {
+                    last_err = format!("{cmd}: output too large");
+                    continue;
+                }
                 if let Ok(img) = ppm_from_bytes(&out.stdout) {
                     return Ok(img);
                 }
                 last_err = format!("{cmd}: could not parse PPM output");
             }
             Ok(out) => {
-                last_err = format!(
-                    "{cmd} failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                );
+                // Sanitize stderr into a single line (log injection safe).
+                let first: String = String::from_utf8_lossy(&out.stderr)
+                    .chars()
+                    .filter(|c| !c.is_control() || *c == '\t')
+                    .take(200)
+                    .collect();
+                let first = first.lines().next().unwrap_or("").to_string();
+                last_err = format!("{cmd} failed: {first}");
             }
             Err(e) => last_err = format!("{cmd}: {e}"),
         }
     }
     Err(format!("maverick-img: {last_err}"))
+}
+
+/// Resolve `bin` via PATH to an absolute executable path (no exec of bare
+/// names, no `which` subprocess). Returns `None` if not found/executable.
+fn resolve_exec(bin: &str) -> Option<std::path::PathBuf> {
+    if bin.is_empty() || bin.contains('/') {
+        return None;
+    }
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let p = dir.join(bin);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(m) = std::fs::metadata(&p) {
+                if m.is_file() && m.permissions().mode() & 0o111 != 0 {
+                    return Some(p);
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 /// Parse a P6 PPM byte stream (as produced by the external converters).
@@ -872,6 +1071,9 @@ fn ppm_from_bytes(bytes: &[u8]) -> Result<Rgba8, String> {
         let start = *i;
         while *i < bytes.len() && bytes[*i].is_ascii_digit() {
             *i += 1;
+            if *i - start > 19 {
+                return Err("external PPM: bad int".into());
+            }
         }
         if *i == start {
             return Err("external PPM: malformed header".into());
@@ -881,21 +1083,24 @@ fn ppm_from_bytes(bytes: &[u8]) -> Result<Rgba8, String> {
             .parse::<i64>()
             .map_err(|_| "external PPM: bad int".to_string())
     };
-    let w = read_int(&mut i)? as u32;
-    let h = read_int(&mut i)? as u32;
+    let w_raw = read_int(&mut i)?;
+    let h_raw = read_int(&mut i)?;
     let maxval = read_int(&mut i)?;
     if maxval != 255 {
         return Err("external PPM: maxval != 255".into());
     }
+    let w = dim_from_i64(w_raw, "external PPM").map_err(|e| format!("external PPM: {e}"))?;
+    let h = dim_from_i64(h_raw, "external PPM").map_err(|e| format!("external PPM: {e}"))?;
+    check_dims(w, h).map_err(|e| format!("external PPM: {e}"))?;
     if i >= bytes.len() || !bytes[i].is_ascii_whitespace() {
         return Err("external PPM: missing separator".into());
     }
     i += 1;
-    let need = w as usize * h as usize * 3;
-    if bytes.len() - i < need {
+    let need = checked_buf(w, h, 3, "external PPM")?;
+    if bytes.len().saturating_sub(i) < need {
         return Err("external PPM: truncated".into());
     }
-    let mut out = Vec::with_capacity(need / 3 * 4);
+    let mut out = Vec::with_capacity(checked_buf(w, h, 4, "external PPM")?);
     for p in 0..need / 3 {
         out.extend_from_slice(&[
             bytes[i + p * 3],
@@ -904,7 +1109,11 @@ fn ppm_from_bytes(bytes: &[u8]) -> Result<Rgba8, String> {
             255,
         ]);
     }
-    Ok(Rgba8 { data: out, w, h })
+    Ok(Rgba8 {
+        data: out,
+        w: w as u32,
+        h: h as u32,
+    })
 }
 
 #[cfg(test)]
