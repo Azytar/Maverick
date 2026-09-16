@@ -3,10 +3,84 @@
 All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+## [Unreleased]
+
+### Fixed
+
+- **Floating windows no longer "jump around by themselves"** (two-authorities
+  ping-pong). Root cause: the `ConfigureRequest` sink adopted the client's
+  rect verbatim, but every `arrange` re-projected floats through
+  `normalize_float_geom` (hint snap + workarea clamp), rewriting what was just
+  promised — the client re-requested, the WM re-wrote, forever. The fix is a
+  single-authority policy: a new `Client::float_client_authority` seal marks
+  the float's rect as client-claimed when the WM adopts a request, and the
+  arrange projection then re-emits that rect verbatim (protocol sanity only,
+  `adopt_client_float_geometry`) instead of re-normalizing it. The seal is
+  cleared exactly where the WM reclaims the geometry (drag start, window
+  rules, relink with recentering, `ToggleFloat`, workspace/monitor moves,
+  RandR/strut workarea changes — `reposition_floats`), and every "float
+  gained a new context" path now settles the rect through the new pure helper
+  `layout::settle_float_in_workarea` so the first arrange of the new context
+  has nothing to correct (one configure, zero visible jumps).
+
+### Changed
+
+### Changed
+
+- **Pointer drags no longer change tiling membership** (niri-style drop
+  removed by design decision): only already-floating windows are draggable
+  (Button1 = move, Button3 = resize), a float released over a column stays
+  floating, and a Mod4 drag on a tiled window is a no-op — tiles are moved
+  with the keyboard (`Mod4+Shift+h/l/j/k`). The drag-to-tile preview
+  highlight (`drag_target`) and the `drop_candidate` machinery were removed;
+  `MoveResize` no longer sets the `FLOAT` flag.
+- **No-compositor mode is now dwm-style**: zero animation. The per-frame
+  X11 reconfiguration path (`arrange_live`) is removed; with the compositor
+  off (env var, config, or a `--no-default-features` build) every state change
+  lands on its final geometry in a single pass and the loop goes idle. The
+  compositor path animates exactly as before.
+- **Installer**: the Rust `maverick-installer` crate is replaced by a single
+  `install.sh` bash script (same behaviour: release build with native-CPU
+  optimization, binary installation to `/usr/local/bin` or `~/.local/bin`,
+  X session desktop file, First Flight config, PATH check). Removed from the
+  workspace; CI now syntax-checks `install.sh`.
+
+### Fixed
+
+- **Build**: unclosed delimiter in `maverick-sys/src/control.rs` (`query`
+  handler) broke compilation of the whole workspace.
+- **Floating windows**: `clamp_float_to_workarea` now uses saturating
+  arithmetic so a workarea at a large negative origin (multi-monitor) can no
+  longer overflow `i32` and park a float at an absurd position; degenerate
+  0x0 workareas keep the window at the workarea origin.
+- **Floating windows**: self-resizing floats (e.g. PrismLauncher's resource
+  download dialog) no longer flicker bigger/smaller on every update. The
+  float `ConfigureRequest` sink answered with the raw requested size,
+  ignoring the client's own `WM_NORMAL_HINTS`, so a hint-respecting toolkit
+  (Qt, Xt) corrected the answer with a follow-up `ConfigureRequest` on each
+  update — one corrective bounce per resize. Both float sinks
+  (`ConfigureRequest` and the `ConfigureNotify` follow path, which adopted
+  the reported rect raw with no clamp at all) now route through
+  `normalize_float_request` (hints snap, then workarea clamp, then a final
+  settle onto the increment grid), and `WM_NORMAL_HINTS` is re-read on
+  `PropertyNotify` so mid-life hint updates are honored. Invariant
+  `INV-FLOAT-CONVERGE` (the WM's answer is a fixed point of the toolkit's
+  correction) is pinned by unit tests in `src/backend/x11/render.rs`
+  (helpers in `src/core/layout.rs`).
+
+### Verified
+
+- No-compositor mode (`MAVERICK_NO_COMPOSITOR=1`, `[compositor] enabled =
+  false`, and binaries built `--no-default-features`): scroll layout, tiling,
+  float toggle, fullscreen presentation, workspace hiding and focus transitions
+  validated end-to-end in Xephyr (also with the release build).
+
 Version note: the entries under `[0.18.4]` describe the window-manager
 rewrite that forms the current `main` history. Earlier releases
 (`[0.18.2]`, `[0.18.1]`) are retained as historical records of the
 pre-rewrite codebase.
+
 
 ## [Unreleased]
 
