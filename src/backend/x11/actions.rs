@@ -46,6 +46,8 @@ impl WindowManager {
     /// carries them out. Fullscreen is presentation-only and tied to focus
     /// (see `core::present`), so every action is safe while fullscreen.
     pub(super) fn do_action(&mut self, action: Action) -> Result<(), Box<dyn std::error::Error>> {
+        let _action_trace = super::trace::Span::new("action");
+        super::trace::trace!("action_input", "action={action:?}");
         let is_toggle = matches!(action, Action::ToggleFloat);
         let (tw, old_float, old_geom, old_layout, old_dirty, old_reasons) = if is_toggle {
             let mi = self.engine.state.sel_mon;
@@ -74,7 +76,9 @@ impl WindowManager {
         } else {
             (None, None, Rect::default(), false, false, 0u8)
         };
+        let state_trace = super::trace::Span::new("state_action");
         let effects = self.engine.dispatch(action);
+        drop(state_trace);
         self.run_effects(effects)?;
         if let Some((w, _old_fl)) = tw {
             let mi = self.engine.state.sel_mon;

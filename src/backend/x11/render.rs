@@ -825,6 +825,7 @@ impl WindowManager {
                 .border_width(wire_bw),
         );
 
+        super::trace::trace!("geometry_applied", "win={win} x={} y={} w={wire_w} h={wire_h} bw={wire_bw} gl_active={} server_confirmed=false", geom.x, geom.y, self.compositor.is_some());
         let event = ConfigureNotifyEvent {
             response_type: CONFIGURE_NOTIFY_EVENT,
             sequence: 0,

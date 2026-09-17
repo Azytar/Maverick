@@ -113,6 +113,10 @@ pub(crate) struct FrameScheduler {
 }
 
 impl FrameScheduler {
+    pub(crate) fn trace_bits(&self) -> u8 {
+        self.reasons
+    }
+
     pub(crate) fn new() -> Self {
         Self { reasons: 0 }
     }

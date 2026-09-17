@@ -101,6 +101,8 @@ pub(crate) mod reconciler;
 mod render;
 mod rootwall;
 mod struts;
+mod trace;
+use trace::trace;
 #[cfg(test)]
 mod tests;
 use pointer::DragState;
@@ -301,6 +303,10 @@ pub struct WindowManager {
 
 impl WindowManager {
     fn dispatch(&mut self, ev: x11rb::protocol::Event) -> Result<(), Box<dyn std::error::Error>> {
+        if trace::enabled() {
+            trace::input(&ev);
+        }
+        let _dispatch_trace = trace::Span::new("event_dispatch");
         match ev {
             Event::ButtonPress(e) => self.on_button_press(e)?,
             Event::ButtonRelease(e) => self.on_button_release(e)?,
@@ -461,11 +467,14 @@ impl WindowManager {
             maverick_sys::identity::cleanup_meta(&self.session_id);
         }
         drop(self.control.take());
+        trace::dump();
         Ok(())
     }
     fn run_once(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::io::AsRawFd;
 
+        trace::begin_turn();
+        let _turn_trace = trace::Span::new("turn");
         // ── signal phase ─────────────────────────────────────────────────────────
         // SIGCONT (resume from stop) requests a key regrab; SIGTERM requests quit.
         // Both are set by the maverick-sys signal handlers (the only unsafe code).
@@ -483,8 +492,15 @@ impl WindowManager {
         // Drain the deferred _NET_CLIENT_LIST update (if any manage/unmanage
         // marked it dirty) before blocking on the next event, so all X11
         // output from the previous event batch is flushed in one shot.
+        let flush_trace = trace::Span::new("x_flush");
         self.flush_client_list()?;
         self.conn.flush()?;
+        drop(flush_trace);
+        trace!(
+            "geometry_flush_returned",
+            "gl_active={} actual_visible=false",
+            self.compositor.is_some()
+        );
 
         // ── drain phase ───────────────────────────────────────────────────────
         // Drain X11 + control-socket events *before* deciding the frame (B2):
@@ -515,6 +531,10 @@ impl WindowManager {
         let raw_dt = (now - self.last_frame).as_secs_f32();
         let dt = crate::backend::x11::framesched::clamp_frame_dt(raw_dt, was_animating);
         self.last_frame = now;
+        trace!(
+            "wm_dt",
+            "raw_s={raw_dt} clamped_s={dt} was_animating={was_animating}"
+        );
 
         // Fase 9 — single authoritative frame scheduler for this turn. Built once
         // from the animation flag (set by the tick below) and the dirty reasons
@@ -613,7 +633,9 @@ impl WindowManager {
                 );
             }
             let wants_frame = sched.needs_frame();
+            trace!("scheduler", "gl_active=true needs_frame={wants_frame} dirty={} reasons={} wm_animation={} presentation_animation={} wallpaper_animation={}", comp.dirty_reasons_bits(), sched.trace_bits(), self.animating, comp.presentation_animating(), comp.wallpaper_animating());
             if wants_frame {
+                trace::begin_frame();
                 if comp.float_trace {
                     let mut fids: Vec<WindowId> = Vec::new();
                     for (mi, mon) in self.engine.state.monitors.iter().enumerate() {
@@ -630,17 +652,22 @@ impl WindowManager {
                 }
                 // Presentation state is owned by the compositor; the WM only
                 // supplies state/cfg and the animation flags.
+                let prepare_trace = trace::Span::new("prepare");
                 comp.prepare_frame(
                     &mut self.engine.state,
                     &self.engine.cfg,
                     &self.layout_registry,
                     &self.anim_per_mon,
                 );
+                drop(prepare_trace);
+                let render_trace = trace::Span::new("render");
                 // A GL failure disables the compositor and returns us to the
                 // classic path. `panic = "abort"` means a GL panic would kill
                 // the whole WM, so the draw is isolated behind `catch_unwind`.
                 let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| comp.render()))
                     .unwrap_or(false);
+                drop(render_trace);
+                trace!("frame_returned", "ok={ok}");
                 if !ok {
                     log::warn!("compositor: GL error — disabling, falling back to X11 path");
                     if let Some(c) = self.compositor.as_mut() {
@@ -680,12 +707,24 @@ impl WindowManager {
         // the same scheduler so the wait phase consults one authoritative
         // decision instead of rebuilding it (which would duplicate the NEED_FRAME
         // logic and could drift).
+        let after_trace = trace::Span::new("after_present");
         sched.after_present(
             self.animating
                 || self
                     .compositor
                     .as_ref()
                     .is_some_and(compositor::Compositor::presentation_animating),
+        );
+
+        drop(after_trace);
+        trace!(
+            "after_present_state",
+            "reasons={} wm_animation={} presentation_animation={}",
+            sched.trace_bits(),
+            self.animating,
+            self.compositor
+                .as_ref()
+                .is_some_and(compositor::Compositor::presentation_animating)
         );
 
         // ── wait phase ────────────────────────────────────────────────────────
@@ -710,8 +749,16 @@ impl WindowManager {
             timeout_ms = timeout_ms.min(left.as_millis() as u64);
         }
 
+        trace!(
+            "scheduler_wait",
+            "requested_ms={} effective_ms={timeout_ms} reasons={}",
+            sched.timeout_ms(),
+            sched.trace_bits()
+        );
         if timeout_ms > 0 {
+            let wait_trace = trace::Span::new("wait");
             maverick_sys::wait_readable(fd, std::time::Duration::from_millis(timeout_ms));
+            drop(wait_trace);
             // Drain for anything that arrived while we were blocked.
             while let Some(ev) = self.conn.poll_for_event()? {
                 self.dispatch(ev)?;
@@ -731,8 +778,10 @@ impl WindowManager {
 
         // ── control phase ────────────────────────────────────────────────────────
         // Execute any commands from the control socket, then publish state.
+        let control_trace = trace::Span::new("control");
         self.drain_control()?;
         self.publish_state();
+        drop(control_trace);
 
         // Loop back → flush_client_list() rewrites _NET_CLIENT_LIST at most once per batch.
         Ok(())
@@ -775,6 +824,7 @@ impl WindowManager {
         config_path: Option<PathBuf>,
         launch_args: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        trace::init();
         let (dpy, conn, screen_num) = maverick_x11::open_x()?;
         // `conn` is shared (via `Rc`) with the compositor so both the WM and the
         // GLX layer issue requests over the *same* `XCBConnection` — that is what

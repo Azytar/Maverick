@@ -1580,7 +1580,29 @@ impl Compositor {
             };
             let before = cw.transform;
             let before_gen = cw.transform_gen;
+            let trace_transition = crate::backend::x11::trace::enabled()
+                .then(|| cw.presentation.as_ref().map(|t| t.progress.position));
             cw.set_transform(geom, bw, corner_radius, screen, gen);
+            if let Some(previous) = trace_transition {
+                crate::backend::x11::trace::trace!(
+                    "transition",
+                    "win={} previous_progress={previous:?} progress={:?} active={} ended={} endpoint_installed={} target={:?} transform={:?} radius={}",
+                    win,
+                    cw.presentation.as_ref().map(|t| t.progress.position),
+                    cw.presentation.is_some(),
+                    previous.is_some() && cw.presentation.is_none(),
+                    cw.transform
+                        == Rect::new(
+                            cw.presentation_target[0] as i32,
+                            cw.presentation_target[1] as i32,
+                            cw.presentation_target[2] as u32,
+                            cw.presentation_target[3] as u32,
+                        ) && cw.transform_radius == cw.presentation_target[4] as u32,
+                    cw.presentation_target,
+                    cw.transform,
+                    cw.transform_radius
+                );
+            }
             if self.float_trace {
                 let changed = before != cw.transform || before_gen != gen;
                 log::info!(
@@ -1625,7 +1647,12 @@ impl Compositor {
         // Advance before installing transforms so the frame that finishes a
         // transition also draws its endpoint, rather than waiting for another turn.
         let dt = self.last_present.map_or(0.0, |t| t.elapsed().as_secs_f32());
+        let trace_raw_dt = dt;
         let dt = dt.clamp(0.0, crate::backend::x11::framesched::ONE_REFRESH * 2.0);
+        crate::backend::x11::trace::trace!(
+            "presentation_dt",
+            "raw_s={trace_raw_dt} clamped_s={dt}"
+        );
         for cw in self.wins.values_mut() {
             cw.tick_presentation(dt);
         }
@@ -2677,6 +2704,14 @@ impl Compositor {
             // quad's filter, and elides the `glBindTexture` when it matches
             // `last_tex` — exactly the bind-cache the `&Texture` path
             // kept on the texture, reconstructed from the scene.
+            crate::backend::x11::trace::trace!(
+                "submitted_geometry",
+                "win={} dst={:?} radius={} opacity={}",
+                item.win,
+                item.quad.dst,
+                item.quad.radius,
+                item.quad.opacity
+            );
             last_tex = self.renderer.draw_raw(item.tex, last_tex, &item.quad);
         }
 
@@ -2691,7 +2726,16 @@ impl Compositor {
                 mode
             );
         }
+        crate::backend::x11::trace::trace!("swap_begin", "");
+        let trace_swap_start = crate::backend::x11::trace::enabled().then(Instant::now);
         self.renderer.end_frame();
+        let trace_swap_duration = trace_swap_start.map(|start| start.elapsed().as_nanos());
+        if let Some(duration) = trace_swap_duration {
+            crate::backend::x11::trace::trace!(
+                "swap_returned",
+                "duration_ns={duration} actual_visible=false"
+            );
+        }
         if self.comp_trace {
             log::info!(
                 "[LIFECYCLE] event=PresentEnd submitted=true mode={:?}",
