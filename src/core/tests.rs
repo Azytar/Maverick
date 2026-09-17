@@ -94,23 +94,40 @@ mod unit_tests {
             // actual focus and the map-time deferral belongs to A.
             engine.state.monitors[0].workspaces[0].focus.column_idx = 1;
             engine.state.pending_focus = Some(crate::types::PendingFocus {
-                window: 2, owner: 1, monitor: 0, workspace: 0,
+                window: 2,
+                owner: 1,
+                monitor: 0,
+                workspace: 0,
             });
 
             engine.execute(FocusDirection(direction));
             assert!(engine.state.pending_focus.is_none());
             assert_eq!(engine.state.monitors[0].focused, Some(2));
-            assert_eq!(engine.state.presented_overlay_owner(0), None,
-                "explicit horizontal navigation must release the pinned overlay");
+            assert_eq!(
+                engine.state.presented_overlay_owner(0),
+                None,
+                "explicit horizontal navigation must release the pinned overlay"
+            );
             assert!(engine.state.clients[&1].is_fullscreen());
             assert_eq!(engine.state.clients[&1].fs_snapshot, snapshot);
 
             let camera = engine.state.monitors[0].ws().camera.target;
             engine.state.monitors[0].workspaces[0].camera.position = camera;
             let mut placements = Placements::new();
-            arrange(&engine.state, 0, &engine.cfg, &default_registry(), Phase::Live,
-                &mut placements, &mut RibbonScratch::default());
-            crate::core::present::present(&engine.state, &engine.state.monitors[0], &mut placements);
+            arrange(
+                &engine.state,
+                0,
+                &engine.cfg,
+                &default_registry(),
+                Phase::Live,
+                &mut placements,
+                &mut RibbonScratch::default(),
+            );
+            crate::core::present::present(
+                &engine.state,
+                &engine.state.monitors[0],
+                &mut placements,
+            );
             let a = placements.iter().find(|e| e.0 == 1).unwrap().1;
             let b = placements.iter().find(|e| e.0 == 2).unwrap().1;
             let screen = engine.state.monitors[0].screen;
@@ -126,11 +143,26 @@ mod unit_tests {
             engine.execute(FocusDirection(direction));
             let camera = engine.state.monitors[0].ws().camera.target;
             engine.state.monitors[0].workspaces[0].camera.position = camera;
-            arrange(&engine.state, 0, &engine.cfg, &default_registry(), Phase::Live,
-                &mut placements, &mut RibbonScratch::default());
-            crate::core::present::present(&engine.state, &engine.state.monitors[0], &mut placements);
+            arrange(
+                &engine.state,
+                0,
+                &engine.cfg,
+                &default_registry(),
+                Phase::Live,
+                &mut placements,
+                &mut RibbonScratch::default(),
+            );
+            crate::core::present::present(
+                &engine.state,
+                &engine.state.monitors[0],
+                &mut placements,
+            );
             let a = placements.iter().find(|e| e.0 == 1).unwrap();
-            assert_eq!((a.1, a.2), (screen, 0), "returning to A preserves fullscreen");
+            assert_eq!(
+                (a.1, a.2),
+                (screen, 0),
+                "returning to A preserves fullscreen"
+            );
             engine.execute(ToggleFullscreen(Some(1)));
             assert!(!engine.state.clients[&1].is_fullscreen());
             assert_eq!(engine.state.clients[&1].border_w, 2);
@@ -154,7 +186,6 @@ mod unit_tests {
             assert!(engine.state.clients[&1].is_fullscreen());
         }
     }
-
 
     #[test]
     fn config_compositor_spring_reaches_camera() {

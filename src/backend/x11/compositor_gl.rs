@@ -359,12 +359,7 @@ impl CompWin {
     /// synchronously inside the event handler.
     fn observe_configure(&mut self, x: i32, y: i32, w: u32, h: u32, bw: u32) -> bool {
         let frame = bw.saturating_mul(2);
-        let new_outer = Rect::new(
-            x,
-            y,
-            w.saturating_add(frame),
-            h.saturating_add(frame),
-        );
+        let new_outer = Rect::new(x, y, w.saturating_add(frame), h.saturating_add(frame));
         let resized = new_outer.w != self.outer.w || new_outer.h != self.outer.h;
         self.outer = new_outer;
         self.border_w = bw;
@@ -4212,17 +4207,32 @@ mod lifecycle_tests {
             direct: true,
         };
         let mut cw = CompWin::new(Rect::default(), 0, vf);
-        cw.set_transform(Rect::new(100, 200, 400, 300), 1, 12, Rect::new(0, 0, 1440, 900), 1);
+        cw.set_transform(
+            Rect::new(100, 200, 400, 300),
+            1,
+            12,
+            Rect::new(0, 0, 1440, 900),
+            1,
+        );
         assert_eq!(cw.transform, Rect::new(100, 200, 402, 302));
         assert_eq!(cw.transform_border_w, 1);
         assert_eq!(cw.transform_radius, 12);
 
         // Same placement with bw 0 (maximize/fullscreen presentation): outer
         // equals the content rect, no rounding beyond the screen-cover gate.
-        cw.set_transform(Rect::new(0, 0, 640, 480), 0, 12, Rect::new(0, 0, 1440, 900), 2);
+        cw.set_transform(
+            Rect::new(0, 0, 640, 480),
+            0,
+            12,
+            Rect::new(0, 0, 1440, 900),
+            2,
+        );
         assert_eq!(cw.transform, Rect::new(0, 0, 640, 480));
         assert_eq!(cw.transform_border_w, 0);
-        assert_eq!(cw.transform_radius, 12, "bw 0 alone must not square the window");
+        assert_eq!(
+            cw.transform_radius, 12,
+            "bw 0 alone must not square the window"
+        );
     }
 
     /// Fullscreen policy parity with the X11 Shape path: only a presentation
@@ -4245,7 +4255,10 @@ mod lifecycle_tests {
         cw.set_transform(Rect::new(0, 0, 1440, 900), 0, 18, screen, 1);
         assert_eq!(cw.transform_radius, 0, "screen-covering overlay is square");
         cw.set_transform(Rect::new(0, 0, 1440, 876), 0, 18, screen, 2);
-        assert_eq!(cw.transform_radius, 18, "workarea-sized maximize stays rounded");
+        assert_eq!(
+            cw.transform_radius, 18,
+            "workarea-sized maximize stays rounded"
+        );
         cw.set_transform(Rect::new(0, 0, 1440, 900), 0, 0, screen, 3);
         assert_eq!(cw.transform_radius, 0, "corner_radius 0 disables rounding");
         // Radius clamped to half the border-inclusive shorter side
@@ -4281,7 +4294,13 @@ mod lifecycle_tests {
         let mut cw = CompWin::new(Rect::default(), 0, vf);
         assert_eq!(cw.border_color, None, "tracked windows start colorless");
         cw.border_color = Some(0xff0000);
-        cw.set_transform(Rect::new(10, 10, 200, 100), 1, 8, Rect::new(0, 0, 1440, 900), 1);
+        cw.set_transform(
+            Rect::new(10, 10, 200, 100),
+            1,
+            8,
+            Rect::new(0, 0, 1440, 900),
+            1,
+        );
         // Stroke width rides the live transform's border and is suppressed
         // whenever no color is known (the unwrap_or(0) path yields width 0
         // in compute_scene).

@@ -1593,8 +1593,11 @@ mod tests {
             // Arc rows: every row of the top corner zone carries ring pixels
             // on both the left and right corner (not only straight edges).
             for y in 0..r.min(h as i32 / 2) {
-                let xs: Vec<i32> =
-                    band.iter().filter(|&&(_, py)| py == y).map(|&(x, _)| x).collect();
+                let xs: Vec<i32> = band
+                    .iter()
+                    .filter(|&&(_, py)| py == y)
+                    .map(|&(x, _)| x)
+                    .collect();
                 assert!(
                     !xs.is_empty(),
                     "w={w} h={h} r={r} bw={bw}: arc row y={y} lost its ring"
@@ -1643,8 +1646,11 @@ mod tests {
             // this (its centers de-concentric by bw); straight-edge columns
             // (x < bw) legitimately run the full height and are excluded.
             for x in bw as i32..r.min(w as i32 / 2) {
-                let ys: Vec<i32> =
-                    band.iter().filter(|&&(px, _)| px == x).map(|&(_, py)| py).collect();
+                let ys: Vec<i32> = band
+                    .iter()
+                    .filter(|&&(px, _)| px == x)
+                    .map(|&(_, py)| py)
+                    .collect();
                 let mut run = 0;
                 let mut max_run = 0;
                 for window in ys.windows(2) {

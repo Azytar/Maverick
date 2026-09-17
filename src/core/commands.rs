@@ -704,7 +704,10 @@ impl Command for FocusDirection {
             // navigation with no other column must not dismiss an overlay.
             if matches!(self.0, Dir::Left | Dir::Right) && from != Some(w) {
                 let windows: Vec<_> = state.monitors[mi].workspaces[ws_i]
-                    .columns.iter().flat_map(|col| col.windows.iter().copied()).collect();
+                    .columns
+                    .iter()
+                    .flat_map(|col| col.windows.iter().copied())
+                    .collect();
                 for owner in windows {
                     if owner == w {
                         continue;
