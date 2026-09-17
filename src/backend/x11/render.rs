@@ -1523,6 +1523,203 @@ mod tests {
         }
     }
 
+    // ── Rounded focus ring (BOUNDING − CLIP = the X11-painted border) ──────
+    //
+    // `rounded_frame_regions` derives the client-clip mask from the same
+    // outer frame the BOUNDING mask uses, inset by the border width with the
+    // inner radius max(R - bw, 0). These tests pin the band that makes the
+    // curved border visible without duplicating `rounded_rectangles` itself.
+
+    /// The border the server actually paints: BOUNDING minus CLIP, both in
+    /// outer-frame coordinates. The bounding mask *is* the outer frame
+    /// (0,0,w,h); the clip lives in client space and is lifted by +bw.
+    fn border_band(w: u32, h: u32, r: i32, bw: u32) -> std::collections::BTreeSet<(i32, i32)> {
+        let (outer, inner) = rounded_frame_regions(w, h, r, bw);
+        let mut pixels = std::collections::BTreeSet::new();
+        for rect in &outer {
+            for y in i32::from(rect.y)..i32::from(rect.y) + i32::from(rect.height) {
+                for x in i32::from(rect.x)..i32::from(rect.x) + i32::from(rect.width) {
+                    pixels.insert((x, y));
+                }
+            }
+        }
+        for rect in &inner {
+            for y in i32::from(rect.y)..i32::from(rect.y) + i32::from(rect.height) {
+                for x in i32::from(rect.x)..i32::from(rect.x) + i32::from(rect.width) {
+                    pixels.remove(&(x + bw as i32, y + bw as i32));
+                }
+            }
+        }
+        pixels
+    }
+
+    #[test]
+    fn focus_ring_band_is_thin_and_traces_the_frame_curve() {
+        // The property under repair: with a rectangular CLIP the curved band
+        // vanishes (rows 1..r-1 hold no border pixels at all). The ring must
+        // instead hug the rounded frame — present on *every* arc row of all
+        // four corners, symmetric, and at most 2·bw px thick (the vertical
+        // border band may join the arc's; thickness beyond that means the
+        // inner radius drifted from max(R − bw, 0)).
+        for &(w, h, r, bw) in &[
+            (800, 600, 12, 1),
+            (401, 300, 10, 2),
+            (100, 80, 18, 1),
+            (60, 40, 7, 3),
+            (30, 30, 15, 3),
+        ] {
+            let band = border_band(w, h, r, bw);
+            assert!(!band.is_empty(), "w={w} r={r}: ring must exist");
+            let ys: std::collections::BTreeSet<i32> = band.iter().map(|&(_, y)| y).collect();
+            assert_eq!(
+                ys.first().copied(),
+                Some(0),
+                "w={w} r={r}: ring must start at the outer top edge"
+            );
+            assert_eq!(
+                ys.last().copied(),
+                Some(h as i32 - 1),
+                "w={w} r={r}: ring must reach the outer bottom edge"
+            );
+            // Arc rows: every row of the top corner zone carries ring pixels
+            // on both the left and right corner (not only straight edges).
+            for y in 0..r.min(h as i32 / 2) {
+                let xs: Vec<i32> =
+                    band.iter().filter(|&&(_, py)| py == y).map(|&(x, _)| x).collect();
+                assert!(
+                    !xs.is_empty(),
+                    "w={w} h={h} r={r} bw={bw}: arc row y={y} lost its ring"
+                );
+                let left = xs[0];
+                let right = xs[xs.len() - 1];
+                // The ring hugs the frame curve: on arc rows its outermost
+                // pixels coincide with the outer mask's own edge (row 0 of
+                // the arc is chord-inset by up to r; deeper rows widen back
+                // to the straight edge). Rasterization is right-inclusive,
+                // hence the −1 on the corner-zone bound.
+                assert!(
+                    left <= r.min(w as i32 / 2),
+                    "w={w} r={r} bw={bw}: left arc pixel x={left} outside the corner zone"
+                );
+                assert!(
+                    right >= w as i32 - r.min(w as i32 / 2) - 1,
+                    "w={w} r={r} bw={bw}: right arc pixel x={right} outside the corner zone"
+                );
+            }
+            // The ring traces a curve: the leftmost ring pixel must move
+            // outward (non-increasing inset) as the arc approaches the
+            // straight edge, and start clearly inset (not on the straight
+            // border at x < bw — that would be a rectangular ring).
+            let mut prev_left = i32::MAX;
+            for y in 0..r.min(h as i32 / 2) {
+                let left = band
+                    .iter()
+                    .filter(|&&(_, py)| py == y)
+                    .map(|&(x, _)| x)
+                    .min()
+                    .unwrap();
+                assert!(
+                    left <= prev_left,
+                    "w={w} r={r}: ring inset grew downward (x={left} after {prev_left})"
+                );
+                prev_left = left;
+            }
+            // Thinness in the corner quadrants: within an arc zone, each
+            // column's vertical ring run stays at rasterization width. The
+            // honest bound comes from the discrete arc itself: near the
+            // circle's flat foot the chord's integer floor stays constant
+            // for up to ⌈√(2r)⌉ consecutive rows, and the lifted inner mask
+            // can lag the outer by its own foot plus the border width.
+            // A clip radius of R instead of R−bw smears the band far beyond
+            // this (its centers de-concentric by bw); straight-edge columns
+            // (x < bw) legitimately run the full height and are excluded.
+            for x in bw as i32..r.min(w as i32 / 2) {
+                let ys: Vec<i32> =
+                    band.iter().filter(|&&(px, _)| px == x).map(|&(_, py)| py).collect();
+                let mut run = 0;
+                let mut max_run = 0;
+                for window in ys.windows(2) {
+                    if window[1] == window[0] + 1 {
+                        run += 1;
+                    } else {
+                        run = 1;
+                    }
+                    max_run = max_run.max(run);
+                }
+                max_run = max_run.max(usize::from(!ys.is_empty()));
+                let foot = (((r - bw as i32).max(1) * 2) as f64).sqrt().ceil() as usize;
+                let allowed = 2 * bw as usize + foot + 1;
+                assert!(
+                    max_run <= allowed,
+                    "w={w} h={h} r={r} bw={bw}: corner column x={x} band {max_run}px thick (allowed {allowed})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn focus_ring_inner_radius_follows_outer_minus_border() {
+        // Deriving the inner radius from the clamped outer radius keeps the
+        // circle centers concentric. `rounded_frame_regions` returns the clip
+        // in client space (origin 0,0) and the bounding in frame space
+        // (origin 0,0 too, since the mask is anchored at -bw): comparing
+        // extents directly, the clip must measure exactly w−2bw × h−2bw.
+        for &(w, h, r, bw) in &[(800, 600, 12, 1), (401, 300, 10, 2), (100, 80, 18, 4)] {
+            let (outer, inner) = rounded_frame_regions(w, h, r, bw);
+            let (omin_x, omin_y, omax_x, omax_y) = mask_extents(&outer);
+            let (imin_x, imin_y, imax_x, imax_y) = mask_extents(&inner);
+            // Bounding spans the full outer frame; clip spans exactly the
+            // client area, i.e. the outer frame inset by bw on every side.
+            assert_eq!((omin_x, omin_y, omax_x, omax_y), (0, 0, w as i32, h as i32));
+            assert_eq!(
+                (imin_x, imin_y, imax_x, imax_y),
+                (0, 0, (w - 2 * bw) as i32, (h - 2 * bw) as i32),
+                "w={w} h={h} r={r} bw={bw}: clip must measure the inset client area"
+            );
+        }
+    }
+
+    #[test]
+    fn focus_ring_vanishes_when_radius_reaches_the_border() {
+        // max(R − bw, 0) → 0: the clip degenerates to the square client rect,
+        // so the ring is the straight frame plus square-cut corners — the
+        // correct geometry when the border eats the whole radius, never a
+        // negative or inverted mask.
+        for &(w, h, r, bw) in &[(60, 40, 1, 1), (60, 40, 2, 2), (30, 30, 3, 5)] {
+            let (outer, inner) = rounded_frame_regions(w, h, r, bw);
+            assert_eq!(mask_extents(&outer), (0, 0, w as i32, h as i32));
+            assert_eq!(
+                mask_extents(&inner),
+                (0, 0, (w - 2 * bw) as i32, (h - 2 * bw) as i32),
+                "w={w} h={h} r={r} bw={bw}: R ≤ bw must give a square inner clip"
+            );
+            assert_eq!(inner.len(), 1, "square clip must be a single rect");
+        }
+    }
+
+    #[test]
+    fn fullscreen_geometry_yields_square_masks_both_kinds() {
+        // Fullscreen policy: effective radius 0 with border 0 — both masks
+        // must be the plain full-frame rectangle, so neither clips content
+        // under a curve nor leaves ring residue in the corners.
+        let (outer, inner) = rounded_frame_regions(1440, 900, 0, 0);
+        assert_eq!(outer.len(), 1);
+        assert_eq!(inner.len(), 1);
+        assert_eq!(
+            (
+                outer[0].x,
+                outer[0].y,
+                outer[0].width,
+                outer[0].height,
+                inner[0].x,
+                inner[0].y,
+                inner[0].width,
+                inner[0].height
+            ),
+            (0, 0, 1440, 900, 0, 0, 1440, 900)
+        );
+    }
+
     #[test]
     fn float_past_the_edges_is_pulled_back() {
         let wa = workarea();
