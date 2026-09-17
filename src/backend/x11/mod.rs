@@ -596,7 +596,7 @@ impl WindowManager {
             // explicit and testable. Idle stays free: when the scheduler reports no
             // reason we do no GL work and the wait phase below parks on a 100 ms poll.
             sched = FrameScheduler::from_compositor(
-                self.animating,
+                self.animating || comp.presentation_animating(),
                 comp.wallpaper_animating(),
                 comp.dirty_reasons(),
             );

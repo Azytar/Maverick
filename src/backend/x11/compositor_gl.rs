@@ -2500,11 +2500,7 @@ impl Compositor {
         if self.stack_dirty {
             self.refresh_stack();
         }
-        let t_frame_start = if self.trace {
-            Some(Instant::now())
-        } else {
-            None
-        };
+        let t_frame_start = Some(Instant::now());
         self.compute_scene();
         let t_build = t_frame_start.map(|t| t.elapsed().as_nanos() as u64);
 
@@ -2737,7 +2733,7 @@ impl Compositor {
         // Stamp the present timestamp unconditionally: the presentation
         // transitions read the inter-present interval as their dt, which must
         // work with tracing off (the trace block below only *reports* it).
-        self.last_present = Some(t_frame_start.unwrap_or_else(Instant::now));
+        self.last_present = t_frame_start;
 
         if self.trace {
             if let (Some(b), Some(s), Some(ts)) = (t_build, swap_ns, t_frame_start) {

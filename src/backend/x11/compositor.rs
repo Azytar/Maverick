@@ -122,6 +122,12 @@ mod placeholder {
         pub fn wallpaper_animating(&self) -> bool {
             false
         }
+        /// No presentation transitions exist without the compositor feature,
+        /// so the loop never stays awake for one.
+        #[inline(always)]
+        pub fn presentation_animating(&self) -> bool {
+            false
+        }
         #[inline(always)]
         pub fn set_wallpaper(&mut self, _wp: &crate::core::wallpaper::WallpaperSpec) {}
         #[inline(always)]
