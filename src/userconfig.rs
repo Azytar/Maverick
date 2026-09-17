@@ -258,7 +258,9 @@ pub fn config_path() -> Option<PathBuf> {
 /// fatal (B10).
 pub fn load_config(path: Option<&Path>) -> Cfg {
     let Some(path) = path.map(Path::to_path_buf).or_else(config_path) else {
-        return default_config();
+        let cfg = default_config();
+        log::config_snapshot("normalized_no_path", &cfg);
+        return cfg;
     };
     let (cfg, diag) = load_from_path(&path);
     dump_diagnostics(&diag);
@@ -286,12 +288,23 @@ fn default_config() -> Cfg {
 /// returned with the error recorded; on semantic issues the offending entries
 /// are dropped and reported. Never panics and never returns `None`.
 pub fn load_from_path(path: &Path) -> (Cfg, Diagnostics) {
+    log::config_trace("defaults_start", format_args!("path={}", path.display()));
     let baseline = default_config();
+    log::config_trace("defaults_end", format_args!(""));
     let mut diag = Diagnostics::default();
 
-    let source = match std::fs::read_to_string(path) {
+    log::config_trace("config_read_start", format_args!("path={}", path.display()));
+    let read_result = std::fs::read_to_string(path);
+    log::config_trace(
+        "config_read_end",
+        format_args!("ok={}", read_result.is_ok()),
+    );
+    let source = match read_result {
         Ok(source) => source,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (baseline, diag),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            log::config_snapshot("normalized_missing_file", &baseline);
+            return (baseline, diag);
+        }
         Err(e) => {
             diag.errors.push(format!(
                 "cannot read '{}': {e}; using compiled defaults",
@@ -301,7 +314,31 @@ pub fn load_from_path(path: &Path) -> (Cfg, Diagnostics) {
         }
     };
 
-    let user = match parse_user(&source, &mut diag) {
+    if log::config_trace_enabled() {
+        log::config_trace(
+            "source_identity",
+            format_args!(
+                "bytes={} fingerprint={:016x}",
+                source.len(),
+                log::config_fingerprint(source.as_bytes())
+            ),
+        );
+    }
+    log::config_trace(
+        "deserialize_start",
+        format_args!("parser=maverick_toml_event_stream"),
+    );
+    let parsed = parse_user(&source, &mut diag);
+    log::config_trace(
+        "deserialize_end",
+        format_args!(
+            "ok={} warnings={} errors={}",
+            parsed.is_ok(),
+            diag.warnings.len(),
+            diag.errors.len()
+        ),
+    );
+    let user = match parsed {
         Ok(user) => user,
         Err(e) => {
             diag.errors.push(format!(
@@ -314,7 +351,17 @@ pub fn load_from_path(path: &Path) -> (Cfg, Diagnostics) {
         }
     };
 
+    log::config_trace("validation_start", format_args!("phase=semantic_merge"));
     let cfg = merge_config(baseline, user, &mut diag);
+    log::config_trace(
+        "validation_end",
+        format_args!(
+            "warnings={} errors={}",
+            diag.warnings.len(),
+            diag.errors.len()
+        ),
+    );
+    log::config_snapshot("normalized_config", &cfg);
     (cfg, diag)
 }
 

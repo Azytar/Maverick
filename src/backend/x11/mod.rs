@@ -318,7 +318,31 @@ impl WindowManager {
             Event::EnterNotify(e) => self.on_enter(e)?,
             Event::FocusIn(e) => self.on_focus_in(e)?,
             Event::FocusOut(e) => self.on_focus_out(e)?,
-            Event::KeyPress(e) => self.on_key(e)?,
+            Event::KeyPress(e) => {
+                if crate::log::config_trace_enabled() {
+                    static FIRST_KEYPRESS: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !FIRST_KEYPRESS.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        crate::log::config_trace("first_keypress", format_args!("event={e:?}"));
+                    }
+                    crate::log::config_trace(
+                        "key_raw",
+                        format_args!(
+                            "keycode={} state={:#06x} group={} compositor_actual={} event={e:?}",
+                            e.detail,
+                            u16::from(e.state),
+                            (u16::from(e.state) >> 13) & 3,
+                            self.compositor.is_some()
+                        ),
+                    );
+                }
+                let result = self.on_key(e);
+                crate::log::config_trace(
+                    "key_handler_end",
+                    format_args!("keycode={} time={} result={result:?}", e.detail, e.time),
+                );
+                result?;
+            }
             Event::MappingNotify(e) => self.on_mapping(&e),
             Event::MapNotify(e) => self.on_map_notify(e)?,
             Event::MapRequest(e) => self.on_map_request(e)?,
@@ -790,6 +814,18 @@ impl WindowManager {
     /// One iteration is `run_once`; graceful `quit` waits up to `SHUTDOWN_BUDGET`
     /// for clients, then `force_kill_remaining`.
     pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        crate::log::config_trace(
+            "event_loop_start",
+            format_args!(
+                "compositor_requested={} compositor_actual={}",
+                self.engine.cfg.compositor.enabled,
+                self.compositor.is_some()
+            ),
+        );
+        crate::log::config_trace(
+            "scheduler_policy",
+            format_args!("compositor_actual={} animations_enabled={} off_path=snap_animations on_path=substeps_if_enabled idle_poll_ms=100 frame_poll_ms=0 pacing=swap_only existing_trace_enabled={}", self.compositor.is_some(), crate::config::animations_enabled(&self.engine.cfg), trace::enabled()),
+        );
         while self.engine.state.running {
             if let Err(e) = self.run_once() {
                 return if is_x11_connection_loss(&*e) {
@@ -862,6 +898,20 @@ impl WindowManager {
         // stiffness/damping) to every workspace camera, since Monitor::new /
         // reconcile_workspaces build cameras with hard-coded defaults.
         engine.apply_camera_cfg();
+        crate::log::config_snapshot("engine_config", &engine.cfg);
+        if crate::log::config_trace_enabled() {
+            for (monitor, mon) in engine.state.monitors.iter().enumerate() {
+                for (workspace, ws) in mon.workspaces.iter().enumerate() {
+                    crate::log::config_trace(
+                        "camera_config_applied",
+                        format_args!(
+                            "monitor={monitor} workspace={workspace} camera={:?}",
+                            ws.camera
+                        ),
+                    );
+                }
+            }
+        }
 
         // Seed the native wallpaper from config: a configured `path` becomes the
         // wallpaper source (image/shader inferred by extension); the compositor
@@ -890,7 +940,27 @@ impl WindowManager {
         )?
         .check()?;
 
-        let ks = fetch_keyboard_state(&conn)?;
+        crate::log::config_trace(
+            "xkb_init_start",
+            format_args!("phase=fetch_before_compositor"),
+        );
+        let ks = fetch_keyboard_state(&conn).inspect_err(|e| {
+            crate::log::config_trace(
+                "xkb_init_end",
+                format_args!("phase=fetch_before_compositor status=failed error={e}"),
+            );
+        })?;
+        crate::log::config_trace(
+            "xkb_init_end",
+            format_args!("phase=fetch_before_compositor status=ok"),
+        );
+        crate::log::config_trace(
+            "keyboard_snapshot_before_compositor",
+            format_args!(
+                "min={} kpk={} raw={:?} groups={:?} numlock={:#x} scroll={:#x}",
+                ks.min, ks.kpk, ks.keysyms, ks.group_cols, ks.numlock, ks.scroll
+            ),
+        );
         let (raw_keymap, raw_kpk, raw_min, numlock) = (ks.keysyms, ks.kpk, ks.min, ks.numlock);
         let keymap = build_keymap(&engine.cfg);
 
@@ -898,6 +968,14 @@ impl WindowManager {
         // `_NET_WM_CM_S0`, redirects every subwindow to Manual, and sets up the
         // GLX context. On any failure it logs and returns `None`, leaving the WM
         // on the classic `ConfigureWindow` path.
+        crate::log::config_trace(
+            "compositor_init_start",
+            format_args!(
+                "requested={} actual=false skipped_off={}",
+                engine.cfg.compositor.enabled,
+                !crate::config::compositor_enabled(&engine.cfg)
+            ),
+        );
         let mut compositor = if crate::config::compositor_enabled(&engine.cfg) {
             if let Err(e) = crate::config::validate_compositor_backend(&engine.cfg) {
                 log::warn!("compositor: {e}; staying on X11 path");
@@ -915,6 +993,36 @@ impl WindowManager {
         } else {
             None
         };
+
+        crate::log::config_trace(
+            "compositor_init_end",
+            format_args!(
+                "requested={} actual={} skipped_off={}",
+                engine.cfg.compositor.enabled,
+                compositor.is_some(),
+                !crate::config::compositor_enabled(&engine.cfg)
+            ),
+        );
+        if crate::log::config_trace_enabled() {
+            crate::log::config_trace(
+                "xkb_init_start",
+                format_args!("phase=fetch_after_compositor diagnostic_only=true"),
+            );
+            match fetch_keyboard_state(&conn) {
+                Ok(after) => {
+                    crate::log::config_trace("xkb_init_end", format_args!("phase=fetch_after_compositor diagnostic_only=true status=ok"));
+                    crate::log::config_trace(
+                        "keyboard_snapshot_after_compositor",
+                        format_args!("applied=false min={} kpk={} raw={:?} groups={:?} numlock={:#x} scroll={:#x}", after.min, after.kpk, after.keysyms, after.group_cols, after.numlock, after.scroll),
+                    );
+                    crate::log::config_trace(
+                        "keyboard_compare_compositor",
+                        format_args!("raw_equal={} groups_equal={} locks_equal={} range_equal={} applied=false", raw_keymap == after.keysyms, ks.group_cols == after.group_cols, numlock == after.numlock && ks.scroll == after.scroll, raw_min == after.min && raw_kpk == after.kpk),
+                    );
+                }
+                Err(e) => crate::log::config_trace("xkb_init_end", format_args!("phase=fetch_after_compositor diagnostic_only=true status=failed applied=false error={e}")),
+            }
+        }
 
         // Apply the configured native wallpaper (if any) to the freshly-built
         // compositor. A path of `None` leaves the legacy root pixmap in place.
@@ -1529,14 +1637,17 @@ fn resolve_binding(
             continue;
         }
         if let Some(a) = keymap.get(&(mods, ks)) {
+            crate::log::config_trace("key_binding", format_args!("keycode={code} mods={mods:#x} primary={ks_primary:#x} shifted={ks_shifted:#x} resolved={ks:#x} action={a:?} outcome=matched"));
             return Some(((mods, ks), a.clone()));
         }
     }
     for &ks in code_bindings.get(&code).into_iter().flatten() {
         if let Some(a) = keymap.get(&(mods, ks)) {
+            crate::log::config_trace("key_binding", format_args!("keycode={code} mods={mods:#x} primary={ks_primary:#x} shifted={ks_shifted:#x} resolved={ks:#x} action={a:?} outcome=matched"));
             return Some(((mods, ks), a.clone()));
         }
     }
+    crate::log::config_trace("key_binding", format_args!("keycode={code} mods={mods:#x} primary={ks_primary:#x} shifted={ks_shifted:#x} outcome=unmatched"));
     None
 }
 

@@ -85,3 +85,46 @@ macro_rules! debug {
 }
 
 pub(crate) use {debug, error, info, warn_ as warn};
+
+/// Opt-in diagnostics only. May contain config paths and command arguments;
+/// do not enable on a session containing sensitive bindings/autostart entries.
+pub(crate) fn config_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("MAVERICK_CONFIG_TRACE").is_some_and(|v| v == "1"))
+}
+
+/// Process-relative monotonic timestamp plus sequence; never used by WM policy.
+pub(crate) fn config_trace(event: &str, details: std::fmt::Arguments<'_>) {
+    if !config_trace_enabled() {
+        return;
+    }
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let us = START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    eprintln!("CONFIG-TRACE seq={seq} t_us={us} event={event} {details}");
+}
+
+/// FNV-1a over a deterministic same-binary Debug representation (no maps or
+/// pointers in Cfg). Not a security hash or a cross-version serialization API.
+pub(crate) fn config_fingerprint(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
+pub(crate) fn config_snapshot(stage: &str, cfg: &crate::config::Cfg) {
+    if config_trace_enabled() {
+        let snapshot = format!("{cfg:?}");
+        config_trace(
+            stage,
+            format_args!(
+                "fingerprint={:016x} config={snapshot}",
+                config_fingerprint(snapshot.as_bytes())
+            ),
+        );
+    }
+}

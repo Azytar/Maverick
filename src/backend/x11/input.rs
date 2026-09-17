@@ -177,22 +177,35 @@ impl WindowManager {
     pub(super) fn setup_xkb(&self) {
         use x11rb::protocol::xkb::{ConnectionExt as _, EventType, SelectEventsAux, ID};
 
+        crate::log::config_trace("xkb_init_start", format_args!("phase=subscription"));
         let supported = match self.conn.xkb_use_extension(1, 0) {
             Ok(cookie) => match cookie.reply() {
                 Ok(reply) => reply.supported,
                 Err(e) => {
                     log::info!("XKB: UseExtension failed ({e}) — core MappingNotify only");
+                    crate::log::config_trace(
+                        "xkb_init_end",
+                        format_args!("phase=subscription status=extension_reply_failed error={e}"),
+                    );
                     return;
                 }
             },
             Err(e) => {
                 log::info!("XKB: extension unavailable ({e}) — core MappingNotify only");
+                crate::log::config_trace(
+                    "xkb_init_end",
+                    format_args!("phase=subscription status=extension_request_failed error={e}"),
+                );
                 return;
             }
         };
         if !supported {
             log::info!(
                 "XKB: server reports the extension as unsupported — core MappingNotify only"
+            );
+            crate::log::config_trace(
+                "xkb_init_end",
+                format_args!("phase=subscription status=unsupported"),
             );
             return;
         }
@@ -211,9 +224,28 @@ impl WindowManager {
             Ok(cookie) => {
                 if let Err(e) = cookie.check() {
                     log::info!("XKB: SelectEvents rejected ({e}) — core MappingNotify only");
+                    crate::log::config_trace(
+                        "xkb_init_end",
+                        format_args!(
+                            "phase=subscription status=rejected events={events:?} error={e}"
+                        ),
+                    );
+                } else {
+                    crate::log::config_trace(
+                        "xkb_init_end",
+                        format_args!("phase=subscription status=ok events={events:?}"),
+                    );
                 }
             }
-            Err(e) => log::info!("XKB: SelectEvents failed ({e}) — core MappingNotify only"),
+            Err(e) => {
+                log::info!("XKB: SelectEvents failed ({e}) — core MappingNotify only");
+                crate::log::config_trace(
+                    "xkb_init_end",
+                    format_args!(
+                        "phase=subscription status=request_failed events={events:?} error={e}"
+                    ),
+                );
+            }
         }
     }
 
@@ -224,12 +256,23 @@ impl WindowManager {
     /// `plan_key_grabs`). Anything grabbed here that `on_key` could not resolve
     /// would be a key stolen from the focused application, not a no-op.
     pub(super) fn grab_keys(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        crate::log::config_trace(
+            "grabs_start",
+            format_args!(
+                "kind=passive_key root={:#x} numlock={:#x} scroll={:#x}",
+                self.root, self.numlock, self.scroll
+            ),
+        );
         let _ = self.conn.ungrab_key(0u8, self.root, ModMask::ANY);
         self.code_bindings.clear();
 
         // P7: Use cached keyboard mapping instead of fetching it again
         let kpk = self.raw_kpk;
         if kpk == 0 {
+            crate::log::config_trace(
+                "grabs_end",
+                format_args!("kind=passive_key status=skipped_empty_keymap"),
+            );
             return Ok(());
         }
         let min = self.raw_min;
@@ -281,12 +324,18 @@ impl WindowManager {
                             bind_name(*mask, *keysym),
                             x_error_kind(&e)
                         ));
+                        crate::log::config_trace("key_grab", format_args!("kind=passive root={:#x} keycode={code} mask={mask:#x} keysym={keysym:#x} status=rejected error={e}", self.root));
+                    } else {
+                        crate::log::config_trace("key_grab", format_args!("kind=passive root={:#x} keycode={code} mask={mask:#x} keysym={keysym:#x} status=confirmed owner_events=true pointer_mode=ASYNC keyboard_mode=ASYNC", self.root));
                     }
                 }
-                Err(e) => warnings.push(format!(
-                    "keybinding {}: grab request failed ({e})",
-                    bind_name(*mask, *keysym)
-                )),
+                Err(e) => {
+                    warnings.push(format!(
+                        "keybinding {}: grab request failed ({e})",
+                        bind_name(*mask, *keysym)
+                    ));
+                    crate::log::config_trace("key_grab", format_args!("kind=passive root={:#x} keycode={code} mask={mask:#x} keysym={keysym:#x} status=request_failed error={e}", self.root));
+                }
             }
 
             // NumLock/CapsLock variants. Unchecked: they share the base
@@ -300,14 +349,17 @@ impl WindowManager {
                     continue;
                 }
                 done.push(extra);
-                let _ = self.conn.grab_key(
+                match self.conn.grab_key(
                     true,
                     self.root,
                     (mask | extra).into(),
                     *code,
                     GrabMode::ASYNC,
                     GrabMode::ASYNC,
-                );
+                ) {
+                    Ok(_) => crate::log::config_trace("key_grab", format_args!("kind=passive root={:#x} keycode={code} mask={:#x} keysym={keysym:#x} status=submitted_unchecked owner_events=true pointer_mode=ASYNC keyboard_mode=ASYNC", self.root, mask | extra)),
+                    Err(e) => crate::log::config_trace("key_grab", format_args!("kind=passive root={:#x} keycode={code} mask={:#x} keysym={keysym:#x} status=request_failed error={e}", self.root, mask | extra)),
+                }
             }
         }
 
@@ -321,6 +373,16 @@ impl WindowManager {
             self.last_grab_warnings = warnings;
         }
 
+        crate::log::config_trace(
+            "grabs_end",
+            format_args!(
+                "kind=passive_key planned={} missing={} fallback_keycodes={} warnings={:?}",
+                plan.grabs.len(),
+                plan.missing.len(),
+                plan.code_bindings.len(),
+                self.last_grab_warnings
+            ),
+        );
         self.code_bindings = plan.code_bindings;
         Ok(())
     }
