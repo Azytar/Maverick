@@ -141,8 +141,15 @@ opacity = {0.78 if self.scene == "compositor" else 1.0}
         return json.loads(run([str(self.binaries / "maverickctl"), "query", "tree"], self.env).stdout)
 
     def gl_active(self):
-        log = (self.path / "wm.log").read_text()
-        return "Backend: OpenGL/GLX" in log and "event=PresentEnd submitted=true" in log
+        return self._gl_active(self.path / "wm.log")
+
+    @staticmethod
+    def _gl_active(log):
+        try:
+            text = Path(log).read_text()
+        except FileNotFoundError:
+            return False
+        return "Backend: OpenGL/GLX" in text and "event=PresentEnd submitted=true" in text
 
     def action(self, action):
         result = run([str(self.binaries / "maverickctl"), "msg", action], self.env)
@@ -277,14 +284,14 @@ def main():
             if scene == "compositor":
                 wait_for("actual GL renderer and submitted frame (fallback is not accepted)", session.gl_active)
             geometry = session.capture(windows)
-            evidence = {"scene": scene, "display": session.env["DISPLAY"],
-                        "wm_pid": session.wm.pid, "geometry": geometry,
-                        "state": session.state(), "tree": session.tree(),
-                        "gl_active": session.gl_active(),
-                        "sha256": hashlib.sha256((output / f"{scene}.png").read_bytes()).hexdigest()}
-            (session.path / f"{scene}.json").write_text(json.dumps(evidence, indent=2) + "\n")
+            record = {"scene": scene, "display": session.env["DISPLAY"],
+                      "wm_pid": session.wm.pid, "geometry": geometry,
+                      "state": session.state(), "tree": session.tree(),
+                      "gl_active": session.gl_active(),
+                      "sha256": hashlib.sha256((output / f"{scene}.png").read_bytes()).hexdigest()}
+            (evidence / f"{scene}.json").write_text(json.dumps(record, indent=2) + "\n")
             if scene == "compositor":
-                (session.path / "compositor.log").write_text((session.path / "wm.log").read_text())
+                (evidence / "compositor-wm.log").write_text((session.path / "wm.log").read_text())
         except Exception:
             for name in ("xephyr", "wm"):
                 log = session.path / f"{name}.log"
