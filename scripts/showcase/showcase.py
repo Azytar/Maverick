@@ -18,9 +18,10 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 SCENES = ("tiling", "navigation", "floating", "fullscreen", "compositor",
           "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration",
-          "rounded-focus", "rounded-focus-gl")
+          "rounded-focus", "rounded-focus-gl", "fullscreen-new-window", "fullscreen-new-window-gl")
 FOCUS_SCENES = ("rounded-focus", "rounded-focus-gl")
-GL_SCENES = ("compositor", "rounded-focus-gl")
+FULLSCREEN_SCENES = ("fullscreen-new-window", "fullscreen-new-window-gl")
+GL_SCENES = ("compositor", "rounded-focus-gl", "fullscreen-new-window-gl")
 SIZE = (1440, 900)
 BORDER, RADIUS = 1, 18
 FOCUSED, NORMAL = (137, 180, 250), (69, 71, 90)
@@ -75,6 +76,8 @@ class Session:
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(("MAVERICK_", "MAV_"))}
         self.env["MAVERICK_LOG"] = "info"
         self.env["MAV_COMP_TRACE"] = "1"
+        if scene in FULLSCREEN_SCENES:
+            self.env["MAV_FLOAT_TRACE"] = "1"
         self.env["LC_ALL"] = "C.UTF-8"
         self.env.pop("DBUS_SESSION_BUS_ADDRESS", None)
         for key in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"):
@@ -115,7 +118,7 @@ class Session:
         config = self.path / "config.toml"
         config.write_text(f'''[general]
 border_width = 1
-corner_radius = {RADIUS if self.scene in ("compositor", "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration", *FOCUS_SCENES) else 0}
+corner_radius = {RADIUS if self.scene in ("compositor", "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration", *FOCUS_SCENES, *FULLSCREEN_SCENES) else 0}
 gaps_inner = {6 if self.scene == "tiled-spacing" else 4}
 gaps_outer = {10 if self.scene == "tiled-spacing" else 8}
 column_width = 0.31
@@ -137,7 +140,7 @@ commands = [["/usr/bin/true"]]
 instance = "showcase3"
 opacity = {0.78 if self.scene == "compositor" else 1.0}
 ''')
-        if self.scene in FOCUS_SCENES:
+        if self.scene in (*FOCUS_SCENES, *FULLSCREEN_SCENES):
             with config.open("a") as stream:
                 stream.write('\n[[rules]]\ninstance = "showcase6"\nfloat = true\n')
         run([str(self.binaries / "maverick"), "--check-config", str(config)], self.env)
@@ -170,9 +173,11 @@ opacity = {0.78 if self.scene == "compositor" else 1.0}
 
     def terminal(self, number, title, source):
         name = f"showcase{number}"
+        background = ({2: "#542638", 3: "#245447"}.get(number, "#1e1e2e")
+                      if self.scene in FULLSCREEN_SCENES else "#1e1e2e")
         self.spawn(["xterm", "-name", name, "-class", "Showcase", "-title", title,
-                    "-fa", "DejaVu Sans Mono", "-fs", "11", "-bg", "#1e1e2e",
-                    "-fg", "#cdd6f4", "-cr", "#1e1e2e", "+sb", "-b", "18",
+                    "-fa", "DejaVu Sans Mono", "-fs", "11", "-bg", background,
+                    "-fg", "#cdd6f4", "-cr", background, "+sb", "-b", "18",
                     "-geometry", "72x36", "-e", sys.executable, str(Path(__file__).resolve()),
                     "--client", title, source], name)
         return wait_for(f"client {number}", lambda: run(["xdotool", "search", "--onlyvisible",
@@ -434,6 +439,214 @@ def rounded_focus(session, windows, evidence):
     return reports
 
 
+def x_stack(session):
+    lib = ctypes.CDLL("libX11.so.6")
+    window_type = ctypes.c_ulong
+    lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    lib.XOpenDisplay.restype = ctypes.c_void_p
+    lib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    lib.XDefaultRootWindow.restype = window_type
+    lib.XQueryTree.argtypes = [ctypes.c_void_p, window_type, ctypes.POINTER(window_type),
+                              ctypes.POINTER(window_type), ctypes.POINTER(ctypes.POINTER(window_type)),
+                              ctypes.POINTER(ctypes.c_uint)]
+    lib.XGetInputFocus.argtypes = [ctypes.c_void_p, ctypes.POINTER(window_type), ctypes.POINTER(ctypes.c_int)]
+    lib.XFree.argtypes = [ctypes.c_void_p]
+    lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    display = lib.XOpenDisplay(session.env["DISPLAY"].encode())
+    if not display:
+        raise RuntimeError("XOpenDisplay failed for actual stack evidence")
+    children = ctypes.POINTER(window_type)()
+    try:
+        root, parent, focus = window_type(), window_type(), window_type()
+        count, revert = ctypes.c_uint(), ctypes.c_int()
+        if not lib.XQueryTree(display, lib.XDefaultRootWindow(display), ctypes.byref(root),
+                              ctypes.byref(parent), ctypes.byref(children), ctypes.byref(count)):
+            raise RuntimeError("XQueryTree failed")
+        lib.XGetInputFocus(display, ctypes.byref(focus), ctypes.byref(revert))
+        return {"source": "XQueryTree(root)", "bottom_to_top": list(children[:count.value]),
+                "input_focus": focus.value, "root": root.value}
+    finally:
+        if children:
+            lib.XFree(children)
+        lib.XCloseDisplay(display)
+
+
+def fullscreen_new_window(session, windows, evidence):
+    reports = []
+    owner = windows[0]
+
+    def entries(tree):
+        return {str(window["id"]): window
+                for monitor in tree["monitors"] for workspace in monitor["workspaces"]
+                for window in [*(w for col in workspace["columns"] for w in col["windows"]),
+                               *workspace["floats"]]}
+
+    def pixels(path):
+        raw = subprocess.run(["convert", str(path), "-alpha", "off", "-colorspace", "sRGB",
+                              "-depth", "8", "rgb:-"], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, check=True, timeout=5).stdout
+        if len(raw) != SIZE[0] * SIZE[1] * 3:
+            raise RuntimeError("Unexpected fullscreen RGB byte count")
+        return raw
+
+    def snapshot(stage, overlay=None, focused=None, pending=None, reference=None):
+        session.stable(windows)
+        last, since = None, time.monotonic()
+        def stable_stack():
+            nonlocal last, since
+            value = x_stack(session)
+            if value != last:
+                last, since = value, time.monotonic()
+            return value if time.monotonic() - since > 0.8 else None
+        stack = wait_for("stable actual QueryTree stack and X focus", stable_stack)
+        tree, state = session.tree(), session.state()
+        objects = entries(tree)
+        geometry = {w: float_geometry(session, w) for w in windows}
+        scroll = [[ws["scroll"] for ws in mon["workspaces"]] for mon in tree["monitors"]]
+        image = evidence / f"{session.scene}-{stage}.png"
+        run(["xdotool", "mousemove", str(SIZE[0] - 1), str(SIZE[1] - 1)], session.env)
+        run(["import", "-display", session.env["DISPLAY"], "-window", "root", str(image)], session.env)
+        raw = pixels(image)
+        failures = []
+        record = {"stage": stage, "state": state, "tree": tree, "x_geometry": geometry,
+                  "actual_stack": stack, "camera": scroll, "image": str(image),
+                  "gl_active": session.gl_active(), "failures": failures}
+        for window in windows:
+            obj = objects.get(window, {})
+            # A freshly adopted float (client-driven resize/move) keeps its
+            # pre-move projection in `desired` until the next full arrange —
+            # the float-authority model (layout.rs). Tiles must satisfy the
+            # strict equality; floats only need applied/real == X11.
+            fields = ("applied", "real") if obj.get("float") else ("desired", "applied", "real")
+            for field in fields:
+                if obj.get(field) != list(geometry[window] or ()):
+                    failures.append(f"{window}: {field} {obj.get(field)} != actual {geometry[window]}")
+            if int(window) not in stack["bottom_to_top"]:
+                failures.append(f"{window}: missing from root top-level QueryTree")
+        if overlay is not None:
+            obj = objects.get(owner, {})
+            if not obj.get("fullscreen") or obj.get("overlay") != overlay:
+                failures.append(f"A fullscreen/overlay expected true/{overlay}: {obj}")
+            if geometry[owner] != (0, 0, *SIZE):
+                failures.append(f"A does not cover monitor: {geometry[owner]}")
+            order = stack["bottom_to_top"]
+            for window in windows[1:]:
+                if int(owner) in order and int(window) in order and order.index(int(owner)) <= order.index(int(window)):
+                    failures.append(f"A is not above {window} in actual XQueryTree")
+        if focused is not None:
+            if not objects.get(focused, {}).get("focus") or not objects.get(focused, {}).get("x11_focus"):
+                failures.append(f"Expected logical and observed X focus on {focused}")
+            if stack["input_focus"] != int(focused):
+                failures.append(f"Actual XGetInputFocus {stack['input_focus']} != {focused}")
+        actual_pending = sorted(w for w, obj in objects.items() if obj.get("pending"))
+        if actual_pending != ([] if pending is None else [pending]):
+            failures.append(f"Pending focus {actual_pending} != {pending}")
+        for window in windows[1:]:
+            obj = objects.get(window, {})
+            if not obj.get("float") and (obj.get("fullscreen") or obj.get("overlay") or
+                                         not geometry[window] or geometry[window][2] >= SIZE[0]):
+                failures.append(f"{window}: new tile did not retain normal ribbon geometry")
+        if reference is not None:
+            before = pixels(Path(reference["image"]))
+            changed, samples = 0, []
+            for y in range(SIZE[1]):
+                for x in range(SIZE[0]):
+                    if x >= SIZE[0] - 32 and y >= SIZE[1] - 32:
+                        continue
+                    offset = (y * SIZE[0] + x) * 3
+                    if raw[offset:offset + 3] != before[offset:offset + 3]:
+                        changed += 1
+                        if len(samples) < 12:
+                            samples.append([x, y, list(before[offset:offset + 3]), list(raw[offset:offset + 3])])
+            record["pixel_comparison"] = {"reference": reference["image"], "changed_pixels": changed,
+                                           "excluded_cursor_rect": [SIZE[0] - 32, SIZE[1] - 32, 32, 32],
+                                           "first_differences": samples}
+            if changed:
+                failures.append(f"Fullscreen content changed after insertion: {changed} pixels")
+        if session.scene in GL_SCENES and not session.gl_active():
+            failures.append("Real OpenGL/GLX backend and submitted frame required")
+        reports.append(record)
+        (evidence / f"{session.scene}-{stage}.json").write_text(json.dumps(record, indent=2) + "\n")
+        (evidence / f"{session.scene}.json").write_text(json.dumps(
+            {"scene": session.scene, "checks": reports, "failures": failures}, indent=2) + "\n")
+        if failures:
+            raise RuntimeError("; ".join(failures))
+        return record
+
+    def activate(window):
+        run(["xdotool", "windowactivate", "--sync", window], session.env)
+        wait_for(f"focus on {window}", lambda: any(
+            mon.get("focused") == int(window) for mon in session.state()["monitors"]))
+        session.stable(windows)
+
+    session.stable(windows)
+    if session.scene in GL_SCENES:
+        wait_for("actual GL renderer and submitted frame (fallback is not accepted)", session.gl_active)
+    snapshot("a-only", focused=owner)
+    session.action("toggle_fullscreen")
+    baseline = snapshot("a-fullscreen", overlay=True, focused=owner)
+    windows.append(session.terminal(2, "B / MAGENTA NEW RIBBON CLIENT", "Cargo.toml"))
+    snapshot("new-b-principal", overlay=True, focused=owner, pending=windows[1],
+             reference=baseline)
+    windows.append(session.terminal(3, "C / GREEN NEW RIBBON CLIENT", "tests/realwin.c"))
+    snapshot("new-c", overlay=True, focused=owner, pending=windows[2],
+             reference=baseline)
+    floating = session.terminal(6, "06 / Floating isolation", "Cargo.toml")
+    windows.append(floating)
+    snapshot("new-unrelated-float", overlay=True, focused=owner, pending=floating,
+             reference=baseline)
+    if not entries(session.tree())[floating].get("float"):
+        raise RuntimeError("showcase6 rule did not create a floating window")
+    session.action("focus:right")
+    snapshot("navigate-l", focused=windows[1])
+    session.action("focus:left")
+    snapshot("return-a-ribbon", overlay=False, focused=owner)
+    session.action("toggle_fullscreen")
+    # IPC acknowledgement precedes action dispatch; do not activate another
+    # client until the focused-window command has actually completed.
+    wait_for("A has exited fullscreen", lambda: not entries(session.tree())[owner]["fullscreen"])
+    activate(floating)
+    run(["xdotool", "windowsize", floating, "480", "360"], session.env)
+    session.stable(windows)
+    run(["xdotool", "windowmove", floating, "480", "270"], session.env)
+    snapshot("float-focus", focused=floating)
+    before = float_geometry(session, floating)
+    activate(windows[1])
+    session.action("focus:left")
+    session.stable(windows)
+    snapshot("float-unfocus", focused=owner)
+    windows.extend([session.terminal(4, "04 / Rendering", "maverick-gl/Cargo.toml"),
+                    session.terminal(5, "05 / IPC", "maverick-sys/Cargo.toml")])
+    activate(windows[-1])
+    tiled_before = float_geometry(session, windows[0])
+    for _ in range(4):
+        session.action("focus:left")
+    session.stable(windows)
+    isolation = snapshot("floating-scroll-isolation")
+    isolation["float_before"] = before
+    isolation["float_after"] = float_geometry(session, floating)
+    isolation["tile_before"] = tiled_before
+    isolation["tile_after"] = float_geometry(session, windows[0])
+    failures = isolation["failures"]
+    if before != isolation["float_after"]:
+        failures.append("Floating geometry moved with ribbon camera")
+    if tiled_before[:2] == isolation["tile_after"][:2]:
+        failures.append("Floating isolation did not actually scroll tiles")
+    (evidence / f"{session.scene}-floating-scroll-isolation.json").write_text(json.dumps(isolation, indent=2) + "\n")
+    if failures:
+        raise RuntimeError("; ".join(failures))
+    activate(floating)
+    for window in windows[2:]:
+        run(["xdotool", "windowclose", window], session.env)
+    windows[:] = windows[:2]
+    wait_for("extra clients removed", lambda: set(entries(session.tree())) == set(windows))
+    activate(owner)
+    snapshot("a-b-before-fullscreen", focused=owner)
+    session.action("toggle_fullscreen")
+    snapshot("a-b-fullscreen-a", overlay=True, focused=owner)
+    return reports
+
+
 def main():
     parser = argparse.ArgumentParser(description="Capture real Maverick windows in an isolated Xephyr server.")
     parser.add_argument("scene", choices=(*SCENES, "all"))
@@ -444,7 +657,7 @@ def main():
     if sys.platform != "linux" or ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
         parser.error("Linux PR_SET_CHILD_SUBREAPER is required for safe detached-child cleanup")
     required = ("Xephyr", "xdpyinfo", "xdotool", "xterm", "xsetroot", "import", "identify")
-    if args.scene in (*FOCUS_SCENES, "all"):
+    if args.scene in (*FOCUS_SCENES, *FULLSCREEN_SCENES, "all"):
         required += ("convert",)
     missing = [program for program in required if not shutil.which(program)]
     if missing:
@@ -460,8 +673,8 @@ def main():
     output = ROOT / "docs/screenshots"
     output.mkdir(parents=True, exist_ok=True)
     evidence = args.evidence.resolve()
-    if args.scene in (*FOCUS_SCENES, "all") and evidence != Path("/tmp/kilo/showcase-evidence"):
-        parser.error("Rounded-focus evidence must use /tmp/kilo/showcase-evidence")
+    if args.scene in (*FOCUS_SCENES, *FULLSCREEN_SCENES, "all") and evidence != Path("/tmp/kilo/showcase-evidence"):
+        parser.error("Regression scene evidence must use /tmp/kilo/showcase-evidence")
     evidence.mkdir(parents=True, exist_ok=True)
     lock = (evidence / "run.lock").open("w")
     try:
@@ -471,18 +684,24 @@ def main():
     for scene in SCENES if args.scene == "all" else (args.scene,):
         session = Session(scene, binaries, output)
         try:
+            if scene in FULLSCREEN_SCENES:
+                (evidence / f"{scene}.json").write_text(json.dumps(
+                    {"scene": scene, "checks": [], "failures": []}, indent=2) + "\n")
             session.start()
-            windows = [session.terminal(1, "01 / Configuration", "config/config.toml"),
-                       session.terminal(2, "02 / Workspace", "Cargo.toml"),
-                       session.terminal(3, "03 / X11 client", "tests/realwin.c")]
-            session.action("focus:left")
-            session.action("focus:left")
-            session.action("grow_col:-994")
-            session.action("focus:right")
-            session.action("focus:right")
-            session.stable(windows)
+            windows = [session.terminal(1, "01 / Configuration", "config/config.toml")]
             pixel_checks = None
-            if scene in FOCUS_SCENES:
+            if scene not in FULLSCREEN_SCENES:
+                windows.extend([session.terminal(2, "02 / Workspace", "Cargo.toml"),
+                                session.terminal(3, "03 / X11 client", "tests/realwin.c")])
+                session.action("focus:left")
+                session.action("focus:left")
+                session.action("grow_col:-994")
+                session.action("focus:right")
+                session.action("focus:right")
+                session.stable(windows)
+            if scene in FULLSCREEN_SCENES:
+                pixel_checks = fullscreen_new_window(session, windows, evidence)
+            elif scene in FOCUS_SCENES:
                 pixel_checks = rounded_focus(session, windows, evidence)
             elif scene == "navigation":
                 windows.extend([session.terminal(4, "04 / Rendering", "maverick-gl/Cargo.toml"),
@@ -532,16 +751,25 @@ def main():
                       "sha256": hashlib.sha256((output / f"{scene}.png").read_bytes()).hexdigest()}
             if pixel_checks is not None:
                 record["pixel_checks"] = pixel_checks
+            if scene in FULLSCREEN_SCENES:
+                record["failures"] = []
             (evidence / f"{scene}.json").write_text(json.dumps(record, indent=2) + "\n")
             if scene in GL_SCENES:
                 (evidence / f"{scene}-wm.log").write_text((session.path / "wm.log").read_text())
-        except Exception:
+        except Exception as error:
+            if scene in FULLSCREEN_SCENES:
+                report = evidence / f"{scene}.json"
+                record = json.loads(report.read_text()) if report.exists() else {"scene": scene}
+                record["failures"] = [str(error)]
+                report.write_text(json.dumps(record, indent=2) + "\n")
             for name in ("xephyr", "wm"):
                 log = session.path / f"{name}.log"
                 if log.exists():
                     print(f"{name} log:\n{log.read_text()[-6000:]}", file=sys.stderr)
             raise
         finally:
+            if scene in FULLSCREEN_SCENES and (session.path / "wm.log").exists():
+                (evidence / f"{scene}-wm.log").write_text((session.path / "wm.log").read_text())
             session.close()
 
 
