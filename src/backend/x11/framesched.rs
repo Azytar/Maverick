@@ -198,6 +198,16 @@ impl FrameScheduler {
         self.reasons &= FrameReason::Animation.bit() | FrameReason::WallpaperAnimation.bit();
     }
 
+    /// Consume this frame's damage and refresh animation state after presentation.
+    /// Preparation can start a transition after the scheduler was constructed.
+    pub(crate) fn after_present(&mut self, animating: bool) {
+        self.clear_dirty();
+        self.reasons &= !FrameReason::Animation.bit();
+        if animating {
+            self.mark(FrameReason::Animation);
+        }
+    }
+
     /// The reasons currently pending, as an iterator (for logs/tests).
     pub(crate) fn reasons(&self) -> impl Iterator<Item = FrameReason> + '_ {
         FrameReason::ALL
@@ -264,6 +274,26 @@ mod tests {
     //!   reason is pending.
 
     use super::*;
+
+    #[test]
+    fn transition_started_during_frame_does_not_idle_before_next_frame() {
+        let mut scheduler = FrameScheduler::from_compositor(false, false, DirtyReason::GEOMETRY);
+        assert!(!scheduler.is_animating());
+        scheduler.after_present(true);
+        assert_eq!(scheduler.timeout_ms(), 0);
+        assert!(!scheduler.has_dirty());
+        scheduler.after_present(false);
+        assert_eq!(scheduler.timeout_ms(), 100);
+    }
+
+    #[test]
+    fn finishing_presentation_preserves_wallpaper_animation() {
+        let mut scheduler = FrameScheduler::from_compositor(true, true, DirtyReason::GEOMETRY);
+        scheduler.after_present(false);
+        assert!(!scheduler.is_animating());
+        assert!(scheduler.has(FrameReason::WallpaperAnimation));
+        assert_eq!(scheduler.timeout_ms(), 0);
+    }
 
     #[test]
     fn empty_scheduler_needs_no_frame() {

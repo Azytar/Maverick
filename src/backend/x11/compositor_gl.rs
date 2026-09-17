@@ -427,6 +427,14 @@ impl CompWin {
                 self.presentation_value[3].round() as u32,
             );
             self.transform_radius = self.presentation_value[4].round() as u32;
+            // Retain the transition until its exact settled endpoint is installed.
+            // The camera may still be approaching that endpoint after progress reaches 1.
+            if progress >= 1.0
+                && self.transform == Rect::new(goal[0] as i32, goal[1] as i32, goal[2] as u32, goal[3] as u32)
+                && self.transform_radius == goal[4] as u32
+            {
+                self.presentation = None;
+            }
         } else {
             self.presentation_value = live;
             if self.presentation_spring.is_some() {
@@ -449,13 +457,11 @@ impl CompWin {
         for sub in substep_bounds(dt) {
             moving = transition.progress.step(sub);
         }
-        // A scalar spring can settle short of its target while still visibly
-        // mid-flight (the settle predicate is `|v| ≤ 0.01 && |disp| ≤ 0.5` in
-        // *progress units*); an eased presentation must always land exactly on
-        // its endpoint, so an early settle snaps the remainder here. The next
-        // `set_transform` sees goal == target and keeps the transition off.
+        // Snap progress, but keep the transition until set_transform installs
+        // the exact endpoint. A moving camera can reach that endpoint later.
         if !moving || transition.progress.position > 0.995 {
-            self.presentation = None;
+            transition.progress.position = 1.0;
+            transition.progress.velocity = 0.0;
         }
         true
     }
@@ -1616,6 +1622,13 @@ impl Compositor {
         registry: &LayoutRegistry,
         anim_per_mon: &[bool],
     ) {
+        // Advance before installing transforms so the frame that finishes a
+        // transition also draws its endpoint, rather than waiting for another turn.
+        let dt = self.last_present.map_or(0.0, |t| t.elapsed().as_secs_f32());
+        let dt = dt.clamp(0.0, crate::backend::x11::framesched::ONE_REFRESH * 2.0);
+        for cw in self.wins.values_mut() {
+            cw.tick_presentation(dt);
+        }
         if self.corner_radius != cfg.corner_radius {
             self.corner_radius = cfg.corner_radius;
             self.mark_full(DirtyReason::GEOMETRY);
@@ -1750,10 +1763,8 @@ impl Compositor {
         self.presentation_transforms = transforms;
     }
 
-    /// Whether any mapped window is mid presentation transition. Kept for the
-    /// debug harness (`dirty_reasons_bits`-style introspection); the frame loop
-    /// itself continues through `render`'s internal GEOMETRY re-mark.
-    #[allow(dead_code)]
+    /// Whether a visible presentation transition needs another frame. The loop
+    /// checks this before rendering and again before choosing its wait timeout.
     pub fn presentation_animating(&self) -> bool {
         self.wins
             .values()
@@ -2464,30 +2475,7 @@ impl Compositor {
     /// Blocks to vsync via the swap (when `vsync` is on). Returns `false` on a
     /// GL error so the caller can disable the compositor.
     pub fn render(&mut self) -> bool {
-        // Advance presentation transitions against the real inter-present
-        // interval. `render` runs exactly once per wanted frame, so the elapsed
-        // time since the previous present *is* the dt the transitions were
-        // displayed for — no separate clock and no synthetic timer (B1/B8
-        // policy). A first present has no interval yet and contributes dt 0.
-        //
-        // Timing detail: this runs *before* `compute_scene` so the springs see
-        // the interval the previous frame was actually on screen, and the new
-        // interpolation below reads the freshly advanced progress.
-        let dt = self.last_present.map_or(0.0, |t| t.elapsed().as_secs_f32());
-        // Same B8 policy as the WM springs: a present interval longer than two
-        // refreshes (idle gap, stalled GPU) must not advance the transition by
-        // the whole gap — it would snap instead of glide.
-        let dt = dt.clamp(0.0, crate::backend::x11::framesched::ONE_REFRESH * 2.0);
-        let mut presenting = false;
-        if dt > 0.0 {
-            for cw in self.wins.values_mut() {
-                presenting |= cw.tick_presentation(dt);
-            }
-        }
-        presenting |= self
-            .wins
-            .values()
-            .any(|cw| cw.mapped && !cw.hidden && cw.presentation.is_some());
+        let presenting = self.presentation_animating();
         if self.comp_trace {
             log::info!(
                 "[LIFECYCLE] event=RenderBegin dirty={} needs_full={} tracked={} scene_windows={}",
@@ -4091,6 +4079,25 @@ mod lifecycle_tests {
         assert!(cw.transform_radius < 18);
         settle_presentation(&mut cw, screen);
         assert_eq!(cw.transform_radius, 0);
+    }
+
+    #[test]
+    fn finished_progress_waits_for_installed_camera_endpoint() {
+        let mut cw = transitioning_window();
+        let screen = Rect::new(0, 0, 800, 600);
+        cw.presentation_goal = Some(presentation_value(screen, 0));
+        cw.set_transform(Rect::new(100, 0, 800, 600), 0, 18, screen, 2);
+        for _ in 0..120 {
+            cw.tick_presentation(1.0 / 60.0);
+            cw.set_transform(Rect::new(7, 0, 800, 600), 0, 18, screen, cw.transform_gen + 1);
+        }
+        assert!(cw.presentation.is_some(), "camera still has seven pixels to travel");
+        cw.tick_presentation(1.0 / 60.0);
+        assert!(cw.presentation.is_some(), "ticking alone must not consume the final frame");
+        cw.set_transform(screen, 0, 18, screen, cw.transform_gen + 1);
+        assert_eq!(cw.transform, screen);
+        assert_eq!(cw.transform_radius, 0);
+        assert!(cw.presentation.is_none());
     }
 
     #[test]

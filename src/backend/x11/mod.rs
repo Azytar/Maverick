@@ -680,7 +680,13 @@ impl WindowManager {
         // the same scheduler so the wait phase consults one authoritative
         // decision instead of rebuilding it (which would duplicate the NEED_FRAME
         // logic and could drift).
-        sched.clear_dirty();
+        sched.after_present(
+            self.animating
+                || self
+                    .compositor
+                    .as_ref()
+                    .is_some_and(compositor::Compositor::presentation_animating),
+        );
 
         // ── wait phase ────────────────────────────────────────────────────────
         // Block on the X/control-socket fd just long enough to wake for the next
