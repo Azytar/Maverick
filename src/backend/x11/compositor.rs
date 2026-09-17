@@ -270,7 +270,7 @@ mod placeholder_substep_tests {
         mon.workspaces[0].camera.position = 0.0;
         mon.workspaces[0].camera.target = 100.0;
         let dt = 0.016;
-        let mut pos_before = mon.workspaces[0].camera.position;
+        let pos_before = mon.workspaces[0].camera.position;
         for sub in substep_bounds(dt) {
             mon.workspaces[0].camera.step(sub);
         }
