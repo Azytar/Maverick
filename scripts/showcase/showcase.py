@@ -105,10 +105,10 @@ class Session:
         wait_for("X11 readiness", lambda: run(["xdpyinfo"], self.env, False).returncode == 0)
         config = self.path / "config.toml"
         config.write_text(f'''[general]
-border_width = 3
+border_width = 1
 corner_radius = {18 if self.scene == "compositor" else 0}
-gaps_inner = 14
-gaps_outer = 24
+gaps_inner = 4
+gaps_outer = 8
 column_width = 0.31
 n_tags = 3
 focus_mouse = false

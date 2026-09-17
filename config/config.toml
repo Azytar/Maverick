@@ -21,11 +21,11 @@
 
 [general]
 # Border width in pixels. 0 disables borders.
-border_width = 2
+border_width = 1
 
 # Gaps (pixels). `gaps` sets both at once; the two below override it.
-gaps_inner = 6          # between adjacent tiles
-gaps_outer = 6          # between tiles and the screen edge
+gaps_inner = 4          # between adjacent tiles
+gaps_outer = 8          # between tiles and the screen edge
 # Collapse to a single gap when only one window is visible on a workspace.
 smart_gaps = false
 

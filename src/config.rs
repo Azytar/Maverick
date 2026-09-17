@@ -114,9 +114,9 @@ impl Default for Cfg {
     /// safe baseline. The real runtime config is built by `load_config`.
     fn default() -> Self {
         Cfg {
-            border_w: 2,
-            gaps_inner: 6,
-            gaps_outer: 6,
+            border_w: 1,
+            gaps_inner: 4,
+            gaps_outer: 8,
             smart_gaps: false,
             corner_radius: 0,
             n_tags: 9,
