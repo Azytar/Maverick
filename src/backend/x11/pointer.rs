@@ -163,7 +163,7 @@ impl WindowManager {
         // this WM that was previously unreachable (bug C9).
         if e.detail >= 4 {
             let sup: u16 = ModMask::M4.into();
-            let clean = clean_mask(u16::from(e.state), self.numlock);
+            let clean = clean_mask(u16::from(e.state), self.numlock, self.scroll);
             if clean == sup {
                 self.scroll_camera_with_wheel(e.detail, e.root_x as i32, e.root_y as i32)?;
                 // Consumed as a WM gesture: release the SYNC grab WITHOUT
@@ -396,7 +396,7 @@ impl WindowManager {
         }
 
         let sup: u16 = ModMask::M4.into();
-        let clean = clean_mask(u16::from(e.state), self.numlock);
+        let clean = clean_mask(u16::from(e.state), self.numlock, self.scroll);
         if clean == sup && !focused_fs {
             if let Some(cw) = client_win {
                 // Only already-floating windows are draggable (move with

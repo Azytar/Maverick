@@ -32,6 +32,15 @@ class Lines:
         self.log.flush()
         return result
 
+    def drain(self):
+        """Consume already-buffered lines so a later barrier cannot match a
+        stale one. Event-driven: returns as soon as the pipe is empty."""
+        while self.buffer and b"\n" in self.buffer:
+            result, self.buffer = self.buffer.split(b"\n", 1)
+            result = result.decode(errors="replace")
+            self.log.write(result + "\n")
+            self.log.flush()
+
     def until(self, marker):
         result = []
         while True:
@@ -39,6 +48,25 @@ class Lines:
             result.append(value)
             if marker in value:
                 return result
+
+    def drain(self):
+        # Consume every line already buffered (or arriving within a short
+        # non-blocking window) so a later `until` can only match a FRESH line.
+        drained = []
+        while True:
+            ready = select.select([self.pipe], [], [], 0.05)[0]
+            if not ready:
+                return drained
+            data = os.read(self.pipe.fileno(), 65536)
+            if not data:
+                return drained
+            self.buffer += data
+            while b"\n" in self.buffer:
+                line, self.buffer = self.buffer.split(b"\n", 1)
+                text = line.decode(errors="replace")
+                self.log.write(text + "\n")
+                self.log.flush()
+                drained.append(text)
 
 
 def main():
@@ -104,13 +132,16 @@ commands = [["/usr/bin/true"]]
                     wm_lines.until("keyboard: keymap refreshed")
                 cmd("map", "STATE")
 
-            def start(variant):
-                layout(variant)
+            def spawn_wm():
                 wm = subprocess.Popen([str(args.wm.resolve()), "--config", str(config)], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 processes.append(wm)
                 stream = Lines(wm.stdout, logs)
                 stream.until("maverick ready")
                 return wm, stream
+
+            def start(variant):
+                layout(variant)
+                return spawn_wm()
 
             def test(label, code, mask, expected, locks=0):
                 if locks:
@@ -149,8 +180,19 @@ commands = [["/usr/bin/true"]]
             test("group-dvorak-c", 31, 76, 4)
             cmd("group 0", "STATE")
             test("group-back-qwerty-h", 43, 77, 1)
+            wm.terminate()
+            wm.wait(timeout=5)
+            # Session 4: Scroll Lock's column present when the WM reads the
+            # keyboard. Order is load-bearing: the layout() inside start() runs
+            # setxkbmap, which WIPES runtime modifier assignments (verified:
+            # mod3 resets to ISO_Level5_Shift), and this server does not deliver
+            # core MappingNotify for modifier-map changes (verified with a bare
+            # X client), so the xmodmap must land AFTER the last setxkbmap and
+            # BEFORE the WM starts reading the map.
+            layout("")
             subprocess.run(["xmodmap", "-e", "add mod3 = Scroll_Lock"], env=env, stdout=events, stderr=events, check=True)
-            cmd("map", "STATE")
+            subprocess.run(["xmodmap", "-pm"], env=env, stdout=events, stderr=events, check=True)
+            wm, wm_lines = spawn_wm()
             test("qwerty-scroll-lock-h", 43, 76, 1, 32)
             wm.terminate()
             wm.wait(timeout=5)

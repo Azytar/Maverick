@@ -15,6 +15,8 @@ const XK_BRACKETLEFT: u32 = 0x5b;
 const XK_BRACKETRIGHT: u32 = 0x5d;
 const XK_DEAD_GRAVE: u32 = 0xfe50;
 const XK_DEAD_CIRCUMFLEX: u32 = 0xfe52;
+const XK_H: u32 = 0x68;
+const XK_D: u32 = 0x64;
 
 const MIN: u8 = 8;
 const SUPER: u16 = 1 << 6; // ModMask::M4
@@ -89,7 +91,13 @@ fn altgr_only_keysym_falls_back_and_is_recorded() {
     // Group 1 cannot reach `[` at all on this layout.
     assert!(keysym_to_codes_group1(&km, MIN, 4, XK_BRACKETLEFT).is_empty());
 
-    let plan = plan_key_grabs(&km, MIN, 4, &[(SUPER, XK_BRACKETLEFT)]);
+    let plan = plan_key_grabs(
+        &km,
+        MIN,
+        4,
+        &[(SUPER, XK_BRACKETLEFT)],
+        ActiveLayout::default(),
+    );
     assert_eq!(plan.grabs, vec![(SUPER, XK_BRACKETLEFT, 9)]);
     assert!(plan.missing.is_empty());
     assert_eq!(
@@ -101,7 +109,13 @@ fn altgr_only_keysym_falls_back_and_is_recorded() {
 
 #[test]
 fn group1_binds_are_not_recorded_in_code_bindings() {
-    let plan = plan_key_grabs(&keymap_us_de(), MIN, 4, &[(SUPER, XK_Z)]);
+    let plan = plan_key_grabs(
+        &keymap_us_de(),
+        MIN,
+        4,
+        &[(SUPER, XK_Z)],
+        ActiveLayout::default(),
+    );
     assert_eq!(plan.grabs, vec![(SUPER, XK_Z, 9)]);
     assert!(
         plan.code_bindings.is_empty(),
@@ -112,7 +126,13 @@ fn group1_binds_are_not_recorded_in_code_bindings() {
 #[test]
 fn a_keysym_absent_from_the_layout_is_reported_not_grabbed() {
     // `[` does not exist anywhere in the us,de keymap.
-    let plan = plan_key_grabs(&keymap_us_de(), MIN, 4, &[(SUPER, XK_BRACKETLEFT)]);
+    let plan = plan_key_grabs(
+        &keymap_us_de(),
+        MIN,
+        4,
+        &[(SUPER, XK_BRACKETLEFT)],
+        ActiveLayout::default(),
+    );
     assert!(plan.grabs.is_empty(), "never grab a key we cannot dispatch");
     assert_eq!(plan.missing, vec![(SUPER, XK_BRACKETLEFT)]);
 }
@@ -126,6 +146,7 @@ fn duplicate_mask_keycode_pairs_are_grabbed_once() {
         MIN,
         4,
         &[(SUPER, XK_Z), (SUPER, XK_Z_UPPER)],
+        ActiveLayout::default(),
     );
     assert_eq!(plan.grabs, vec![(SUPER, XK_Z, 9)]);
 }
@@ -136,7 +157,7 @@ fn duplicate_mask_keycode_pairs_are_grabbed_once() {
 fn two_altgr_keysyms_on_one_keycode_stay_distinguishable() {
     let km = keymap_es();
     let binds = [(SUPER, XK_BRACKETLEFT), (SUPER | SHIFT, XK_BRACKETRIGHT)];
-    let plan = plan_key_grabs(&km, MIN, 4, &binds);
+    let plan = plan_key_grabs(&km, MIN, 4, &binds, ActiveLayout::default());
 
     assert_eq!(
         plan.code_bindings.get(&9),
@@ -237,12 +258,12 @@ fn clean_mask_strips_the_xkb_group_bits() {
     // would never match a bind's mask.
     let numlock = 1u16 << 4;
     let state = SUPER | 0x2000 | 0x4000;
-    assert_eq!(clean_mask(state, numlock), SUPER);
+    assert_eq!(clean_mask(state, numlock, 0), SUPER);
 
     // NumLock and CapsLock are removed too, so binds work in any lock state.
     let lock = 1u16 << 1;
-    assert_eq!(clean_mask(SUPER | numlock | lock, numlock), SUPER);
-    assert_eq!(clean_mask(SUPER | SHIFT | 0x2000, numlock), SUPER | SHIFT);
+    assert_eq!(clean_mask(SUPER | numlock | lock, numlock, 0), SUPER);
+    assert_eq!(clean_mask(SUPER | SHIFT | 0x2000, numlock, 0), SUPER | SHIFT);
 }
 
 // ── 5. Config keysym normalisation ─────────────────────────────────────────────
@@ -262,7 +283,13 @@ fn a_raw_uppercase_keysym_bind_is_indexed_lowercase() {
 
     // …and the grab side still searches for the raw keysym, which really does
     // live in column 1 of the `a` keycode.
-    let plan = plan_key_grabs(&keymap_us_de(), MIN, 4, &[(SUPER, XK_A_UPPER)]);
+    let plan = plan_key_grabs(
+        &keymap_us_de(),
+        MIN,
+        4,
+        &[(SUPER, XK_A_UPPER)],
+        ActiveLayout::default(),
+    );
     assert_eq!(plan.grabs, vec![(SUPER, XK_A_UPPER, 8)]);
 
     // End to end: the press reports column 0 (`a`), the bind was written `0x41`.
@@ -313,6 +340,84 @@ fn dispatch_never_reads_past_group1() {
     assert_eq!(dispatch_col(true, true, 4), 0);
     // A degenerate one-column keymap must not index out of bounds.
     assert_eq!(dispatch_col(true, false, 1), 0);
+}
+
+// ── 6. Active XKB group projection (BUG B) ─────────────────────────────────────
+
+/// Two groups laid out the way an XKB `KeySymMap` row really is: `width`
+/// symbols per group, contiguous (`group_info` low nibble = group count).
+/// Group 1 is QWERTY (`h`), group 2 is Dvorak (`h` on a different keycode);
+/// 2 levels per group → 4 symbols per row.
+fn xkb_rows_us_us_dvorak() -> Vec<x11rb::protocol::xkb::KeySymMap> {
+    let row = |syms: Vec<u32>| x11rb::protocol::xkb::KeySymMap {
+        kt_index: [0, 0, 0, 0],
+        group_info: 2,
+        width: 2,
+        syms,
+    };
+    // Keycode 43 row: QWERTY h/H, then Dvorak d/D. Keycode 44 row: QWERTY j/J,
+    // then Dvorak h/H. `group_info` low nibble = 2 groups.
+    vec![
+        row(vec![0x68, 0x48, 0x64, 0x44]),
+        row(vec![0x6a, 0x4a, 0x68, 0x48]),
+    ]
+}
+
+#[test]
+fn group_projection_reads_the_active_group_not_core_columns() {
+    let symbols = xkb_rows_us_us_dvorak();
+    // QWERTY group: keycode 43 is h, keycode 44 is j.
+    let qwerty = group_columns(&symbols, 0, 2);
+    assert_eq!(qwerty[0], [0x68, 0x48]);
+    assert_eq!(qwerty[1], [0x6a, 0x4a]);
+    // Dvorak group: the same keycodes now mean d and h.
+    let dvorak = group_columns(&symbols, 1, 2);
+    assert_eq!(dvorak[0], [0x64, 0x44]);
+    assert_eq!(dvorak[1], [0x68, 0x48]);
+}
+
+#[test]
+fn grabs_follow_the_active_group() {
+    // The bind is written for the physical Dvorak `h` (keycode 44's active
+    // group). With Dvorak active the grab must land on keycode 44 — the old
+    // core-column scan would have grabbed nothing for `h` in group 1 terms.
+    let dvorak = group_columns(&xkb_rows_us_us_dvorak(), 1, 2);
+    let plan = plan_key_grabs(
+        &[0x64, 0x44, 0x00, 0x00, 0x68, 0x48, 0x00, 0x00],
+        MIN,
+        4,
+        &[(SUPER, XK_H)],
+        ActiveLayout {
+            group_levels: &dvorak,
+        },
+    );
+    assert_eq!(plan.grabs, vec![(SUPER, XK_H, 9)]);
+    assert!(plan.missing.is_empty());
+}
+
+#[test]
+fn qwerty_group_does_not_grab_the_other_layouts_key() {
+    // With QWERTY active, Dvorak-only `d` on keycode 43 must NOT be grabbed:
+    // pressing physical `j` (which is `d` in Dvorak) must stay with the app.
+    let qwerty = group_columns(&xkb_rows_us_us_dvorak(), 0, 2);
+    let plan = plan_key_grabs(
+        &[0x64, 0x44, 0x00, 0x00, 0x68, 0x48, 0x00, 0x00],
+        MIN,
+        4,
+        &[(SUPER, XK_D)],
+        ActiveLayout {
+            group_levels: &qwerty,
+        },
+    );
+    assert!(plan.grabs.is_empty(), "the other group's key is not ours");
+}
+
+#[test]
+fn clean_mask_strips_mod3_like_the_other_locks() {
+    let numlock = 1u16 << 4;
+    let mod3 = 1u16 << 5; // Scroll Lock's column, from the modifier map
+    assert_eq!(clean_mask(SUPER | mod3, numlock, mod3), SUPER);
+    assert_eq!(clean_mask(SUPER | SHIFT | mod3, numlock, mod3), SUPER | SHIFT);
 }
 
 // ── Diagnostics ────────────────────────────────────────────────────────────────

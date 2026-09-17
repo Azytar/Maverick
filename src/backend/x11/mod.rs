@@ -69,8 +69,8 @@ use std::rc::Rc;
 use std::time::Instant;
 use x11rb::connection::Connection;
 use x11rb::errors::ConnectionError;
-use x11rb::protocol::xproto::*;
-use x11rb::protocol::Event;
+use x11rb::protocol::{xproto::*, Event};
+use x11rb::protocol::xkb;
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::COPY_DEPTH_FROM_PARENT;
 
@@ -156,10 +156,19 @@ pub struct WindowManager {
     layout_registry: crate::core::layout::LayoutRegistry,
     check_win: Window,
     numlock: u16,
+    /// Modifier-map column that carries Scroll Lock (0 when unmapped). Treated
+    /// as an ignored lock like Caps/Num: grabs get `| scroll` variants and
+    /// `clean_mask` strips it, so binds fire with the lock on or off.
+    scroll: u16,
     keymap: BTreeMap<(u16, u32), crate::types::Action>,
     raw_keymap: Vec<u32>,
     raw_kpk: usize,
     raw_min: u8,
+    /// Active-group levels per keycode (level 0 = unshifted, 1 = shifted,
+    /// 2+ = `AltGr`), projected from the XKB `KeySymMap` rows. Empty when XKB is
+    /// unavailable — every consumer then falls back to the core keymap columns
+    /// (BUG B).
+    group_levels: Vec<Vec<u32>>,
     /// Keycodes that were grabbed through the *keysym-directed fallback* (the
     /// bound keysym is unreachable in group 1, so it only exists in an `AltGr` /
     /// second-group column), mapped to the normalised keysyms they stand for.
@@ -321,10 +330,18 @@ impl WindowManager {
             }
             // XKB keyboard changes. `MapNotify` covers remaps that never raise a
             // core `MappingNotify` (a pure XKB `setxkbmap`), `NewKeyboardNotify`
-            // covers hotplug. Both share the debounced refresh with the core
-            // path, so the usual "all three at once" burst regrabs only once.
+            // covers hotplug. A `StateNotify` with `GROUP_STATE` set is a layout
+            // toggle (BUG B): the active group moved, so grabs and the projected
+            // group keysyms must be rebuilt. All share the debounced refresh, so
+            // the usual burst regrabs only once.
             Event::XkbMapNotify(_) | Event::XkbNewKeyboardNotify(_) => {
                 self.schedule_keyboard_refresh();
+            }
+            Event::XkbStateNotify(s) => {
+                if s.changed.contains(xkb::StatePart::GROUP_STATE) {
+                    self.kbd_refresh_due = None;
+                    self.refresh_keyboard();
+                }
             }
             // Errors from the many fire-and-forget requests the WM issues
             // (`let _ = …`). Debug, not warn: `BadWindow` from a client that
@@ -361,6 +378,9 @@ impl WindowManager {
                 self.raw_kpk = ks.kpk;
                 self.raw_min = ks.min;
                 self.numlock = ks.numlock;
+                self.scroll = ks.scroll;
+                self.group_levels = ks.group_cols;
+                self.last_key_times.clear();
             }
             Err(e) => {
                 log::warn!(
@@ -858,10 +878,12 @@ impl WindowManager {
             layout_registry: crate::core::layout::LayoutRegistry::new(),
             check_win,
             numlock,
+            scroll: ks.scroll,
             keymap,
             raw_keymap,
             raw_kpk,
             raw_min,
+            group_levels: ks.group_cols,
             code_bindings: std::collections::HashMap::new(),
             last_grab_warnings: Vec::new(),
             kbd_refresh_due: None,
@@ -1083,6 +1105,48 @@ struct KeyboardState {
     kpk: usize,
     min: u8,
     numlock: u16,
+    /// Modifier-map column that carries Scroll Lock (0 when unmapped). Treated
+    /// as an ignored lock like Caps/Num: grabs get `| scroll` variants and
+    /// `clean_mask` strips it, so binds fire with the lock on or off.
+    scroll: u16,
+    /// Per-keycode `[level1, level2]` keysym pair for the active XKB group,
+    /// derived from the XKB keymap (never from raw core columns).
+    group_cols: Vec<Vec<u32>>,
+}
+
+/// Project the XKB `KeySymMap` rows onto the active group's first two levels.
+///
+/// A row's symbols are laid out group by group, `width` symbols per group; the
+/// core keymap interleaves levels differently and cannot be indexed by
+/// `group * 2`. Rows shorter than the group's offset (AltGr-only single-group
+/// layouts) produce an empty pair so the caller falls back per key.
+fn group_columns(
+    symbols: &[x11rb::protocol::xkb::KeySymMap],
+    group: u8,
+    count: usize,
+) -> Vec<Vec<u32>> {
+    symbols
+        .iter()
+        .take(count)
+        .map(|row| {
+            let groups = row.group_info & 0x0f;
+            if groups == 0 || row.width == 0 {
+                return Vec::new();
+            }
+            let group = if group < groups {
+                group
+            } else {
+                match row.group_info & 0xc0 {
+                    0x40 => groups - 1, // XKB clamp into range
+                    0x80 => ((row.group_info >> 4) & 3).min(groups - 1),
+                    _ => group % groups, // XKB wrap into range
+                }
+            };
+            let width = usize::from(row.width);
+            let base = usize::from(group) * width;
+            row.syms.get(base..base + width).unwrap_or(&[]).to_vec()
+        })
+        .collect()
 }
 
 /// P2: Pipelined keyboard+modifier state — fire both requests, then collect both replies.
@@ -1110,18 +1174,61 @@ fn fetch_keyboard_state(conn: &XConn) -> Result<KeyboardState, Box<dyn std::erro
     let kpk = map.keysyms_per_keycode as usize;
     let keysyms = map.keysyms.clone();
 
-    let numlock = if let Ok(modmap) = c_mod.reply() {
+    let (numlock, scroll) = if let Ok(modmap) = c_mod.reply() {
         let kpm = modmap.keycodes_per_modifier() as usize;
-        compute_numlock(&modmap.keycodes, kpm, &keysyms, kpk, min, max)
+        (
+            compute_numlock(&modmap.keycodes, kpm, &keysyms, kpk, min, max),
+            compute_scroll(&modmap.keycodes, kpm, &keysyms, kpk, min, max),
+        )
     } else {
-        0
+        (0, 0)
     };
 
+    use x11rb::protocol::xkb::{ConnectionExt as _, MapPart, ID};
+    let mut group_cols: Vec<Vec<u32>> = Vec::new();
+    if conn.xkb_use_extension(1, 0)?.reply().is_ok_and(|r| r.supported) {
+        let map = conn.xkb_get_map(
+            ID::USE_CORE_KBD.into(),
+            MapPart::KEY_SYMS,
+            0u16.into(),
+            0,
+            0,
+            min,
+            count,
+            0,
+            0,
+            0,
+            0,
+            0u16.into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )?
+        .reply()?;
+        if let Some(symbols) = map.map.syms_rtrn {
+            let mut rows = vec![x11rb::protocol::xkb::KeySymMap::default(); count as usize];
+            for (i, row) in symbols.into_iter().enumerate() {
+                let code = usize::from(map.first_key_sym) + i;
+                if let Some(index) = code.checked_sub(usize::from(min)) {
+                    if let Some(target) = rows.get_mut(index) {
+                        *target = row;
+                    }
+                }
+            }
+            let group = conn.xkb_get_state(ID::USE_CORE_KBD.into())?.reply()?.group.into();
+            group_cols = group_columns(&rows, group, count as usize);
+        }
+    }
     Ok(KeyboardState {
         keysyms,
         kpk,
         min,
         numlock,
+        scroll,
+        group_cols,
     })
 }
 
@@ -1138,13 +1245,47 @@ fn compute_numlock(
         return 0;
     }
     const XK_NUM_LOCK: u32 = 0xff7f;
+    modifier_column(keycodes, kpm, keysyms, kpk, min, max, XK_NUM_LOCK)
+}
+
+/// Search for `Scroll Lock` keysym in the modifier mapping (0 when unmapped).
+fn compute_scroll(
+    keycodes: &[u8],
+    kpm: usize,
+    keysyms: &[u32],
+    kpk: usize,
+    min: u8,
+    max: u8,
+) -> u16 {
+    if kpk == 0 || kpm == 0 {
+        return 0;
+    }
+    const XK_SCROLL_LOCK: u32 = 0xff14;
+    modifier_column(keycodes, kpm, keysyms, kpk, min, max, XK_SCROLL_LOCK)
+}
+
+/// Modifier-map column whose keycodes carry `keysym` (0 when unmapped). Shared
+/// by the `NumLock` and `Scroll Lock` detectors: the column, not the keysym, is
+/// what a lock mask looks like in event state.
+fn modifier_column(
+    keycodes: &[u8],
+    kpm: usize,
+    keysyms: &[u32],
+    kpk: usize,
+    min: u8,
+    max: u8,
+    keysym_wanted: u32,
+) -> u16 {
+    if kpk == 0 || kpm == 0 {
+        return 0;
+    }
     for (i, codes) in keycodes.chunks(kpm).enumerate() {
         for &code in codes {
             if code == 0 || code < min || code > max {
                 continue;
             }
             let idx = (code - min) as usize * kpk;
-            if (0..kpk).any(|j| keysyms[idx + j] == XK_NUM_LOCK) {
+            if (0..kpk).any(|j| keysyms[idx + j] == keysym_wanted) {
                 return 1 << i;
             }
         }
@@ -1207,18 +1348,25 @@ struct KeyGrabPlan {
     /// by `(mask, keycode)` — the server answers a repeat of the same
     /// combination with `BadAccess`, which would look like a real conflict.
     grabs: Vec<(u16, u32, u8)>,
-    /// Keycodes grabbed via the fallback, and the normalised keysyms they were
-    /// grabbed *for*. Becomes `WindowManager::code_bindings`.
+    /// Keycodes grabbed through the fallback, and the normalised keysyms they
+    /// were grabbed *for*. Becomes `WindowManager::code_bindings`.
     code_bindings: std::collections::HashMap<u8, Vec<u32>>,
     /// Binds whose keysym does not exist anywhere in the current layout.
     missing: Vec<(u16, u32)>,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct ActiveLayout<'a> {
+    /// Active-group `[level1, level2]` pairs per keycode, from the XKB map.
+    group_levels: &'a [Vec<u32>],
+}
+
 /// Resolve every configured bind to the keycodes to grab, under the
-/// "strict group 1" policy:
+/// "active XKB group" policy:
 ///
-/// 1. Look for the keysym in columns 0/1 (group 1). This is layout-independent
-///    in the only way that matters — the dispatch reads those same columns.
+/// 1. Look for the keysym among the active group's level 1/2 pairs (XKB
+///    `KeySymMap` projection — core columns are not group pairs). Without XKB
+///    data, fall back to the core group-1 column scan.
 /// 2. If it is not there, scan the whole row **for that keysym only** and
 ///    record the hits in `code_bindings` so `on_key` can still resolve them.
 ///    That keeps `Mod4+bracketleft` working on `es`/`latam`, where `[` only
@@ -1226,17 +1374,40 @@ struct KeyGrabPlan {
 ///    would drop on the floor.
 /// 3. If it exists nowhere, report it as missing so the caller can warn: a
 ///    silent grab that resolves to nothing steals the key from the application.
-fn plan_key_grabs(keysyms: &[u32], min: u8, kpk: usize, binds: &[(u16, u32)]) -> KeyGrabPlan {
+fn plan_key_grabs(
+    keysyms: &[u32],
+    min: u8,
+    kpk: usize,
+    binds: &[(u16, u32)],
+    layout: ActiveLayout<'_>,
+) -> KeyGrabPlan {
     let mut plan = KeyGrabPlan::default();
     if kpk == 0 {
         return plan;
     }
     let mut seen: std::collections::HashSet<(u16, u8)> = std::collections::HashSet::new();
     for &(mask, keysym) in binds {
-        let mut codes = keysym_to_codes_group1(keysyms, min, kpk, keysym);
+        let mut codes: Vec<u8> = if layout.group_levels.is_empty() {
+            keysym_to_codes_group1(keysyms, min, kpk, keysym)
+        } else {
+            layout
+                .group_levels
+                .iter()
+                .enumerate()
+                .filter(|(_, levels)| levels.iter().take(2).any(|&sym| sym == keysym))
+                .filter_map(|(i, _)| row_keycode(min, i))
+                .collect()
+        };
         let fallback = codes.is_empty();
         if fallback {
-            codes = keysym_to_codes_any(keysyms, min, kpk, keysym);
+            // AltGr/second-group fallback: with XKB data only the active
+            // group's levels are ours (a raw core scan would grab the other
+            // layout's key — BUG B); without XKB fall back to the core scan.
+            codes = if layout.group_levels.is_empty() {
+                keysym_to_codes_any(keysyms, min, kpk, keysym)
+            } else {
+                Vec::new()
+            };
         }
         if codes.is_empty() {
             plan.missing.push((mask, keysym));
@@ -1261,11 +1432,13 @@ fn plan_key_grabs(keysyms: &[u32], min: u8, kpk: usize, binds: &[(u16, u32)]) ->
     plan
 }
 
-/// Keymap column `on_key` reads for its shifted-symbol fallback.
+/// Modifier map column `on_key` reads for its shifted-symbol fallback.
 ///
-/// Clamped to group 1 (columns 0/1). The old `col.min(kpk - 1)` reached column
-/// 3 on a `kpk = 4` keymap — a *different group*, which is neither what was
-/// grabbed nor what the user pressed (R2).
+/// XKB projects each group's levels contiguously (`width` per group), so with
+/// XKB data the pair table already holds the active group and `level` picks
+/// unshifted/shifted within it. Without XKB, fall back to the core keymap's
+/// group-1 columns — the only part of that map with an unambiguous meaning;
+/// the old `col.min(kpk - 1)` reached a *different group* on wide rows (R2).
 #[inline]
 fn dispatch_col(shift: bool, lock: bool, kpk: usize) -> usize {
     usize::from(shift ^ lock).min(1).min(kpk.saturating_sub(1))
@@ -1273,10 +1446,11 @@ fn dispatch_col(shift: bool, lock: bool, kpk: usize) -> usize {
 
 /// Match a physical key press against the bindings.
 ///
-/// Pure so the resolution order is testable: group-1 unshifted, then the
-/// group-1 shifted column, then the keysyms recorded for keycodes that were
-/// grabbed through the fallback. Returns the `(mods, keysym)` that actually
-/// matched, which is what the repeat rate-limiter must key on.
+/// Pure so the resolution order is testable: the active group's unshifted
+/// keysym, then the group's shifted column, then the keysyms recorded for
+/// keycodes that were grabbed through the fallback. Returns the `(mods,
+/// keysym)` that actually matched, which is what the repeat rate-limiter must
+/// key on.
 fn resolve_binding(
     keymap: &BTreeMap<(u16, u32), Action>,
     code_bindings: &std::collections::HashMap<u8, Vec<u32>>,
@@ -1376,9 +1550,18 @@ fn read_wm_hints_value(
 }
 
 #[inline]
-fn mod_variants(numlock: u16) -> [u16; 4] {
+fn mod_variants(numlock: u16, scroll: u16) -> [u16; 8] {
     let lock = u16::from(ModMask::LOCK);
-    [0, numlock, lock, numlock | lock]
+    [
+        0,
+        numlock,
+        lock,
+        scroll,
+        numlock | lock,
+        numlock | scroll,
+        lock | scroll,
+        numlock | lock | scroll,
+    ]
 }
 
 #[inline]
@@ -1391,10 +1574,12 @@ fn normalize_ksym(k: u32) -> u32 {
 }
 
 #[inline]
-fn clean_mask(state: u16, numlock: u16) -> u16 {
+fn clean_mask(state: u16, numlock: u16, scroll: u16) -> u16 {
     let lock: u16 = ModMask::LOCK.into();
+    // The Scroll Lock column arrives from the modifier map; when the key is
+    // unmapped this is simply 0 and behaves exactly like before.
     state
-        & !(numlock | lock)
+        & !(numlock | lock | scroll)
         & (u16::from(ModMask::SHIFT)
             | u16::from(ModMask::CONTROL)
             | u16::from(ModMask::M1)

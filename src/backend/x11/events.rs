@@ -816,17 +816,28 @@ impl WindowManager {
 
     pub(super) fn on_key(&mut self, e: KeyPressEvent) -> Result<(), Box<dyn std::error::Error>> {
         self.last_event_time = e.time;
-        let mods = clean_mask(u16::from(e.state), self.numlock);
-        // Primary lookup uses the column-0 keysym (B6). Shift/Lock travel only in
-        // `mods`, so `Mod4+Shift+bracketleft` resolves to the bound keysym.
+        // A key following a map/group notification must not use the snapshot
+        // from before that notification, even inside the same event drain.
+        if self.kbd_refresh_due.take().is_some() {
+            self.refresh_keyboard();
+        }
+        let mods = clean_mask(u16::from(e.state), self.numlock, self.scroll);
+        // Primary lookup uses the active XKB group's unshifted keysym (BUG B).
+        // Shift/Lock travel only in `mods`, so `Mod4+Shift+bracketleft`
+        // resolves to the bound keysym.
         let ks_primary = self.keycode_to_keysym(e.detail, u16::from(e.state))?;
-        // Fallback to the shifted/locked column: anyone who relied on the old
-        // shifted-only resolution still works (B6). Clamped to group 1, which
-        // is the half of the keymap `grab_keys` actually grabbed on.
+        // Fallback to the shifted/locked level of the same active group:
+        // anyone who relied on the old shifted-only resolution still works
+        // (B6). With XKB data this reads the projected group pair; without it,
+        // the core keymap's group-1 columns.
         let shift = u16::from(e.state) & u16::from(ModMask::SHIFT) != 0;
         let lock = u16::from(e.state) & u16::from(ModMask::LOCK) != 0;
-        let col = dispatch_col(shift, lock, self.raw_kpk);
-        let ks_shifted = self.keysym_at_col(e.detail, col);
+        let ks_shifted = if self.group_levels.is_empty() {
+            let col = dispatch_col(shift, lock, self.raw_kpk);
+            self.keysym_at_col(e.detail, col)
+        } else {
+            self.keysym_at_level(e.detail, usize::from(shift ^ lock))
+        };
 
         // Last resort: keycodes grabbed through the keysym-directed fallback
         // (the bind only exists at an AltGr / second-group level).

@@ -164,10 +164,10 @@ impl WindowManager {
     /// still sees core `MappingNotify`, it just misses the remaps the server
     /// reports only through XKB.
     ///
-    /// Note what is *not* selected: `StateNotify`. Under the strict-group-1
-    /// policy the active group is irrelevant to grabs and dispatch, so
-    /// subscribing would mean a full ungrab/regrab on every layout toggle for
-    /// no behavioural gain.
+    /// `StateNotify` is selected for `GROUP_STATE` changes: grabs and dispatch
+    /// both resolve keysyms through the *active* XKB group (BUG B), so a layout
+    /// toggle must regrasp — a burst of state events collapses into the same
+    /// debounced refresh as map changes.
     ///
     /// The keymap itself is still read with core `GetKeyboardMapping`, always
     /// clamped to `Setup.min_keycode..=max_keycode`: a server cannot change the
@@ -197,7 +197,7 @@ impl WindowManager {
             return;
         }
 
-        let events = EventType::NEW_KEYBOARD_NOTIFY | EventType::MAP_NOTIFY;
+        let events = EventType::NEW_KEYBOARD_NOTIFY | EventType::MAP_NOTIFY | EventType::STATE_NOTIFY;
         let res = self.conn.xkb_select_events(
             ID::USE_CORE_KBD.into(),
             0u16.into(),
@@ -240,7 +240,15 @@ impl WindowManager {
             .iter()
             .map(|(mask, keysym, _)| (*mask, *keysym))
             .collect();
-        let plan = plan_key_grabs(&self.raw_keymap, min, kpk, &binds);
+        let plan = plan_key_grabs(
+            &self.raw_keymap,
+            min,
+            kpk,
+            &binds,
+            ActiveLayout {
+                group_levels: &self.group_levels,
+            },
+        );
 
         // Diagnostics are collected, not logged inline: see the dedup at the
         // end of the function.
@@ -286,7 +294,7 @@ impl WindowManager {
             // the same mask twice when NumLock is unmapped, and a duplicate
             // grab is a `BadAccess` that would show up as a phantom conflict.
             let mut done: Vec<u16> = vec![0];
-            for extra in mod_variants(self.numlock) {
+            for extra in mod_variants(self.numlock, self.scroll) {
                 if done.contains(&extra) {
                     continue;
                 }
@@ -365,7 +373,7 @@ impl WindowManager {
         // the user does a Mod+drag (move/resize) on any window, and it never
         // gets released.
         let sup: u16 = ModMask::M4.into();
-        for extra in mod_variants(self.numlock) {
+        for extra in mod_variants(self.numlock, self.scroll) {
             let m = (sup | extra).into();
             for btn in [ButtonIndex::M1, ButtonIndex::M3] {
                 let _ = self.conn.grab_button(
@@ -389,11 +397,36 @@ impl WindowManager {
         code: u8,
         _state: u16,
     ) -> Result<u32, Box<dyn std::error::Error>> {
-        // B6: resolve the key by its column-0 keysym and let the Shift/Lock
-        // modifiers travel only in the keymap's modifier mask. A shifted symbol
-        // such as `Mod4+Shift+bracketleft` now resolves to the same entry a user
-        // binds by name (`Mod4+Shift+bracketleft`) instead of mismatching it.
-        Ok(self.keysym_at_col(code, 0))
+        // BUG B: resolve the key through the *active XKB group*'s projected
+        // level-1 keysym, so a press made with a non-default layout dispatches
+        // the keysym that group actually produces. Shift travels only in the
+        // modifier mask (B6), so a shifted symbol such as
+        // `Mod4+Shift+bracketleft` still resolves to the entry bound by name.
+        // Without XKB data, keep the core column-0 lookup.
+        Ok(self.keysym_at_level(code, 0))
+    }
+
+    /// Active-group keysym at level 0 (unshifted) or 1 (shifted) for a keycode.
+    ///
+    /// Reads the active-group projection built from the XKB `KeySymMap` — raw
+    /// core columns are not group pairs and would silently resolve the *other*
+    /// layout's keysym. Falls back to the core keymap's group-1 columns when
+    /// XKB is unavailable.
+    pub(crate) fn keysym_at_level(&self, code: u8, level: usize) -> u32 {
+        if self.group_levels.is_empty() {
+            let shift = level != 0;
+            let col = dispatch_col(shift, false, self.raw_kpk);
+            return self.keysym_at_col(code, col);
+        }
+        if self.raw_kpk == 0 || code < self.raw_min {
+            return 0;
+        }
+        let idx = (code - self.raw_min) as usize;
+        self.group_levels
+            .get(idx)
+            .and_then(|levels| levels.get(level.min(1)))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Raw keysym lookup at a given keycode column (0 = unshifted). Used both for
