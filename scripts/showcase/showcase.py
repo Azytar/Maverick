@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -18,10 +19,12 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 SCENES = ("tiling", "navigation", "floating", "fullscreen", "compositor",
           "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration",
-          "rounded-focus", "rounded-focus-gl", "fullscreen-new-window", "fullscreen-new-window-gl")
+          "rounded-focus", "rounded-focus-gl", "fullscreen-new-window", "fullscreen-new-window-gl",
+          "fullscreen-transition", "fullscreen-transition-gl")
+TRANSITION_SCENES = ("fullscreen-transition", "fullscreen-transition-gl")
 FOCUS_SCENES = ("rounded-focus", "rounded-focus-gl")
 FULLSCREEN_SCENES = ("fullscreen-new-window", "fullscreen-new-window-gl")
-GL_SCENES = ("compositor", "rounded-focus-gl", "fullscreen-new-window-gl")
+GL_SCENES = ("compositor", "rounded-focus-gl", "fullscreen-new-window-gl", "fullscreen-transition-gl")
 SIZE = (1440, 900)
 BORDER, RADIUS = 1, 18
 FOCUSED, NORMAL = (137, 180, 250), (69, 71, 90)
@@ -76,7 +79,7 @@ class Session:
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(("MAVERICK_", "MAV_"))}
         self.env["MAVERICK_LOG"] = "info"
         self.env["MAV_COMP_TRACE"] = "1"
-        if scene in FULLSCREEN_SCENES:
+        if scene in (*FULLSCREEN_SCENES, *TRANSITION_SCENES):
             self.env["MAV_FLOAT_TRACE"] = "1"
         self.env["LC_ALL"] = "C.UTF-8"
         self.env.pop("DBUS_SESSION_BUS_ADDRESS", None)
@@ -118,7 +121,7 @@ class Session:
         config = self.path / "config.toml"
         config.write_text(f'''[general]
 border_width = 1
-corner_radius = {RADIUS if self.scene in ("compositor", "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration", *FOCUS_SCENES, *FULLSCREEN_SCENES) else 0}
+corner_radius = {RADIUS if self.scene in ("compositor", "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration", *FOCUS_SCENES, *FULLSCREEN_SCENES, *TRANSITION_SCENES) else 0}
 gaps_inner = {6 if self.scene == "tiled-spacing" else 4}
 gaps_outer = {10 if self.scene == "tiled-spacing" else 8}
 column_width = 0.31
@@ -129,7 +132,7 @@ warp_cursor = false
 normal = 0x45475a
 focused = 0x89b4fa
 [animations]
-enabled = false
+enabled = {str(self.scene == "fullscreen-transition-gl").lower()}
 [compositor]
 enabled = {str(self.scene in GL_SCENES).lower()}
 backend = "opengl"
@@ -647,6 +650,133 @@ def fullscreen_new_window(session, windows, evidence):
     return reports
 
 
+def fullscreen_transition(session, windows, evidence):
+    gl = session.scene in GL_SCENES
+    log = session.path / "wm.log"
+    screen = float_geometry(session, str(x_stack(session)["root"]))
+    if screen != (0, 0, *SIZE):
+        raise RuntimeError(f"Unexpected Xephyr screen: {screen}")
+    reports = []
+    rect_pattern = r"Rect \{ x: (-?\d+), y: (-?\d+), w: (\d+), h: (\d+) \}"
+    pattern = re.compile(r"\[TRANSFORM\] frame=(\d+) win=(0x[0-9a-f]+) old_transform="
+                         + rect_pattern + r" new_transform=" + rect_pattern
+                         + r" .*?radius=(\d+) transition=(true|false)")
+
+    def traces(window, offset=0):
+        text = log.read_text()[offset:]
+        presented = {int(frame) for frame in re.findall(r"\[PRESENT\] frame=(\d+) submitted=true", text)}
+        records = []
+        for match in pattern.finditer(text):
+            frame, win, *values = match.groups()
+            if int(win, 16) == int(window) and int(frame) in presented:
+                records.append({"frame": int(frame), "old": tuple(map(int, values[:4])),
+                                "rect": tuple(map(int, values[4:8])), "radius": int(values[8]),
+                                "transition": values[9] == "true", "submitted": True,
+                                "line": match.group(0)})
+        return records
+
+    def entry(window):
+        return next(w for mon in session.tree()["monitors"] for ws in mon["workspaces"]
+                    for col in ws["columns"] for w in col["windows"] if w["id"] == int(window))
+
+    def focused(window):
+        return any(mon.get("focused") == int(window) for mon in session.state()["monitors"])
+
+    def settled(window):
+        session.stable(windows)
+        obj = entry(window)
+        geometry = float_geometry(session, window)
+        if any(obj[field] != list(geometry) for field in ("desired", "applied", "real")):
+            raise RuntimeError(f"Settled/X11 geometry mismatch: {obj}, X11={geometry}")
+        border = 0 if obj["fullscreen"] else BORDER
+        outer = (*geometry[:2], geometry[2] + 2 * border, geometry[3] + 2 * border)
+        radius = 0 if outer == screen else RADIUS
+        def probe():
+            records = traces(window)
+            return records[-1] if records and not records[-1]["transition"] and (
+                records[-1]["rect"], records[-1]["radius"]) == (outer, radius) else None
+        trace = wait_for(f"settled submitted GL frame for {window}", probe) if gl else None
+        return {"window": window, "geometry": geometry, "outer": outer, "radius": radius,
+                "entry": obj, "trace": trace}
+
+    def perform(stage, command, window, target, fullscreen):
+        before = settled(window)
+        offset = len(log.read_text())
+        report = {"stage": stage, "command": command, "before": before, "target": target,
+                  "log_offset": offset, "animation_required": gl, "failures": []}
+        reports.append(report)
+        report_path = evidence / f"{session.scene}-{stage}.json"
+        try:
+            session.action(command)
+            wait_for(f"{stage}: action dispatched", lambda: focused(window)
+                     and entry(window)["fullscreen"] == fullscreen)
+            geometry = float_geometry(session, window)
+            report["first_geometry_after_dispatch"] = geometry
+            if geometry != target:
+                raise RuntimeError(f"{stage}: X geometry not immediately at target: {geometry} != {target}")
+            obj = entry(window)
+            if any(obj[field] != list(target) for field in ("desired", "applied", "real")):
+                raise RuntimeError(f"{stage}: settled-goal/X11 disagreement: {obj}")
+            outer = (*target[:2], target[2] + (0 if fullscreen else 2 * BORDER),
+                     target[3] + (0 if fullscreen else 2 * BORDER))
+            radius = 0 if outer == screen else RADIUS
+            if gl:
+                def probe():
+                    records = traces(window, offset)
+                    report["frames"] = records
+                    return records if records and not records[-1]["transition"] and (
+                        records[-1]["rect"], records[-1]["radius"]) == (outer, radius) else None
+                records = wait_for(f"{stage}: exact settled submitted endpoint", probe)
+                intermediates = [r for r in records if r["transition"] and
+                                 r["rect"] not in (before["outer"], outer) and 0 < r["radius"] < RADIUS]
+                if not intermediates:
+                    raise RuntimeError(f"{stage}: no submitted intermediate transform with fading radius")
+                if records[0]["old"] != before["outer"]:
+                    raise RuntimeError(f"{stage}: trace does not start at the settled source")
+                radii = [before["radius"], *(r["radius"] for r in records)]
+                direction = 1 if radius > before["radius"] else -1
+                if any(not 0 <= r <= RADIUS for r in radii) or any(
+                        direction * (b - a) < 0 for a, b in zip(radii, radii[1:])):
+                    raise RuntimeError(f"{stage}: inconsistent radius progression: {radii}")
+                if any(not r["transition"] and (r["rect"], r["radius"]) != (outer, radius)
+                       for r in records if r["frame"] >= intermediates[0]["frame"]):
+                    raise RuntimeError(f"{stage}: inactive transition before exact endpoint")
+                report["intermediate_count"] = len(intermediates)
+                report["sample"] = intermediates[len(intermediates) // 2]
+                report["final"] = records[-1]
+                print(f"  {stage}: {len(intermediates)} submitted intermediate frames; exact endpoint R{radius}", flush=True)
+            report["after"] = settled(window)
+            if report["after"]["geometry"] != target:
+                raise RuntimeError(f"{stage}: endpoint changed after settling")
+        except Exception as error:
+            report["failures"].append(str(error))
+            raise
+        finally:
+            report_path.write_text(json.dumps(report, indent=2) + "\n")
+
+    if gl:
+        wait_for("actual GL renderer and submitted frame (fallback is not accepted)", session.gl_active)
+    elif session.gl_active() or "Backend:" in log.read_text():
+        raise RuntimeError("fullscreen-transition must run without a compositor")
+    a, b = windows
+    wait_for("initial focus on B", lambda: focused(b))
+    tiled = settled(b)["geometry"]
+    perform("toggle-enter", "toggle_fullscreen", b, screen, True)
+    perform("toggle-exit", "toggle_fullscreen", b, tiled, False)
+    perform("navigation-setup", "toggle_fullscreen", b, screen, True)
+    session.action("focus:left")
+    wait_for("tiled A focused while B remains fullscreen", lambda: focused(a)
+             and not entry(a)["fullscreen"] and entry(b)["fullscreen"])
+    away = settled(b)
+    if away["outer"] == screen or away["radius"] != RADIUS:
+        raise RuntimeError(f"Navigation did not leave B's fullscreen presentation: {away}")
+    reports.append({"stage": "navigation-away", "a": settled(a), "b": away})
+    perform("navigation-enter", "focus:right", b, screen, True)
+    if not gl and "[TRANSFORM]" in log.read_text():
+        raise RuntimeError("Compositor-OFF scene unexpectedly emitted presentation transforms")
+    return reports
+
+
 def main():
     parser = argparse.ArgumentParser(description="Capture real Maverick windows in an isolated Xephyr server.")
     parser.add_argument("scene", choices=(*SCENES, "all"))
@@ -690,7 +820,9 @@ def main():
             session.start()
             windows = [session.terminal(1, "01 / Configuration", "config/config.toml")]
             pixel_checks = None
-            if scene not in FULLSCREEN_SCENES:
+            if scene in TRANSITION_SCENES:
+                windows.append(session.terminal(2, "B / Fullscreen presentation", "Cargo.toml"))
+            elif scene not in FULLSCREEN_SCENES:
                 windows.extend([session.terminal(2, "02 / Workspace", "Cargo.toml"),
                                 session.terminal(3, "03 / X11 client", "tests/realwin.c")])
                 session.action("focus:left")
@@ -699,7 +831,9 @@ def main():
                 session.action("focus:right")
                 session.action("focus:right")
                 session.stable(windows)
-            if scene in FULLSCREEN_SCENES:
+            if scene in TRANSITION_SCENES:
+                transition_checks = fullscreen_transition(session, windows, evidence)
+            elif scene in FULLSCREEN_SCENES:
                 pixel_checks = fullscreen_new_window(session, windows, evidence)
             elif scene in FOCUS_SCENES:
                 pixel_checks = rounded_focus(session, windows, evidence)
@@ -749,6 +883,8 @@ def main():
                       "state": session.state(), "tree": session.tree(),
                       "gl_active": session.gl_active(),
                       "sha256": hashlib.sha256((output / f"{scene}.png").read_bytes()).hexdigest()}
+            if scene in TRANSITION_SCENES:
+                record["transition_checks"] = transition_checks
             if pixel_checks is not None:
                 record["pixel_checks"] = pixel_checks
             if scene in FULLSCREEN_SCENES:
@@ -768,7 +904,7 @@ def main():
                     print(f"{name} log:\n{log.read_text()[-6000:]}", file=sys.stderr)
             raise
         finally:
-            if scene in FULLSCREEN_SCENES and (session.path / "wm.log").exists():
+            if scene in (*FULLSCREEN_SCENES, *TRANSITION_SCENES) and (session.path / "wm.log").exists():
                 (evidence / f"{scene}-wm.log").write_text((session.path / "wm.log").read_text())
             session.close()
 
