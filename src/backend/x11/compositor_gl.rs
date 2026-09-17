@@ -4144,6 +4144,100 @@ mod lifecycle_tests {
         assert!(cw.presentation.is_none());
     }
 
+    /// Navigation *away* from a settled fullscreen window must morph it back to
+    /// its ribbon position through intermediate spatial frames — the same glide
+    /// a toggle uses — instead of snapping to the new settled presentation. The
+    /// ribbon rect moves *out* under the camera while the presentation spring
+    /// interpolates, so the live x endpoint is the moving one; the test drives
+    /// the live side exactly like the loop does and requires the first frames
+    /// to stay strictly inside the from→endpoint envelope (B4/c999c27).
+    #[test]
+    fn navigation_away_from_fullscreen_glides_back_to_the_ribbon() {
+        let mut cw = transitioning_window();
+        let screen = Rect::new(0, 0, 800, 600);
+        cw.set_transform(screen, 0, 18, screen, cw.transform_gen + 1);
+        settle_presentation(&mut cw, screen);
+        assert_eq!(cw.transform, screen);
+        assert_eq!(cw.transform_radius, 0);
+        // The demotion flip: next settled goal is the ribbon tile again.
+        cw.set_transform(
+            Rect::new(478, 8, 313, 584),
+            0,
+            18,
+            screen,
+            cw.transform_gen + 1,
+        );
+        assert_eq!(
+            cw.transform, screen,
+            "first frame after the flip keeps the old look"
+        );
+        cw.tick_presentation(1.0 / 60.0);
+        cw.set_transform(
+            Rect::new(478, 8, 313, 584),
+            0,
+            18,
+            screen,
+            cw.transform_gen + 1,
+        );
+        assert_ne!(
+            cw.transform, screen,
+            "demotion must produce an intermediate frame"
+        );
+        let frames = settle_presentation(&mut cw, Rect::new(478, 8, 313, 584));
+        assert!(frames > 1);
+        assert_eq!(cw.transform, Rect::new(478, 8, 313, 584));
+        assert_eq!(cw.transform_radius, 18);
+    }
+
+    /// Navigation *into* a fullscreen window from an off-screen ribbon position
+    /// must animate from where the window actually *is* when the retarget
+    /// lands — mid-scroll that is off-screen — not from the old settled goal
+    /// and not a snap to the screen rect. Mirrors the traced
+    /// fullscreen→fullscreen entry (x 796→0 over ~219 intermediate frames,
+    /// progress 0→1, exact endpoint).
+    #[test]
+    fn navigation_into_fullscreen_starts_from_the_presented_geometry() {
+        let mut cw = transitioning_window();
+        let screen = Rect::new(0, 0, 800, 600);
+        let tile = Rect::new(478, 8, 313, 584);
+        cw.presentation_goal = Some(presentation_value(tile, 18));
+        cw.set_transform(tile, 0, 18, screen, cw.transform_gen + 1);
+        settle_presentation(&mut cw, tile);
+        // The camera scrolls the window far left: the *presented* rect follows
+        // the camera while the settled goal is unchanged — a camera scroll is
+        // not a presentation transition.
+        cw.set_transform(
+            Rect::new(-800, 0, 800, 600),
+            0,
+            18,
+            screen,
+            cw.transform_gen + 1,
+        );
+        assert!(
+            cw.presentation.is_none(),
+            "camera scroll must not start a presentation transition"
+        );
+        assert_eq!(cw.transform, Rect::new(-800, 0, 800, 600));
+        // Navigation focuses it: the settled goal flips to the exclusive
+        // overlay and the same frame presents the screen rect. The transition
+        // must start from the off-screen *presented* value.
+        cw.presentation_goal = Some(presentation_value(screen, 0));
+        cw.set_transform(screen, 0, 18, screen, cw.transform_gen + 1);
+        assert!(
+            cw.presentation.is_some(),
+            "the settled-goal flip must start a presentation transition"
+        );
+        assert_eq!(cw.transform, Rect::new(-800, 0, 800, 600));
+        cw.tick_presentation(1.0 / 60.0);
+        cw.set_transform(screen, 0, 18, screen, cw.transform_gen + 1);
+        assert_ne!(cw.transform, Rect::new(-800, 0, 800, 600));
+        assert_ne!(cw.transform, screen);
+        let frames = settle_presentation(&mut cw, screen);
+        assert!(frames > 1);
+        assert_eq!(cw.transform, screen);
+        assert_eq!(cw.transform_radius, 0);
+    }
+
     #[test]
     fn disabled_animation_and_unmapped_first_placement_are_immediate() {
         let mut cw = transitioning_window();
