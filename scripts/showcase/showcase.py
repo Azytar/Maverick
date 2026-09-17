@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
 import ctypes
+import colorsys
+import math
 import fcntl
 import hashlib
 import json
@@ -15,8 +17,14 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 SCENES = ("tiling", "navigation", "floating", "fullscreen", "compositor",
-          "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration")
+          "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration",
+          "rounded-focus", "rounded-focus-gl")
+FOCUS_SCENES = ("rounded-focus", "rounded-focus-gl")
+GL_SCENES = ("compositor", "rounded-focus-gl")
 SIZE = (1440, 900)
+BORDER, RADIUS = 1, 18
+FOCUSED, NORMAL = (137, 180, 250), (69, 71, 90)
+CONTENT = (30, 30, 46)
 
 
 def client(title, source):
@@ -107,7 +115,7 @@ class Session:
         config = self.path / "config.toml"
         config.write_text(f'''[general]
 border_width = 1
-corner_radius = {18 if self.scene in ("compositor", "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration") else 0}
+corner_radius = {RADIUS if self.scene in ("compositor", "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration", *FOCUS_SCENES) else 0}
 gaps_inner = {6 if self.scene == "tiled-spacing" else 4}
 gaps_outer = {10 if self.scene == "tiled-spacing" else 8}
 column_width = 0.31
@@ -120,7 +128,7 @@ focused = 0x89b4fa
 [animations]
 enabled = false
 [compositor]
-enabled = {str(self.scene == "compositor").lower()}
+enabled = {str(self.scene in GL_SCENES).lower()}
 backend = "opengl"
 fullscreen_bypass = false
 [autostart]
@@ -129,6 +137,9 @@ commands = [["/usr/bin/true"]]
 instance = "showcase3"
 opacity = {0.78 if self.scene == "compositor" else 1.0}
 ''')
+        if self.scene in FOCUS_SCENES:
+            with config.open("a") as stream:
+                stream.write('\n[[rules]]\ninstance = "showcase6"\nfloat = true\n')
         run([str(self.binaries / "maverick"), "--check-config", str(config)], self.env)
         self.wm = self.spawn([str(self.binaries / "maverick"), "--config", str(config),
                               "--name", "showcase"], "wm")
@@ -240,6 +251,189 @@ def float_geometry(session, window):
         return None
 
 
+def color_match(pixel, target, root):
+    backgrounds = (CONTENT, root)
+    alternate = NORMAL if target == FOCUSED else FOCUSED
+    def residual(color):
+        best = float("inf")
+        for background in backgrounds:
+            delta = tuple(c - b for c, b in zip(color, background))
+            weight = sum((p - b) * d for p, b, d in zip(pixel, background, delta)) / sum(d * d for d in delta)
+            if 0.18 <= weight <= 1.1:
+                best = min(best, math.dist(pixel, tuple(b + min(weight, 1) * d
+                                                       for b, d in zip(background, delta))))
+        return best
+    if min(math.dist(pixel, background) for background in backgrounds) < 12:
+        return False
+    if target == FOCUSED:
+        hue = colorsys.rgb_to_hsv(*(value / 255 for value in pixel))[0]
+        if abs(hue - colorsys.rgb_to_hsv(*(value / 255 for value in FOCUSED))[0]) > 0.04:
+            return False
+    score = residual(target)
+    return score <= 12 and score + 4 < residual(alternate)
+
+
+def corner_pixels(session, evidence, stage, checks, fullscreen=False):
+    session.stable([window for window, _ in checks])
+    run(["xdotool", "mousemove", str(SIZE[0] - 1), str(SIZE[1] - 1)], session.env)
+    image = evidence / f"{session.scene}-{stage}.png"
+    run(["import", "-display", session.env["DISPLAY"], "-window", "root", str(image)], session.env)
+    raw = subprocess.run(["convert", str(image), "-alpha", "off", "-colorspace", "sRGB",
+                          "-depth", "8", "rgb:-"], stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, check=True, timeout=5).stdout
+    if len(raw) != SIZE[0] * SIZE[1] * 3:
+        raise RuntimeError(f"Unexpected raw RGB byte count: {len(raw)}")
+    def pixel(x, y):
+        offset = (y * SIZE[0] + x) * 3
+        return tuple(raw[offset:offset + 3])
+    root = (0, 0, 0) if session.scene in GL_SCENES else (17, 17, 27)
+    report = {"stage": stage, "outer_radius": 0 if fullscreen else RADIUS,
+              "inner_radius": 0 if fullscreen else max(RADIUS - BORDER, 0),
+              "border": 0 if fullscreen else BORDER, "root_color": root, "windows": []}
+    failures = []
+    for window, focused in checks:
+        geometry = float_geometry(session, window)
+        if geometry is None:
+            raise RuntimeError(f"No geometry for {window}")
+        x, y, width, height = geometry
+        if not fullscreen:
+            width += 2 * BORDER
+            height += 2 * BORDER
+        if x < 0 or y < 0 or x + width > SIZE[0] or y + height > SIZE[1]:
+            raise RuntimeError(f"Corner probe requires fully visible outer frame: {geometry}")
+        if fullscreen and (x, y, width, height) != (0, 0, *SIZE):
+            raise RuntimeError(f"Fullscreen did not cover monitor: {geometry}")
+        result = {"id": window, "focused": focused, "outer_geometry": [x, y, width, height], "corners": {}}
+        for name, right, bottom in (("tl", False, False), ("tr", True, False),
+                                    ("bl", False, True), ("br", True, True)):
+            samples, blue, normal = [], [], []
+            for v in range(RADIUS):
+                for u in range(RADIUS):
+                    px = x + (width - 1 - u if right else u)
+                    py = y + (height - 1 - v if bottom else v)
+                    rgb = pixel(px, py)
+                    samples.append(rgb)
+                    if (2 <= u < RADIUS - 2 and 2 <= v < RADIUS - 2
+                            and abs(math.hypot(RADIUS - u - 0.5, RADIUS - v - 0.5)
+                                    - (RADIUS - BORDER / 2)) <= 2):
+                        if color_match(rgb, FOCUSED, root):
+                            blue.append([u, v, *rgb])
+                        if color_match(rgb, NORMAL, root):
+                            normal.append([u, v, *rgb])
+            crop_x = x + width - RADIUS if right else x
+            crop_y = y + height - RADIUS if bottom else y
+            crop = evidence / f"{session.scene}-{stage}-{window}-{name}.png"
+            run(["convert", str(image), "-crop", f"{RADIUS}x{RADIUS}+{crop_x}+{crop_y}",
+                 "+repage", "-filter", "point", "-resize", "800%", str(crop)])
+            result["corners"][name] = {"blue_arc_pixels": blue, "normal_arc_pixels": normal,
+                                       "outermost_rgb": samples[0], "crop": str(crop)}
+            if fullscreen:
+                if any(color_match(rgb, FOCUSED, root) for rgb in samples) or any(
+                        math.dist(rgb, CONTENT) > 8 for rgb in samples):
+                    failures.append(f"{window}/{name}: fullscreen corner not square undecorated content")
+            else:
+                ring = blue if focused else normal
+                if len(ring) < 3 or len({p[0] for p in ring}) < 2 or len({p[1] for p in ring}) < 2:
+                    failures.append(f"{window}/{name}: missing {'focused' if focused else 'normal'} curved arc")
+                if not focused and blue:
+                    failures.append(f"{window}/{name}: unfocused arc retains blue")
+        if fullscreen:
+            edges = [pixel(width // 2, 0), pixel(width // 2, height - 1),
+                     pixel(0, height // 2), pixel(width - 1, height // 2)]
+            result["edge_pixels"] = edges
+            if any(math.dist(rgb, CONTENT) > 8 for rgb in edges):
+                failures.append(f"{window}: fullscreen still has edge decoration")
+        report["windows"].append(result)
+    report["failures"] = failures
+    (evidence / f"{session.scene}-{stage}.json").write_text(json.dumps(report, indent=2) + "\n")
+    if failures:
+        raise RuntimeError("; ".join(failures) + f"; evidence: {image}")
+    print(f"  {stage}: all four {'square fullscreen corners' if fullscreen else 'curved corner rings'} verified", flush=True)
+    return report
+
+
+def rounded_focus(session, windows, evidence):
+    def activate(window):
+        run(["xdotool", "windowactivate", "--sync", window], session.env)
+        wait_for(f"focus on {window}", lambda: any(
+            monitor.get("focused") == int(window) for monitor in session.state()["monitors"]))
+        session.stable(windows)
+
+    def tiled_checks(window):
+        visible = []
+        for other in windows:
+            x, y, width, height = float_geometry(session, other)
+            if other != window and x >= 0 and y >= 0 and x + width + 2 * BORDER <= SIZE[0] and y + height + 2 * BORDER <= SIZE[1]:
+                visible.append((other, False))
+        if not visible:
+            raise RuntimeError("No fully visible unfocused tile for corner comparison")
+        return [(window, True), *visible]
+
+    if session.scene in GL_SCENES:
+        wait_for("actual GL renderer and submitted frame (fallback is not accepted)", session.gl_active)
+    elif session.gl_active() or "Backend: OpenGL/GLX" in (session.path / "wm.log").read_text():
+        raise RuntimeError("rounded-focus must run without a compositor")
+    reports = [corner_pixels(session, evidence, "tiles", [(windows[2], True), (windows[1], False)])]
+    sizes = [float_geometry(session, window)[2:] for window in windows]
+    session.action("focus:left")
+    reports.append(corner_pixels(session, evidence, "focus-change", [(windows[1], True), (windows[2], False)]))
+    if sizes != [float_geometry(session, window)[2:] for window in windows]:
+        raise RuntimeError("Focus change altered tile sizes with B1 R18")
+    before_scroll = float_geometry(session, windows[0])
+    windows.extend([session.terminal(4, "04 / Rendering", "maverick-gl/Cargo.toml"),
+                    session.terminal(5, "05 / IPC", "maverick-sys/Cargo.toml")])
+    activate(windows[4])
+    session.action("focus:left")
+    session.stable(windows)
+    reports.append(corner_pixels(session, evidence, "scrolled", tiled_checks(windows[3])))
+    if float_geometry(session, windows[0])[:2] == before_scroll[:2]:
+        raise RuntimeError("Scrolled test did not move the ribbon camera")
+    session.action("toggle_fullscreen")
+    reports.append(corner_pixels(session, evidence, "fullscreen", [(windows[3], True)], fullscreen=True))
+    session.action("toggle_fullscreen")
+    session.stable(windows)
+    reports.append(corner_pixels(session, evidence, "fullscreen-exit", tiled_checks(windows[3])))
+    floating = session.terminal(6, "06 / Floating isolation", "Cargo.toml")
+    windows.append(floating)
+    activate(floating)
+    run(["xdotool", "windowsize", floating, "480", "360"], session.env)
+    session.stable(windows)
+    run(["xdotool", "windowmove", floating, "480", "270"], session.env)
+    reports.append(corner_pixels(session, evidence, "floating", [(floating, True)]))
+    before = float_geometry(session, floating)
+    tiled_before = float_geometry(session, windows[0])
+    for _ in range(4):
+        session.action("focus:left")
+    session.stable(windows)
+    if before != float_geometry(session, floating):
+        raise RuntimeError("Floating window moved during ribbon scroll")
+    if tiled_before[:2] == float_geometry(session, windows[0])[:2]:
+        raise RuntimeError("Floating isolation test did not actually scroll tiles")
+    reports.append(corner_pixels(session, evidence, "floating-unfocused", [(floating, False)]))
+    activate(floating)
+    reports.append(corner_pixels(session, evidence, "floating-refocused", [(floating, True)]))
+    before = float_geometry(session, floating)
+    tiled_before = [float_geometry(session, window) for window in windows[:-1]]
+    x, y, width, height = before
+    run(["xdotool", "mousemove", str(x + width // 2), str(y + height // 2),
+         "keydown", "Super_L", "mousedown", "1", "sleep", "0.2",
+         "mousemove", str(x + width // 2 + 80), str(y + height // 2 + 50),
+         "sleep", "0.2", "mouseup", "1", "keyup", "Super_L"], session.env)
+    session.stable(windows)
+    after = float_geometry(session, floating)
+    if after[:2] != (before[0] + 80, before[1] + 50):
+        raise RuntimeError(f"Floating drag did not follow pointer delta: {before} -> {after}")
+    if tiled_before != [float_geometry(session, window) for window in windows[:-1]]:
+        raise RuntimeError("Native floating drag changed tiled geometry")
+    reports.append(corner_pixels(session, evidence, "floating-drag", [(floating, True)]))
+    reports[-1]["drag_geometry"] = {"before": before, "after": after}
+    run(["xdotool", "windowclose", floating], session.env)
+    windows.remove(floating)
+    activate(windows[3])
+    reports.append(corner_pixels(session, evidence, "final", tiled_checks(windows[3])))
+    return reports
+
+
 def main():
     parser = argparse.ArgumentParser(description="Capture real Maverick windows in an isolated Xephyr server.")
     parser.add_argument("scene", choices=(*SCENES, "all"))
@@ -250,6 +444,8 @@ def main():
     if sys.platform != "linux" or ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
         parser.error("Linux PR_SET_CHILD_SUBREAPER is required for safe detached-child cleanup")
     required = ("Xephyr", "xdpyinfo", "xdotool", "xterm", "xsetroot", "import", "identify")
+    if args.scene in (*FOCUS_SCENES, "all"):
+        required += ("convert",)
     missing = [program for program in required if not shutil.which(program)]
     if missing:
         parser.error("Missing prerequisites: " + ", ".join(missing))
@@ -264,6 +460,8 @@ def main():
     output = ROOT / "docs/screenshots"
     output.mkdir(parents=True, exist_ok=True)
     evidence = args.evidence.resolve()
+    if args.scene in (*FOCUS_SCENES, "all") and evidence != Path("/tmp/kilo/showcase-evidence"):
+        parser.error("Rounded-focus evidence must use /tmp/kilo/showcase-evidence")
     evidence.mkdir(parents=True, exist_ok=True)
     lock = (evidence / "run.lock").open("w")
     try:
@@ -283,7 +481,10 @@ def main():
             session.action("focus:right")
             session.action("focus:right")
             session.stable(windows)
-            if scene == "navigation":
+            pixel_checks = None
+            if scene in FOCUS_SCENES:
+                pixel_checks = rounded_focus(session, windows, evidence)
+            elif scene == "navigation":
                 windows.extend([session.terminal(4, "04 / Rendering", "maverick-gl/Cargo.toml"),
                                 session.terminal(5, "05 / IPC", "maverick-sys/Cargo.toml")])
                 session.action("focus:left")
@@ -321,7 +522,7 @@ def main():
                 session.stable(windows)
             else:
                 session.action("focus:left")
-            if scene == "compositor":
+            if scene in GL_SCENES:
                 wait_for("actual GL renderer and submitted frame (fallback is not accepted)", session.gl_active)
             geometry = session.capture(windows)
             record = {"scene": scene, "display": session.env["DISPLAY"],
@@ -329,9 +530,11 @@ def main():
                       "state": session.state(), "tree": session.tree(),
                       "gl_active": session.gl_active(),
                       "sha256": hashlib.sha256((output / f"{scene}.png").read_bytes()).hexdigest()}
+            if pixel_checks is not None:
+                record["pixel_checks"] = pixel_checks
             (evidence / f"{scene}.json").write_text(json.dumps(record, indent=2) + "\n")
-            if scene == "compositor":
-                (evidence / "compositor-wm.log").write_text((session.path / "wm.log").read_text())
+            if scene in GL_SCENES:
+                (evidence / f"{scene}-wm.log").write_text((session.path / "wm.log").read_text())
         except Exception:
             for name in ("xephyr", "wm"):
                 log = session.path / f"{name}.log"
