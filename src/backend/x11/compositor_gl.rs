@@ -269,6 +269,11 @@ struct CompWin {
     transform: Rect,
     transform_radius: u32,
     transform_border_w: u32,
+    presentation: Option<PresentationTransition>,
+    presentation_spring: Option<(f32, f32)>,
+    presentation_value: [f64; 5],
+    presentation_target: [f64; 5],
+    presentation_goal: Option<[f64; 5]>,
     /// Which frame `transform` was written for. Anything older than the
     /// compositor's current generation means the WM did not place this window
     /// this frame (an override-redirect menu, say), so it falls back to its X
@@ -282,10 +287,26 @@ struct CompWin {
     /// drawn last frame (just appeared / was off-screen), so only the current
     /// rect needs repainting.
     prev_visual: Option<Rect>,
+    prev_visual_radius: u32,
     /// Fase 12 — true when this window is fully hidden behind a single opaque,
     /// square-cornered window above it this frame, so it need not be drawn.
     /// Recomputed every frame by `compute_scene`'s top→bottom occlusion pass.
     occluded: bool,
+}
+
+struct PresentationTransition {
+    from: [f64; 5],
+    progress: crate::types::Camera,
+}
+
+fn presentation_value(rect: Rect, radius: u32) -> [f64; 5] {
+    [
+        f64::from(rect.x),
+        f64::from(rect.y),
+        f64::from(rect.w),
+        f64::from(rect.h),
+        f64::from(radius),
+    ]
 }
 
 fn border_rgba(pixel: u32) -> [f32; 4] {
@@ -314,10 +335,16 @@ impl CompWin {
             transform: Rect::default(),
             transform_radius: 0,
             transform_border_w: 0,
+            presentation: None,
+            presentation_spring: None,
+            presentation_value: [0.0; 5],
+            presentation_target: [0.0; 5],
+            presentation_goal: None,
             // 0 is never a live generation: `set_transforms` pre-increments, so
             // the first frame is generation 1.
             transform_gen: 0,
             prev_visual: None,
+            prev_visual_radius: 0,
             occluded: false,
         }
     }
@@ -363,7 +390,79 @@ impl CompWin {
         } else {
             radius.min((self.transform.w / 2).min(self.transform.h / 2))
         };
+        let live = presentation_value(self.transform, self.transform_radius);
+        // Exact comparison is intentional: the goal keys are copied from
+        // integer-backed rects (only the radius rounds), so equality is a
+        // token change test, not a float proximity test.
+        let goal = self.presentation_goal.unwrap_or(live);
+        if self.mapped && !self.hidden && self.transform_gen != 0 {
+            if let Some((stiffness, damping)) = self.presentation_spring {
+                // Exact comparison is intentional: `goal`/`presentation_target`
+                // are integer-backed keys (radii included), so equality is a
+                // "did the settled presentation change" test, not proximity.
+                #[allow(clippy::float_cmp)]
+                let retarget = goal != self.presentation_target;
+                if retarget {
+                    let mut progress = crate::types::Camera::new(0.0);
+                    progress.target = 1.0;
+                    progress.stiffness = stiffness;
+                    progress.damping = damping;
+                    self.presentation = Some(PresentationTransition {
+                        from: self.presentation_value,
+                        progress,
+                    });
+                }
+            } else {
+                self.presentation = None;
+            }
+        } else {
+            self.presentation = None;
+        }
+        self.presentation_target = goal;
+        if let Some(transition) = &self.presentation {
+            let progress = f64::from(transition.progress.position.clamp(0.0, 1.0));
+            for (i, value) in self.presentation_value.iter_mut().enumerate() {
+                let to = if i == 4 { goal[i] } else { live[i] };
+                *value = transition.from[i] + (to - transition.from[i]) * progress;
+            }
+            self.transform = Rect::new(
+                self.presentation_value[0].round() as i32,
+                self.presentation_value[1].round() as i32,
+                self.presentation_value[2].round() as u32,
+                self.presentation_value[3].round() as u32,
+            );
+            self.transform_radius = self.presentation_value[4].round() as u32;
+        } else {
+            self.presentation_value = live;
+            if self.presentation_spring.is_some() {
+                self.presentation_value[4] = goal[4];
+                self.transform_radius = goal[4].round() as u32;
+            }
+        }
         self.transform_gen = gen;
+    }
+
+    fn tick_presentation(&mut self, dt: f32) -> bool {
+        let Some(transition) = self.presentation.as_mut() else {
+            return false;
+        };
+        if !self.mapped || self.hidden {
+            self.presentation = None;
+            return false;
+        }
+        let mut moving = true;
+        for sub in substep_bounds(dt) {
+            moving = transition.progress.step(sub);
+        }
+        // A scalar spring can settle short of its target while still visibly
+        // mid-flight (the settle predicate is `|v| ≤ 0.01 && |disp| ≤ 0.5` in
+        // *progress units*); an eased presentation must always land exactly on
+        // its endpoint, so an early settle snaps the remainder here. The next
+        // `set_transform` sees goal == target and keeps the transition off.
+        if !moving || transition.progress.position > 0.995 {
+            self.presentation = None;
+        }
+        true
     }
 
     /// Whether `r` is entirely outside the `[0,0,w,h]` viewport (plus a small
@@ -745,6 +844,7 @@ pub struct Compositor {
     // ── Presentation caches — owned by the compositor so the WM core never
     // hands GPU transforms (WindowManager does not import Renderer details).
     live_cache: Vec<Vec<(Window, crate::types::Rect, u32)>>,
+    settled_cache: Vec<Placements>,
     cam_cache: Vec<f32>,
     proj_cache: Vec<Option<ProjSig>>,
     presentation_transforms: Vec<(Window, crate::types::Rect, u32)>,
@@ -1011,6 +1111,7 @@ impl Compositor {
             trace_partial_to_full: 0,
             last_present: None,
             live_cache: Vec::new(),
+            settled_cache: Vec::new(),
             cam_cache: Vec::new(),
             proj_cache: Vec::new(),
             presentation_transforms: Vec::with_capacity(256),
@@ -1306,6 +1407,8 @@ impl Compositor {
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.mapped = false;
             cw.hidden = false;
+            cw.presentation = None;
+            cw.transform_gen = 0;
             let (tex, pixmap) = (cw.tex.take(), cw.pixmap.take());
             if let Some(t) = tex {
                 self.renderer.destroy_texture(t);
@@ -1324,6 +1427,10 @@ impl Compositor {
     pub fn set_hidden(&mut self, win: Window, hidden: bool) {
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.hidden = hidden;
+            if hidden {
+                cw.presentation = None;
+                cw.transform_gen = 0;
+            }
             self.mark_full(DirtyReason::SURFACE);
         }
     }
@@ -1470,21 +1577,17 @@ impl Compositor {
             let Some(cw) = self.wins.get_mut(&win) else {
                 continue;
             };
-            // Outer rect = content + borders on every side.
-            let outer = Rect::new(
-                geom.x,
-                geom.y,
-                geom.w + 2 * bw,
-                geom.h + 2 * bw,
-            );
+            let before = cw.transform;
+            let before_gen = cw.transform_gen;
+            cw.set_transform(geom, bw, corner_radius, screen, gen);
             if self.float_trace {
-                let changed = cw.transform != outer || cw.transform_gen != gen;
+                let changed = before != cw.transform || before_gen != gen;
                 log::info!(
-                    "[TRANSFORM] frame={} win={:#x} old_transform={:?} new_transform={:?} changed={} transform_gen_before={} transform_gen_after={}",
-                    self.dbg_frame, win, cw.transform, outer, changed, cw.transform_gen, gen
+                    "[TRANSFORM] frame={} win={:#x} old_transform={:?} new_transform={:?} changed={} transform_gen_before={} transform_gen_after={} radius={} transition={}",
+                    self.dbg_frame, win, before, cw.transform, changed, before_gen, gen,
+                    cw.transform_radius, cw.presentation.is_some()
                 );
             }
-            cw.set_transform(geom, bw, corner_radius, screen, gen);
         }
         if self.float_trace {
             let wins: Vec<String> = placements
@@ -1526,11 +1629,65 @@ impl Compositor {
         let nmon = state.monitors.len();
         if self.live_cache.len() != nmon {
             self.live_cache = vec![Vec::new(); nmon];
+            self.settled_cache = vec![Vec::new(); nmon];
             self.cam_cache = vec![0.0; nmon];
             self.proj_cache = vec![None; nmon];
             for m in &mut state.monitors {
                 m.layout_dirty = true;
             }
+        }
+        // Presentation-transition goals: the *settled* presentation (arrange
+        // Phase::Settled + present_into overlay, i.e. exactly what the X11 side
+        // applies) per window. Cached per monitor and recomputed only when that
+        // monitor's settled layout changes (its `layout_dirty` flag, which the
+        // settle-side arrange sets) — never per camera pixel, so an active
+        // transition's spring is never reset by ordinary scrolling.
+        for i in 0..nmon {
+            if state.monitors[i].layout_dirty || self.settled_cache[i].is_empty() {
+                self.settled_cache[i].clear();
+                arrange(
+                    state,
+                    i,
+                    cfg,
+                    registry,
+                    Phase::Settled,
+                    &mut self.settled_cache[i],
+                    &mut self.presentation_ribbon_scratch,
+                );
+                crate::core::present::present_into(
+                    state,
+                    &state.monitors[i],
+                    &mut self.settled_cache[i],
+                    &mut self.presentation_raise_scratch,
+                );
+            }
+        }
+        let spring = crate::config::animations_enabled(cfg).then(|| {
+            crate::types::sanitize_spring(cfg.animations.stiffness, cfg.animations.damping)
+        });
+        for (&win, cw) in &mut self.wins {
+            cw.presentation_spring = spring;
+            cw.presentation_goal = self
+                .settled_cache
+                .iter()
+                .flatten()
+                .find(|(w, _, _)| *w == win)
+                .map(|&(_, rect, bw)| {
+                    let outer = Rect::new(
+                        rect.x,
+                        rect.y,
+                        rect.w.saturating_add(bw.saturating_mul(2)),
+                        rect.h.saturating_add(bw.saturating_mul(2)),
+                    );
+                    let radius = if outer == self.screen_rect {
+                        0
+                    } else {
+                        cfg.corner_radius
+                            .min(outer.w / 2)
+                            .min(outer.h / 2)
+                    };
+                    presentation_value(outer, radius)
+                });
         }
         self.presentation_transforms.clear();
         for i in 0..nmon {
@@ -1598,6 +1755,16 @@ impl Compositor {
         let transforms = std::mem::take(&mut self.presentation_transforms);
         self.set_transforms(&transforms);
         self.presentation_transforms = transforms;
+    }
+
+    /// Whether any mapped window is mid presentation transition. Kept for the
+    /// debug harness (`dirty_reasons_bits`-style introspection); the frame loop
+    /// itself continues through `render`'s internal GEOMETRY re-mark.
+    #[allow(dead_code)]
+    pub fn presentation_animating(&self) -> bool {
+        self.wins
+            .values()
+            .any(|cw| cw.mapped && !cw.hidden && cw.presentation.is_some())
     }
 
     /// Mark the whole frame dirty (used when stacking or the wallpaper changes).
@@ -2225,7 +2392,7 @@ impl Compositor {
             // entry. A stationary, undamaged window contributes nothing, so the
             // partial-redraw bounding box no longer balloons to the whole screen
             // every frame (B5).
-            let moved = cw.prev_visual != Some(outer);
+            let moved = cw.prev_visual != Some(outer) || cw.prev_visual_radius != radius;
             if was_damaged || moved {
                 let mut aout = [Rect::default(); 2];
                 let n = anim_damage_rects(cw.prev_visual, outer, &mut aout);
@@ -2234,6 +2401,7 @@ impl Compositor {
                 }
             }
             cw.prev_visual = Some(outer);
+            cw.prev_visual_radius = radius;
             // Cull windows that are entirely outside the screen. This is the
             // single biggest draw-time win: a 50-window ribbon only has ~5 on
             // screen at once; the rest are scrolled off the edges and would
@@ -2303,6 +2471,32 @@ impl Compositor {
     /// Blocks to vsync via the swap (when `vsync` is on). Returns `false` on a
     /// GL error so the caller can disable the compositor.
     pub fn render(&mut self) -> bool {
+        // Advance presentation transitions against the real inter-present
+        // interval. `render` runs exactly once per wanted frame, so the elapsed
+        // time since the previous present *is* the dt the transitions were
+        // displayed for — no separate clock and no synthetic timer (B1/B8
+        // policy). A first present has no interval yet and contributes dt 0.
+        //
+        // Timing detail: this runs *before* `compute_scene` so the springs see
+        // the interval the previous frame was actually on screen, and the new
+        // interpolation below reads the freshly advanced progress.
+        let dt = self
+            .last_present
+            .map_or(0.0, |t| t.elapsed().as_secs_f32());
+        // Same B8 policy as the WM springs: a present interval longer than two
+        // refreshes (idle gap, stalled GPU) must not advance the transition by
+        // the whole gap — it would snap instead of glide.
+        let dt = dt.clamp(0.0, crate::backend::x11::framesched::ONE_REFRESH * 2.0);
+        let mut presenting = false;
+        if dt > 0.0 {
+            for cw in self.wins.values_mut() {
+                presenting |= cw.tick_presentation(dt);
+            }
+        }
+        presenting |= self
+            .wins
+            .values()
+            .any(|cw| cw.mapped && !cw.hidden && cw.presentation.is_some());
         if self.comp_trace {
             log::info!(
                 "[LIFECYCLE] event=RenderBegin dirty={} needs_full={} tracked={} scene_windows={}",
@@ -2541,6 +2735,18 @@ impl Compositor {
         self.dirty = false;
         self.needs_full = false;
         self.dirty_reasons.clear();
+        // A transition that is still mid-flight (or a newly triggered one whose
+        // first interpolated frame was just produced) keeps the loop awake the
+        // same way an ongoing camera animation does — through the one-shot
+        // GEOMETRY dirty bit that survives `clear_dirty` as FrameReason::Geometry.
+        if presenting {
+            self.dirty = true;
+            self.dirty_reasons.insert(DirtyReason::GEOMETRY);
+        }
+        // Stamp the present timestamp unconditionally: the presentation
+        // transitions read the inter-present interval as their dt, which must
+        // work with tracing off (the trace block below only *reports* it).
+        self.last_present = Some(t_frame_start.unwrap_or_else(Instant::now));
 
         if self.trace {
             if let (Some(b), Some(s), Some(ts)) = (t_build, swap_ns, t_frame_start) {
@@ -2563,8 +2769,10 @@ impl Compositor {
                 }
                 if let Some(last) = self.last_present {
                     let iv = ts.duration_since(last).as_nanos() as u64;
-                    self.trace_ns_interval_total += iv;
-                    self.trace_ns_interval_max = self.trace_ns_interval_max.max(iv);
+                    if iv > 0 {
+                        self.trace_ns_interval_total += iv;
+                        self.trace_ns_interval_max = self.trace_ns_interval_max.max(iv);
+                    }
                 }
                 self.last_present = Some(ts);
 
@@ -3786,9 +3994,120 @@ mod bench {
 
 #[cfg(test)]
 mod lifecycle_tests {
-    use super::{border_rgba, CompWin};
+    use super::{border_rgba, presentation_value, CompWin};
     use crate::types::Rect;
     use maverick_gl::VisualFormat;
+
+    fn transitioning_window() -> CompWin {
+        let mut cw = CompWin::new(
+            Rect::new(478, 8, 313, 584),
+            0,
+            VisualFormat {
+                id: 0,
+                depth: 24,
+                red_bits: 8,
+                green_bits: 8,
+                blue_bits: 8,
+                alpha_bits: 0,
+                direct: true,
+            },
+        );
+        cw.mapped = true;
+        let cfg = crate::config::Cfg::default();
+        cw.presentation_spring = Some((cfg.animations.stiffness, cfg.animations.damping));
+        cw.set_transform(cw.outer, 0, 18, Rect::new(0, 0, 800, 600), 1);
+        cw
+    }
+
+    fn settle_presentation(cw: &mut CompWin, target: Rect) -> usize {
+        for frame in 0..600 {
+            cw.tick_presentation(1.0 / 60.0);
+            cw.set_transform(target, 0, 18, Rect::new(0, 0, 800, 600), cw.transform_gen + 1);
+            if cw.presentation.is_none() {
+                assert_eq!(cw.transform, target);
+                return frame + 1;
+            }
+        }
+        panic!("presentation did not settle");
+    }
+
+    #[test]
+    fn a8_fullscreen_presentation_has_intermediate_frame_and_exact_endpoint() {
+        let mut cw = transitioning_window();
+        let initial = cw.transform;
+        let final_rect = Rect::new(0, 0, 800, 600);
+        assert_ne!(initial, final_rect);
+        cw.set_transform(final_rect, 0, 18, final_rect, 2);
+        assert_eq!(cw.transform, initial);
+        assert_eq!(cw.transform_radius, 18);
+        cw.tick_presentation(1.0 / 60.0);
+        cw.set_transform(final_rect, 0, 18, final_rect, 3);
+        assert_ne!(cw.transform, initial);
+        assert_ne!(cw.transform, final_rect);
+        let frames = settle_presentation(&mut cw, final_rect);
+        assert!(frames > 1);
+        assert_eq!(cw.transform_radius, 0);
+        assert_eq!(cw.outer, initial);
+        cw.set_transform(initial, 0, 18, final_rect, cw.transform_gen + 1);
+        assert_eq!(cw.transform, final_rect);
+        settle_presentation(&mut cw, initial);
+        assert_eq!(cw.transform_radius, 18);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn presentation_retargets_from_unrounded_value_without_return_drift() {
+        let mut cw = transitioning_window();
+        let screen = Rect::new(0, 0, 800, 600);
+        let b = Rect::new(490, 0, 800, 600);
+        let c = Rect::new(-300, 8, 313, 584);
+        for target in [screen, b, c, b] {
+            let before = cw.presentation_value;
+            cw.set_transform(target, 0, 18, screen, cw.transform_gen + 1);
+            assert_eq!(cw.presentation_value, before);
+            for _ in 0..5 {
+                cw.tick_presentation(1.0 / 60.0);
+                cw.set_transform(target, 0, 18, screen, cw.transform_gen + 1);
+            }
+        }
+        settle_presentation(&mut cw, b);
+        assert_eq!(cw.presentation_value, presentation_value(b, 18));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn ribbon_radius_fades_with_motion_and_target_does_not_restart_each_pixel() {
+        let mut cw = transitioning_window();
+        let screen = Rect::new(0, 0, 800, 600);
+        cw.presentation_goal = Some(presentation_value(screen, 0));
+        cw.set_transform(Rect::new(796, 0, 800, 600), 0, 18, screen, 2);
+        let from = cw.presentation.as_ref().unwrap().from;
+        for x in (1..796).rev().step_by(20) {
+            cw.tick_presentation(1.0 / 60.0);
+            cw.set_transform(Rect::new(x, 0, 800, 600), 0, 18, screen, cw.transform_gen + 1);
+            if let Some(transition) = &cw.presentation {
+                assert_eq!(transition.from, from);
+            }
+        }
+        assert!(cw.transform_radius < 18);
+        settle_presentation(&mut cw, screen);
+        assert_eq!(cw.transform_radius, 0);
+    }
+
+    #[test]
+    fn disabled_animation_and_unmapped_first_placement_are_immediate() {
+        let mut cw = transitioning_window();
+        let screen = Rect::new(0, 0, 800, 600);
+        cw.presentation_spring = None;
+        cw.set_transform(screen, 0, 18, screen, 2);
+        assert_eq!(cw.transform, screen);
+        assert!(cw.presentation.is_none());
+        cw.presentation_spring = Some((220.0, 30.0));
+        cw.mapped = false;
+        cw.set_transform(cw.outer, 0, 18, screen, 3);
+        assert_eq!(cw.transform, cw.outer);
+        assert!(cw.presentation.is_none());
+    }
 
     /// The core invariant the floating-freeze fix relies on: `observe_configure`
     /// is *pure* — it never touches X11 or GL — and it reports a size change
