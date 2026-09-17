@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import ctypes
+import fcntl
 import hashlib
 import json
 import os
@@ -253,6 +254,11 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
+    lock = (evidence / "run.lock").open("w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        parser.error("Another showcase run is already active (evidence lock is held)")
     for scene in SCENES if args.scene == "all" else (args.scene,):
         session = Session(scene, binaries, output)
         try:
