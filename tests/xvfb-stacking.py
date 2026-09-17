@@ -95,6 +95,40 @@ action = "focus:right"
                                    env=env, check=True, timeout=5)
                     time.sleep(0.2)
 
+                def fullscreen_peer(label):
+                    """Regression: while A holds the exclusive fullscreen overlay,
+                    a newly mapped ordinary tile B must reconcile X stacking
+                    immediately — B below A, A's geometry/state untouched —
+                    without any Mod+H/L navigation (the old cache skipped the
+                    raise because the overlay-only order vector was unchanged)."""
+                    command("peer")
+                    time.sleep(0.2)
+                    for _ in range(60):
+                        wi, pi, px, py, pw, ph, pbw = map(
+                            int, command("pcheck").split())
+                        # A exclusive: geometry fullscreen, above the peer.
+                        # B tiled: normal workarea geometry below A.
+                        if (wi > pi >= 0 and 0 < pw < 800 and 0 < ph < 600):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise AssertionError(f"{label}: A/B stack/geometry={wi} {pi} {px} {py} {pw} {ph} {pbw}")
+                    time.sleep(0.3)
+                    final = list(map(int, command("pcheck").split()))
+                    assert final == [wi, pi, px, py, pw, ph, pbw], (
+                        f"{label}: unstable {[wi, pi, px, py, pw, ph, pbw]} -> {final}")
+                    a = list(map(int, command("check").split()))
+                    assert a[2:] == [0, 0, 800, 600, 0], f"A lost fullscreen geometry: {a}"
+                    active = subprocess.check_output(["xdotool", "getwindowfocus"],
+                                                     env=env, text=True, timeout=3)
+                    assert int(active) == int(win), f"B stole focus: {active}"
+                    props = subprocess.check_output(["xprop", "-id", win, "_NET_WM_STATE"],
+                                                    env=env, text=True, timeout=3)
+                    assert "_NET_WM_STATE_FULLSCREEN" in props, props
+                    print("PASS:", label, [wi, pi, px, py, pw, ph, pbw])
+                    command("unpeer")
+                    time.sleep(0.2)
+
                 def check(label, fullscreen=True):
                     for _ in range(60):
                         values = list(map(int, command("check").split()))
@@ -137,6 +171,16 @@ action = "focus:right"
                 time.sleep(0.2)
                 command("dock")
                 check("dock restart after covering and exclusive")
+
+                # Regression: while A holds the exclusive fullscreen overlay
+                # (entered above), a newly mapped ordinary tile B must
+                # reconcile X stacking immediately — B below A, A's geometry
+                # and state untouched — with no Mod+H/L. The old overlay-only
+                # order cache skipped the raise because its cached vector did
+                # not change on insertion.
+                check("exclusive before peer insertion")
+                fullscreen_peer("peer while exclusive stays below and A intact")
+                check("exclusive survives peer lifecycle")
 
                 # B maps behind A's exclusive overlay; explicit keyboard focus
                 # must override that deferral and reveal B, not scroll under A.
