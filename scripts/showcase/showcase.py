@@ -14,7 +14,8 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
-SCENES = ("tiling", "navigation", "floating", "fullscreen", "compositor")
+SCENES = ("tiling", "navigation", "floating", "fullscreen", "compositor",
+          "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration")
 SIZE = (1440, 900)
 
 
@@ -106,9 +107,9 @@ class Session:
         config = self.path / "config.toml"
         config.write_text(f'''[general]
 border_width = 1
-corner_radius = {18 if self.scene == "compositor" else 0}
-gaps_inner = 4
-gaps_outer = 8
+corner_radius = {18 if self.scene in ("compositor", "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration") else 0}
+gaps_inner = {6 if self.scene == "tiled-spacing" else 4}
+gaps_outer = {10 if self.scene == "tiled-spacing" else 8}
 column_width = 0.31
 n_tags = 3
 focus_mouse = false
@@ -229,6 +230,16 @@ opacity = {0.78 if self.scene == "compositor" else 1.0}
         print(f"{self.scene}: owned descendants reaped; temporary config/runtime removed", flush=True)
 
 
+def float_geometry(session, window):
+    """Screen-space geometry of a window via xdotool, or None."""
+    try:
+        shell = run(["xdotool", "getwindowgeometry", "--shell", window], session.env).stdout
+        fields = dict(line.split("=", 1) for line in shell.strip().splitlines() if "=" in line)
+        return (int(fields["X"]), int(fields["Y"]), int(fields["WIDTH"]), int(fields["HEIGHT"]))
+    except (RuntimeError, KeyError):
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Capture real Maverick windows in an isolated Xephyr server.")
     parser.add_argument("scene", choices=(*SCENES, "all"))
@@ -285,6 +296,29 @@ def main():
                 run(["xdotool", "windowmove", windows[-1], "590", "290"], session.env)
             elif scene == "fullscreen":
                 session.action("toggle_fullscreen")
+            elif scene == "floating-scroll":
+                session.action("toggle_float")
+                session.stable(windows)
+                run(["xdotool", "windowsize", windows[-1], "480", "360"], session.env)
+                session.stable(windows)
+                run(["xdotool", "windowmove", windows[-1], "480", "270"], session.env)
+                # Record the float's screen geometry, scroll the ribbon two
+                # columns, record again, then scroll back: the float must not
+                # have moved (it is isolated from the ribbon camera).
+                before = float_geometry(session, windows[-1])
+                session.action("focus:left")
+                session.action("focus:left")
+                session.stable(windows)
+                after = float_geometry(session, windows[-1])
+                if before is None or before != after:
+                    raise RuntimeError(
+                        f"floating window moved during ribbon scroll: {before} -> {after}")
+                print("  floating isolation verified during scroll", flush=True)
+            elif scene == "fullscreen-decoration":
+                session.action("toggle_fullscreen")
+                session.stable(windows)
+                session.action("toggle_fullscreen")
+                session.stable(windows)
             else:
                 session.action("focus:left")
             if scene == "compositor":
