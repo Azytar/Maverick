@@ -1417,6 +1417,7 @@ impl Compositor {
         self.frame_gen = self.frame_gen.wrapping_add(1);
         let gen = self.frame_gen;
         let corner_radius = self.corner_radius;
+        let screen = self.screen_rect;
         for &(win, geom, bw) in placements {
             // `ignored` windows are never tracked (see `track`), so the lookup
             // below already rejects them — no separate set probe needed.
@@ -1438,7 +1439,13 @@ impl Compositor {
                 );
             }
             cw.transform = outer;
-            cw.transform_radius = if corner_radius == 0 {
+            // Fullscreen/maximize presentation emits `bw = 0` and a rect that
+            // covers the monitor edge-to-edge (`present_into`). Rounding such
+            // an overlay just clips content under a curved corner with no
+            // desktop behind it to round into — the same niri-style policy the
+            // X11 Shape path enforces in `emit_geometry`. A window is square
+            // exactly when its presentation covers the monitor's screen rect.
+            cw.transform_radius = if corner_radius == 0 || outer == screen {
                 0
             } else {
                 corner_radius.min((outer.w / 2).min(outer.h / 2))
