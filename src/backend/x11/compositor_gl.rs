@@ -230,6 +230,7 @@ struct CompWin {
     /// Outer (border-inclusive) geometry as last seen from X.
     outer: Rect,
     border_w: u32,
+    border_color: Option<u32>,
     /// Last opacity from `_NET_WM_WINDOW_OPACITY` (0..1).
     opacity: f32,
     /// The GLX-backed texture (off-screen pixmap), if the window is mapped.
@@ -267,6 +268,7 @@ struct CompWin {
     /// already had a direct handle to.
     transform: Rect,
     transform_radius: u32,
+    transform_border_w: u32,
     /// Which frame `transform` was written for. Anything older than the
     /// compositor's current generation means the WM did not place this window
     /// this frame (an override-redirect menu, say), so it falls back to its X
@@ -286,11 +288,21 @@ struct CompWin {
     occluded: bool,
 }
 
+fn border_rgba(pixel: u32) -> [f32; 4] {
+    [
+        ((pixel >> 16) & 0xff) as f32 / 255.0,
+        ((pixel >> 8) & 0xff) as f32 / 255.0,
+        (pixel & 0xff) as f32 / 255.0,
+        1.0,
+    ]
+}
+
 impl CompWin {
     fn new(outer: Rect, border_w: u32, format: VisualFormat) -> Self {
         Self {
             outer,
             border_w,
+            border_color: None,
             opacity: 1.0,
             tex: None,
             pixmap: None,
@@ -301,6 +313,7 @@ impl CompWin {
             format,
             transform: Rect::default(),
             transform_radius: 0,
+            transform_border_w: 0,
             // 0 is never a live generation: `set_transforms` pre-increments, so
             // the first frame is generation 1.
             transform_gen: 0,
@@ -320,8 +333,8 @@ impl CompWin {
     fn observe_configure(&mut self, x: i32, y: i32, w: u32, h: u32, bw: u32) -> bool {
         let frame = bw.saturating_mul(2);
         let new_outer = Rect::new(
-            x.saturating_sub(bw as i32),
-            y.saturating_sub(bw as i32),
+            x,
+            y,
             w.saturating_add(frame),
             h.saturating_add(frame),
         );
@@ -329,6 +342,28 @@ impl CompWin {
         self.outer = new_outer;
         self.border_w = bw;
         resized
+    }
+
+    fn set_transform(&mut self, geom: Rect, bw: u32, radius: u32, screen: Rect, gen: u64) {
+        self.transform = Rect::new(
+            geom.x,
+            geom.y,
+            geom.w.saturating_add(bw.saturating_mul(2)),
+            geom.h.saturating_add(bw.saturating_mul(2)),
+        );
+        self.transform_border_w = bw;
+        // Fullscreen/maximize presentation emits `bw = 0` and a rect that
+        // covers the monitor edge-to-edge (`present_into`). Rounding such
+        // an overlay just clips content under a curved corner with no
+        // desktop behind it to round into — the same niri-style policy the
+        // X11 Shape path enforces in `emit_geometry`. A window is square
+        // exactly when its presentation covers the monitor's screen rect.
+        self.transform_radius = if radius == 0 || self.transform == screen {
+            0
+        } else {
+            radius.min((self.transform.w / 2).min(self.transform.h / 2))
+        };
+        self.transform_gen = gen;
     }
 
     /// Whether `r` is entirely outside the `[0,0,w,h]` viewport (plus a small
@@ -1047,8 +1082,8 @@ impl Compositor {
         }
         let bw = g.border_width as u32;
         let geom = Rect::new(
-            g.x as i32 - bw as i32,
-            g.y as i32 - bw as i32,
+            g.x as i32,
+            g.y as i32,
             g.width as u32 + 2 * bw,
             g.height as u32 + 2 * bw,
         );
@@ -1189,8 +1224,8 @@ impl Compositor {
                 let bw = g.border_width as u32;
                 let frame = bw.saturating_mul(2);
                 cw.outer = Rect::new(
-                    (g.x as i32).saturating_sub(bw as i32),
-                    (g.y as i32).saturating_sub(bw as i32),
+                    g.x as i32,
+                    g.y as i32,
                     (g.width as u32).saturating_add(frame),
                     (g.height as u32).saturating_add(frame),
                 );
@@ -1392,10 +1427,21 @@ impl Compositor {
         self.mark_full(DirtyReason::GEOMETRY);
     }
 
-    /// Client changed its own X shape (`ShapeNotify`). We never clobber the
-    /// client's shape with our own X Shape mask, so this is just a redraw
-    /// hint; the SDF/vs shader path already handles corner rounding, and an
-    /// arbitrary client shape is respected because we don't overwrite it.
+    /// The WM repainted a window's native `border_pixel`; the compositor's
+    /// stroke must show the same color (focus/urgent/normal transitions all
+    /// flow through here).
+    pub fn on_border_color(&mut self, win: Window, pixel: u32) {
+        if !self.wins.contains_key(&win) {
+            self.track(win);
+        }
+        if let Some(cw) = self.wins.get_mut(&win) {
+            if cw.border_color != Some(pixel) {
+                cw.border_color = Some(pixel);
+                self.mark_full(DirtyReason::FOCUS);
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub fn on_shape(&mut self, win: Window) {
         if let Some(cw) = self.wins.get_mut(&win) {
@@ -1426,8 +1472,8 @@ impl Compositor {
             };
             // Outer rect = content + borders on every side.
             let outer = Rect::new(
-                geom.x - bw as i32,
-                geom.y - bw as i32,
+                geom.x,
+                geom.y,
                 geom.w + 2 * bw,
                 geom.h + 2 * bw,
             );
@@ -1438,19 +1484,7 @@ impl Compositor {
                     self.dbg_frame, win, cw.transform, outer, changed, cw.transform_gen, gen
                 );
             }
-            cw.transform = outer;
-            // Fullscreen/maximize presentation emits `bw = 0` and a rect that
-            // covers the monitor edge-to-edge (`present_into`). Rounding such
-            // an overlay just clips content under a curved corner with no
-            // desktop behind it to round into — the same niri-style policy the
-            // X11 Shape path enforces in `emit_geometry`. A window is square
-            // exactly when its presentation covers the monitor's screen rect.
-            cw.transform_radius = if corner_radius == 0 || outer == screen {
-                0
-            } else {
-                corner_radius.min((outer.w / 2).min(outer.h / 2))
-            };
-            cw.transform_gen = gen;
+            cw.set_transform(geom, bw, corner_radius, screen, gen);
         }
         if self.float_trace {
             let wins: Vec<String> = placements
@@ -1484,6 +1518,10 @@ impl Compositor {
         registry: &LayoutRegistry,
         anim_per_mon: &[bool],
     ) {
+        if self.corner_radius != cfg.corner_radius {
+            self.corner_radius = cfg.corner_radius;
+            self.mark_full(DirtyReason::GEOMETRY);
+        }
         // Ensure caches match live monitor count.
         let nmon = state.monitors.len();
         if self.live_cache.len() != nmon {
@@ -2232,6 +2270,12 @@ impl Compositor {
                 src: [0.0, 0.0, 1.0, 1.0],
                 size: [outer.w as f32, outer.h as f32],
                 radius: radius as f32,
+                border_width: if cw.transform_gen == gen && cw.border_color.is_some() {
+                    cw.transform_border_w as f32
+                } else {
+                    0.0
+                },
+                border_color: border_rgba(cw.border_color.unwrap_or(0)),
                 opacity: cw.opacity,
                 filter,
             };
@@ -3742,7 +3786,7 @@ mod bench {
 
 #[cfg(test)]
 mod lifecycle_tests {
-    use super::CompWin;
+    use super::{border_rgba, CompWin};
     use crate::types::Rect;
     use maverick_gl::VisualFormat;
 
@@ -3776,7 +3820,7 @@ mod lifecycle_tests {
         // side.
         let resized = cw.observe_configure(10, 20, 100, 50, 2);
         assert!(resized, "first real size must be reported as a resize");
-        assert_eq!(cw.outer, Rect::new(8, 18, 104, 54));
+        assert_eq!(cw.outer, Rect::new(10, 20, 104, 54));
 
         // Move-only (same w/h, different position): must NOT be reported as a
         // resize, or the (deferred) bind would be needlessly re-armed for a pure
@@ -3786,12 +3830,12 @@ mod lifecycle_tests {
             !moved,
             "a move-only ConfigureNotify must not look like a resize"
         );
-        assert_eq!(cw.outer, Rect::new(38, 58, 104, 54));
+        assert_eq!(cw.outer, Rect::new(40, 60, 104, 54));
 
         // Real resize: report it, and expand by the (changed) border.
         let resized2 = cw.observe_configure(40, 60, 200, 80, 4);
         assert!(resized2);
-        assert_eq!(cw.outer, Rect::new(36, 56, 208, 88));
+        assert_eq!(cw.outer, Rect::new(40, 60, 208, 88));
     }
 
     /// Border width is folded into `outer` so the compositor's drawn rect matches
@@ -3820,7 +3864,106 @@ mod lifecycle_tests {
             resized,
             "border change expands outer -> reported as a resize"
         );
-        assert_eq!(cw.outer, Rect::new(-3, -3, 106, 106));
+        assert_eq!(cw.outer, Rect::new(0, 0, 106, 106));
+    }
+
+    /// GL transform = the placement's outer frame *as emitted*: X11
+    /// `ConfigureWindow` x/y already mark the border-inclusive top-left
+    /// (layout.rs subtracts 2·bw from content width; `emit_geometry` wires
+    /// x/y through verbatim). The compositor must therefore NOT shift the
+    /// quad by (-bw,-bw) — that displaced every GL frame one border up-left
+    /// of the native frame. w/h still grow by 2·bw (content-only measures).
+    #[test]
+    fn set_transform_keeps_outer_origin_without_bw_shift() {
+        let vf = VisualFormat {
+            id: 0,
+            depth: 24,
+            red_bits: 8,
+            green_bits: 8,
+            blue_bits: 8,
+            alpha_bits: 0,
+            direct: true,
+        };
+        let mut cw = CompWin::new(Rect::default(), 0, vf);
+        cw.set_transform(Rect::new(100, 200, 400, 300), 1, 12, Rect::new(0, 0, 1440, 900), 1);
+        assert_eq!(cw.transform, Rect::new(100, 200, 402, 302));
+        assert_eq!(cw.transform_border_w, 1);
+        assert_eq!(cw.transform_radius, 12);
+
+        // Same placement with bw 0 (maximize/fullscreen presentation): outer
+        // equals the content rect, no rounding beyond the screen-cover gate.
+        cw.set_transform(Rect::new(0, 0, 640, 480), 0, 12, Rect::new(0, 0, 1440, 900), 2);
+        assert_eq!(cw.transform, Rect::new(0, 0, 640, 480));
+        assert_eq!(cw.transform_border_w, 0);
+        assert_eq!(cw.transform_radius, 12, "bw 0 alone must not square the window");
+    }
+
+    /// Fullscreen policy parity with the X11 Shape path: only a presentation
+    /// that covers the whole monitor is forced square; a maximized window
+    /// whose rect merely equals the *workarea* keeps its rounding, and a
+    /// zero config radius squares everything.
+    #[test]
+    fn set_transform_squares_only_full_screen_coverage() {
+        let vf = VisualFormat {
+            id: 0,
+            depth: 24,
+            red_bits: 8,
+            green_bits: 8,
+            blue_bits: 8,
+            alpha_bits: 0,
+            direct: true,
+        };
+        let screen = Rect::new(0, 0, 1440, 900);
+        let mut cw = CompWin::new(Rect::default(), 0, vf);
+        cw.set_transform(Rect::new(0, 0, 1440, 900), 0, 18, screen, 1);
+        assert_eq!(cw.transform_radius, 0, "screen-covering overlay is square");
+        cw.set_transform(Rect::new(0, 0, 1440, 876), 0, 18, screen, 2);
+        assert_eq!(cw.transform_radius, 18, "workarea-sized maximize stays rounded");
+        cw.set_transform(Rect::new(0, 0, 1440, 900), 0, 0, screen, 3);
+        assert_eq!(cw.transform_radius, 0, "corner_radius 0 disables rounding");
+        // Radius clamped to half the border-inclusive shorter side
+        // (44x24 outer from a 40x20 content + 2px frame → 12).
+        cw.set_transform(Rect::new(0, 0, 40, 20), 2, 18, screen, 4);
+        assert_eq!(cw.transform_radius, 12);
+    }
+
+    /// Border color bookkeeping: `on_border_color` records the pixel and
+    /// flags a focus repaint; `border_rgba` must decode X `border_pixel`
+    /// (0xRRGGBB, alpha forced 1 for premultiplied blending) and the
+    /// no-color-yet state must leave stroke width 0 — an unknown color must
+    /// never invent a ring.
+    #[test]
+    fn border_color_updates_feed_stroke_state() {
+        let [r, g, b, a] = border_rgba(0x89b4fa);
+        assert!((r - f32::from(0x89u8) / 255.0).abs() < f32::EPSILON);
+        assert!((g - f32::from(0xb4u8) / 255.0).abs() < f32::EPSILON);
+        assert!((b - f32::from(0xfau8) / 255.0).abs() < f32::EPSILON);
+        assert!((a - 1.0).abs() < f32::EPSILON);
+        let [r0, g0, b0, a0] = border_rgba(0);
+        assert_eq!((r0, g0, b0, a0), (0.0, 0.0, 0.0, 1.0));
+
+        let vf = VisualFormat {
+            id: 0,
+            depth: 24,
+            red_bits: 8,
+            green_bits: 8,
+            blue_bits: 8,
+            alpha_bits: 0,
+            direct: true,
+        };
+        let mut cw = CompWin::new(Rect::default(), 0, vf);
+        assert_eq!(cw.border_color, None, "tracked windows start colorless");
+        cw.border_color = Some(0xff0000);
+        cw.set_transform(Rect::new(10, 10, 200, 100), 1, 8, Rect::new(0, 0, 1440, 900), 1);
+        // Stroke width rides the live transform's border and is suppressed
+        // whenever no color is known (the unwrap_or(0) path yields width 0
+        // in compute_scene).
+        assert_eq!(cw.transform_border_w, 1);
+        assert_eq!(cw.transform_radius, 8);
+        // Idempotence is the caller's dedup (Some == Some check), mirrored here.
+        let before = cw.border_color;
+        cw.border_color = Some(0xff0000);
+        assert_eq!(cw.border_color, before);
     }
 }
 

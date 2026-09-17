@@ -166,6 +166,21 @@ fn rounded_rectangles(w: i32, h: i32, r: i32) -> Vec<Rectangle> {
     rects
 }
 
+/// Outer region and inset client region, both expressed relative to their own
+/// top-left. Translating the outer region by -bw aligns their circle centers.
+fn rounded_frame_regions(w: u32, h: u32, radius: i32, bw: u32) -> (Vec<Rectangle>, Vec<Rectangle>) {
+    let radius = radius.clamp(0, (w.min(h) / 2) as i32);
+    let inset = bw.saturating_mul(2);
+    (
+        rounded_rectangles(w as i32, h as i32, radius),
+        rounded_rectangles(
+            w.saturating_sub(inset) as i32,
+            h.saturating_sub(inset) as i32,
+            radius.saturating_sub(bw.min(i32::MAX as u32) as i32).max(0),
+        ),
+    )
+}
+
 /// Clamp a floating window's geometry so the whole frame (content + the border
 /// on both sides) fits inside `wa`.
 ///
@@ -282,9 +297,9 @@ pub(super) fn transient_chain_reaches(
 
 impl WindowManager {
     /// Apply (or clear) rounded corners on `win` via the Shape extension's
-    /// bounding-shape mask. Only called when `corner_radius > 0` — with the
-    /// default of `0` this codepath, and every X11 Shape request, never
-    /// runs, so there's zero cost for users who don't opt in. `radius` is
+    /// bounding and client-clip masks. With radius zero, restore both default
+    /// regions so fullscreen content is not limited by a stale inner clip.
+    /// Windows that never opt in do not issue Shape requests. `radius` is
     /// the *effective* radius for this call — callers pass `0` to force a
     /// square mask (e.g. fullscreen, which must stay edge-to-edge like niri:
     /// rounding an overlay that touches the screen border just clips the
@@ -307,7 +322,27 @@ impl WindowManager {
         radius: i32,
         bw: u32,
     ) {
-        let rects = rounded_rectangles(outer_w as i32, outer_h as i32, radius);
+        if radius <= 0 {
+            for kind in [shape::SK::CLIP, shape::SK::BOUNDING] {
+                let _ = shape::mask(&self.conn, shape::SO::SET, kind, win, 0, 0, x11rb::NONE);
+            }
+            return;
+        }
+        let (rects, inner) = rounded_frame_regions(outer_w, outer_h, radius, bw);
+        // The X server paints the border as BOUNDING minus CLIP. Leaving CLIP
+        // rectangular consumes the curved band inside the client rectangle.
+        // Insetting the outer frame by bw keeps the circle centers fixed:
+        // the inner radius is max(R - bw, 0), not R or an arbitrary offset.
+        let _ = shape::rectangles(
+            &self.conn,
+            shape::SO::SET,
+            shape::SK::CLIP,
+            ClipOrdering::UNSORTED,
+            win,
+            0,
+            0,
+            &inner,
+        );
         // Fire-and-forget, same rationale as apply_geom's configure_window:
         // this runs on every geometry change, a synchronous round-trip per
         // window would be unacceptable. Servers without the Shape extension
@@ -813,11 +848,19 @@ impl WindowManager {
             self.engine.state.monitors[mon].layout_dirty = true;
         }
 
-        if self.engine.cfg.corner_radius > 0 && self.compositor.is_none() {
+        self.sync_rounded_frame(win, geom, bw, is_fullscreen);
+
+        Ok(())
+    }
+
+    fn sync_rounded_frame(&mut self, win: Window, geom: Rect, bw: u32, is_fullscreen: bool) {
+        if (self.engine.cfg.corner_radius > 0 && self.compositor.is_none())
+            || self.shape_mask_cache.contains_key(&win)
+        {
             // Fullscreen is always square, niri-style — border-0 and edge-to-
             // edge, so a rounded mask has no desktop behind it to reveal and
             // just chops the content under a curved clip instead.
-            let r = if is_fullscreen {
+            let r = if is_fullscreen || self.compositor.is_some() {
                 0
             } else {
                 self.engine.cfg.corner_radius as i32
@@ -839,8 +882,6 @@ impl WindowManager {
                 self.shape_mask_cache.insert(win, key);
             }
         }
-
-        Ok(())
     }
 
     pub(super) fn apply_geom(
@@ -1011,6 +1052,11 @@ impl WindowManager {
             let _ = self
                 .conn
                 .change_window_attributes(w, &ChangeWindowAttributesAux::new().border_pixel(col));
+            // The GL compositor paints its own stroke from the same color;
+            // keeping it in sync here means the ring follows focus changes.
+            if let Some(compositor) = self.compositor.as_mut() {
+                compositor.on_border_color(w, col);
+            }
             self.grab_buttons(w, true)?;
 
             let serial = self.engine.state.next_serial();
@@ -1153,11 +1199,14 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn unfocus(&self, win: Window) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn unfocus(&mut self, win: Window) -> Result<(), Box<dyn std::error::Error>> {
         let col = self.engine.cfg.col_normal;
         let _ = self
             .conn
             .change_window_attributes(win, &ChangeWindowAttributesAux::new().border_pixel(col));
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.on_border_color(win, col);
+        }
         let _ = self.grab_buttons(win, false);
         Ok(())
     }
@@ -1324,6 +1373,9 @@ impl WindowManager {
                     w,
                     &ChangeWindowAttributesAux::new().border_pixel(col),
                 );
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.on_border_color(w, col);
+                }
             }
         } else {
             let _ = self.conn.set_input_focus(
@@ -1340,6 +1392,9 @@ impl WindowManager {
                     old,
                     &ChangeWindowAttributesAux::new().border_pixel(self.engine.cfg.col_normal),
                 );
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.on_border_color(old, self.engine.cfg.col_normal);
+                }
             }
         }
 

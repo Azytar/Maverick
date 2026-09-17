@@ -461,6 +461,9 @@ impl WindowManager {
                         | EventMask::STRUCTURE_NOTIFY,
                 ),
         );
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.on_border_color(win, self.engine.cfg.col_normal);
+        }
 
         self.grab_buttons(win, false)?;
 

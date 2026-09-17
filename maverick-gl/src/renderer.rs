@@ -76,6 +76,8 @@ uniform sampler2D u_tex;
 uniform float u_opacity;  // _NET_WM_WINDOW_OPACITY, 0..1
 uniform float u_radius;   // WM corner_radius in px, 0 disables the whole branch
 uniform vec2  u_size;     // quad size in px, for the SDF
+uniform float u_border_width;
+uniform vec4 u_border_color;
 out vec4 frag;
 
 // Signed distance to a rounded box centred on the origin.
@@ -89,9 +91,17 @@ void main() {
     float a = u_opacity;
     if (u_radius > 0.0) {
         vec2 p = v_uv * u_size - u_size * 0.5;
-        float d = sd_round_box(p, u_size * 0.5, u_radius);
-        // 1px analytic antialiasing across the corner edge.
-        a *= 1.0 - smoothstep(-1.0, 1.0, d);
+        float radius = min(u_radius, min(u_size.x, u_size.y) * 0.5);
+        float d = sd_round_box(p, u_size * 0.5, radius);
+        float outer = 1.0 - smoothstep(-0.5, 0.5, d);
+        if (u_border_width > 0.0) {
+            float width = min(u_border_width, min(u_size.x, u_size.y) * 0.5);
+            float inner_d = sd_round_box(p, u_size * 0.5 - width, max(radius - width, 0.0));
+            float inner = min(outer, 1.0 - smoothstep(-0.5, 0.5, inner_d));
+            src = src * inner + u_border_color * (outer - inner);
+        } else {
+            src *= outer;
+        }
     }
     // Scaling the whole vec4 keeps the result premultiplied.
     frag = src * a;
@@ -255,6 +265,8 @@ pub struct DrawQuad {
     pub size: [f32; 2],
     /// Corner radius in pixels; `0.0` takes the fast path (no SDF at all).
     pub radius: f32,
+    pub border_width: f32,
+    pub border_color: [f32; 4],
     /// 0..1 multiplier applied to the premultiplied source.
     pub opacity: f32,
     /// Texture filtering mode.
@@ -586,6 +598,8 @@ pub struct Renderer {
     u_opacity: GLint,
     u_radius: GLint,
     u_size: GLint,
+    u_border_width: GLint,
+    u_border_color: GLint,
     /// Wallpaper shader program (user fragment shader + our unit-quad vertex
     /// shader). `0` when no shader wallpaper is active. Separate from `prog` so
     /// the window path is untouched.
@@ -803,6 +817,8 @@ impl Renderer {
             u_opacity: -1,
             u_radius: -1,
             u_size: -1,
+            u_border_width: -1,
+            u_border_color: -1,
             wp_prog: 0,
             wp_u_dst: -1,
             wp_u_res: -1,
@@ -886,6 +902,8 @@ impl Renderer {
         self.u_opacity = uniform("u_opacity");
         self.u_radius = uniform("u_radius");
         self.u_size = uniform("u_size");
+        self.u_border_width = uniform("u_border_width");
+        self.u_border_color = uniform("u_border_color");
 
         // The wallpaper shader program reuses the same unit-quad vertex shader as
         // the window program, so a user fragment shader only has to declare the
@@ -1045,6 +1063,14 @@ impl Renderer {
             (gl.glUniform4f)(self.u_src, q.src[0], q.src[1], q.src[2], q.src[3]);
             (gl.glUniform2f)(self.u_size, q.size[0], q.size[1]);
             (gl.glUniform1f)(self.u_radius, q.radius);
+            (gl.glUniform1f)(self.u_border_width, q.border_width);
+            (gl.glUniform4f)(
+                self.u_border_color,
+                q.border_color[0],
+                q.border_color[1],
+                q.border_color[2],
+                q.border_color[3],
+            );
             (gl.glUniform1f)(self.u_opacity, q.opacity);
             (gl.glUniform1f)(self.u_flip, if tex.flip { 1.0 } else { 0.0 });
             (gl.glDrawArrays)(GL_TRIANGLES, 0, 6);
@@ -1078,6 +1104,14 @@ impl Renderer {
             (gl.glUniform4f)(self.u_src, q.src[0], q.src[1], q.src[2], q.src[3]);
             (gl.glUniform2f)(self.u_size, q.size[0], q.size[1]);
             (gl.glUniform1f)(self.u_radius, q.radius);
+            (gl.glUniform1f)(self.u_border_width, q.border_width);
+            (gl.glUniform4f)(
+                self.u_border_color,
+                q.border_color[0],
+                q.border_color[1],
+                q.border_color[2],
+                q.border_color[3],
+            );
             (gl.glUniform1f)(self.u_opacity, q.opacity);
             (gl.glUniform1f)(self.u_flip, 0.0);
             (gl.glDrawArrays)(GL_TRIANGLES, 0, 6);
