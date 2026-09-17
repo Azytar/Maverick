@@ -102,6 +102,10 @@ mod placeholder {
         pub fn on_map(&mut self, _window: Window) {}
         #[inline(always)]
         pub fn on_damage(&mut self, _window: Window) {}
+        /// No-op without the compositor feature: the native border already
+        /// carries the color, there is no GL stroke to keep in sync.
+        #[inline(always)]
+        pub fn on_border_color(&mut self, _window: Window, _pixel: u32) {}
         #[inline(always)]
         pub fn set_outputs(&mut self, _outputs: &[Rect]) {}
         #[inline(always)]
