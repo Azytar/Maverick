@@ -1682,9 +1682,7 @@ impl Compositor {
                     let radius = if outer == self.screen_rect {
                         0
                     } else {
-                        cfg.corner_radius
-                            .min(outer.w / 2)
-                            .min(outer.h / 2)
+                        cfg.corner_radius.min(outer.w / 2).min(outer.h / 2)
                     };
                     presentation_value(outer, radius)
                 });
@@ -2480,9 +2478,7 @@ impl Compositor {
         // Timing detail: this runs *before* `compute_scene` so the springs see
         // the interval the previous frame was actually on screen, and the new
         // interpolation below reads the freshly advanced progress.
-        let dt = self
-            .last_present
-            .map_or(0.0, |t| t.elapsed().as_secs_f32());
+        let dt = self.last_present.map_or(0.0, |t| t.elapsed().as_secs_f32());
         // Same B8 policy as the WM springs: a present interval longer than two
         // refreshes (idle gap, stalled GPU) must not advance the transition by
         // the whole gap — it would snap instead of glide.
@@ -4022,7 +4018,13 @@ mod lifecycle_tests {
     fn settle_presentation(cw: &mut CompWin, target: Rect) -> usize {
         for frame in 0..600 {
             cw.tick_presentation(1.0 / 60.0);
-            cw.set_transform(target, 0, 18, Rect::new(0, 0, 800, 600), cw.transform_gen + 1);
+            cw.set_transform(
+                target,
+                0,
+                18,
+                Rect::new(0, 0, 800, 600),
+                cw.transform_gen + 1,
+            );
             if cw.presentation.is_none() {
                 assert_eq!(cw.transform, target);
                 return frame + 1;
@@ -4084,7 +4086,13 @@ mod lifecycle_tests {
         let from = cw.presentation.as_ref().unwrap().from;
         for x in (1..796).rev().step_by(20) {
             cw.tick_presentation(1.0 / 60.0);
-            cw.set_transform(Rect::new(x, 0, 800, 600), 0, 18, screen, cw.transform_gen + 1);
+            cw.set_transform(
+                Rect::new(x, 0, 800, 600),
+                0,
+                18,
+                screen,
+                cw.transform_gen + 1,
+            );
             if let Some(transition) = &cw.presentation {
                 assert_eq!(transition.from, from);
             }

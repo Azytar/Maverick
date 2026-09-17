@@ -263,7 +263,10 @@ fn clean_mask_strips_the_xkb_group_bits() {
     // NumLock and CapsLock are removed too, so binds work in any lock state.
     let lock = 1u16 << 1;
     assert_eq!(clean_mask(SUPER | numlock | lock, numlock, 0), SUPER);
-    assert_eq!(clean_mask(SUPER | SHIFT | 0x2000, numlock, 0), SUPER | SHIFT);
+    assert_eq!(
+        clean_mask(SUPER | SHIFT | 0x2000, numlock, 0),
+        SUPER | SHIFT
+    );
 }
 
 // ── 5. Config keysym normalisation ─────────────────────────────────────────────
@@ -417,7 +420,10 @@ fn clean_mask_strips_mod3_like_the_other_locks() {
     let numlock = 1u16 << 4;
     let mod3 = 1u16 << 5; // Scroll Lock's column, from the modifier map
     assert_eq!(clean_mask(SUPER | mod3, numlock, mod3), SUPER);
-    assert_eq!(clean_mask(SUPER | SHIFT | mod3, numlock, mod3), SUPER | SHIFT);
+    assert_eq!(
+        clean_mask(SUPER | SHIFT | mod3, numlock, mod3),
+        SUPER | SHIFT
+    );
 }
 
 // ── Diagnostics ────────────────────────────────────────────────────────────────

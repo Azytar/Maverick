@@ -69,8 +69,8 @@ use std::rc::Rc;
 use std::time::Instant;
 use x11rb::connection::Connection;
 use x11rb::errors::ConnectionError;
-use x11rb::protocol::{xproto::*, Event};
 use x11rb::protocol::xkb;
+use x11rb::protocol::{xproto::*, Event};
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::COPY_DEPTH_FROM_PARENT;
 
@@ -1186,28 +1186,33 @@ fn fetch_keyboard_state(conn: &XConn) -> Result<KeyboardState, Box<dyn std::erro
 
     use x11rb::protocol::xkb::{ConnectionExt as _, MapPart, ID};
     let mut group_cols: Vec<Vec<u32>> = Vec::new();
-    if conn.xkb_use_extension(1, 0)?.reply().is_ok_and(|r| r.supported) {
-        let map = conn.xkb_get_map(
-            ID::USE_CORE_KBD.into(),
-            MapPart::KEY_SYMS,
-            0u16.into(),
-            0,
-            0,
-            min,
-            count,
-            0,
-            0,
-            0,
-            0,
-            0u16.into(),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )?
-        .reply()?;
+    if conn
+        .xkb_use_extension(1, 0)?
+        .reply()
+        .is_ok_and(|r| r.supported)
+    {
+        let map = conn
+            .xkb_get_map(
+                ID::USE_CORE_KBD.into(),
+                MapPart::KEY_SYMS,
+                0u16.into(),
+                0,
+                0,
+                min,
+                count,
+                0,
+                0,
+                0,
+                0,
+                0u16.into(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )?
+            .reply()?;
         if let Some(symbols) = map.map.syms_rtrn {
             let mut rows = vec![x11rb::protocol::xkb::KeySymMap::default(); count as usize];
             for (i, row) in symbols.into_iter().enumerate() {
@@ -1218,7 +1223,11 @@ fn fetch_keyboard_state(conn: &XConn) -> Result<KeyboardState, Box<dyn std::erro
                     }
                 }
             }
-            let group = conn.xkb_get_state(ID::USE_CORE_KBD.into())?.reply()?.group.into();
+            let group = conn
+                .xkb_get_state(ID::USE_CORE_KBD.into())?
+                .reply()?
+                .group
+                .into();
             group_cols = group_columns(&rows, group, count as usize);
         }
     }

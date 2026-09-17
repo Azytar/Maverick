@@ -197,7 +197,8 @@ impl WindowManager {
             return;
         }
 
-        let events = EventType::NEW_KEYBOARD_NOTIFY | EventType::MAP_NOTIFY | EventType::STATE_NOTIFY;
+        let events =
+            EventType::NEW_KEYBOARD_NOTIFY | EventType::MAP_NOTIFY | EventType::STATE_NOTIFY;
         let res = self.conn.xkb_select_events(
             ID::USE_CORE_KBD.into(),
             0u16.into(),
