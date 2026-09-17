@@ -126,11 +126,16 @@ fn rounded_rectangles(w: i32, h: i32, r: i32) -> Vec<Rectangle> {
     }
 
     let mut rects = Vec::with_capacity(2 * r as usize + 1);
+    // The middle band only exists when the corner zones leave a gap between
+    // them. When `2*r == h` the band degenerates to the circle-center row,
+    // which is fully visible (chord == r there), so clamping it to 1px is the
+    // true geometry, not padding — and Shape unions tolerate the overlap with
+    // the tangent corner row below.
     rects.push(Rectangle {
         x: 0,
         y: r as i16,
         width: w as u16,
-        height: (h - 2 * r).max(0) as u16,
+        height: (h - 2 * r).max(1) as u16,
     });
 
     for i in 0..r {
@@ -140,7 +145,11 @@ fn rounded_rectangles(w: i32, h: i32, r: i32) -> Vec<Rectangle> {
         let dy = r - i;
         let chord = ((r * r - dy * dy).max(0) as f64).sqrt() as i32;
         let inset = (r - chord).clamp(0, w / 2);
-        let width = (w - 2 * inset).max(0) as u16;
+        // `width` reaches 0 exactly when `w == 2*r` on the tangent row
+        // (`i == 0`, `chord == 0`): the circle then touches the frame at the
+        // single point `x == r`, so one visible pixel is the true geometry —
+        // the row must not be dropped (it would clip the frame's top edge).
+        let width = (w - 2 * inset).max(1) as u16;
         rects.push(Rectangle {
             x: inset as i16,
             y: i as i16,
@@ -1361,6 +1370,102 @@ mod tests {
         let wa = workarea();
         let g = Rect::new(100, 200, 640, 480);
         assert_eq!(clamp_float_to_workarea(g, wa, 2), g);
+    }
+
+    // ── Rounded-corner mask geometry (see `round_corners`) ────────────────
+    //
+    // `rounded_rectangles` is a pure function of (w, h, r): the X11 mask it
+    // describes must be a centered, symmetric rounded frame. The call site
+    // anchors it at (-bw, -bw) so the mask's outer edge lands on the window's
+    // outer frame; these tests pin the invariants that make that anchoring
+    // correct without duplicating the implementation's arithmetic.
+
+    fn mask_extents(rects: &[Rectangle]) -> (i32, i32, i32, i32) {
+        // (min_x, min_y, max_x, max_y) of the union — half-open, X11-style.
+        let (mut min_x, mut min_y) = (i32::MAX, i32::MAX);
+        let (mut max_x, mut max_y) = (i32::MIN, i32::MIN);
+        for r in rects {
+            min_x = min_x.min(r.x as i32);
+            min_y = min_y.min(r.y as i32);
+            max_x = max_x.max(r.x as i32 + r.width as i32);
+            max_y = max_y.max(r.y as i32 + r.height as i32);
+        }
+        (min_x, min_y, max_x, max_y)
+    }
+
+    #[test]
+    fn rounded_mask_spans_exactly_the_outer_frame() {
+        let (w, h, r) = (800, 600, 12);
+        let rects = rounded_rectangles(w, h, r);
+        let (min_x, min_y, max_x, max_y) = mask_extents(&rects);
+        assert_eq!((min_x, min_y, max_x, max_y), (0, 0, w, h));
+    }
+
+    #[test]
+    fn rounded_mask_is_horizontally_symmetric() {
+        // Every 1px corner row must leave the same inset on the left as on
+        // the right, and the middle band must span the full width — otherwise
+        // the arc eats one side (the bug `round_corners` anchoring fixes).
+        let (w, h, r) = (401, 300, 10); // odd width: symmetry cannot hold by luck
+        let rects = rounded_rectangles(w, h, r);
+        let middle = &rects[0];
+        assert_eq!((middle.x, middle.y, middle.width), (0, r as i16, w as u16));
+        for row in &rects[1..] {
+            let inset = row.x as i32;
+            let right_edge = row.x as i32 + row.width as i32;
+            assert_eq!(
+                inset,
+                w - right_edge,
+                "row y={} must leave matching insets on both sides",
+                row.y
+            );
+        }
+    }
+
+    #[test]
+    fn rounded_mask_radius_is_bounded_by_half_the_smaller_side() {
+        // A radius larger than half the window must clamp, never invert the
+        // middle band (negative height) or push rows past the frame.
+        for &(w, h, r) in &[
+            (40, 30, 15),
+            (30, 40, 20),
+            (10, 10, 9),
+            (6, 6, 3),
+            (5, 5, 5),
+        ] {
+            let rects = rounded_rectangles(w, h, r);
+            let (min_x, min_y, max_x, max_y) = mask_extents(&rects);
+            assert_eq!(
+                (min_x, min_y, max_x, max_y),
+                (0, 0, w, h),
+                "w={w} h={h} r={r}"
+            );
+            assert!(rects.iter().all(|x| x.height > 0 && x.width > 0));
+        }
+    }
+
+    #[test]
+    fn zero_radius_is_a_square_full_frame_mask() {
+        let rects = rounded_rectangles(640, 480, 0);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(
+            (rects[0].x, rects[0].y, rects[0].width, rects[0].height),
+            (0, 0, 640, 480)
+        );
+    }
+
+    #[test]
+    fn degenerate_mask_sizes_stay_valid() {
+        // 0-sized frames fall into the early square-mask branch: a single
+        // (0,0,w,h) rect, possibly with a 0 dimension when the frame itself
+        // has none — never a malformed multi-rect union.
+        for &(w, h) in &[(0, 0), (1, 1), (0, 100), (100, 0)] {
+            let rects = rounded_rectangles(w, h, 8);
+            assert_eq!(rects.len(), 1, "{w}x{h} must fall back to the square mask");
+            assert_eq!((rects[0].x, rects[0].y), (0, 0));
+            assert_eq!(rects[0].width, w.max(0) as u16);
+            assert_eq!(rects[0].height, h.max(0) as u16);
+        }
     }
 
     #[test]
