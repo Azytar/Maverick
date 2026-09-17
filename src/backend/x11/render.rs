@@ -632,7 +632,16 @@ impl WindowManager {
         let mon = &self.engine.state.monitors[mon_idx];
         let ws = mon.ws();
 
-        let mut order: Vec<WindowId> = Vec::new();
+        // Include the tiled base in the canonical order: mapping a new tile
+        // changes the real X stack even when the overlay list is unchanged.
+        // Omitting it would let the cache skip reconciliation and leave the
+        // newcomer above an exclusive fullscreen owner.
+        let mut order: Vec<WindowId> = ws
+            .columns
+            .iter()
+            .flat_map(|col| col.windows.iter().copied())
+            .filter(|win| self.engine.state.clients.contains_key(win))
+            .collect();
 
         // 1. Base float layer.
         for &win in &ws.floats {
