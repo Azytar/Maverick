@@ -194,7 +194,7 @@ pub struct WindowManager {
     /// window's `x` every frame) — without this cache a SHAPE `SET` request
     /// was reissued every such frame even though the mask geometry (a pure
     /// function of size, not position) hadn't changed.
-    shape_mask_cache: std::collections::HashMap<Window, (u32, u32, i32)>,
+    shape_mask_cache: std::collections::HashMap<Window, (u32, u32, i32, u32)>,
     /// No-compositor wallpaper (`rootwall.rs`): the pixmap ID last installed as
     /// the root background, if any. `apply_root_wallpaper` runs repeatedly
     /// (startup, config reload, monitor reconfiguration, GL-failure fallback)

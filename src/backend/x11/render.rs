@@ -281,21 +281,38 @@ impl WindowManager {
     /// rounding an overlay that touches the screen border just clips the
     /// content under a curved corner instead of producing a real rounded
     /// look, since there's no desktop showing behind it to round into).
-    pub(super) fn round_corners(&self, win: Window, outer_w: u32, outer_h: u32, radius: i32) {
+    ///
+    /// `bw` is the border width already included in `outer_w`/`outer_h`: the
+    /// mask must be anchored at the window's *outer* top-left corner, and a
+    /// window's local coordinate space starts at the inner edge of its border
+    /// (the border band lives at [-bw, 0) × [-bw, 0) around the origin). A
+    /// mask placed at (0, 0) sized w+2bw × h+2bw therefore clips the whole
+    /// top/left border band and shifts both corner arcs bw px into the
+    /// content. Offsetting the mask by -bw is not a magic constant: it is
+    /// exactly the border width the outer size includes.
+    pub(super) fn round_corners(
+        &self,
+        win: Window,
+        outer_w: u32,
+        outer_h: u32,
+        radius: i32,
+        bw: u32,
+    ) {
         let rects = rounded_rectangles(outer_w as i32, outer_h as i32, radius);
         // Fire-and-forget, same rationale as apply_geom's configure_window:
         // this runs on every geometry change, a synchronous round-trip per
         // window would be unacceptable. Servers without the Shape extension
         // (essentially none — it's been near-universal since the 90s) just
         // silently ignore the request.
+        let offset = -(bw.min(i16::MAX as u32) as i16);
         let _ = shape::rectangles(
             &self.conn,
             shape::SO::SET,
             shape::SK::BOUNDING,
             ClipOrdering::UNSORTED,
             win,
-            0,
-            0,
+            offset,
+            offset,
             &rects,
         );
     }
@@ -798,16 +815,18 @@ impl WindowManager {
             };
             let outer_w = geom.w + 2 * bw;
             let outer_h = geom.h + 2 * bw;
-            // The Shape `BOUNDING` mask depends only on (outer_w, outer_h, r),
-            // never on position. `emit_geometry` fires on every Configure
+            // The Shape `BOUNDING` mask depends only on (outer_w, outer_h, r,
+            // bw), never on position. `emit_geometry` fires on every Configure
             // effect, including pure moves (camera scroll re-Configures every
             // visible window's x each animation frame), so without this guard
             // an unchanged mask was re-uploaded to the X server every such
             // frame. Skip the SHAPE request when nothing the mask depends on
-            // has changed since the last one we actually issued.
-            let key = (outer_w, outer_h, r);
+            // has changed since the last one we actually issued. `bw` is part
+            // of the key: the mask origin (-bw, -bw) anchors the mask at the
+            // outer frame, so a border-width change alone re-anchors it.
+            let key = (outer_w, outer_h, r, bw);
             if self.shape_mask_cache.get(&win) != Some(&key) {
-                self.round_corners(win, outer_w, outer_h, r);
+                self.round_corners(win, outer_w, outer_h, r, bw);
                 self.shape_mask_cache.insert(win, key);
             }
         }
