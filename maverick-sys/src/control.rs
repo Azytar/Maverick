@@ -298,16 +298,25 @@ fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -
         IDENTIFY_CMD => format!("{}\n", single_line(identity_json)),
         STATE_CMD => format!("{}\n", single_line(&hub.snapshot())),
         QUIT_CMD => {
-            hub.push_command(ControlCommand::Quit);
-            "ok\n".to_string()
+            if hub.push_command(ControlCommand::Quit) {
+                "ok\n".to_string()
+            } else {
+                "error busy: command queue full\n".to_string()
+            }
         }
         RESTART_CMD => {
-            hub.push_command(ControlCommand::Restart);
-            "ok\n".to_string()
+            if hub.push_command(ControlCommand::Restart) {
+                "ok\n".to_string()
+            } else {
+                "error busy: command queue full\n".to_string()
+            }
         }
         RELOAD_CMD => {
-            hub.push_command(ControlCommand::Reload);
-            "ok\n".to_string()
+            if hub.push_command(ControlCommand::Reload) {
+                "ok\n".to_string()
+            } else {
+                "error busy: command queue full\n".to_string()
+            }
         }
         tmp => {
             // `dispatch <action>` — require a whitespace delimiter so that
@@ -318,8 +327,10 @@ fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -
                     if action.is_empty() {
                         return "error dispatch: missing action\n".to_string();
                     }
-                    hub.push_command(ControlCommand::Dispatch(action.to_string()));
-                    return "ok\n".to_string();
+                    if hub.push_command(ControlCommand::Dispatch(action.to_string())) {
+                        return "ok\n".to_string();
+                    }
+                    return "error busy: command queue full\n".to_string();
                 }
             }
             // `query <topic>` — same delimiter requirement.
@@ -332,7 +343,9 @@ fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -
                     // The WM thread computes the reply from live state (it is the
                     // only thread allowed to touch it); we block on its answer.
                     // 2s is generous: the WM loop wakes at least every 100ms.
-                    let (tx, rx) = std::sync::mpsc::channel();
+                    // Bounded one-shot: the WM sends exactly once, so this
+                    // never grows and never blocks the WM thread.
+                    let (tx, rx) = std::sync::mpsc::sync_channel(1);
                     if !hub.push_command(ControlCommand::Query {
                         topic: topic.to_string(),
                         reply: tx,

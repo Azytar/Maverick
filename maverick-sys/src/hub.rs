@@ -27,19 +27,49 @@
 //!
 //! # Invariants
 //!
-//! - `ControlCommand::Query` carries a one-shot `Sender<String>` reply channel;
+//! - `ControlCommand::Query` carries a one-shot `SyncSender<String>` reply channel;
 //!   therefore `ControlCommand` is not `Eq`/`PartialEq` — callers use `matches!`.
 //! - `drain_commands` never blocks (`try_recv` loop); `publish_state`/`emit` hold
 //!   their `Mutex` only long enough to swap/clone.
-//! - `emit` prunes dead subscribers (`send` returns `Err`) on every call.
+//! - `emit` never blocks the WM thread (`try_send` only): a slow subscriber's
+//!   message is dropped and counted, a dead one is pruned on the next `emit`.
+//! - `push_command` never blocks (`try_send` only): a full command queue
+//!   returns `false` so the server can reply `error busy` instead of growing
+//!   memory without bound.
+//!
+//! # Back-pressure
+//!
+//! | Channel      | Capacity            | Producer            | Consumer              | Full policy                    | Blocking? |
+//! |--------------|---------------------|---------------------|-----------------------|--------------------------------|-----------|
+//! | commands     | `CMD_CAP` (128)     | server conn threads | WM event-loop thread  | `try_send` fails → `false`     | never     |
+//! | subscriber   | `SUB_CAP` (64 each) | WM thread (`emit`)  | per-sub conn thread   | drop msg + count, keep sub     | never     |
+//! | query reply  | 1 (one-shot)        | WM thread           | requesting conn thread| `send` into empty slot / `Err` | never*    |
+//!
+//! `*` the query reply is sent exactly once into an empty 1-slot channel, so it
+//! never blocks; if the requester already timed out the send just fails.
 
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
+
+/// Maximum queued control commands (server threads → WM thread).
+///
+/// Each entry is a tiny enum + short `String` (<64 B action). 128 bounds the
+/// queue to a few KiB while absorbing legit bursts (scripts fanning out
+/// dispatches). Beyond this the server replies `error busy` instead of
+/// growing memory.
+pub const CMD_CAP: usize = 128;
+/// Per-subscriber event queue (WM thread → each `subscribe` connection).
+///
+/// Events are coalescible notifications (`focus`/`workspace`); a slow client
+/// drops intermediate lines and re-queries `state`. 64 × ~32 B × 16 subs is
+/// bounded to tens of KiB.
+pub const SUB_CAP: usize = 64;
 
 /// A command requested by an external tool, to be executed by the WM on its
 /// own thread. `Dispatch` carries an action name that the WM maps to its
 /// internal `Action` vocabulary.
-// NOTE: not `Eq`/`PartialEq` — `Query` carries a `Sender` reply channel, which
+// NOTE: not `Eq`/`PartialEq` — `Query` carries a `SyncSender` reply channel, which
 // has no meaningful equality. Callers (and tests) that need to recognise a
 // queued command match on it with `matches!` instead.
 #[derive(Debug, Clone)]
@@ -54,10 +84,10 @@ pub enum ControlCommand {
     Dispatch(String),
     /// A structured read-only query ("workspaces", "tree", "focused", …).
     /// The WM answers by sending the result JSON through `reply`; the server
-    /// thread blocks on the channel until it arrives.
+    /// thread blocks on the channel until it arrives (2 s timeout).
     Query {
         topic: String,
-        reply: Sender<String>,
+        reply: SyncSender<String>,
     },
 }
 
@@ -71,26 +101,31 @@ pub struct ControlHub {
 }
 
 struct Inner {
-    /// Sender half of the command queue (server thread -> WM thread).
-    cmd_tx: Sender<ControlCommand>,
+    /// Sender half of the bounded command queue (server thread -> WM thread).
+    cmd_tx: SyncSender<ControlCommand>,
     /// Receiver half; guarded so `drain()` can be called from the WM thread.
     cmd_rx: Mutex<Receiver<ControlCommand>>,
     /// Latest state snapshot as JSON, published by the WM.
     state: Mutex<String>,
     /// Live `subscribe` sinks. Dead ones are pruned on the next `emit`.
-    subscribers: Mutex<Vec<Sender<String>>>,
+    subscribers: Mutex<Vec<SyncSender<String>>>,
+    /// Subscriber messages dropped because a queue was full. Control-plane
+    /// observability only: incremented on drop (rare), read by tests/tools.
+    /// `Relaxed` is enough — an approximate count is fine.
+    dropped: AtomicUsize,
 }
 
 impl ControlHub {
     /// Create a fresh hub with empty state and no subscribers.
     pub fn new() -> Self {
-        let (cmd_tx, cmd_rx) = channel();
+        let (cmd_tx, cmd_rx) = sync_channel(CMD_CAP);
         ControlHub {
             inner: Arc::new(Inner {
                 cmd_tx,
                 cmd_rx: Mutex::new(cmd_rx),
                 state: Mutex::new(String::from("{}")),
                 subscribers: Mutex::new(Vec::new()),
+                dropped: AtomicUsize::new(0),
             }),
         }
     }
@@ -98,9 +133,11 @@ impl ControlHub {
     // ── server thread side ────────────────────────────────────────────────
 
     /// Queue a command for the WM to execute. Called from the server thread.
-    /// Returns `false` if the WM thread has gone away (receiver dropped).
+    /// Never blocks. Returns `false` when the queue is full or the WM thread
+    /// has gone away (receiver dropped); the caller must reply `error busy`
+    /// instead of `ok` so the loss is visible.
     pub fn push_command(&self, cmd: ControlCommand) -> bool {
-        self.inner.cmd_tx.send(cmd).is_ok()
+        self.inner.cmd_tx.try_send(cmd).is_ok()
     }
 
     /// Read the latest published state snapshot (JSON). Called from the server
@@ -115,9 +152,11 @@ impl ControlHub {
 
     /// Register a new subscriber. Returns the receiving end; the server thread
     /// forwards every line it gets to the connected client until the client
-    /// disconnects (at which point the sender send fails and gets pruned).
+    /// disconnects (at which point the sender fails and gets pruned).
+    /// Each subscriber gets a bounded (`SUB_CAP`) queue so a slow client can
+    /// never grow memory without bound — see `emit`.
     pub fn subscribe(&self) -> Receiver<String> {
-        let (tx, rx) = channel();
+        let (tx, rx) = sync_channel(SUB_CAP);
         if let Ok(mut subs) = self.inner.subscribers.lock() {
             subs.push(tx);
         }
@@ -148,16 +187,34 @@ impl ControlHub {
     /// Emit an event line to every live subscriber, pruning dead ones.
     /// The `line` should be a single JSON object without a trailing newline;
     /// the server adds the newline framing.
+    ///
+    /// Never blocks the WM thread: `try_send` only. A `Full` queue means a
+    /// slow subscriber — its message is dropped and counted (`dropped_events`),
+    /// the subscriber is kept (it can re-query `state`). A `Disconnected`
+    /// queue is pruned.
     pub fn emit(&self, line: impl Into<String>) {
         let line = line.into();
         if let Ok(mut s) = self.inner.subscribers.lock() {
-            s.retain(|tx| tx.send(line.clone()).is_ok());
+            s.retain(|tx| match tx.try_send(line.clone()) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_)) => {
+                    self.inner.dropped.fetch_add(1, Ordering::Relaxed);
+                    true
+                }
+                Err(TrySendError::Disconnected(_)) => false,
+            });
         }
     }
 
     /// Number of currently registered subscribers (for tests/introspection).
     pub fn subscriber_count(&self) -> usize {
         self.inner.subscribers.lock().map(|s| s.len()).unwrap_or(0)
+    }
+
+    /// Messages dropped because a subscriber queue was full.
+    /// Control-plane observability only; `Relaxed` count, may lag slightly.
+    pub fn dropped_events(&self) -> usize {
+        self.inner.dropped.load(Ordering::Relaxed)
     }
 }
 
@@ -218,5 +275,56 @@ mod tests {
         let cmds = b.drain_commands();
         assert_eq!(cmds.len(), 1);
         assert!(matches!(cmds[0], ControlCommand::Reload));
+    }
+
+    #[test]
+    fn command_queue_is_bounded_and_never_blocks() {
+        let hub = ControlHub::new();
+        // Fill to capacity: every push must succeed without blocking.
+        for i in 0..CMD_CAP {
+            assert!(
+                hub.push_command(ControlCommand::Dispatch(format!("a{i}"))),
+                "push {i} must succeed while filling"
+            );
+        }
+        // One more must be rejected, not block and not grow memory.
+        assert!(
+            !hub.push_command(ControlCommand::Dispatch("overflow".into())),
+            "queue must reject beyond CMD_CAP"
+        );
+        let cmds = hub.drain_commands();
+        assert_eq!(cmds.len(), CMD_CAP);
+        // After draining there is room again.
+        assert!(hub.push_command(ControlCommand::Quit));
+        let cmds = hub.drain_commands();
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], ControlCommand::Quit));
+    }
+
+    #[test]
+    fn slow_subscriber_drops_but_stays_connected() {
+        let hub = ControlHub::new();
+        let rx = hub.subscribe();
+        // Never read: fill the per-subscriber queue, then overflow it.
+        for _ in 0..(SUB_CAP + 10) {
+            hub.emit("{\"event\":\"focus\"}");
+        }
+        assert_eq!(hub.subscriber_count(), 1, "slow subscriber is kept");
+        assert_eq!(
+            hub.dropped_events(),
+            10,
+            "only the overflow beyond SUB_CAP is counted"
+        );
+        // The queue holds the first SUB_CAP lines; drain them to prove order.
+        for _ in 0..SUB_CAP {
+            assert_eq!(rx.try_recv().unwrap(), "{\"event\":\"focus\"}");
+        }
+        // Next emit fits again — no further drop.
+        hub.emit("{\"event\":\"focus\"}");
+        assert_eq!(hub.dropped_events(), 10);
+        assert_eq!(rx.try_recv().unwrap(), "{\"event\":\"focus\"}");
+        drop(rx);
+        hub.emit("{\"event\":\"workspace\"}");
+        assert_eq!(hub.subscriber_count(), 0, "dead subscriber is pruned");
     }
 }
