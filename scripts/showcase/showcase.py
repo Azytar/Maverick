@@ -31,15 +31,67 @@ FOCUSED, NORMAL = (137, 180, 250), (69, 71, 90)
 CONTENT = (30, 30, 46)
 
 
+def fold_line(line, width):
+    """Fold one source line to fit `width` cells without mid-word cuts.
+
+    Word-aware wrap; only an overlong whitespace-free token is hard-folded
+    with a trailing ellipsis marker. Returns the list of continuation rows.
+    """
+    if len(line) <= width:
+        return [line]
+    rows, current = [], ""
+    for word in line.split(" "):
+        if not current:
+            if len(word) <= width:
+                current = word
+            else:
+                while len(word) > width - 1:
+                    rows.append(word[:width - 1] + "…")
+                    word = word[width - 1:]
+                current = word
+        elif len(current) + 1 + len(word) <= width:
+            current += " " + word
+        else:
+            rows.append(current)
+            if len(word) <= width:
+                current = word
+            else:
+                while len(word) > width - 1:
+                    rows.append(word[:width - 1] + "…")
+                    word = word[width - 1:]
+                current = word
+    rows.append(current)
+    return rows
+
+
 def client(title, source):
     lines = (ROOT / source).read_text().splitlines()
     def draw(*_):
         columns, rows = shutil.get_terminal_size()
+        width = max(10, columns - 7)
+        budget = max(1, rows - 9)
         print("\033[2J\033[H\033[?25l\033[1;36m" + title + "\033[0m\n")
         print("MAVERICK / LIVE X11 CLIENT\n")
         print(source + "\n" + "─" * min(42, columns - 1))
-        for index, line in enumerate(lines[:max(1, rows - 9)], 1):
-            print(f"\033[90m{index:3} │\033[0m {line[:max(1, columns - 7)]}")
+        folded = []
+        for index, line in enumerate(lines, 1):
+            for position, part in enumerate(fold_line(line, width)):
+                folded.append((index, position > 0, part))
+                if len(folded) >= budget:
+                    break
+            if len(folded) >= budget:
+                break
+        shown = {index for index, _, _ in folded}
+        if len(shown) < len(lines):
+            folded = folded[:max(0, budget - 1)]
+            shown = {index for index, _, _ in folded}
+        for index, continuation, part in folded:
+            if continuation:
+                print(f"\033[90m    │\033[0m {part}")
+            else:
+                print(f"\033[90m{index:3} │\033[0m {part}")
+        if len(shown) < len(lines):
+            print(f"\033[90m    │ … +{len(lines) - len(shown)} lines\033[0m")
         sys.stdout.flush()
     signal.signal(signal.SIGWINCH, draw)
     draw()
