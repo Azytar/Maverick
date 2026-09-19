@@ -79,6 +79,7 @@
 )]
 
 mod backend;
+mod bench_arrange;
 mod compositor_policy;
 mod config;
 pub mod core;
@@ -104,10 +105,12 @@ fn main() {
     // not passed at all.
     let mut check_config: Option<Option<String>> = None;
     let mut bad_arg: Option<String> = None;
+    let mut bench_arrange = false;
 
     let mut args = std::env::args().skip(1).peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--bench-arrange" => bench_arrange = true,
             "-v" | "--version" => show_version = true,
             "-h" | "--help" => show_help = true,
             "--replace" | "-r" => replace = true,
@@ -152,6 +155,11 @@ fn main() {
     if let Some(msg) = bad_arg {
         eprintln!("maverick: {msg}");
         process::exit(1);
+    }
+
+    // Synthetic release benchmark: no X, no WM startup, exits after printing.
+    if bench_arrange {
+        process::exit(crate::bench_arrange::run());
     }
 
     // `--check-config` validates a config file and exits with status 0 when it
