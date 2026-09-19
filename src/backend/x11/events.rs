@@ -866,10 +866,19 @@ impl WindowManager {
                 return Ok(());
             }
         }
-        let cutoff = std::time::Instant::now()
-            .checked_sub(std::time::Duration::from_secs(1))
-            .unwrap();
-        self.last_key_times.retain(|_, v| *v >= cutoff);
+        // Prune per-binding timestamps older than 1 s to bound the map.
+        // Invariant: `Instant::now() - 1s` is virtually always representable
+        // (monotonic clock long past its minimum by the time the WM runs).
+        // Why it holds: `checked_sub` only returns `None` within 1 s of the
+        // clock's minimum — unreachable in practice after process startup.
+        // Failure handling: if somehow `None`, skip pruning this keypress
+        // (the map holds one entry per binding, so growth is bounded) rather
+        // than panicking the WM event loop on a key press.
+        if let Some(cutoff) =
+            std::time::Instant::now().checked_sub(std::time::Duration::from_secs(1))
+        {
+            self.last_key_times.retain(|_, v| *v >= cutoff);
+        }
         self.last_key_times.insert(key, std::time::Instant::now());
         self.do_action(action)?;
         // Keyboard navigation must not be instantly undone by an EnterNotify
