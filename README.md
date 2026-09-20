@@ -612,10 +612,10 @@ The focused window in exclusive fullscreen presentation.
 
 ![Maverick compositor](docs/screenshots/compositor.png)
 
-The optional OpenGL compositor drawing window opacity (the floating window is
-rendered with rule-set `opacity = 0.78`, tiles visible through it) over the same
-layout. Driver and nested-server compatibility still need testing; this capture
-used Mesa's software renderer.
+The optional OpenGL compositor drawing window opacity (the tinted floating
+window is rendered with rule-set `opacity = 0.78`, tiles visible through it)
+over the same layout. Driver and nested-server compatibility still need testing;
+this capture used Mesa's software renderer.
 
 ### Reproducing the screenshots
 
@@ -632,12 +632,15 @@ not replace the WM on the parent display or modify the user's configuration.
 ./scripts/showcase/run.sh all
 ```
 
-Each run verifies the screenshot dimensions, checks that the GL scene really
+Each run renders Maverick inside Xephyr at 2880×1800, captures the root
+window, downsamples with Lanczos to 1440×900 (`sRGB`, stripped metadata),
+and wraps the authentic pixels in a presentation frame (1616×1076 final).
+It verifies every stage's dimensions, checks that the GL scene really
 initialized (`Backend: OpenGL/GLX` plus a submitted frame in the WM log; a
 plain-X11 fallback fails the scene instead of producing a misleading capture),
 reaps every process it created, and removes its temporary state. Dependencies:
 `Xephyr`, `xdpyinfo`, `xdotool`, `xterm`, `xsetroot`, ImageMagick's `import`/
-`identify`, and a reachable host X11 display.
+`identify`/`magick`, and a reachable host X11 display.
 
 ## License
 
