@@ -53,6 +53,16 @@ All notable changes to this project are documented here. Format follows
   `maverickctl quit --confirm`, so no auxiliary process or prompt sits on the
   keyboard quit path.
 
+### Removed
+
+- **`maverick-dialog`.** The standalone X11 confirmation client is gone from
+  the workspace, `install.sh`, the installer's binary list, `maverickctl`'s
+  confirmation fallback and the docs. The `maverickctl quit --confirm` flag
+  itself stays: it is an explicit opt-in prompt (`zenity`/`kdialog`/TTY) for
+  remote/scripted control, not part of the keyboard quit path. Dated release
+  notes further down keep their `maverick-dialog` mentions as historical
+  records.
+
 ### Fixed
 
 - **Build**: unclosed delimiter in `maverick-sys/src/control.rs` (`query`

@@ -376,7 +376,7 @@ configuration can override these defaults.
 | `Super+wheel` | Step column focus |
 | `Super+Shift+C` | Close focused window |
 | `Super+Shift+R` or `Super+F5` | Restart in place |
-| `Super+Shift+Q` | Quit with confirmation |
+| `Super+Shift+Q` | Quit immediately (native clean shutdown, no dialog) |
 
 Custom bindings use entries such as `key = "Mod4+Return"` and
 `action = "spawn:xterm"` inside `[[keybindings]]`. Remember that supplying one

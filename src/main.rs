@@ -224,9 +224,9 @@ fn main() {
     let info = maverick_sys::self_info(&instance_name);
     let sid = info.session_id.clone();
 
-    // Export the session id so child processes (notably `maverickctl`, e.g.
-    // the Mod+Shift+Q quit-confirm keybind) target *this* instance by default,
-    // even when several Mavericks run on different TTYs/DISPLAYs.
+    // Export the session id so child processes (notably `maverickctl`) target
+    // *this* instance by default, even when several Mavericks run on different
+    // TTYs/DISPLAYs.
     std::env::set_var("MAVERICK_INSTANCE", &sid);
 
     maverick_sys::detach_from_terminal();
