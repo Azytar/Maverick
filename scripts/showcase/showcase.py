@@ -452,15 +452,18 @@ foreground = "{FG}"
         return path
 
     def real_alacritty(self, description, title, command, instance="Alacritty"):
-        """Launch real Alacritty (authentic terminal chrome, not xterm)."""
+        """Launch real Alacritty (authentic terminal chrome, not xterm).
+
+        Each caller passes a distinct WM_CLASS instance so concurrent
+        Alacritty windows are distinguishable via the Maverick tree."""
         config = self.real_alacritty_config()
-        label = "real-" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        label = "real-" + re.sub(r"[^a-z0-9]+", "-", description.lower()).strip("-")
         self.spawn(["alacritty", "--config-file", str(config), "--title", title,
-                    "--class", instance, instance,
+                    "--class", f"Alacritty,{instance}",
                     "-e", *command], label)
         return self.wait_tree_for(
             f"alacritty {description}",
-            lambda w, t=title: w.get("instance") == instance and t in (w.get("title") or ""))
+            lambda w, inst=instance: w.get("instance") == inst)
 
     def real_firefox_profile(self):
         """Isolated Firefox profile pinned to offline file:// operation."""
@@ -1196,9 +1199,43 @@ def fullscreen_transition(session, windows, evidence):
     return reports
 
 
+def run_real_desktop(session):
+    """Everyday developer desktop: Neovim + Firefox + Zed + shell.
+
+    Four real applications in Maverick columns (not floating boxes). The
+    ribbon must overflow the viewport so the capture reads as a viewport
+    onto a larger column sequence, not a fitted mosaic."""
+    windows = []
+    windows.append(session.real_alacritty(
+        "neovim", "Neovim / layout.rs",
+        ["nvim", "--clean", "-c", "set number", "--",
+         str(ROOT / "src/core/layout.rs")],
+        instance="realnvim"))
+    windows.append(session.real_firefox("docs", f"file://{REAL_DOC}"))
+    windows.append(session.real_zed("repo", ROOT / "Cargo.toml"))
+    root = str(ROOT)
+    windows.append(session.real_alacritty(
+        "shell", "Shell / git status",
+        ["bash", "--noprofile", "--norc", "-c",
+         f'export PS1="mav$ "; cd {root} && git status --short --branch;'
+         ' exec bash --noprofile --norc -i'],
+        instance="realshell"))
+    session.stable(windows)
+    tree = session.tree()
+    workspace = tree["monitors"][0]["workspaces"][0]
+    scroll = workspace["scroll"]
+    ncols = len(workspace["columns"])
+    print(f"  real-desktop: {ncols} columns, scroll={scroll}", flush=True)
+    if ncols < 4:
+        raise RuntimeError(f"real-desktop expected 4 columns, got {ncols}")
+    if scroll <= 0:
+        raise RuntimeError(f"real-desktop did not overflow the viewport: scroll={scroll}")
+    return windows
+
+
 def main():
     parser = argparse.ArgumentParser(description="Capture real Maverick windows in an isolated Xephyr server.")
-    parser.add_argument("scene", choices=(*SCENES, "all"))
+    parser.add_argument("scene", choices=(*SCENES, "real-desktop", "all"))
     parser.add_argument("--bin-dir", type=Path, default=ROOT / "target/debug")
     parser.add_argument("--evidence", type=Path, default=Path("/tmp/kilo/showcase-evidence"),
                         help="Where JSON evidence and the compositor WM log are written")
@@ -1208,6 +1245,8 @@ def main():
     required = ("Xephyr", "xdpyinfo", "xdotool", "xterm", "xsetroot", "import", "identify")
     if args.scene in (*FOCUS_SCENES, *FULLSCREEN_SCENES, "all"):
         required += ("convert",)
+    if args.scene in ("real-desktop",):
+        required += ("alacritty", "firefox", "zeditor", "nvim")
     missing = [program for program in required if not shutil.which(program)]
     if missing:
         parser.error("Missing prerequisites: " + ", ".join(missing))
@@ -1237,6 +1276,30 @@ def main():
                 (evidence / f"{scene}.json").write_text(json.dumps(
                     {"scene": scene, "checks": [], "failures": []}, indent=2) + "\n")
             session.start()
+            if scene == "real-desktop":
+                windows = run_real_desktop(session)
+                pixel_checks = None
+                transition_checks = None
+                if scene in (*GL_SCENES, *REAL_GL_SCENES):
+                    wait_for("actual GL renderer and submitted frame (fallback is not accepted)", session.gl_active)
+                geometry = session.capture(windows)
+                record = {"scene": scene, "display": session.env["DISPLAY"],
+                          "wm_pid": session.wm.pid, "geometry": geometry,
+                          "state": session.state(), "tree": session.tree(),
+                          "gl_active": session.gl_active(),
+                          "applications": ["alacritty+nvim", "firefox", "zed", "alacritty+shell"],
+                          "sha256": hashlib.sha256((output / f"{scene}.png").read_bytes()).hexdigest(),
+                          "render": {"internal": list(INTERNAL), "final": list(SIZE),
+                                     "framed": list(FRAMED), "scale": SUPER,
+                                     "downsample": "Lanczos", "colorspace": "sRGB",
+                                     "stripped": True,
+                                     "font_face": FONT_FACE, "font_file": FONT_FILE,
+                                     "font_size": FONT_SIZE,
+                                     "frame": {"margin": FRAME_MARGIN, "pad": FRAME_PAD,
+                                               "radius": FRAME_RADIUS,
+                                               "exterior": FRAME_BG}}}
+                (evidence / f"{scene}.json").write_text(json.dumps(record, indent=2) + "\n")
+                continue
             windows = [session.terminal(1, "01 / Configuration", "config/config.toml")]
             pixel_checks = None
             if scene in TRANSITION_SCENES:
