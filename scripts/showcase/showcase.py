@@ -439,24 +439,30 @@ opacity = {0.78 if self.scene == "compositor" else 1.0}
             return None
         return wait_for(description, probe, timeout=timeout)
 
-    def real_alacritty_config(self):
-        """Deterministic Alacritty config: Fira Code, dark Maverick surface."""
-        path = self.path / "real-alacritty.toml"
+    def real_alacritty_config(self, opacity=1.0):
+        """Deterministic Alacritty config: Fira Code, dark Maverick surface.
+
+        Alacritty manages _NET_WM_WINDOW_OPACITY itself (default 1.0
+        overwrites a WM rule set at manage time), so a translucent float
+        needs the client-side `window.opacity` too; the value stays 0.78
+        either way and blending is still done by Maverick's GL compositor."""
+        path = self.path / f"real-alacritty-{str(opacity).replace('.', '_')}.toml"
+        window_section = "" if opacity >= 1.0 else "[window]\nopacity = 0.78\n"
         path.write_text(f'''[font]
 size = {REAL_ALACRITTY_FONT_SIZE}
 normal = {{ family = "{FONT_FACE}" }}
-[colors.primary]
+{window_section}[colors.primary]
 background = "{SURFACE}"
 foreground = "{FG}"
 ''')
         return path
 
-    def real_alacritty(self, description, title, command, instance="Alacritty"):
+    def real_alacritty(self, description, title, command, instance="Alacritty", opacity=1.0):
         """Launch real Alacritty (authentic terminal chrome, not xterm).
 
         Each caller passes a distinct WM_CLASS instance so concurrent
         Alacritty windows are distinguishable via the Maverick tree."""
-        config = self.real_alacritty_config()
+        config = self.real_alacritty_config(opacity=opacity)
         label = "real-" + re.sub(r"[^a-z0-9]+", "-", description.lower()).strip("-")
         self.spawn(["alacritty", "--config-file", str(config), "--title", title,
                     "--class", f"Alacritty,{instance}",
@@ -1313,7 +1319,7 @@ def run_real_focus(session):
     return windows
 
 
-def run_real_floating(session):
+def run_real_floating(session, label="real-floating", float_opacity=1.0):
     """Real floating client over the scrolling mosaic.
 
     A small Alacritty scratch shell is floated via Maverick's own
@@ -1326,7 +1332,7 @@ def run_real_floating(session):
         "float", "Float / scratch",
         ["bash", "--noprofile", "--norc", "-c",
          f'export PS1="float$ "; cd {root}; exec bash --noprofile --norc -i'],
-        instance="realfloat"))
+        instance="realfloat", opacity=float_opacity))
     session.action("toggle_float")
     session.stable(windows)
     run(["xdotool", "windowsize", windows[-1], str(480 * SUPER), str(360 * SUPER)], session.env)
@@ -1340,22 +1346,35 @@ def run_real_floating(session):
     session.stable(windows)
     after = float_geometry(session, windows[-1])
     tiled_after = float_geometry(session, windows[0])
-    print(f"  real-floating: float {before} -> {after}", flush=True)
+    print(f"  {label}: float {before} -> {after}", flush=True)
     if before is None or before != after:
-        raise RuntimeError(f"real float moved during ribbon scroll: {before} -> {after}")
+        raise RuntimeError(f"{label} float moved during ribbon scroll: {before} -> {after}")
     if tiled_before is None or tiled_before[:2] == (tiled_after or (None,))[:2]:
-        raise RuntimeError("real-floating isolation test did not actually scroll tiles")
+        raise RuntimeError(f"{label} isolation test did not actually scroll tiles")
     tree = session.tree()
     floats = tree["monitors"][0]["workspaces"][0]["floats"]
     if not any(str(w["id"]) == windows[-1] for w in floats):
-        raise RuntimeError("real float is not in the workspace float list")
+        raise RuntimeError(f"{label} is not in the workspace float list")
+    return windows
+
+
+def run_real_compositor(session):
+    """Same real desktop as the floating scene, with the real GL compositor.
+
+    Identical choreography (4 tiles + opacity-ruled scratch float, scrolled
+    tiles beneath it); the only difference is compositor ON, so the
+    real-floating capture is the OFF half of the pair."""
+    windows = run_real_floating(session, label="real-compositor", float_opacity=0.78)
+    wait_for("actual GL renderer and submitted frame (fallback is not accepted)",
+             session.gl_active)
     return windows
 
 
 def main():
     parser = argparse.ArgumentParser(description="Capture real Maverick windows in an isolated Xephyr server.")
     parser.add_argument("scene", choices=(*SCENES, "real-desktop", "real-scroll-a",
-                                          "real-scroll-b", "real-focus", "real-floating", "all"))
+                                          "real-scroll-b", "real-focus", "real-floating",
+                                          "real-compositor", "all"))
     parser.add_argument("--bin-dir", type=Path, default=ROOT / "target/debug")
     parser.add_argument("--evidence", type=Path, default=Path("/tmp/kilo/showcase-evidence"),
                         help="Where JSON evidence and the compositor WM log are written")
@@ -1366,7 +1385,7 @@ def main():
     if args.scene in (*FOCUS_SCENES, *FULLSCREEN_SCENES, "all"):
         required += ("convert",)
     if args.scene in ("real-desktop", "real-scroll-a", "real-scroll-b", "real-focus",
-                        "real-floating"):
+                        "real-floating", "real-compositor"):
         required += ("alacritty", "firefox", "zeditor", "nvim")
     if args.scene in ("real-scroll-a", "real-scroll-b"):
         required += ("nautilus", "htop")
@@ -1400,7 +1419,7 @@ def main():
                     {"scene": scene, "checks": [], "failures": []}, indent=2) + "\n")
             session.start()
             if scene in ("real-desktop", "real-scroll-a", "real-scroll-b", "real-focus",
-                           "real-floating"):
+                           "real-floating", "real-compositor"):
                 if scene == "real-desktop":
                     windows = run_real_desktop(session)
                     applications = ["alacritty+nvim", "firefox", "zed", "alacritty+shell"]
@@ -1419,12 +1438,18 @@ def main():
                     windows = run_real_focus(session)
                     applications = ["alacritty+nvim", "firefox", "zed", "alacritty+shell"]
                     navigation = "Neovim -> Firefox -> Zed -> shell walk, ending on Firefox"
-                else:
+                elif scene == "real-floating":
                     windows = run_real_floating(session)
                     applications = ["alacritty+nvim", "firefox", "zed", "alacritty+shell",
                                     "alacritty+float"]
                     navigation = ("toggle_float on scratch shell, resize/move, then "
                                   "focus:left x2 scrolls tiles beneath stationary float")
+                else:
+                    windows = run_real_compositor(session)
+                    applications = ["alacritty+nvim", "firefox", "zed", "alacritty+shell",
+                                    "alacritty+float(opacity 0.78)"]
+                    navigation = ("same choreography as real-floating with the OpenGL "
+                                  "compositor ON; rule-set 0.78 opacity on the float")
                 if scene in (*GL_SCENES, *REAL_GL_SCENES):
                     wait_for("actual GL renderer and submitted frame (fallback is not accepted)", session.gl_active)
                 geometry = session.capture(windows)
