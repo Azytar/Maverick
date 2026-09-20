@@ -430,7 +430,13 @@ impl CompWin {
             // Retain the transition until its exact settled endpoint is installed.
             // The camera may still be approaching that endpoint after progress reaches 1.
             if progress >= 1.0
-                && self.transform == Rect::new(goal[0] as i32, goal[1] as i32, goal[2] as u32, goal[3] as u32)
+                && self.transform
+                    == Rect::new(
+                        goal[0] as i32,
+                        goal[1] as i32,
+                        goal[2] as u32,
+                        goal[3] as u32,
+                    )
                 && self.transform_radius == goal[4] as u32
             {
                 self.presentation = None;
@@ -4133,11 +4139,23 @@ mod lifecycle_tests {
         cw.set_transform(Rect::new(100, 0, 800, 600), 0, 18, screen, 2);
         for _ in 0..120 {
             cw.tick_presentation(1.0 / 60.0);
-            cw.set_transform(Rect::new(7, 0, 800, 600), 0, 18, screen, cw.transform_gen + 1);
+            cw.set_transform(
+                Rect::new(7, 0, 800, 600),
+                0,
+                18,
+                screen,
+                cw.transform_gen + 1,
+            );
         }
-        assert!(cw.presentation.is_some(), "camera still has seven pixels to travel");
+        assert!(
+            cw.presentation.is_some(),
+            "camera still has seven pixels to travel"
+        );
         cw.tick_presentation(1.0 / 60.0);
-        assert!(cw.presentation.is_some(), "ticking alone must not consume the final frame");
+        assert!(
+            cw.presentation.is_some(),
+            "ticking alone must not consume the final frame"
+        );
         cw.set_transform(screen, 0, 18, screen, cw.transform_gen + 1);
         assert_eq!(cw.transform, screen);
         assert_eq!(cw.transform_radius, 0);

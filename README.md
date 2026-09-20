@@ -241,12 +241,12 @@ For a WM build without GL, select the runtime packages explicitly:
 
 ```bash
 cargo build --release --no-default-features \
-  -p maverick -p maverick-sys -p maverick-dialog
+  -p maverick -p maverick-sys
 ```
 
-The normal runtime binaries are `maverick`, `maverickctl`, `maverick-msg`, and
-`maverick-dialog`, under `target/release/`. Cargo also discovers the separate
-`maverick-setup` utility in `src/bin/`; the shell installer installs the four
+The normal runtime binaries are `maverick`, `maverickctl`, and
+`maverick-msg`, under `target/release/`. Cargo also discovers the separate
+`maverick-setup` utility in `src/bin/`; the shell installer installs the three
 runtime binaries, not that utility. No Rust installer crate is part of the workspace.
 
 ### Install
@@ -530,7 +530,6 @@ server that supports the required GLX path.
 | `maverick-gl/` | OpenGL/GLX renderer and in-tree FFI/loading |
 | `maverick-vk/` | Experimental Vulkan device/surface/swapchain code, not integrated into the WM |
 | `maverick-toml/`, `maverick-img/` | TOML-subset parser and PNG decoder/external image conversion |
-| `maverick-dialog/` | Standalone quit-confirmation client |
 | `tests/` | Real-X11 probes and integration scripts, installer smoke tests |
 | `scripts/showcase/` | Isolated documentation capture harness |
 

@@ -26,7 +26,7 @@
 //! # Ownership
 //!
 //! Stateless CLI dispatch; no handles are retained across invocations. Confirmation
-//! prompts try `maverick-dialog` → `zenity`/`kdialog` → TTY fallback.
+//! prompts try `zenity`/`kdialog` → TTY fallback.
 
 use std::process::ExitCode;
 
@@ -483,15 +483,9 @@ fn cmd_forward(tool: &str, line: &str) -> ExitCode {
 // ── confirmation ────────────────────────────────────────────────────────────
 
 /// Ask the user to confirm `prompt`. Tries, in order:
-///   1. `maverick-dialog` (our own X11 dialog binary, if installed)
-///   2. `zenity` / `kdialog` graphical prompts
-///   3. an interactive TTY prompt
+///   1. `zenity` / `kdialog` graphical prompts
+///   2. an interactive TTY prompt
 fn confirm(tool: &str, prompt: &str) -> bool {
-    if which("maverick-dialog") {
-        if let Some(ok) = run_confirm("maverick-dialog", &["--question", prompt]) {
-            return ok;
-        }
-    }
     if which("zenity") {
         if let Some(ok) = run_confirm("zenity", &["--question", "--text", prompt]) {
             return ok;

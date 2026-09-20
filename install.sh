@@ -1184,7 +1184,7 @@ else
     # viejo estimado solo como último recurso si `cargo tree` falla.
     # shellcheck disable=SC2086
     estimated_crates="$(cargo tree --edges normal,build --prefix none $CARGO_FEATURES \
-        -p maverick -p maverick-sys -p maverick-dialog 2>/dev/null | sort -u | grep -c . || true)"
+        -p maverick -p maverick-sys 2>/dev/null | sort -u | grep -c . || true)"
     if [[ -z "$estimated_crates" || "$estimated_crates" -lt 1 ]]; then
         if [[ "$WITH_COMPOSITOR" == "no" ]]; then
             estimated_crates=12
@@ -1197,12 +1197,12 @@ else
     # shellcheck disable=SC2086
     (
         if RUSTFLAGS="-C target-cpu=native" cargo build --release $CARGO_FEATURES \
-               -p maverick -p maverick-sys -p maverick-dialog >"$BUILD_LOG" 2>&1; then
+               -p maverick -p maverick-sys >"$BUILD_LOG" 2>&1; then
             exit 0
         fi
         # shellcheck disable=SC2086
         cargo build --release $CARGO_FEATURES \
-            -p maverick -p maverick-sys -p maverick-dialog >>"$BUILD_LOG" 2>&1
+            -p maverick -p maverick-sys >>"$BUILD_LOG" 2>&1
     ) &
     BUILD_PID=$!
     
@@ -1312,7 +1312,7 @@ fi
 # ── fase 2 · binarios ────────────────────────────────────────────────────────
 _phase_begin 2 ""
 # Check the complete artifact set before replacing any installed binary.
-for bin in maverick maverickctl maverick-msg maverick-dialog; do
+for bin in maverick maverickctl maverick-msg; do
     [[ -f "$CARGO_TARGET_DIR/release/$bin" && -x "$CARGO_TARGET_DIR/release/$bin" ]] ||
         die "missing executable $CARGO_TARGET_DIR/release/$bin (run without --no-build)"
 done
@@ -1320,7 +1320,7 @@ done
 install_command mkdir -p -- "$BIN_DIR" || die "$(t no_write): $BIN_DIR"
 _animate 70 "$BIN_DIR"
 n_ok=0
-for bin in maverick maverickctl maverick-msg maverick-dialog; do
+for bin in maverick maverickctl maverick-msg; do
     # A same-directory rename avoids truncating a running executable (ETXTBSY).
     staged="$(install_command mktemp "$BIN_DIR/.${bin}.XXXXXX")"
     if ! install_command install -m 0755 -- "$CARGO_TARGET_DIR/release/$bin" "$staged" \
@@ -1426,20 +1426,20 @@ esac
 _phase_begin 5 ""
 checks=0
 verify_detail=""
-for bin in maverick maverickctl maverick-msg maverick-dialog; do
+for bin in maverick maverickctl maverick-msg; do
     if [[ -x "$BIN_DIR/$bin" ]]; then
         checks=$(( checks + 1 ))
     fi
 done
 
 # FIX: Real post-install verification — execute maverick --version
-if [[ "$checks" -ne 4 ]] || ! "$BIN_DIR/maverick" --version >/dev/null 2>&1; then
+if [[ "$checks" -ne 3 ]] || ! "$BIN_DIR/maverick" --version >/dev/null 2>&1; then
     die "$(t verify_fail): $BIN_DIR/maverick"
 fi
 verify_detail="$(t verify_ok)"
 
 _animate 100 "$(t checks_ok)"
-_phase_end 5 "$checks/4 ✓ · $verify_detail"
+_phase_end 5 "$checks/3 ✓ · $verify_detail"
 _nap 0.35
 
 # ── cerrar el bloque ─────────────────────────────────────────────────────────

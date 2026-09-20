@@ -5,7 +5,6 @@ members = [
     "maverick-x11",
     "maverick-render",
     "maverick-gl",
-    "maverick-dialog",
     "maverick-toml",
     "maverick-img",
     "maverick-vk",

@@ -56,7 +56,6 @@ Rust. Presenta un diseño de columnas desplazables horizontalmente inspirado en
 
 Maverick es un workspace de Cargo: el binario `maverick` (el propio gestor),
 `maverickctl` (CLI de control), `maverick-setup` (asistente First Flight),
-`maverick-dialog` (el diálogo de confirmación de salida), `maverick-installer`,
 y los crates de librería
 `maverick-gl` (primitivas GL/GLX del compositor), `maverick-img` (decode de
 PNG sin dependencias para el wallpaper) y `maverick-toml` (el parser de
@@ -70,7 +69,7 @@ cargo build --release --workspace
 
 (`--workspace` es necesario porque el `Cargo.toml` raíz es en sí el paquete
 `maverick` — sin él, Cargo solo compila `maverick` y omite los binarios
-`maverick-sys`/`maverick-dialog`.)
+`maverick-sys`.)
 
 > describe un instalador/asistente capaz de detectar tu sistema, generar una
 > configuración a medida, validar la sesión y evitar que el primer arranque
@@ -79,12 +78,8 @@ cargo build --release --workspace
 ### Añadir al PATH
 
 ```bash
-cp target/release/maverick target/release/maverickctl target/release/maverick-msg target/release/maverick-setup target/release/maverick-dialog ~/.local/bin/
+cp target/release/maverick target/release/maverickctl target/release/maverick-msg target/release/maverick-setup ~/.local/bin/
 ```
-
-`maverick-dialog` solo necesita estar en el `PATH` si quieres que aparezca el
-aviso de salida con `Super+Shift+Q`; sin él, `maverickctl` recurre a
-`zenity`/`kdialog`/un aviso en TTY.
 
 Genera una configuración inicial adaptada a tu equipo:
 
@@ -221,17 +216,19 @@ Cicla por todos los modos con `Super+Space`.
 
 | Atajo | Acción |
 | --- | --- |
-| `Super+Shift+Q` | Pide confirmación y luego sale de maverick |
+| `Super+Shift+Q` | Sale de maverick sin confirmación |
 | `Super+Shift+R` | Reinicio en caliente en sitio |
 | `Super+F5` | Reinicio en caliente en sitio |
 | `Super+Space` | Ciclar modos de diseño |
 | `Super+T` | Poner diseño Column |
 | `Super+G` | Poner diseño Grid |
 
-> `Super+Shift+Q` lanza `maverickctl quit --confirm` (recurre a
-> `zenity`/`kdialog`/TTY si `maverick-dialog` no está instalado) para que una
-> pulsación accidental no mate la sesión. Todo el WM también es controlable
-> desde fuera vía un socket Unix con `maverickctl` — véase
+> `Super+Shift+Q` sale de maverick inmediatamente sin diálogo de confirmación.
+> El teardown normal del WM se ejecuta en su totalidad: los clientes se notifican
+> para que cierren cooperativamente, hay un tiempo límite global, y luego se
+> fuerza el cierre de los restantes antes de que el bucle de eventos retorne y
+> los recursos X11 se liberen mediante RAII/Drop. Todo el WM también es
+> controlable desde fuera vía un socket Unix con `maverickctl` — véase
 > [Detalles técnicos](#-detalles-técnicos).
 
 ### Ratón (ventanas flotantes)
@@ -473,7 +470,7 @@ rules: vec![
 
 maverick minimiza las capas de abstracción evitando dependencias innecesarias:
 
-* **X11 / XLibre vía `x11rb 0.13`** — bindings de protocolo seguros en tipos, sin libx11. Solo el WM y `maverick-dialog` enlazan `x11rb`; el resto del workspace es `std` puro.
+* **X11 / XLibre vía `x11rb 0.13`** — bindings de protocolo seguros en tipos, sin libx11. Solo el WM enlaza `x11rb`; el resto del workspace es `std` puro.
 * **Una sola costura de despacho** — `Engine::dispatch(Action) -> Vec<Effect>` es el *único* camino de un atajo o comando IPC a la mutación de estado. `Effect` es un vocabulario semántico (`ArrangeMonitor`, `FocusWindow`, `SetFullscreen`, …); el `execute()` del backend X11 es el único sitio que los convierte en llamadas de protocolo. Un backend no-X11 futuro implementaría `execute()` contra los mismos efectos sin tocar el núcleo.
 * **Pantalla completa/maximizar como presentación, no como bloqueo de máquina de estados** — `core/present.rs` reescribe solo el rectángulo de la ventana *enfocada* (pantalla completa → toda la pantalla, maximizar → área de trabajo, ambos con precedencia sobre el diseño simple) y reordena en cada transición de foco, en lugar de bloquear la entrada mientras una ventana está a pantalla completa.
 * **Colocación flotante autocalculada** — `manage()` nunca confía en la geometría X bruta que reporta una ventana nueva; las ventanas flotantes se centran sobre la geometría real almacenada del padre transitorio (o el área de trabajo del monitor asignado, para diálogos de portales sin padre real) y se recortan dentro de ella. Solo el ancho/alto vienen de la petición original.
@@ -544,8 +541,6 @@ Maverick/                    # Cargo workspace
 │   └── src/lib.rs
 ├── maverick-toml/                # parser de TOML sin dependencias usado por userconfig.rs
 │   └── src/lib.rs
-├── maverick-dialog/           # ventana X11 autónoma de confirmación de salida
-│   └── src/main.rs
 ├── maverick-installer/         # instalador opcional (miembro del workspace)
 │   └── src/main.rs
 ├── config/

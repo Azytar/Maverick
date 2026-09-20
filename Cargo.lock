@@ -97,13 +97,6 @@ name = "maverick-core"
 version = "0.6.0"
 
 [[package]]
-name = "maverick-dialog"
-version = "0.6.0"
-dependencies = [
- "x11rb",
-]
-
-[[package]]
 name = "maverick-gl"
 version = "0.6.0"
 dependencies = [

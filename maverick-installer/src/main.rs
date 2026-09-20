@@ -20,7 +20,6 @@ const BINARIES: &[&str] = &[
     "maverick",
     "maverickctl",
     "maverick-msg",
-    "maverick-dialog",
     "maverick-setup",
 ];
 

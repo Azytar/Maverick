@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-BINS = ("maverick", "maverickctl", "maverick-msg", "maverick-dialog")
+BINS = ("maverick", "maverickctl", "maverick-msg")
 
 
 def executable(path, text):
@@ -57,7 +57,7 @@ case "$1" in
  build)
    [[ $(id -u) != 0 ]]
    [[ "$CARGO_TARGET_DIR" == "$TEST_REPO/target" ]]
-   for b in maverick maverickctl maverick-msg maverick-dialog; do
+   for b in maverick maverickctl maverick-msg; do
      printf '#!/bin/sh\\necho "maverick test"\\n' > "$CARGO_TARGET_DIR/release/$b"
      chmod 755 "$CARGO_TARGET_DIR/release/$b"
    done

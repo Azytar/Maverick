@@ -413,18 +413,10 @@ pub fn compiled_config() -> Cfg {
         // ── layout ──
         (sup, k!(b't'), Action::SetLayout(LayoutKind::Column)),
         // ── misc ──
-        // Mod4+Shift+Q asks maverickctl for confirmation instead of quitting
-        // outright, so a stray keypress can't kill the session. The raw
-        // Action::Quit still exists and is reachable via the control socket.
-        (
-            shs,
-            k!(b'q'),
-            Action::Spawn(vec![
-                "maverickctl".to_string(),
-                "quit".to_string(),
-                "--confirm".to_string(),
-            ]),
-        ),
+        // Mod4+Shift+Q quits Maverick immediately without confirmation.
+        // The shutdown path runs the normal teardown: ask clients to close,
+        // wait up to SHUTDOWN_BUDGET, force-kill remaining, then cleanup.
+        (shs, k!(b'q'), Action::Quit),
         (shs, k!(b'r'), Action::Restart),
         (sup, XK_F5, Action::Restart),
         (sup, XK_TAB, Action::FocusMon(Dir::Next)),
@@ -620,7 +612,8 @@ pub fn theme_palette(name: &str) -> Option<(u32, u32, u32)> {
 
 #[cfg(test)]
 mod rule_tests {
-    use super::Rule;
+    use super::compiled_config;
+    use super::{Action, Rule};
 
     /// Builder sugar for the tests: criterion helpers on a default Rule.
     trait RuleEx {
@@ -718,6 +711,48 @@ mod rule_tests {
         assert!(
             !super::compiled_config().honor_initial_state,
             "compiled default must normalize map-time client state",
+        );
+    }
+
+    #[test]
+    fn compiled_config_binds_mod4_shift_q_to_quit() {
+        // The built-in `Mod4+Shift+Q` must be a direct quit, not a shell-out to
+        // `maverickctl quit --confirm`. Verify the action is `Action::Quit` and
+        // that no `Spawn` action references `maverickctl`.
+        let cfg = compiled_config();
+        // Constants mirror those in `compiled_config()` — see the block-comment
+        // above that function for the numeric values.
+        const SUPER: u16 = 1 << 6;
+        const SHIFT: u16 = 1 << 0;
+        let shs = SUPER | SHIFT;
+        let q = u32::from(b'q');
+        let matched = cfg.keybinds.iter().find(|(m, k, _a)| *m == shs && *k == q);
+        assert_eq!(
+            matched,
+            Some(&(shs, q, Action::Quit)),
+            "Mod4+Shift+Q must resolve to Action::Quit"
+        );
+        assert!(
+            !cfg
+                .keybinds
+                .iter()
+                .any(|(_, _, a)| matches!(a, Action::Spawn(cmd) if cmd.first().is_some_and(|b| b == "maverickctl"))),
+            "compiled config must not spawn maverickctl for the quit binding"
+        );
+    }
+
+    #[test]
+    fn compiled_config_binds_mod4_shift_r_to_restart() {
+        let cfg = compiled_config();
+        const SUPER: u16 = 1 << 6;
+        const SHIFT: u16 = 1 << 0;
+        let shs = SUPER | SHIFT;
+        let r = u32::from(b'r');
+        assert!(
+            cfg.keybinds
+                .iter()
+                .any(|(m, k, a)| *m == shs && *k == r && matches!(a, Action::Restart)),
+            "Mod4+Shift+R must still restart"
         );
     }
 }

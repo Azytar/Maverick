@@ -29,7 +29,7 @@
 //! - [`ctl`] — shared CLI engine for `maverickctl`/`maverick-msg`: instance
 //!   selection (`--session`/`--name`/`$MAVERICK_INSTANCE`/DISPLAY+TTY
 //!   context/singleton), `list`/`state`/`query`/`msg`/`subscribe`/`quit`/
-//!   `restart`/`reload`/`prune`, and confirmation via `maverick-dialog`/
+//!   `restart`/`reload`/`prune`, and confirmation via
 //!   `zenity`/`kdialog`/TTY.
 //!
 //! # Ownership
