@@ -577,70 +577,93 @@ release dates:
 
 ## Screenshots
 
-All images below were captured from real Maverick sessions: the WM running inside
-Xephyr, managing actual X11 clients (`xterm` rendering live repository files),
-screenshotted with `import`. No mock-ups.
+All images below were captured from real Maverick sessions: the WM running
+inside Xephyr at 2880×1800, managing real applications, captured with
+`import`, downsampled with Lanczos to 1440×900 (`sRGB`, stripped metadata),
+and wrapped in a presentation frame (1616×1076 final). Every pixel inside the
+frame is authentic application rendering through Maverick's layout. No
+mock-ups, no terminal imitations of apps, no post-processing effects.
 
-### Tiling
+### Everyday desktop
 
-![Maverick tiling](docs/screenshots/tiling.png)
+![Maverick everyday desktop](docs/screenshots/real-desktop.png)
 
-Three columns with the focused window indicated by the blue border.
+A developer's workspace: Neovim in Alacritty on real source
+(`src/core/layout.rs`), Firefox on a local offline documentation page
+(`file://`, no network), Zed on the repository, and an Alacritty shell with
+`git status`. Four Maverick columns; the ribbon already extends past the
+viewport, with Neovim peeking in at the left edge.
 
-### Navigation
+### Scrolling
 
-![Maverick navigation](docs/screenshots/navigation.png)
+![Maverick scrolling, viewport A](docs/screenshots/real-scroll-a.png)
 
-A horizontally scrolling ribbon: adding windows extends the ribbon instead of
-shrinking the current view; the leftmost and rightmost columns peek in at the
-screen edges.
+![Maverick scrolling, viewport B](docs/screenshots/real-scroll-b.png)
+
+Six columns (the desktop above plus a file manager and a system monitor);
+two viewports of the same desktop reached through Maverick's own directional
+focus: viewport A sits on Zed (`scroll=2764`), viewport B on the file manager
+(`scroll=4454`). The workspace is larger than the visible mosaic, and the
+blue border always marks the focused column. A
+[focus walk](docs/screenshots/real-focus.png) ending on Firefox is also
+captured.
 
 ### Floating windows
 
-![Maverick floating](docs/screenshots/floating.png)
+![Maverick floating window](docs/screenshots/real-floating.png)
 
-A floating window centred over the tiled layout. Floats keep screen-space
-geometry while the tiles scroll underneath.
-
-### Fullscreen
-
-![Maverick fullscreen](docs/screenshots/fullscreen.png)
-
-The focused window in exclusive fullscreen presentation.
+A real Alacritty scratch shell floated by the WM (`960×540` at `960,540`)
+stays put while the tiles scroll two columns beneath it: floats keep
+screen-space geometry outside the ribbon transform.
 
 ### Compositor
 
-![Maverick compositor](docs/screenshots/compositor.png)
+![Maverick compositor](docs/screenshots/real-compositor.png)
 
-The optional OpenGL compositor drawing window opacity (the tinted floating
-window is rendered with rule-set `opacity = 0.78`, tiles visible through it)
-over the same layout. Driver and nested-server compatibility still need testing;
-this capture used Mesa's software renderer.
+The same desktop and float with the real OpenGL compositor ON (`0.78`
+opacity, rounded corners; Mesa software renderer under Xephyr): Firefox and
+Zed content shows through the float. Compare with the floating shot above,
+which is the same state with the compositor OFF.
+
+### Technical (synthetic clients)
+
+The `xterm` source-viewer scenes remain for implementation detail
+(`tiling`, `navigation`, `floating`, `fullscreen`, `compositor`, plus the
+rounded/fullscreen regression set under `docs/screenshots/`). They no longer
+carry the burden of being the primary representation of Maverick.
 
 ### Reproducing the screenshots
 
-The showcase runs Maverick inside Xephyr with controlled lightweight clients,
-private configuration/runtime directories, and bounded process cleanup. It does
-not replace the WM on the parent display or modify the user's configuration.
+The showcase runs Maverick inside Xephyr with controlled clients, private
+configuration/runtime directories (including isolated Firefox profiles and
+Zed data directories; the user's `~/.config` is never touched), and bounded
+process cleanup. It does not replace the WM on the parent display or modify
+the user's configuration. Everything works offline: Firefox opens a local
+`file://` page and no scene touches the network.
 
 ```bash
+./scripts/showcase/run.sh real-desktop
+./scripts/showcase/run.sh real-scroll-a
+./scripts/showcase/run.sh real-scroll-b
+./scripts/showcase/run.sh real-focus
+./scripts/showcase/run.sh real-floating
+./scripts/showcase/run.sh real-compositor
 ./scripts/showcase/run.sh tiling
-./scripts/showcase/run.sh navigation
-./scripts/showcase/run.sh floating
-./scripts/showcase/run.sh fullscreen
-./scripts/showcase/run.sh compositor
 ./scripts/showcase/run.sh all
 ```
 
 Each run renders Maverick inside Xephyr at 2880×1800, captures the root
 window, downsamples with Lanczos to 1440×900 (`sRGB`, stripped metadata),
 and wraps the authentic pixels in a presentation frame (1616×1076 final).
-It verifies every stage's dimensions, checks that the GL scene really
+It verifies every stage's dimensions, checks that the GL scenes really
 initialized (`Backend: OpenGL/GLX` plus a submitted frame in the WM log; a
 plain-X11 fallback fails the scene instead of producing a misleading capture),
 reaps every process it created, and removes its temporary state. Dependencies:
-`Xephyr`, `xdpyinfo`, `xdotool`, `xterm`, `xsetroot`, ImageMagick's `import`/
-`identify`/`magick`, and a reachable host X11 display.
+`Xephyr`, `xdpyinfo`, `xdotool`, `xsetroot`, ImageMagick's `import`/
+`identify`/`magick`, a reachable host X11 display, and — for the real
+desktop scenes only — `alacritty`, `firefox`, `zeditor`, `nvim`
+(`nautilus` and `htop` for the scrolling pair). GL clients are forced onto
+X11 inside the harness, so a Wayland host session does not break them.
 
 ## License
 
