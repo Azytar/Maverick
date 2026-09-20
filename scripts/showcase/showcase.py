@@ -32,8 +32,20 @@ SUPER = 2
 SIZE = (1440, 900)
 INTERNAL = (SIZE[0] * SUPER, SIZE[1] * SUPER)
 BORDER, RADIUS = 1 * SUPER, 18 * SUPER
-FOCUSED, NORMAL = (137, 180, 250), (69, 71, 90)
-CONTENT = (30, 30, 46)
+# Maverick Showcase palette (deterministic, offline).
+# Very dark neutral blue/charcoal foundation; terminal surface one step up;
+# single restrained electric-cyan/blue accent. Tuned at 2880x1800, verified
+# after Lanczos to 1440x900 and at ~720px README width.
+ROOT_BG = "#0D1118"       # root gradient top
+ROOT_BG_BOTTOM = "#0A0D12"  # root gradient bottom
+SURFACE = "#161B26"       # terminal background (distinguishable, same family)
+SURFACE_ALT = "#3A2B45"   # secondary client tint (fullscreen B, compositor float)
+SURFACE_ALT2 = "#1E3A40"  # tertiary client tint (fullscreen-new-window C)
+FG = "#E8EAF0"            # primary text (off-white, not max white)
+DIM = "#9AA3B2"           # secondary text
+ACCENT = "#4CC3FF"        # single Maverick accent (electric cyan/blue)
+FOCUSED, NORMAL = (76, 195, 255), (58, 67, 86)
+CONTENT = (22, 27, 38)
 FONT_FACE = "Fira Code"
 FONT_FILE = "/usr/share/fonts/TTF/FiraCode-Regular.ttf"
 # xterm has no OpenType shaping (libXft, no harfbuzz): Fira Code ligatures are
@@ -77,13 +89,73 @@ def fold_line(line, width):
     return rows
 
 
+def _rgb(hexcolor):
+    hexcolor = hexcolor.lstrip("#")
+    return tuple(int(hexcolor[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _fg_seq(hexcolor):
+    r, g, b = _rgb(hexcolor)
+    return f"\033[38;2;{r};{g};{b}m"
+
+
+_BG_CACHE = {}
+
+
+def write_showcase_background(path, width, height):
+    """Deterministic showcase background: vertical gradient #0D1118 -> #0A0D12
+    with one restrained diagonal light band and a faint cyan depth glow.
+    Pure stdlib (zlib/crc PNG writer), no RNG, no external files.
+
+    The INTERNAL size is fixed, so the bytes are identical for every scene:
+    render once per process and reuse them (a full 2880x1800 per-pixel pass
+    costs ~6s; without the cache an `all` run would pay it ~15 times)."""
+    import struct
+    import zlib
+    key = (width, height)
+    png = _BG_CACHE.get(key)
+    if png is None:
+        top = (13, 17, 24)
+        bottom = (10, 13, 18)
+        glow_cx, glow_cy, glow_r = 0.78 * width, 0.78 * height, 350 * SUPER
+        rows = []
+        for y in range(height):
+            t = y / max(1, height - 1)
+            r0 = round(top[0] + (bottom[0] - top[0]) * t)
+            g0 = round(top[1] + (bottom[1] - top[1]) * t)
+            b0 = round(top[2] + (bottom[2] - top[2]) * t)
+            line = bytearray(width * 3 + 1)
+            line[0] = 0  # filter 0
+            dy = y - glow_cy
+            for x in range(width):
+                cy = height * 0.30 - x * 0.12
+                d = abs(y - cy)
+                add = round(7 * max(0.0, 1.0 - d / (130 * SUPER)))
+                dx = x - glow_cx
+                glow = max(0.0, 1.0 - (dx * dx + dy * dy) ** 0.5 / glow_r)
+                glow *= glow
+                o = 1 + x * 3
+                line[o] = min(255, r0 + add)
+                line[o + 1] = min(255, g0 + add + round(5 * glow))
+                line[o + 2] = min(255, b0 + add + round(11 * glow))
+            rows.append(bytes(line))
+        raw = b"".join(rows)
+        def chunk(tag, data):
+            c = struct.pack(">I", len(data)) + tag + data
+            return c + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+               + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+        _BG_CACHE[key] = png
+    Path(path).write_bytes(png)
+
+
 def client(title, source):
     lines = (ROOT / source).read_text().splitlines()
     def draw(*_):
         columns, rows = shutil.get_terminal_size()
         width = max(10, columns - 7)
         budget = max(1, rows - 9)
-        print("\033[2J\033[H\033[?25l\033[1;36m" + title + "\033[0m\n")
+        print("\033[2J\033[H\033[?25l" + _fg_seq(ACCENT) + title + "\033[0m\n")
         print("MAVERICK / LIVE X11 CLIENT\n")
         print(source + "\n" + "─" * min(42, columns - 1))
         folded = []
@@ -100,11 +172,11 @@ def client(title, source):
             shown = {index for index, _, _ in folded}
         for index, continuation, part in folded:
             if continuation:
-                print(f"\033[90m    │\033[0m {part}")
+                print(f"{_fg_seq(DIM)}    │\033[0m {part}")
             else:
-                print(f"\033[90m{index:3} │\033[0m {part}")
+                print(f"{_fg_seq(DIM)}{index:3} │\033[0m {part}")
         if len(shown) < len(lines):
-            print(f"\033[90m    │ … +{len(lines) - len(shown)} lines\033[0m")
+            print(f"{_fg_seq(DIM)}    │ … +{len(lines) - len(shown)} lines\033[0m")
         sys.stdout.flush()
     signal.signal(signal.SIGWINCH, draw)
     draw()
@@ -183,6 +255,12 @@ class Session:
                 os.close(write_fd)
         self.env["DISPLAY"] = ":" + display.decode()
         wait_for("X11 readiness", lambda: run(["xdpyinfo"], self.env, False).returncode == 0)
+        # Procedural deterministic background (stdlib PNG, no external file).
+        # Installed as Maverick's native wallpaper so BOTH paths share it:
+        # plain-X11 scenes via rootwall, compositor scenes via the GL painter.
+        # A flat xsetroot color remains underneath for the pre-wallpaper moment.
+        bg = self.path / "showcase-bg.png"
+        write_showcase_background(bg, *INTERNAL)
         config = self.path / "config.toml"
         config.write_text(f'''[general]
 border_width = {BORDER}
@@ -194,14 +272,17 @@ n_tags = 3
 focus_mouse = false
 warp_cursor = false
 [colors]
-normal = 0x45475a
-focused = 0x89b4fa
+normal = 0x3a4356
+focused = 0x4cc3ff
 [animations]
 enabled = {str(self.scene == "fullscreen-transition-gl").lower()}
 [compositor]
 enabled = {str(self.scene in GL_SCENES).lower()}
 backend = "opengl"
 fullscreen_bypass = false
+[wallpaper]
+path = "{bg}"
+mode = "fill"
 [autostart]
 commands = [["/usr/bin/true"]]
 [[rules]]
@@ -215,7 +296,7 @@ opacity = {0.78 if self.scene == "compositor" else 1.0}
         self.wm = self.spawn([str(self.binaries / "maverick"), "--config", str(config),
                               "--name", "showcase"], "wm")
         wait_for("Maverick IPC startup", lambda: self.state().get("monitors"))
-        run(["xsetroot", "-solid", "#11111b"], self.env)
+        run(["xsetroot", "-solid", ROOT_BG], self.env)
         print(f"{self.scene}: WM started on {self.env['DISPLAY']} (pid {self.wm.pid})", flush=True)
 
     def state(self):
@@ -241,11 +322,18 @@ opacity = {0.78 if self.scene == "compositor" else 1.0}
 
     def terminal(self, number, title, source):
         name = f"showcase{number}"
-        background = ({2: "#542638", 3: "#245447"}.get(number, "#1e1e2e")
-                      if self.scene in FULLSCREEN_SCENES else "#1e1e2e")
+        if self.scene in FULLSCREEN_SCENES:
+            background = ({2: SURFACE_ALT, 3: SURFACE_ALT2}.get(number, SURFACE))
+        elif self.scene == "compositor" and number == 3:
+            # Tinted float over same-hue tiles: the rule-set 0.78 opacity
+            # blends two distinguishable surfaces, so the real GL
+            # transparency reads without touching compositor semantics.
+            background = SURFACE_ALT
+        else:
+            background = SURFACE
         self.spawn(["xterm", "-name", name, "-class", "Showcase", "-title", title,
                     "-fa", FONT_FACE, "-fs", str(FONT_SIZE), "-bg", background,
-                    "-fg", "#cdd6f4", "-cr", background, "+sb", "-b", str(18 * SUPER),
+                    "-fg", FG, "-cr", background, "+sb", "-b", str(18 * SUPER),
                     "-geometry", "72x36", "-e", sys.executable, str(Path(__file__).resolve()),
                     "--client", title, source], name)
         return wait_for(f"client {number}", lambda: run(["xdotool", "search", "--onlyvisible",
@@ -369,7 +457,7 @@ def corner_pixels(session, evidence, stage, checks, fullscreen=False):
     def pixel(x, y):
         offset = (y * INTERNAL[0] + x) * 3
         return tuple(raw[offset:offset + 3])
-    root = (0, 0, 0) if session.scene in GL_SCENES else (17, 17, 27)
+    root = (0, 0, 0) if session.scene in GL_SCENES else (13, 17, 24)
     report = {"stage": stage, "outer_radius": 0 if fullscreen else RADIUS,
               "inner_radius": 0 if fullscreen else max(RADIUS - BORDER, 0),
               "border": 0 if fullscreen else BORDER, "root_color": root, "windows": []}
