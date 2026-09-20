@@ -1233,9 +1233,90 @@ def run_real_desktop(session):
     return windows
 
 
+def run_real_workset(session, with_tools=False):
+    """Shared 4- or 6-column real-application ribbon for scroll/focus scenes."""
+    windows = []
+    windows.append(session.real_alacritty(
+        "neovim", "Neovim / layout.rs",
+        ["nvim", "--clean", "-c", "set number", "--",
+         str(ROOT / "src/core/layout.rs")],
+        instance="realnvim"))
+    windows.append(session.real_firefox("docs", f"file://{REAL_DOC}"))
+    windows.append(session.real_zed("repo", ROOT / "Cargo.toml"))
+    root = str(ROOT)
+    windows.append(session.real_alacritty(
+        "shell", "Shell / git status",
+        ["bash", "--noprofile", "--norc", "-c",
+         f'export PS1="mav$ "; cd {root} && git status --short --branch;'
+         ' exec bash --noprofile --norc -i'],
+        instance="realshell"))
+    if with_tools:
+        windows.append(session.real_tool(
+            "files", ["nautilus", "--no-default-window", "/tmp"], "nautilus"))
+        windows.append(session.real_alacritty(
+            "monitor", "System / htop", ["htop"], instance="realhtop"))
+        # Geometry settles before content: Nautilus populates its /tmp listing
+        # asynchronously ("Loading..." bottom bar). Give real clients a moment
+        # to paint first content before Maverick navigation/capture.
+        time.sleep(5.0)
+    session.stable(windows)
+    return windows
+
+
+def focused_id(session):
+    for monitor in session.state().get("monitors", []):
+        if monitor.get("focused") is not None:
+            return str(monitor["focused"])
+    return None
+
+
+def run_real_scroll(session, target_index, label):
+    """Six-column ribbon captured at one viewport; movement is Maverick's own
+    directional focus (camera follows focus). Navigation is index-relative so
+    a focus-stealing client cannot desynchronize the step count."""
+    windows = run_real_workset(session, with_tools=True)
+    for _ in range(12):
+        current = focused_id(session)
+        if current == windows[target_index]:
+            break
+        try:
+            position = windows.index(current)
+        except ValueError:
+            session.action("focus:right")
+            session.stable(windows)
+            continue
+        session.action("focus:left" if position > target_index else "focus:right")
+        session.stable(windows)
+    else:
+        raise RuntimeError(f"{label}: could not reach column {target_index + 1}")
+    got = focused_id(session)
+    if got != windows[target_index]:
+        raise RuntimeError(f"{label}: focused {got} != target {windows[target_index]}")
+    workspace = session.tree()["monitors"][0]["workspaces"][0]
+    print(f"  {label}: focused col {target_index + 1}/{len(windows)}, "
+          f"scroll={workspace['scroll']}", flush=True)
+    return windows
+
+
+def run_real_focus(session):
+    """Focus walk Neovim -> Firefox -> Zed -> shell, ending on Firefox so the
+    focused column (Maverick's own blue border) sits mid-viewport."""
+    windows = run_real_workset(session, with_tools=False)
+    session.action("focus:left")
+    session.action("focus:left")
+    session.stable(windows)
+    got = focused_id(session)
+    if got != windows[1]:
+        raise RuntimeError(f"real-focus: focused {got} != firefox {windows[1]}")
+    workspace = session.tree()["monitors"][0]["workspaces"][0]
+    print(f"  real-focus: firefox focused, scroll={workspace['scroll']}", flush=True)
+    return windows
+
+
 def main():
     parser = argparse.ArgumentParser(description="Capture real Maverick windows in an isolated Xephyr server.")
-    parser.add_argument("scene", choices=(*SCENES, "real-desktop", "all"))
+    parser.add_argument("scene", choices=(*SCENES, "real-desktop", "real-scroll-a",
+                                          "real-scroll-b", "real-focus", "all"))
     parser.add_argument("--bin-dir", type=Path, default=ROOT / "target/debug")
     parser.add_argument("--evidence", type=Path, default=Path("/tmp/kilo/showcase-evidence"),
                         help="Where JSON evidence and the compositor WM log are written")
@@ -1245,8 +1326,10 @@ def main():
     required = ("Xephyr", "xdpyinfo", "xdotool", "xterm", "xsetroot", "import", "identify")
     if args.scene in (*FOCUS_SCENES, *FULLSCREEN_SCENES, "all"):
         required += ("convert",)
-    if args.scene in ("real-desktop",):
+    if args.scene in ("real-desktop", "real-scroll-a", "real-scroll-b", "real-focus"):
         required += ("alacritty", "firefox", "zeditor", "nvim")
+    if args.scene in ("real-scroll-a", "real-scroll-b"):
+        required += ("nautilus", "htop")
     missing = [program for program in required if not shutil.which(program)]
     if missing:
         parser.error("Missing prerequisites: " + ", ".join(missing))
@@ -1276,18 +1359,38 @@ def main():
                 (evidence / f"{scene}.json").write_text(json.dumps(
                     {"scene": scene, "checks": [], "failures": []}, indent=2) + "\n")
             session.start()
-            if scene == "real-desktop":
-                windows = run_real_desktop(session)
-                pixel_checks = None
-                transition_checks = None
+            if scene in ("real-desktop", "real-scroll-a", "real-scroll-b", "real-focus"):
+                if scene == "real-desktop":
+                    windows = run_real_desktop(session)
+                    applications = ["alacritty+nvim", "firefox", "zed", "alacritty+shell"]
+                    navigation = "none (focus newest, viewport on ribbon tail)"
+                elif scene == "real-scroll-a":
+                    windows = run_real_scroll(session, 2, scene)
+                    applications = ["alacritty+nvim", "firefox", "zed", "alacritty+shell",
+                                    "nautilus", "alacritty+htop"]
+                    navigation = "focus:left x3 from newest to zed (viewport A)"
+                elif scene == "real-scroll-b":
+                    windows = run_real_scroll(session, 4, scene)
+                    applications = ["alacritty+nvim", "firefox", "zed", "alacritty+shell",
+                                    "nautilus", "alacritty+htop"]
+                    navigation = "focus:left x1 from newest to nautilus (viewport B)"
+                else:
+                    windows = run_real_focus(session)
+                    applications = ["alacritty+nvim", "firefox", "zed", "alacritty+shell"]
+                    navigation = "Neovim -> Firefox -> Zed -> shell walk, ending on Firefox"
                 if scene in (*GL_SCENES, *REAL_GL_SCENES):
                     wait_for("actual GL renderer and submitted frame (fallback is not accepted)", session.gl_active)
                 geometry = session.capture(windows)
+                workspace = session.tree()["monitors"][0]["workspaces"][0]
                 record = {"scene": scene, "display": session.env["DISPLAY"],
                           "wm_pid": session.wm.pid, "geometry": geometry,
                           "state": session.state(), "tree": session.tree(),
                           "gl_active": session.gl_active(),
-                          "applications": ["alacritty+nvim", "firefox", "zed", "alacritty+shell"],
+                          "applications": applications,
+                          "navigation": navigation,
+                          "viewport": {"scroll": workspace["scroll"],
+                                       "columns": len(workspace["columns"]),
+                                       "focused": focused_id(session)},
                           "sha256": hashlib.sha256((output / f"{scene}.png").read_bytes()).hexdigest(),
                           "render": {"internal": list(INTERNAL), "final": list(SIZE),
                                      "framed": list(FRAMED), "scale": SUPER,
