@@ -21,6 +21,16 @@ SCENES = ("tiling", "navigation", "floating", "fullscreen", "compositor",
           "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration",
           "rounded-focus", "rounded-focus-gl", "fullscreen-new-window", "fullscreen-new-window-gl",
           "fullscreen-transition", "fullscreen-transition-gl")
+# Phase-3 real-application scenes (same Session/capture pipeline, real clients).
+# Kept separate from SCENES so the supersample experiment driver (which imports
+# SCENES) keeps its exact scene list; run.sh/main accepts both.
+REAL_SCENES = ("real-desktop", "real-scroll-a", "real-scroll-b", "real-focus",
+               "real-floating", "real-compositor")
+REAL_GL_SCENES = ("real-compositor",)
+REAL_DOC = Path(__file__).resolve().parent / "maverick-doc.html"
+# Alacritty runs at the 2x INTERNAL framebuffer; 16pt keeps an 878px column at
+# a readable ~80-cell grid after the Lanczos downsample to 1440x900.
+REAL_ALACRITTY_FONT_SIZE = 16
 TRANSITION_SCENES = ("fullscreen-transition", "fullscreen-transition-gl")
 FOCUS_SCENES = ("rounded-focus", "rounded-focus-gl")
 FULLSCREEN_SCENES = ("fullscreen-new-window", "fullscreen-new-window-gl")
@@ -272,6 +282,16 @@ class Session:
             self.env["MAV_FLOAT_TRACE"] = "1"
         self.env["LC_ALL"] = "C.UTF-8"
         self.env.pop("DBUS_SESSION_BUS_ADDRESS", None)
+        # Real GL clients (Alacritty/winit, Kitty/glfw, Firefox) prefer Wayland
+        # when the host session offers it (host here is Wayland+Xwayland).
+        # Xephyr is X11-only, so force the X11 backends for every scene; xterm
+        # ignores these variables, real apps need them to map at all.
+        self.env.pop("WAYLAND_DISPLAY", None)
+        self.env.pop("NIRI_SOCKET", None)
+        self.env["WINIT_UNIX_BACKEND"] = "x11"
+        self.env["GDK_BACKEND"] = "x11"
+        self.env["KITTY_DISABLE_WAYLAND"] = "1"
+        self.env["MOZ_ENABLE_WAYLAND"] = "0"
         for key in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"):
             directory = self.path / key.lower()
             directory.mkdir(mode=0o700)
@@ -314,9 +334,12 @@ class Session:
         bg = self.path / "showcase-bg.png"
         write_showcase_background(bg, *INTERNAL)
         config = self.path / "config.toml"
+        rounded_here = self.scene in ("compositor", "rounded", "tiled-spacing", "floating-scroll",
+                                      "fullscreen-decoration", *FOCUS_SCENES, *FULLSCREEN_SCENES,
+                                      *TRANSITION_SCENES, *REAL_GL_SCENES)
         config.write_text(f'''[general]
 border_width = {BORDER}
-corner_radius = {RADIUS if self.scene in ("compositor", "rounded", "tiled-spacing", "floating-scroll", "fullscreen-decoration", *FOCUS_SCENES, *FULLSCREEN_SCENES, *TRANSITION_SCENES) else 0}
+corner_radius = {RADIUS if rounded_here else 0}
 gaps_inner = {(6 if self.scene == "tiled-spacing" else 4) * SUPER}
 gaps_outer = {(10 if self.scene == "tiled-spacing" else 8) * SUPER}
 column_width = 0.31
@@ -329,7 +352,7 @@ focused = 0x4cc3ff
 [animations]
 enabled = {str(self.scene == "fullscreen-transition-gl").lower()}
 [compositor]
-enabled = {str(self.scene in GL_SCENES).lower()}
+enabled = {str(self.scene in (*GL_SCENES, *REAL_GL_SCENES)).lower()}
 backend = "opengl"
 fullscreen_bypass = false
 [wallpaper]
@@ -341,6 +364,11 @@ commands = [["/usr/bin/true"]]
 instance = "showcase3"
 opacity = {0.78 if self.scene == "compositor" else 1.0}
 ''')
+        if self.scene in REAL_GL_SCENES:
+            # Same 0.78 opacity the xterm compositor scene uses, but matched to
+            # the real floating client so GL transparency reads on real pixels.
+            with config.open("a") as stream:
+                stream.write('\n[[rules]]\ninstance = "realfloat"\nopacity = 0.78\n')
         if self.scene in (*FOCUS_SCENES, *FULLSCREEN_SCENES):
             with config.open("a") as stream:
                 stream.write('\n[[rules]]\ninstance = "showcase6"\nfloat = true\n')
@@ -390,6 +418,113 @@ opacity = {0.78 if self.scene == "compositor" else 1.0}
                     "--client", title, source], name)
         return wait_for(f"client {number}", lambda: run(["xdotool", "search", "--onlyvisible",
                          "--classname", "^" + name + "$"], self.env).stdout.strip().splitlines())[0]
+
+    # -- Phase-3 real-application harness (same WM, same pipeline) --
+    def wait_tree_for(self, description, predicate, timeout=60):
+        """Wait until `predicate(tree)` returns a truthy window id."""
+        def probe():
+            try:
+                tree = self.tree()
+            except RuntimeError:
+                return None
+            for monitor in tree.get("monitors", []):
+                for workspace in monitor.get("workspaces", []):
+                    for column in workspace.get("columns", []):
+                        for window in column.get("windows", []):
+                            if predicate(window):
+                                return str(window["id"])
+                    for window in workspace.get("floats", []):
+                        if predicate(window):
+                            return str(window["id"])
+            return None
+        return wait_for(description, probe, timeout=timeout)
+
+    def real_alacritty_config(self):
+        """Deterministic Alacritty config: Fira Code, dark Maverick surface."""
+        path = self.path / "real-alacritty.toml"
+        path.write_text(f'''[font]
+size = {REAL_ALACRITTY_FONT_SIZE}
+normal = {{ family = "{FONT_FACE}" }}
+[colors.primary]
+background = "{SURFACE}"
+foreground = "{FG}"
+''')
+        return path
+
+    def real_alacritty(self, description, title, command, instance="Alacritty"):
+        """Launch real Alacritty (authentic terminal chrome, not xterm)."""
+        config = self.real_alacritty_config()
+        label = "real-" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+        self.spawn(["alacritty", "--config-file", str(config), "--title", title,
+                    "--class", instance, instance,
+                    "-e", *command], label)
+        return self.wait_tree_for(
+            f"alacritty {description}",
+            lambda w, t=title: w.get("instance") == instance and t in (w.get("title") or ""))
+
+    def real_firefox_profile(self):
+        """Isolated Firefox profile pinned to offline file:// operation."""
+        profile = self.path / "real-firefox-profile"
+        profile.mkdir(mode=0o700, exist_ok=True)
+        (profile / "prefs.js").write_text(
+            'user_pref("browser.shell.checkDefaultBrowser", false);\n'
+            'user_pref("browser.aboutwelcome.enabled", false);\n'
+            'user_pref("browser.startup.homepage", "about:blank");\n'
+            'user_pref("datareporting.policy.dataSubmissionEnabled", false);\n'
+            'user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);\n'
+            'user_pref("browser.rights.3.shown", true);\n')
+        return profile
+
+    def real_firefox(self, description, url):
+        """Launch real Firefox on a local file:// URL (no network)."""
+        if not url.startswith("file://"):
+            raise RuntimeError("Firefox showcase must use a local file:// URL")
+        profile = self.real_firefox_profile()
+        label = "real-" + re.sub(r"[^a-z0-9]+", "-", description.lower()).strip("-")
+        self.spawn(["firefox", "--no-remote", "--profile", str(profile), url], label)
+        return self.wait_tree_for(
+            f"firefox {description}",
+            lambda w: (w.get("class") or "").lower() == "firefox", timeout=90)
+
+    def real_zed_settings(self):
+        """Isolated Zed config preferring a dark theme (best effort)."""
+        zed_conf = Path(self.env["XDG_CONFIG_HOME"]) / "zed"
+        zed_conf.mkdir(parents=True, exist_ok=True)
+        (zed_conf / "settings.json").write_text(
+            '{"theme":{"mode":"dark","dark":"One Dark","light":"One Light"},'
+            '"vim_mode":false}\n')
+        data = self.path / "real-zed-data"
+        data.mkdir(mode=0o700, exist_ok=True)
+        return data
+
+    def real_zed(self, description, target):
+        """Launch real Zed on a local file; dismiss trust dialog via Enter."""
+        data = self.real_zed_settings()
+        label = "real-" + re.sub(r"[^a-z0-9]+", "-", description.lower()).strip("-")
+        self.spawn(["zeditor", "--user-data-dir", str(data), str(target)], label)
+        window = self.wait_tree_for(
+            f"zed {description}",
+            lambda w: "zed" in (w.get("class") or "").lower(), timeout=90)
+        # Fresh user-data-dir always shows the Restricted Mode modal for an
+        # unrecognized project. A real Enter keypress ("Trust and Continue")
+        # is authentic WM input, not post-processing.
+        time.sleep(2.0)
+        try:
+            run(["xdotool", "windowactivate", "--sync", window], self.env)
+            run(["xdotool", "key", "Return"], self.env)
+        except RuntimeError:
+            pass
+        time.sleep(2.0)
+        return window
+
+    def real_tool(self, description, argv, match, timeout=30):
+        """Launch a real desktop tool (file manager, mixer, monitor)."""
+        label = "real-" + re.sub(r"[^a-z0-9]+", "-", description.lower()).strip("-")
+        self.spawn(argv, label)
+        def predicate(window):
+            haystack = " ".join(str(window.get(k) or "") for k in ("class", "instance", "title"))
+            return match.lower() in haystack.lower()
+        return self.wait_tree_for(f"tool {description}", predicate, timeout=timeout)
 
     def stable(self, windows):
         last, since = None, time.monotonic()

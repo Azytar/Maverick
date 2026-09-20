@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Maverick — local docs</title>
+<style>
+  body { font-family: sans-serif; max-width: 46em; margin: 2em auto;
+         padding: 0 1em; line-height: 1.55; color: #1a1b1e; background: #fff; }
+  h1 { font-size: 1.6em; margin-bottom: 0.2em; }
+  h2 { font-size: 1.15em; margin-top: 1.6em; border-bottom: 1px solid #ddd;
+       padding-bottom: 0.2em; }
+  code, pre { font-family: monospace; background: #f2f3f5; }
+  code { padding: 0 0.3em; }
+  pre { padding: 0.8em 1em; overflow-x: auto; }
+  .subtitle { color: #555; margin-top: 0; }
+  table { border-collapse: collapse; margin-top: 0.6em; }
+  th, td { border: 1px solid #ccc; padding: 0.3em 0.7em; text-align: left; }
+</style>
+</head>
+<body>
+<h1>Maverick</h1>
+<p class="subtitle">Scrolling X11 window manager. Columns, horizontal
+scrolling, floating windows, optional compositor. X11, Rust.</p>
+
+<h2>Columns</h2>
+<p>New tiled windows normally enter new columns. Each column has a width
+relative to the monitor workarea and can hold a vertical stack. Adding
+columns extends the ribbon instead of shrinking its neighbours.</p>
+
+<h2>Scrolling</h2>
+<p>Navigation moves the viewport through the ribbon and keeps the focused
+column in view:</p>
+<pre>Super+H / Super+L   focus left / right (scrolls)
+Super+[/]           page-snap left / right</pre>
+
+<h2>Floating windows</h2>
+<p>Floats belong to a monitor and workspace but not to the ribbon. They keep
+screen-space geometry while the tiles scroll underneath:</p>
+<pre>Super+Shift+Space   toggle floating
+Super+Left-drag     move floating window</pre>
+
+<h2>Fullscreen</h2>
+<p>Fullscreen is a presentation policy over the logical placement. Leaving it
+to another column keeps the flag and restore geometry.</p>
+
+<h2>Compositor</h2>
+<p>Plain X11 operation is the default. The optional OpenGL/GLX compositor adds
+opacity, rounded corners, and wallpaper without owning window state. Window
+management works the same with it on or off.</p>
+
+<h2>Bindings</h2>
+<table>
+<tr><th>Binding</th><th>Action</th></tr>
+<tr><td><code>Super+Return</code></td><td>Terminal</td></tr>
+<tr><td><code>Super+H/J/K/L</code></td><td>Focus</td></tr>
+<tr><td><code>Super+Shift+H/L</code></td><td>Move window</td></tr>
+<tr><td><code>Super+1..9</code></td><td>Workspaces</td></tr>
+</table>
+
+<p>This page is a local offline fixture for screenshots
+(<code>file://</code>, no network).</p>
+</body>
+</html>
