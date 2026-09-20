@@ -46,6 +46,14 @@ DIM = "#9AA3B2"           # secondary text
 ACCENT = "#4CC3FF"        # single Maverick accent (electric cyan/blue)
 FOCUSED, NORMAL = (76, 195, 255), (58, 67, 86)
 CONTENT = (22, 27, 38)
+FRAME_BG = "#0B0D12"      # external presentation chrome only
+# Presentation frame (external chrome only; Maverick pixels inside untouched).
+# No baked caption: README already captions each image below it.
+FRAME_MARGIN = 48
+FRAME_PAD = 40
+FRAME_RADIUS = 24
+FRAMED = (SIZE[0] + 2 * (FRAME_MARGIN + FRAME_PAD),
+          SIZE[1] + 2 * (FRAME_MARGIN + FRAME_PAD))
 FONT_FACE = "Fira Code"
 FONT_FILE = "/usr/share/fonts/TTF/FiraCode-Regular.ttf"
 # xterm has no OpenType shaping (libXft, no harfbuzz): Fira Code ligatures are
@@ -206,6 +214,50 @@ def wait_for(description, probe, timeout=15):
     raise RuntimeError(f"Timed out waiting for {description}: {last or 'not ready'}")
 
 
+def frame_shot(raw, final):
+    """Wrap the authentic 1440x900 capture in external presentation chrome.
+
+    Maverick pixels inside are never altered (no rounding/cropping of the
+    shot itself): a FRAME_BG margin block with rounded outer corners and a
+    soft drop shadow is composited around it on transparency. No caption is
+    baked in; README already captions each image.
+    """
+    bordered_w = SIZE[0] + 2 * FRAME_MARGIN
+    bordered_h = SIZE[1] + 2 * FRAME_MARGIN
+    # Shot sits at (framed_x, framed_y) inside the explicit canvas; the blur
+    # (sigma 12, +12 downward shift) never reaches the canvas edge, so the
+    # output dimensions are exactly FRAMED every run.
+    framed_x, framed_y = 44, 32
+    bordered = str(final) + ".bordered.png"
+    mask = str(final) + ".mask.png"
+    rounded = str(final) + ".rounded.png"
+    try:
+        run(["magick", str(raw), "-bordercolor", FRAME_BG, "-border",
+             f"{FRAME_MARGIN}x{FRAME_MARGIN}", "-colorspace", "sRGB",
+             "+repage", bordered])
+        run(["magick", "-size", f"{bordered_w}x{bordered_h}", "xc:none",
+             "-fill", "white", "-draw",
+             f"roundrectangle 0,0 {bordered_w - 1},{bordered_h - 1} "
+             f"{FRAME_RADIUS},{FRAME_RADIUS}",
+             mask])
+        run(["magick", bordered, mask, "-alpha", "off",
+             "-compose", "CopyOpacity", "-composite", "-strip", rounded])
+        run(["magick", "-size", f"{FRAMED[0]}x{FRAMED[1]}", "xc:none",
+             "(", rounded, "-alpha", "extract", "-fill", "black",
+             "-colorize", "100", "-blur", "0x12", ")",
+             "-geometry", f"+{framed_x}+{framed_y + 12}",
+             "-compose", "Over", "-composite",
+             rounded, "-geometry", f"+{framed_x}+{framed_y}",
+             "-compose", "Over", "-composite",
+             "-colorspace", "sRGB", "-strip", str(final)])
+    finally:
+        for temp in (bordered, mask, rounded):
+            try:
+                Path(temp).unlink()
+            except FileNotFoundError:
+                pass
+
+
 class Session:
     def __init__(self, scene, binaries, output):
         self.scene, self.binaries, self.output = scene, binaries, output
@@ -353,8 +405,9 @@ opacity = {0.78 if self.scene == "compositor" else 1.0}
     def capture(self, windows):
         geometry = self.stable(windows)
         # Hires lives in the temp session dir (auto-cleaned with it); only the
-        # final 1440x900 lands in docs/screenshots (no *-hires.png pollution).
+        # framed presentation asset lands in docs/screenshots.
         hires = self.path / f"{self.scene}-hires.png"
+        raw = self.path / f"{self.scene}-raw.png"
         final = self.output / f"{self.scene}.png"
         run(["import", "-display", self.env["DISPLAY"], "-window", "root", str(hires)], self.env)
         dimensions = run(["identify", "-format", "%wx%h", str(hires)]).stdout
@@ -362,10 +415,14 @@ opacity = {0.78 if self.scene == "compositor" else 1.0}
             raise RuntimeError(f"Unexpected hires screenshot dimensions: {dimensions}")
         # Proven Phase-1 path: Lanczos downsample to logical size, sRGB, strip.
         run(["magick", str(hires), "-filter", "Lanczos", "-resize",
-             f"{SIZE[0]}x{SIZE[1]}!", "-colorspace", "sRGB", "-strip", str(final)])
-        dimensions = run(["identify", "-format", "%wx%h", str(final)]).stdout
+             f"{SIZE[0]}x{SIZE[1]}!", "-colorspace", "sRGB", "-strip", str(raw)])
+        dimensions = run(["identify", "-format", "%wx%h", str(raw)]).stdout
         if dimensions != f"{SIZE[0]}x{SIZE[1]}":
-            raise RuntimeError(f"Unexpected final screenshot dimensions: {dimensions}")
+            raise RuntimeError(f"Unexpected raw screenshot dimensions: {dimensions}")
+        frame_shot(raw, final)
+        dimensions = run(["identify", "-format", "%wx%h", str(final)]).stdout
+        if dimensions != f"{FRAMED[0]}x{FRAMED[1]}":
+            raise RuntimeError(f"Unexpected framed dimensions: {dimensions}")
         print(f"  captured {final.relative_to(ROOT)} ({dimensions}, via hires {INTERNAL[0]}x{INTERNAL[1]})",
               flush=True)
         return geometry
@@ -1111,11 +1168,14 @@ def main():
                       "gl_active": session.gl_active(),
                       "sha256": hashlib.sha256((output / f"{scene}.png").read_bytes()).hexdigest(),
                       "render": {"internal": list(INTERNAL), "final": list(SIZE),
-                                 "scale": SUPER,
+                                 "framed": list(FRAMED), "scale": SUPER,
                                  "downsample": "Lanczos", "colorspace": "sRGB",
                                  "stripped": True,
                                  "font_face": FONT_FACE, "font_file": FONT_FILE,
-                                 "font_size": FONT_SIZE}}
+                                 "font_size": FONT_SIZE,
+                                 "frame": {"margin": FRAME_MARGIN, "pad": FRAME_PAD,
+                                           "radius": FRAME_RADIUS,
+                                           "exterior": FRAME_BG}}}
             if scene in TRANSITION_SCENES:
                 record["transition_checks"] = transition_checks
             if pixel_checks is not None:
