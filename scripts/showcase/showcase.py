@@ -1313,10 +1313,49 @@ def run_real_focus(session):
     return windows
 
 
+def run_real_floating(session):
+    """Real floating client over the scrolling mosaic.
+
+    A small Alacritty scratch shell is floated via Maverick's own
+    toggle_float, sized/moved with real WM geometry, then the ribbon is
+    scrolled two columns beneath it. The float must not move while the
+    tiles do: spatial isolation without explanation paragraphs."""
+    windows = run_real_workset(session, with_tools=False)
+    root = str(ROOT)
+    windows.append(session.real_alacritty(
+        "float", "Float / scratch",
+        ["bash", "--noprofile", "--norc", "-c",
+         f'export PS1="float$ "; cd {root}; exec bash --noprofile --norc -i'],
+        instance="realfloat"))
+    session.action("toggle_float")
+    session.stable(windows)
+    run(["xdotool", "windowsize", windows[-1], str(480 * SUPER), str(360 * SUPER)], session.env)
+    session.stable(windows)
+    run(["xdotool", "windowmove", windows[-1], str(480 * SUPER), str(270 * SUPER)], session.env)
+    session.stable(windows)
+    before = float_geometry(session, windows[-1])
+    tiled_before = float_geometry(session, windows[0])
+    session.action("focus:left")
+    session.action("focus:left")
+    session.stable(windows)
+    after = float_geometry(session, windows[-1])
+    tiled_after = float_geometry(session, windows[0])
+    print(f"  real-floating: float {before} -> {after}", flush=True)
+    if before is None or before != after:
+        raise RuntimeError(f"real float moved during ribbon scroll: {before} -> {after}")
+    if tiled_before is None or tiled_before[:2] == (tiled_after or (None,))[:2]:
+        raise RuntimeError("real-floating isolation test did not actually scroll tiles")
+    tree = session.tree()
+    floats = tree["monitors"][0]["workspaces"][0]["floats"]
+    if not any(str(w["id"]) == windows[-1] for w in floats):
+        raise RuntimeError("real float is not in the workspace float list")
+    return windows
+
+
 def main():
     parser = argparse.ArgumentParser(description="Capture real Maverick windows in an isolated Xephyr server.")
     parser.add_argument("scene", choices=(*SCENES, "real-desktop", "real-scroll-a",
-                                          "real-scroll-b", "real-focus", "all"))
+                                          "real-scroll-b", "real-focus", "real-floating", "all"))
     parser.add_argument("--bin-dir", type=Path, default=ROOT / "target/debug")
     parser.add_argument("--evidence", type=Path, default=Path("/tmp/kilo/showcase-evidence"),
                         help="Where JSON evidence and the compositor WM log are written")
@@ -1326,7 +1365,8 @@ def main():
     required = ("Xephyr", "xdpyinfo", "xdotool", "xterm", "xsetroot", "import", "identify")
     if args.scene in (*FOCUS_SCENES, *FULLSCREEN_SCENES, "all"):
         required += ("convert",)
-    if args.scene in ("real-desktop", "real-scroll-a", "real-scroll-b", "real-focus"):
+    if args.scene in ("real-desktop", "real-scroll-a", "real-scroll-b", "real-focus",
+                        "real-floating"):
         required += ("alacritty", "firefox", "zeditor", "nvim")
     if args.scene in ("real-scroll-a", "real-scroll-b"):
         required += ("nautilus", "htop")
@@ -1359,7 +1399,8 @@ def main():
                 (evidence / f"{scene}.json").write_text(json.dumps(
                     {"scene": scene, "checks": [], "failures": []}, indent=2) + "\n")
             session.start()
-            if scene in ("real-desktop", "real-scroll-a", "real-scroll-b", "real-focus"):
+            if scene in ("real-desktop", "real-scroll-a", "real-scroll-b", "real-focus",
+                           "real-floating"):
                 if scene == "real-desktop":
                     windows = run_real_desktop(session)
                     applications = ["alacritty+nvim", "firefox", "zed", "alacritty+shell"]
@@ -1374,10 +1415,16 @@ def main():
                     applications = ["alacritty+nvim", "firefox", "zed", "alacritty+shell",
                                     "nautilus", "alacritty+htop"]
                     navigation = "focus:left x1 from newest to nautilus (viewport B)"
-                else:
+                elif scene == "real-focus":
                     windows = run_real_focus(session)
                     applications = ["alacritty+nvim", "firefox", "zed", "alacritty+shell"]
                     navigation = "Neovim -> Firefox -> Zed -> shell walk, ending on Firefox"
+                else:
+                    windows = run_real_floating(session)
+                    applications = ["alacritty+nvim", "firefox", "zed", "alacritty+shell",
+                                    "alacritty+float"]
+                    navigation = ("toggle_float on scratch shell, resize/move, then "
+                                  "focus:left x2 scrolls tiles beneath stationary float")
                 if scene in (*GL_SCENES, *REAL_GL_SCENES):
                     wait_for("actual GL renderer and submitted frame (fallback is not accepted)", session.gl_active)
                 geometry = session.capture(windows)
