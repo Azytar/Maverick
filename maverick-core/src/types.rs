@@ -1414,10 +1414,11 @@ pub enum Action {
     MoveMon(Dir),
     /// Restart the WM (re-exec).
     Restart,
-    /// Quit immediately (sets `running = false`). No confirmation dialog.
-    /// This is not bound to a default key — the Mod4+Shift+Q default shells
-    /// out to `maverickctl quit --confirm` — so in practice it is reachable
-    /// via IPC (`dispatch quit`) or the TOML config only.
+    /// Quit the WM cleanly: the event loop stops and the normal teardown runs —
+    /// clients are asked to close under one global budget, then `cleanup()`
+    /// releases the X11/IPC resources before the process exits 0. Bound to
+    /// `Mod4+Shift+Q` by default; also reachable over the control socket
+    /// (`dispatch quit`) and from the TOML config.
     Quit,
     /// Toggle the Overview (semantic-zoom film-strip) mode for the active workspace.
     ToggleOverview,

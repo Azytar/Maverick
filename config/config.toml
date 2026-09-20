@@ -220,10 +220,11 @@ action = "collapse_column"
 key = "Mod4+t"
 action = "layout:column"
 
-# Session
+# Session — `quit` is the WM's own clean shutdown: no confirmation dialog and
+# no auxiliary process on the quit path.
 [[keybindings]]
 key = "Mod4+Shift+q"
-action = "spawn:maverickctl quit --confirm"
+action = "quit"
 [[keybindings]]
 key = "Mod4+Shift+r"
 action = "restart"

@@ -1798,6 +1798,25 @@ border_width = 0
             .keybinds
             .iter()
             .any(|(_, k, a)| { *k == b'1' as u32 && matches!(a, crate::types::Action::View(0)) }));
+        // Quitting from the keyboard is an in-process action: the shipped sample
+        // must bind `Mod4+Shift+q` to `Action::Quit`, never to a `spawn:` of a
+        // helper that would put a prompt/second process on the quit path.
+        let sup_shift = u16::from(ModMask::M4) | u16::from(ModMask::SHIFT);
+        let q = u32::from(b'q');
+        assert_eq!(
+            cfg.keybinds
+                .iter()
+                .find(|(m, k, _)| *m == sup_shift && *k == q),
+            Some(&(sup_shift, q, Action::Quit)),
+            "example config must quit natively"
+        );
+        assert!(
+            !cfg.keybinds.iter().any(|(_, _, a)| matches!(
+                a,
+                Action::Spawn(cmd) if cmd.iter().any(|c| c == "maverickctl")
+            )),
+            "example config must not shell out to maverickctl"
+        );
     }
 
     #[test]

@@ -45,6 +45,13 @@ All notable changes to this project are documented here. Format follows
   optimization, binary installation to `/usr/local/bin` or `~/.local/bin`,
   X session desktop file, First Flight config, PATH check). Removed from the
   workspace; CI now syntax-checks `install.sh`.
+- **`Mod4+Shift+Q` quits natively.** The default quit binding dispatches the
+  WM's own `Action::Quit` (`Effect::Quit` → `begin_shutdown`): cooperative
+  client close, one global budget, force-kill of stragglers, then `cleanup()`
+  before the process exits 0. The shipped sample config and the
+  `maverick-setup` generator now write `action = "quit"` instead of spawning
+  `maverickctl quit --confirm`, so no auxiliary process or prompt sits on the
+  keyboard quit path.
 
 ### Fixed
 

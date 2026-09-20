@@ -490,7 +490,7 @@ fn render_keybindings(out: &mut String, plan: &Plan) {
         ("Mod4+space", "set_layout:column"),
         ("Mod4+g", "layout:grid"),
         ("Mod4+t", "layout:column"),
-        ("Mod4+Shift+q", "spawn:maverickctl quit --confirm"),
+        ("Mod4+Shift+q", "quit"),
         ("Mod4+Shift+r", "restart"),
         ("Mod4+F5", "restart"),
         ("Mod4+Tab", "focus_mon:next"),
@@ -689,4 +689,43 @@ fn current_exe_sibling(name: &str) -> Option<PathBuf> {
     env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|parent| parent.join(name)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_plan() -> Plan {
+        Plan {
+            profile: Profile::Minimal,
+            terminal: None,
+            launcher: None,
+            bar: None,
+            compositor_enabled: false,
+            gaps_inner: 4,
+            gaps_outer: 8,
+            border_width: 1,
+            theme: "catppuccin-mocha",
+            focus_mouse: false,
+            warp_cursor: false,
+            autostart_portals: false,
+        }
+    }
+
+    #[test]
+    fn generated_keybindings_quit_natively() {
+        // The generated config is what users actually run: quitting must stay an
+        // in-process action (`quit`), never a shell-out to `maverickctl`, which
+        // would put a confirmation prompt and a second process on the quit path.
+        let mut out = String::new();
+        render_keybindings(&mut out, &minimal_plan());
+        assert!(
+            out.contains("key = \"Mod4+Shift+q\"\naction = \"quit\"\n"),
+            "generated keybindings must bind Mod4+Shift+q to the native quit action:\n{out}"
+        );
+        assert!(
+            !out.contains("maverickctl"),
+            "generated keybindings must not spawn maverickctl:\n{out}"
+        );
+    }
 }

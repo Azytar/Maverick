@@ -534,6 +534,31 @@ mod unit_tests {
         );
     }
 
+    #[test]
+    fn test_quit_action_leads_with_shutdown_effect() {
+        // `Mod4+Shift+Q` → `Action::Quit` must reach the backend's graceful
+        // shutdown (`Effect::Quit` → `begin_shutdown`) and nothing else: no
+        // follow-up arrange/focus/kill effect may ride along in the same turn.
+        let mut engine = setup_engine();
+        engine.state.running = true;
+        let effects = engine.dispatch(Action::Quit);
+        assert!(
+            matches!(effects.first(), Some(crate::core::Effect::Quit)),
+            "Quit must lead with Effect::Quit, got {effects:?}"
+        );
+        assert!(
+            effects.iter().all(|e| matches!(
+                e,
+                crate::core::Effect::Quit | crate::core::Effect::PublishIpcState
+            )),
+            "Quit must not emit a follow-up action effect, got {effects:?}"
+        );
+        // The core never clears `running` itself: the backend arms the global
+        // client-close budget and only the run loop stops once clients are gone
+        // or the budget elapsed.
+        assert!(engine.state.running, "the core must not flip `running`");
+    }
+
     // ─── EventBus ───────────────────────────────────────────────────────────
     // The EventBus decouples producers (commands) from consumers (renderer,
     // IPC, bars, hooks, tests). A command declares its OWN domain event, never
