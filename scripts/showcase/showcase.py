@@ -34,6 +34,14 @@ INTERNAL = (SIZE[0] * SUPER, SIZE[1] * SUPER)
 BORDER, RADIUS = 1 * SUPER, 18 * SUPER
 FOCUSED, NORMAL = (137, 180, 250), (69, 71, 90)
 CONTENT = (30, 30, 46)
+FONT_FACE = "Fira Code"
+FONT_FILE = "/usr/share/fonts/TTF/FiraCode-Regular.ttf"
+# xterm has no OpenType shaping (libXft, no harfbuzz): Fira Code ligatures are
+# present in the font (GSUB/liga) but are NOT rendered. Chosen for metrics and
+# glyph clarity, not ligatures. Verified local-only: fc-match resolves the
+# exact file above, no fallback; measured settled grid 56x57 in an 878x1764
+# tiled window (vs 49x50 for Noto 11 at 1x).
+FONT_SIZE = 22
 
 
 def fold_line(line, width):
@@ -236,7 +244,7 @@ opacity = {0.78 if self.scene == "compositor" else 1.0}
         background = ({2: "#542638", 3: "#245447"}.get(number, "#1e1e2e")
                       if self.scene in FULLSCREEN_SCENES else "#1e1e2e")
         self.spawn(["xterm", "-name", name, "-class", "Showcase", "-title", title,
-                    "-fa", "DejaVu Sans Mono", "-fs", "11", "-bg", background,
+                    "-fa", FONT_FACE, "-fs", str(FONT_SIZE), "-bg", background,
                     "-fg", "#cdd6f4", "-cr", background, "+sb", "-b", str(18 * SUPER),
                     "-geometry", "72x36", "-e", sys.executable, str(Path(__file__).resolve()),
                     "--client", title, source], name)
@@ -1017,7 +1025,9 @@ def main():
                       "render": {"internal": list(INTERNAL), "final": list(SIZE),
                                  "scale": SUPER,
                                  "downsample": "Lanczos", "colorspace": "sRGB",
-                                 "stripped": True}}
+                                 "stripped": True,
+                                 "font_face": FONT_FACE, "font_file": FONT_FILE,
+                                 "font_size": FONT_SIZE}}
             if scene in TRANSITION_SCENES:
                 record["transition_checks"] = transition_checks
             if pixel_checks is not None:
