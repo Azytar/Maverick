@@ -1090,6 +1090,13 @@ impl WindowManager {
             wm.arrange(i)?;
         }
 
+        // Publish the initial `_NET_WORKAREA` / `_NET_DESKTOP_GEOMETRY` now
+        // that monitors, workareas (including pre-existing dock struts adopted
+        // by `scan_windows`) and the first arrangement are settled. Without
+        // this they only appear after the first strut/RandR event, leaving
+        // EWMH clients with no workarea straight after startup.
+        wm.update_workarea()?;
+
         // No compositor: paint the configured wallpaper on the root window
         // (feh-style) now — the WM is fully loaded, owns the screen and knows
         // the final monitor layout. This is exactly the moment `feh` would be
