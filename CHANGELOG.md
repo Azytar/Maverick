@@ -4,7 +4,6 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
-## [Unreleased]
 
 ### Fixed
 
@@ -103,7 +102,7 @@ rewrite that forms the current `main` history. Earlier releases
 pre-rewrite codebase.
 
 
-## [Unreleased]
+### Pending
 
 Pending work that is not yet part of a release:
 
