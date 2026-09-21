@@ -1,559 +1,761 @@
-# 🦅 Maverick
+# Maverick
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white">
-  <img src="https://img.shields.io/badge/Linux-111111?style=for-the-badge&logo=linux&logoColor=white">
-  <img src="https://img.shields.io/badge/XLibre-222222?style=for-the-badge&logo=x.org&logoColor=white">
-  <img src="https://img.shields.io/badge/x11rb_0.13-444444?style=for-the-badge">
-</p>
+Maverick es un gestor de ventanas X11 experimental para Linux, escrito en Rust.
+Combina un ribbon horizontal desplazable de columnas en mosaico con workspaces
+por monitor y ventanas flotantes independientes. Un compositor OpenGL/GLX
+opcional añade presentación animada sin adueñarse del estado de gestión de
+ventanas.
 
-<p align="center">
-  <a href="README.md">
-    <img src="https://img.shields.io/badge/Language-English-lightgrey?style=for-the-badge&logo=translate&logoColor=white">
-  </a>
-</p>
+[Panorámica](#panorámica) · [Diseño](#diseño) · [Instalación](#instalación) ·
+[Configuración](#configuración) · [Pruebas](#pruebas) · [Capturas](#capturas)
 
-<p align="center">
-  <b>Gestor de ventanas en mosaico columnar con diseño desplazable tipo niri, escrito en Rust</b>
-</p>
+## Panorámica
 
-<p align="center">
-  🦅 columnar • 🦀 rust • 🖥 xlibre • 🧩 tiling • 🌙 minimal
-</p>
+Maverick explora una alternativa espacial a encajar todas las ventanas en una
+sola pantalla. Las ventanas en mosaico nuevas normalmente entran en columnas
+nuevas; cada columna tiene un ancho relativo al workarea del monitor y puede
+contener una pila vertical de ventanas. Añadir columnas extiende el ribbon en
+lugar de encoger continuamente a sus vecinas. La navegación mueve el viewport a
+través de ese ribbon, manteniendo a la vista la columna enfocada. Overview
+ofrece una tira de película con zoom reducido para seleccionar una columna.
 
----
+Las ventanas flotantes pertenecen a un monitor y un workspace, pero no al
+ribbon. Conservan geometría en coordenadas de pantalla mientras los tiles se
+desplazan. Fullscreen y maximize son políticas de presentación aplicadas sobre
+la colocación lógica, no layouts separados.
 
-## ✨ Acerca de
+Esto es un proyecto de sistemas X11, no un entorno de escritorio ni un
+compositor Wayland. Usa propiedades de cliente X11, monitores RandR y un bucle
+de reconciliación para conectar un modelo de estado testeable con ventanas de
+aplicaciones reales. No incluye panel, servicio de notificaciones, pantalla de
+bloqueo ni lanzador de aplicaciones.
 
-**maverick** es un gestor de ventanas en mosaico ligero y columnar escrito en
-Rust. Presenta un diseño de columnas desplazables horizontalmente inspirado en
-[niri](https://github.com/YaLTeR/niri), y se construye directamente sobre
-`x11rb 0.13` para minimizar dependencias y peso.
+## Funcionalidades
 
-### Características principales
-- 🦅 Diseño de columnas desplazable horizontalmente.
-- ⚡ Huella reducida — sin cairo/pango/Xft, sin runtime asíncrono, un único binario estático.
-- 🔲 Dos modos de diseño: Column (desplazable, por defecto) y Grid (reescrito como motor puro y determinista).
-- 🎨 Compositor OpenGL integrado (opcional, activado por defecto con fallback automático) con detección de daño consciente de oclusión — no hace falta `picom`/`xcompmgr`.
-- 🖼️ Fondo de pantalla nativo — una imagen (PNG decodificado sin dependencias; otros formatos vía un conversor externo) o un shader GLSL en vivo, configurable en `config.toml` o al vuelo con `maverick-msg wallpaper …`.
-- 💾 Persistencia de sesión — el layout de columnas/workspace y el foco sobreviven a un reinicio en caliente o recarga; nada de estado en tiempo real (geometría, animaciones, estado del compositor) se confía nunca al disco.
-- 🔒 Aislamiento por sesión — cada instancia en ejecución tiene su propio directorio/socket de runtime, así una sesión real y una instancia de prueba en Xephyr nunca chocan.
-- 🖼 Maximización real (llena el área de trabajo, conserva el borde) además de pantalla completa.
-- 🖥 Soporte multi-monitor vía RandR.
-- 🧩 Soporte de ventanas flotantes y a pantalla completa.
-- 🧱 Soporte de docks/barras externas (Waybar, Polybar, …) vía struts EWMH.
-- 🔌 Socket de control `maverickctl` — listar/estado/despachar/reiniciar/recargar/salir de cualquier instancia en ejecución.
-- 📐 Altamente configurable (ancho de columna, gaps, bordes, colores, binds de escritorio).
-- 🔧 Reglas declarativas de ventanas.
-- 🚀 Autostart de programas.
-- 📋 Compatible con EWMH.
+### Gestión de ventanas y navegación
 
----
+- Un único layout en mosaico: columnas con desplazamiento horizontal y pilas
+  verticales de ventanas.
+- Foco y movimiento direccionales, anchos de columna ajustables, operaciones de
+  columna nueva y colapso de columna.
+- Cámaras por workspace, zoom de viewport, page-snap scrolling y selección con
+  Overview.
+- Bordes, gaps, temas, keybindings y reglas de aplicación configurables.
+- Comandos por socket Unix, consultas de estado en JSON y suscripción a eventos.
 
-## 🚀 Instalación
+### Ventanas flotantes y fullscreen
 
-### Compilar desde las fuentes
+- Colocación flotante por tipos de ventana/transients, reglas o conmutador
+  explícito.
+- Movimiento y redimensionado con modificador de ventanas **ya flotantes**.
+- Ventanas sticky, geometría por regla y manejo de size hints del cliente.
+- Fullscreen, maximize al workarea y una política exclusiva `true_fullscreen`
+  para aplicaciones que deben abandonar por completo la presentación del ribbon.
+- Reglas para aceptar o rechazar el estado fullscreen inicial y posterior del
+  cliente.
 
-Maverick es un workspace de Cargo: el binario `maverick` (el propio gestor),
-`maverickctl` (CLI de control), `maverick-setup` (asistente First Flight),
-y los crates de librería
-`maverick-gl` (primitivas GL/GLX del compositor), `maverick-img` (decode de
-PNG sin dependencias para el wallpaper) y `maverick-toml` (el parser de
-config sin dependencias). Compílalos todos juntos:
+### Multi-monitor
+
+- Descubrimiento de monitores RandR y actualizaciones de topología, con
+  workspaces por monitor.
+- Foco y movimiento de ventanas entre monitores.
+- Workareas derivados de reservas de docks (`_NET_WM_STRUT_PARTIAL` /
+  `_NET_WM_STRUT`).
+
+### Renderizado y comportamiento de sesión
+
+- Operación X11 pura sin el compositor integrado; los cambios de geometría se
+  asientan de inmediato, sin animación de spring.
+- Renderizado OpenGL/GLX opcional: animación de scroll/zoom, opacidad de
+  ventanas, esquinas redondeadas, fondo de pantalla con imagen y fondo GLSL.
+- Fondo de imagen estático vía pixmap raíz incluso sin compositor.
+- Reinicio en sitio, adopción de ventanas existentes con `--replace` y sockets
+  de control aislados para múltiples instancias de Maverick.
+- Tests unitarios/de regresión en Rust y harnesses de integración separados
+  sobre X11 real.
+
+Vulkan es un **bootstrap experimental no integrado**, no un compositor
+alternativo funcional. Véase [Compositor](#compositor) y
+[Estado actual](#estado-actual).
+
+## Diseño
+
+La distinción central es entre **colocación lógica**, **presentación
+deseada** y **el estado aplicado por última vez a X11**.
+
+```text
+Acciones de tecla / puntero / IPC       Eventos del ciclo de vida X11
+              |                           |
+              v                           v
+         Engine / Command ----------> State + Cfg
+              |                           |
+           Effects                 layout::arrange
+              |                  + present::present_into
+              |                           |
+              +----> backend X11 <--- DesiredState
+                          |
+                      Reconciler ----> AppliedState
+                          |
+                          v
+                         X11
+
+State + Cfg -- layout Phase::Live --> compositor OpenGL opcional
+```
+
+`maverick-core` define los tipos del dominio, incluyendo clientes, columnas,
+workspaces, cámaras y rectángulos. Los módulos de `src/core/` implementan el
+motor, los comandos, el layout, la presentación y el traspaso del estado
+deseado. Mantener los manejadores de protocolo fuera del modelo de dominio
+permite probar la geometría y las transiciones sin un servidor X.
+
+`layout::arrange` proyecta un workspace en rectángulos;
+`present::present_into` aplica la presentación de fullscreen/maximize. El
+`Reconciler` del backend compara `DesiredState` con su contabilidad de
+`AppliedState` y emite los cambios de geometría/borde. El backend X11
+circundante maneja visibilidad, apilado y foco por separado. El estado
+aplicado es una caché del backend, no una afirmación de que las peticiones
+X11 asíncronas nunca puedan fallar.
+
+El layout tiene dos fases. `Phase::Settled` usa los objetivos de cámara para
+la geometría enviada a X11. `Phase::Live` usa valores de cámara interpolados
+para el dibujado del compositor. La misma matemática de proyección sirve a
+ambas: las animaciones mueven texturas en lugar de redimensionar ventanas X
+en cada frame del spring. Sin compositor, los cambios de estado van directo a
+geometría asentada.
+
+El ribbon es un sistema de coordenadas lógico, no otra pantalla X11. Su
+proyección incluye el origen global del monitor y el workarea; X11 sigue
+viendo ventanas ordinarias en el espacio de coordenadas raíz. Las ventanas
+flotantes están deliberadamente fuera de la transformación del ribbon. Esta
+separación importa en escritorios multi-monitor y al hacer scroll, zoom o
+restaurar geometría de fullscreen. El scrolling es una transformación interna
+del layout sobre el desktop físico: `_NET_DESKTOP_GEOMETRY` y `_NET_WORKAREA`
+permanecen físicos, y Maverick no publica `_NET_DESKTOP_VIEWPORT`.
+
+## Ventanas flotantes
+
+Una ventana puede flotar porque es un transient/diálogo, coincide con
+heurísticas de flotación (como hints de tamaño fijo) o una regla, o se
+conmuta con `Super+Shift+Space`. Las reglas pueden especificar tamaño y
+posición; las posiciones de regla son relativas al origen del workarea. La
+colocación inicial normalmente centra un float sobre la geometría almacenada
+de su padre transitorio, o en el workarea de su monitor asignado. La
+geometría flotante persistida puede tener precedencia al adoptar. Cada
+ventana gestionada pertenece o bien a una columna o bien a la lista de floats
+del workspace, nunca a ambas.
+
+- **Aislamiento espacial:** los floats usan coordenadas X11 globales. El
+  scrolling del ribbon, el redimensionado de columnas y la proyección de
+  Overview no los escalan ni trasladan. Los floats ordinarios siguen la
+  visibilidad del workspace; los floats sticky permanecen visibles entre
+  cambios de workspace en su monitor.
+- **Propiedad de la geometría:** cuando el WM coloca o mueve un float a un
+  contexto nuevo, asienta la geometría contra los size hints y el workarea.
+  Un rectángulo flotante reclamado por el cliente se conserva en lugar de ser
+  renormalizado repetidamente por el layout. Arrastrar, reglas, movimientos
+  de monitor/workspace o cambios de workarea pueden reclamar esa geometría
+  para colocación del WM. Esto evita autoridades de redimensionado en
+  competencia.
+- **Movimiento:** `Super+arrastrar-izquierdo` mueve y `Super+arrastrar-derecho`
+  redimensiona un float. Soltarlo sobre un tile no lo inserta en la columna.
+  Arrastrar con modificador una ventana en mosaico no hace nada; usa el
+  movimiento por teclado para los tiles.
+- **Apilado:** los floats ordinarios se colocan sobre los tiles ordinarios,
+  pero esto no es una garantía universal de "siempre encima". Las ventanas de
+  fullscreen/maximize presentadas, las relaciones de transients, el orden de
+  foco y las ventanas X11 no gestionadas también afectan a la pila final.
+- **Fullscreen:** la entrada promueve temporalmente un float a la topología en
+  mosaico y registra su modo y geometría previos. La salida restaura la
+  pertenencia flotante y el rectángulo guardado, sujeto a normalización de
+  colocación. Una conmutación ordinaria de tile a float, en cambio, parte del
+  rectángulo actual del tile.
+- **Foco por teclado:** el foco direccional sigue columnas/filas;
+  `focus:next` y `focus:prev` pueden incluir floats vía historial de foco. El
+  `move` direccional no ofrece movimiento por píxeles para floats.
+
+Los clientes en mosaico no controlan su rectángulo de layout mediante
+`ConfigureRequest`; el WM responde con su geometría asignada. Las peticiones
+flotantes reclamadas por el cliente se acotan por seguridad del protocolo
+X11, no se constriñen continuamente al workarea. Durante un arrastre activo,
+el WM conserva la autoridad de geometría.
+
+### Fullscreen y navegación
+
+La entrada a fullscreen actualmente selecciona presentación exclusiva,
+cubriendo el monitor sin borde. La navegación explícita izquierda/derecha a
+otra columna devuelve ese overlay al fullscreen del ribbon conservando su
+flag de fullscreen y su snapshot de restauración: puede salir de vista con
+scroll y volver a llenar el monitor al regresar. Un overlay exclusivo no se
+limita a elevarse o descartarse cuando cambia el foco. Maximize usa en cambio
+el workarea (también sin borde), con bits de estado horizontal y vertical
+independientes. Estas políticas aún evolucionan; fullscreen no es ni un tile
+del ribbon permanentemente fijado ni un bloqueo de entrada universal.
+
+## Compositor
+
+La gestión de ventanas no requiere el compositor integrado. Desactivarlo es
+un modo de operación soportado, útil para una ruta de renderizado más simple,
+pruebas en X anidado o ejecutar un compositor X11 externo. No desactiva
+tiling, floating, workspaces ni fullscreen.
+
+### Sin el compositor integrado
 
 ```bash
-git clone https://github.com/azytar/Maverick.git
+MAVERICK_NO_COMPOSITOR=1 maverick
+```
+
+Alternativamente, pon `[compositor] enabled = false`, o compila el WM con
+`--no-default-features`. Los cambios de geometría son inmediatos. El fondo
+estático se pinta vía pixmap raíz de X11; el fondo GLSL requiere la ruta GL.
+Las esquinas redondeadas pueden usar la ruta Shape de X11. Un compositor
+externo es dueño de sus propios efectos; las animaciones GPU de Maverick no
+se le delegan.
+
+### OpenGL
+
+La **compilación Cargo** por defecto incluye `compositor-opengl`. La
+implementación usa OpenGL 3.3, texture-from-pixmap de GLX y la conexión X11
+compartida del WM. `libGL.so.1` se carga en tiempo de ejecución. La
+inicialización puede retroceder a X11 puro si GL no está disponible, falla la
+creación del contexto u otro compositor posee la selección de pantalla.
+
+Los efectos implementados son opacidad de ventana
+(`_NET_WM_WINDOW_OPACITY`, también configurable por regla), esquinas
+redondeadas y fondo de pantalla — no blur ni sombras. El redibujado parcial
+necesita `GLX_EXT_buffer_age` y un back buffer utilizable; si no, los frames
+se redibujan completos. El bypass de fullscreen depende de la presentación y
+el apilado reales, no está garantizado para cada cliente fullscreen.
+
+El instalador trata esta ruta como experimental y por defecto usa una
+compilación sin compositar. La compatibilidad de drivers y servidores
+anidados necesita pruebas; un flag de configuración por sí solo no es
+evidencia de que el compositor GL haya arrancado.
+
+### Vulkan
+
+`maverick-vk` contiene infraestructura de instance/device/surface/swapchain
+y una ruta de clear/present. El feature raíz `compositor-vulkan` es un
+placeholder; no conecta ese crate al WM. Poner `backend = "vulkan"`, incluso
+con el feature, **no** ofrece un compositor Vulkan funcional. Usa OpenGL o
+X11 puro.
+
+## Instalación
+
+### Dependencias (Arch Linux)
+
+Se requieren Linux, un servidor X11, un enlazador C y Rust. Los manifiestos
+del workspace declaran edición 2021 y Rust **1.82** como mínimo; el CI actual
+usa Rust estable.
+
+```bash
+sudo pacman -S --needed base-devel rust libx11 libxcb
+# Para una sesión X11 arrancada con startx:
+sudo pacman -S --needed xorg-server xorg-xinit
+# Para la ruta OpenGL opcional:
+sudo pacman -S --needed mesa libxcomposite
+```
+
+Los bindings compilados de lanzamiento usan `alacritty` y `rofi`; instálalos
+o sobreescribe los bindings. El autostart compilado lanza
+`xdg-desktop-portal` y `xdg-desktop-portal-gtk`; usa una lista de autostart
+explícita para cambiarlo o desactivarlo. Esas aplicaciones no las requiere el
+motor de layout. El fondo con imágenes no PNG puede necesitar `ffmpeg` o
+ImageMagick como conversor.
+
+### Compilar
+
+```bash
+git clone https://github.com/Azytar/Maverick.git
 cd Maverick
 cargo build --release --workspace
 ```
 
-(`--workspace` es necesario porque el `Cargo.toml` raíz es en sí el paquete
-`maverick` — sin él, Cargo solo compila `maverick` y omite los binarios
-`maverick-sys`.)
-
-> describe un instalador/asistente capaz de detectar tu sistema, generar una
-> configuración a medida, validar la sesión y evitar que el primer arranque
-> termine en una pantalla vacía.
-
-### Añadir al PATH
+Para un WM sin GL, selecciona los paquetes de runtime explícitamente:
 
 ```bash
-cp target/release/maverick target/release/maverickctl target/release/maverick-msg target/release/maverick-setup ~/.local/bin/
+cargo build --release --no-default-features \
+  -p maverick -p maverick-sys
 ```
 
-Genera una configuración inicial adaptada a tu equipo:
+Los binarios normales de runtime son `maverick`, `maverickctl` y
+`maverick-msg`, bajo `target/release/`. Cargo también descubre la utilidad
+separada `maverick-setup` en `src/bin/`; el instalador shell instala los tres
+binarios de runtime, no esa utilidad. Ningún crate instalador de Rust forma
+parte del workspace.
+
+### Instalar
+
+Ejecuta el instalador como tu usuario normal, no desde un shell de root:
 
 ```bash
-maverick-setup --interactive --write
+./install.sh --prefix "$HOME/.local" --yes --without-compositor
+# O en todo el sistema (el script pide sudo para la instalación):
+./install.sh --yes --without-compositor
+# Optar explícitamente por la compilación GL experimental:
+./install.sh --prefix "$HOME/.local" --yes --with-compositor
 ```
 
-También puedes inspeccionar lo que detecta o previsualizar la configuración sin
-tocar archivos:
+El prefijo por defecto es `/usr/local`, incluso para un invocador no root.
+Las instalaciones de sistema escriben la entrada de sesión en
+`/usr/share/xsessions`; un prefijo de usuario la escribe bajo
+`$prefix/share/xsessions`, que los display managers pueden no descubrir.
+Asegura que `$HOME/.local/bin` esté en `PATH` para una instalación de
+usuario.
 
-```bash
-maverick-setup --detect
-maverick-setup --profile daily --dry-run
-```
+El instalador compila binarios release, ofrece/siembra configuración y
+conserva una config existente con `--yes`. Usa `--no-config` para evitar la
+creación de config. Su primer intento de compilación usa
+`-C target-cpu=native`, así que usa una compilación Cargo normal cuando
+produzcas artefactos para otras máquinas. Véase `./install.sh --help` para
+las opciones restantes.
 
-### Arranque con `.xinitrc`
+## Ejecución
 
-```bash
+### Sesión X11
+
+Para `startx`, pon esto al final de `~/.xinitrc` después de cualquier
+preparación de sesión:
+
+```sh
 exec maverick
 ```
 
-### Gestor de sesión — `maverick.desktop`
-
-Crea `/usr/share/xsessions/maverick.desktop`:
-
-```ini
-[Desktop Entry]
-Name=maverick
-Comment=Columnar tiling WM
-Exec=maverick
-Type=XSession
-```
-
----
-
-## 🖥 Opciones de línea de comandos
-
-`maverick` acepta un pequeño conjunto de flags (en cualquier orden):
-
-| Flag | Descripción |
-| --- | --- |
-| `--config <ruta>` | Carga el TOML de configuración desde `<ruta>` en lugar de `$XDG_CONFIG_HOME/maverick/config.toml`. La misma ruta se reutiliza en `maverickctl reload`, así que una configuración personalizada sobrevive a un reinicio en caliente. |
-| `--check-config [ruta]` | Analiza la configuración (la ruta de `--config` si se indica, si no la ubicación por defecto) y sale. Código de salida `0` = limpia (sin avisos ni errores), `1` = se reportaron avisos o errores. Nunca inicia el WM — útil para CI/lint. |
-| `--replace` / `-r` | Reemplaza a un WM ya en ejecución, adoptando sus ventanas. |
-| `--name <id>` | Nombre de instancia usado para control/identificación (para que `maverickctl` apunte a la instancia correcta). |
-| `-v` / `--version` | Imprime la versión y sale. |
-| `-h` / `--help` | Imprime el uso y sale. |
-
-Valida una configuración antes de arrancar:
+Alternativamente selecciona la sesión Maverick instalada en un display
+manager. No arranques un segundo WM accidentalmente sobre tu display en vivo.
+`maverick --replace` solicita deliberadamente un traspaso del WM existente y
+adopta sus ventanas.
 
 ```bash
-maverick --check-config ~/.config/maverick/config.toml
-maverick --config ~/.config/maverick/config.toml
+maverick --check-config "$HOME/.config/maverick/config.toml"
+maverick --config "$HOME/.config/maverick/config.toml" --name desktop
+maverick --help
 ```
 
----
+`--check-config [path]` valida sin iniciar X11 y devuelve `0` para una
+configuración limpia o `1` para diagnósticos. `--config` lo reutilizan
+reload/restart. `--name` etiqueta la instancia; `--version` imprime la
+versión.
 
-## 🔲 Diseños
+### X11 anidado y depuración
 
-Maverick trae dos modos de diseño conmutables en tiempo de ejecución.
+Usa el [showcase](#reproducción-de-las-capturas) para una sesión Xephyr
+aislada con configuración privada, clientes controlados y limpieza
+automática. Xephyr requiere un display X padre accesible; en Wayland esto
+normalmente significa Xwayland.
 
-| Modo | Atajo | Descripción |
-| --- | --- | --- |
-| **Column** | `Super+T` | Columnas desplazables (por defecto). Cada ventana vive en su propia columna. |
-| **Grid** | `Super+G` | Todas las ventanas en una cuadrícula uniforme. |
-
-Cicla por todos los modos con `Super+Space`.
-
-> El diseño se define **por escritorio**, no globalmente — cambiarlo solo reordena el escritorio activo en el monitor seleccionado.
-
----
-
-## ⌨️ Atajos de teclado
-
-`Super` = tecla Windows (`Mod4`)
-
-### Lanzar
-
-| Atajo | Acción |
-| --- | --- |
-| `Super+Return` | Abrir terminal (`alacritty`) |
-| `Super+P` | Lanzador de apps (`rofi -show drun`) |
-| `Super+Shift+P` | Ejecutor de comandos (`rofi -show run`) |
-
-### Operaciones de ventana
-
-| Atajo | Acción |
-| --- | --- |
-| `Super+Shift+C` | Cerrar ventana enfocada |
-| `Super+Shift+Space` | Conmutar flotante |
-| `Super+Shift+F` | Conmutar pantalla completa |
-
-### Navegación de foco
-
-| Atajo | Acción |
-| --- | --- |
-| `Super+H` | Enfocar columna a la izquierda |
-| `Super+L` | Enfocar columna a la derecha |
-| `Super+K` | Enfocar ventana de arriba (dentro de la columna) |
-| `Super+J` | Enfocar ventana de abajo (dentro de la columna) |
-| `Super+Tab` | Enfocar monitor siguiente |
-
-### Movimiento de ventanas
-
-| Atajo | Acción |
-| --- | --- |
-| `Super+Shift+H` | Mover ventana a la izquierda |
-| `Super+Shift+L` | Mover ventana a la derecha |
-| `Super+Shift+K` | Intercambiar ventana hacia arriba dentro de la columna |
-| `Super+Shift+J` | Intercambiar ventana hacia abajo dentro de la columna |
-| `Super+Shift+Tab` | Mover ventana al monitor siguiente |
-
-> **Semántica de movimiento:** si la columna enfocada tiene una ventana, `Shift+H/L`
-> intercambia toda la columna con su vecina (totalmente reversible). Si la columna
-> tiene varias ventanas, la ventana enfocada se extrae a su propia columna adyacente.
-
-### Operaciones de columna
-
-| Atajo | Acción |
-| --- | --- |
-| `Super+Shift+Return` | Mover ventana a una columna nueva |
-| `Super+Ctrl+H` | Encoger columna actual (−50 px) |
-| `Super+Ctrl+L` | Agrandar columna actual (+50 px) |
-| `Super+Ctrl+J` | Colapsar columna en la de su izquierda |
-
-### Escritorios
-
-| Atajo | Acción |
-| --- | --- |
-| `Super+1` … `Super+9` | Cambiar al escritorio 1–9 |
-| `Super+Shift+1` … `Super+Shift+9` | Mover ventana enfocada al escritorio 1–9 |
-
-### Control del WM
-
-| Atajo | Acción |
-| --- | --- |
-| `Super+Shift+Q` | Sale de maverick sin confirmación |
-| `Super+Shift+R` | Reinicio en caliente en sitio |
-| `Super+F5` | Reinicio en caliente en sitio |
-| `Super+Space` | Ciclar modos de diseño |
-| `Super+T` | Poner diseño Column |
-| `Super+G` | Poner diseño Grid |
-
-> `Super+Shift+Q` sale de maverick inmediatamente sin diálogo de confirmación.
-> El teardown normal del WM se ejecuta en su totalidad: los clientes se notifican
-> para que cierren cooperativamente, hay un tiempo límite global, y luego se
-> fuerza el cierre de los restantes antes de que el bucle de eventos retorne y
-> los recursos X11 se liberen mediante RAII/Drop. Todo el WM también es
-> controlable desde fuera vía un socket Unix con `maverickctl` — véase
-> [Detalles técnicos](#-detalles-técnicos).
-
-### Ratón (ventanas flotantes)
-
-| Acción | Resultado |
-| --- | --- |
-| `Super+Left-drag` | Mover ventana flotante |
-| `Super+Right-drag` | Redimensionar ventana flotante |
-
----
-
-## 🔧 Configuración
-
-Maverick se configura en **`$XDG_CONFIG_HOME/maverick/config.toml`** (o
-`~/.config/maverick/config.toml` cuando `XDG_CONFIG_HOME` no está definido). El
-archivo es **totalmente opcional** — si falta, maverick arranca con los valores
-compilados por defecto sin quejas. Los campos ausentes recaen en esos valores,
-así que solo escribes lo que quieres sobreescribir.
-
-La carga es **a prueba de fallos por diseño**: un archivo con sintaxis inválida
-se rechaza por completo y se usan los valores por defecto, mientras que un
-valor de tipo incorrecto, un nombre de clave desconocido o una cadena de acción
-rota se descartan con un aviso y el resto del archivo se carga igual. Maverick
-nunca falla al arrancar por una configuración errónea.
-
-Hay un ejemplo completo y comentado en
-[`config/config.toml`](config/config.toml):
+Para diagnósticos, compila con los features opt-in `input-trace` y/o
+`window-trace` y captura el stderr del WM en una sesión de prueba:
 
 ```bash
-mkdir -p ~/.config/maverick
-cp config/config.toml ~/.config/maverick/config.toml
+cargo build -p maverick --features input-trace,window-trace
+MAVERICK_NO_COMPOSITOR=1 ./target/debug/maverick --config /path/to/test.toml \
+  2> /tmp/maverick-debug.log
 ```
+
+Ejecuta lo segundo **solo en tu `DISPLAY` de prueba previsto**. Estos
+features añaden trazas estructuradas de entrada/foco o de
+estado-deseado/aplicado/X11; están apagados en compilaciones normales.
+
+## Configuración
+
+La configuración es opcional. Maverick busca
+`$XDG_CONFIG_HOME/maverick/config.toml`, recurriendo a
+`~/.config/maverick/config.toml`. Lo que falte usa los defaults compilados.
+
+Una configuración pequeña basta:
 
 ```toml
-# ~/.config/maverick/config.toml
-
 [general]
-border_width = 2
-gaps = 6
-n_tags = 9
+column_width = 0.5
+gaps_inner = 10
+gaps_outer = 14
+focus_mouse = false
 
-[colors]
-normal  = 0x45475a
-focused = 0x89b4fa
-urgent  = 0xf38ba8
+[compositor]
+enabled = false
+```
 
-[[keybindings]]
-key = "super+return"
-action = "spawn:alacritty"
+Omitir `[autostart]` conserva los defaults compilados; véanse las notas de
+autostart más abajo sobre cómo funciona el reemplazo de listas.
 
-[[keybindings]]
-key = "super+shift+q"
-action = "quit"
+Valídala antes de aplicar `maverickctl reload`. Un TOML malformado recae en
+los defaults compilados; las entradas individuales inválidas se diagnostican
+y se ignoran. Toma los avisos en serio — recaer en defaults también puede
+cambiar bindings y autostart.
 
+El [ejemplo comentado](config/config.toml) lista el vocabulario de
+configuración más amplio. Es un preset, **no una copia exacta de los defaults
+compilados**: copiarlo cambia bindings, reglas y autostart. En particular:
+
+- Los ajustes ordinarios se fusionan con los defaults. `[[keybindings]]` y
+  `[[rules]]` reemplazan sus respectivas listas compiladas cuando se proveen.
+- Los bindings numéricos de workspace rellenan los slots libres salvo
+  `auto_workspace_binds = false`. `n_tags` está limitado a 1–9.
+- `column_width` es una fracción del workarea (0.1–1.0); `accordion_boost`
+  vale `0.0` por defecto, así que la expansión de la columna enfocada es
+  opt-in.
+- `[animations] enabled = false` fija las transiciones de cámara/zoom aun con
+  GL activo. `stiffness` y `damping` ajustan el spring.
+- `[colors]` acepta valores `0xRRGGBB` para `normal`, `focused` y `urgent`,
+  sobreescribiendo un preset `[general] theme`.
+
+### Enlaces compilados esenciales
+
+`Super` significa Mod4 (normalmente la tecla Windows). La configuración de
+ejemplo y la generada por el instalador pueden sobreescribir estos defaults.
+
+| Binding | Acción |
+| --- | --- |
+| `Super+Return` / `Super+P` | Terminal / lanzador de aplicaciones |
+| `Super+H/J/K/L` | Foco izquierda/abajo/arriba/derecha |
+| `Super+Shift+H/J/K/L` | Mover ventana izquierda/abajo/arriba/derecha |
+| `Super+Shift+Return` | Poner ventana en una columna nueva |
+| `Super+Ctrl+H/L` / `Super+Ctrl+J` | Encoger/agrandar columna / colapsar en la columna previa |
+| `Super+Shift+Space` | Conmutar flotante |
+| `Super+Shift+F` / `Super+Shift+M` | Conmutar fullscreen / maximize |
+| `Super+O` / `Super+E` | Conmutar Overview / entrar en su selección |
+| `Super+N` / `Super+Shift+O` | Selección de Overview derecha / izquierda |
+| `Super+=/-` / `Super+]/[` | Zoom de viewport / page-snap derecha/izquierda |
+| `Super+1…9` / `Super+Shift+1…9` | Cambiar de workspace / enviar ventana al workspace |
+| `Super+Tab` / `Super+Shift+Tab` | Foco al monitor siguiente / enviar ventana al monitor siguiente |
+| `Super+wheel` | Foco de columna por pasos |
+| `Super+Shift+C` | Cerrar ventana enfocada |
+| `Super+Shift+R` o `Super+F5` | Reinicio en sitio |
+| `Super+Shift+Q` | Salir de inmediato (apagado nativo limpio, sin diálogo) |
+
+Los bindings personalizados usan entradas como `key = "Mod4+Return"` y
+`action = "spawn:xterm"` dentro de `[[keybindings]]`. Recuerda que proveer
+uno reemplaza la lista compilada de bindings no-workspace. El parser de
+acciones canónico es [`src/core/action.rs`](src/core/action.rs).
+
+### Reglas de aplicación
+
+`class`, `instance` y `title` coinciden por subcadena sin distinguir
+mayúsculas. `window_type` coincide con un nombre de tipo normalizado
+completo, como `dialog` o `utility`. Múltiples criterios en una regla deben
+coincidir todos.
+
+```toml
 [[rules]]
-class = "mpv"
+class = "calculator"
 float = true
-
-[autostart]
-commands = [["nm-applet"]]
+size = [480, 360]
+position = [120, 100]
 ```
 
-Aplica los cambios sin reiniciar:
+Las reglas también aceptan `sticky`, `workspace` (base 1), `opacity` y
+`border_width`. El fullscreen/maximize pedido por el cliente al mapear se
+normaliza normalmente; `honor_initial_state` opta globalmente o por regla,
+mientras `ignore_initial_state` fuerza la normalización. `deny_fullscreen`
+rechaza peticiones EWMH fullscreen del cliente, no el toggle del usuario.
+`true_fullscreen` selecciona una política de overlay exclusiva y tiene
+precedencia sobre esa denegación.
 
-```bash
-maverickctl reload
-```
-
-Si prefieres mantener todo compilado, simplemente no crees el archivo — nada
-cambia respecto a antes.
-
-### Opciones principales
-
-```rust
-border_w:       2,        // grosor del borde en píxeles
-gaps:           6,        // separación entre ventanas y bordes de pantalla (px)
-n_tags:         9,        // número de escritorios
-column_width:   0.6,      // ancho de una columna recién creada, como
-                          //   fracción (0.1–1.0) del ancho del área de trabajo
-accordion_boost: 0.0,     // factor de expansión de foco para la columna enfocada (0.0–0.9)
-overview_zoom_min: 0.25,  // zoom mínimo de la tira Overview (0.05–1.0)
-focus_mouse:    false,    // enfocar ventana al entrar el ratón
-warp_cursor:    false,    // llevar el cursor al centro de la ventana enfocada
-auto_workspace_binds: true, // auto-generar Super+1..9 / Super+Shift+1..9
-```
-
-`column_width` es la fracción del área de trabajo que recibe una columna recién
-creada (0.1–1.0). Sustituye a las antiguas claves `default_col_w` (píxeles) y
-`split_bias`, que ahora son alias obsoletos que se mapean sobre ella.
-
-### Colores
-
-Paleta por defecto: Catppuccin Mocha. Todos los colores son hex de 24 bits `0xRRGGBB`:
-
-```rust
-col_normal:  0x45475a,  // borde de ventana sin foco   (Surface1)
-col_focused: 0x89b4fa,  // borde de ventana enfocada    (Blue)
-col_urgent:  0xf38ba8,  // borde de ventana urgente     (Red)
-```
-
-### Nombres de escritorio
-
-```rust
-tag_names: (1..=9).map(|n| n.to_string()).collect(),
-```
-
-### Autostart
-
-```rust
-autostart: vec![
-    vec!["/usr/lib/xdg-desktop-portal-gtk"],
-    vec!["/usr/lib/xdg-desktop-portal"],
-    vec!["polybar", "main"],                     // barra externa
-    vec!["alacritty"],
-],
-```
-
-El compositor y el wallpaper ya no son entradas de autostart — están
-integrados al WM y se controlan con `compositor_enabled` (bajo `[general]`)
-/ `[wallpaper]` en `config.toml` (ver [Compositor y fondo de pantalla](#-compositor-y-fondo-de-pantalla)).
-Las barras y portales siguen siéndolo: maverick no las orquesta de forma
-especial, simplemente se lanzan una vez que el WM está listo, sin lógica de
-orden/retardo configurable — si una herramienta necesita un momento antes de
-estar usable, eso depende de ella. (Si preferís usar un compositor externo en
-vez del integrado, poné `compositor_enabled = false` (bajo `[general]`) y
-agregalo a `autostart` como antes.)
-
-> El `autostart` por defecto también lanza `/usr/lib/xdg-desktop-portal` y
-> `/usr/lib/xdg-desktop-portal-gtk` — sin ellos, los selectores de archivos
-> basados en GTK/portales (diálogos de subida de navegador, etc.) nunca aparecen.
-
-### Usar una barra externa
-
-maverick **no incluye barra de estado** — dibujarla no es trabajo del WM. Usa
-polybar, waybar, eww o similar; el WM reserva espacio en pantalla para cualquier
-dock que publique `_NET_WM_STRUT_PARTIAL`/`_NET_WM_STRUT`, así que las ventanas
-en mosaico nunca lo solapan (véase `backend/x11/struts.rs`). Lanza tu barra
-desde `autostart`:
-
-```rust
-autostart: vec![
-    vec!["polybar".into(), "main".into()],
-    // …
-],
-```
-
-Para el texto de estado, maverick lee el `WM_NAME` de la ventana raíz (fijado
-con `xsetroot -name "…"` o `xsetroot -name "$(date)"`) y lo expone vía
-`maverickctl state` / `maverickctl subscribe`, para que una barra o script lo
-lean sin rastrear propiedades X.
-
----
-
-## 🎨 Compositor y fondo de pantalla
-
-Maverick levanta su propio compositor OpenGL/GLX sobre
-`CompositeGetOverlayWindow` cuando la pantalla lo soporta — no hace falta
-`picom`/`xcompmgr`. Si falta GL, no se puede crear un contexto 3.3, o ya hay
-otro compositor dueño de la pantalla, avisa por log y cae en silencio al
-camino clásico `ConfigureWindow` (las esquinas redondeadas vía `Shape` de
-X11 siguen funcionando sin GL). Se puede desactivar explícitamente con
-`compositor_enabled = false` (bajo `[general]`) en `config.toml`, o con la
-variable de entorno `MAVERICK_NO_COMPOSITOR`.
-
-El compositor también gestiona un fondo de pantalla nativo, configurado
-bajo `[wallpaper]`:
+### Fondo de pantalla y autostart
 
 ```toml
 [wallpaper]
-path = "~/Pictures/wallpaper.png"   # o un shader .glsl/.frag
-mode = "fill"                       # fill | fit | stretch | center
+path = "~/Pictures/wallpaper.png"
+mode = "fill"
 ```
 
-- **Imágenes** (`.png/.jpg/.jpeg/.webp/.avif/.bmp/.qoi/.ppm/.ff`): el PNG se
-  decodifica de forma nativa (`maverick-img`, sin dependencias); el resto de
-  formatos cae a un conversor externo.
-- **Shaders GLSL** (`.glsl/.frag/.vert/.shader/.fs`): se compilan una vez en
-  la GPU y se redibujan cada frame, recibiendo `u_time`, `u_resolution` y
-  `u_delta_time`.
-- `path = null` (por defecto) lo desactiva — sin fondo dibujado por el
-  compositor.
+Los modos de imagen son `fill`, `fit`, `stretch` y `center`. La decodificación
+de PNG, PPM/PNM, QOI, BMP básico y farbfeld está en el árbol; otros formatos
+(o fallos de decodificación nativa) usan conversión externa. Con GL activo,
+los fondos `.glsl`/`.frag` pueden usar `u_time`, `u_resolution` y
+`u_delta_time`. El fondo de vídeo no tiene implementación. El viejo comentario
+del ejemplo sobre "requiere compositor" para imágenes no aplica a la ruta
+actual de pixmap raíz estático.
 
-Se controla en vivo, sin reiniciar:
+`[autostart] commands` es una lista de listas de argumentos, por ejemplo
+`commands = [["polybar", "main"]]`. Proveer una lista no vacía reemplaza la
+compilada; no hay override documentado con lista vacía, y una entrada vacía
+se descarta con aviso. Usa aplicaciones compatibles con X11; un panel solo
+Wayland no se vuelve compatible por listarlo aquí. Los docks que publican
+struts reservan workarea. El arranque de sesión y el restart no son un
+supervisor de servicios de propósito general.
+
+## Control y ciclo de sesión
 
 ```bash
-maverick-msg wallpaper set ~/Pictures/wallpaper.png
-maverick-msg wallpaper mode fit
-maverick-msg wallpaper clear
+maverickctl list
+maverickctl state --name desktop
+maverickctl query tree --name desktop
+maverickctl msg focus-left --name desktop
+maverickctl subscribe --name desktop
+maverickctl reload --name desktop
+maverickctl restart --name desktop
+maverickctl quit --name desktop --confirm
 ```
 
-## 💾 Sesiones
+`maverick-msg` también reenvía líneas de acción, por ejemplo
+`maverick-msg view 3` o `maverick-msg wallpaper clear`. Cada instancia tiene
+un directorio de runtime privado y un socket Unix bajo
+`$XDG_RUNTIME_DIR/maverick/<session-id>/`. El descubrimiento comprueba
+identidad de proceso y actividad del socket. La selección prefiere
+`--session`, luego `--name`, luego el `MAVERICK_INSTANCE` heredado, luego el
+contexto de display/TTY; también se puede seleccionar un singleton global.
+Usa targeting explícito al probar junto a una sesión en vivo.
 
-El layout de columnas/workspace, los pesos por columna, el workspace activo
-y el foco sobreviven a un reinicio en caliente (`maverickctl restart`) o una
-recarga de config. Solo se persiste esa topología *lógica* — la geometría,
-el estado de animación de cámara/scroll, el estado de zoom/overview, la
-caché del layout Grid y el estado del compositor siempre se reconstruyen
-desde cero contra las ventanas realmente vivas, nunca se confían al disco.
+**Quit cierra las aplicaciones gestionadas de la sesión**, no solo el WM. El
+apagado pregunta a los clientes vía `WM_DELETE_WINDOW` y luego fuerza el
+cierre de los supervivientes tras una espera acotada (tres segundos). Guarda
+tu trabajo antes de salir. Restart es una ruta separada de re-ejecución en
+sitio con recuperación de topología/geometría, no un login de escritorio
+nuevo.
 
-Como cada instancia en ejecución tiene ahora su propio directorio de
-runtime y socket de control (con clave un id de sesión aleatorio por
-proceso), una sesión real y una instancia de prueba en `Xephyr` corriendo
-al mismo tiempo ya no comparten — ni pelean por — el mismo socket.
+## Pruebas
 
----
+### Comprobaciones Rust
 
-## 📋 Reglas de ventanas
-
-Las reglas permiten asignar ventanas a escritorios concretos o forzarlas a
-flotar automáticamente, coincidiendo por subcadena de WM_CLASS o título. Se
-definen con `[[rules]]` en `config.toml` (véase
-[Configuración](#-configuración)) o, para la base compilada, en `config.rs`:
-
-```rust
-rules: vec![
-    Rule { class: Some("xdg-desktop-portal".into()), title: None,                             float: true, ws: None },
-    Rule { class: Some("gpick".into()),              title: None,                             float: true, ws: None },
-    Rule { class: Some("pinentry".into()),           title: None,                             float: true, ws: None },
-    Rule { class: None, title: Some("file upload".into()),    float: true, ws: None },
-    Rule { class: None, title: Some("open file".into()),      float: true, ws: None },
-    Rule { class: None, title: Some("save file".into()),      float: true, ws: None },
-    Rule { class: None, title: Some("qt file dialog".into()), float: true, ws: None },
-],
-
+```bash
+cargo check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-**Campos de regla:**
+`cargo check` comprueba la configuración de paquete/compilación por defecto;
+los tests del workspace también ejercitan los crates de soporte. Los tests
+cubren layout e invariantes de estado, transiciones de
+presentación/foco, convergencia de geometría flotante, parseo de
+configuración y acciones, descubrimiento IPC/sesión, decodificación de
+imágenes y helpers del renderer. No constituyen un test de compatibilidad de
+compositor con driver real ni de aplicaciones. Algunos tests de integración
+Vulkan requieren opt-in explícito y un entorno X11/Vulkan.
 
-| Campo | Tipo | Descripción |
-| --- | --- | --- |
-| `class` | `Option<String>` | Coincide con `WM_CLASS` (subcadena, distingue mayúsculas/minúsculas) |
-| `title` | `Option<String>` | Coincide con el título de ventana (subcadena, distingue mayúsculas/minúsculas) |
-| `float` | `bool` | Forzar modo flotante |
-| `ws` | `Option<usize>` | Fijar la ventana a este escritorio (base 1, 1 = primero) |
+[CI](.github/workflows/ci.yml) ejecuta tests del workspace, Clippy estricto
+y comprobaciones de sintaxis Bash del instalador. No ejecuta los escenarios
+Xephyr.
 
----
+### X11 real y tests del instalador
 
-## 🏗 Detalles técnicos
+```bash
+cargo build -p maverick -p maverick-sys
+python3 tests/xvfb-stacking.py
+python3 tests/install-smoke.py
+```
 
-maverick minimiza las capas de abstracción evitando dependencias innecesarias:
+La regresión de apilado Xvfb compila una sonda Xlib y comprueba el orden real
+de ventanas X en un servidor privado (requiere `xorg-server-xvfb`, un
+compilador C y librerías X11). El smoke test del instalador usa directorios
+temporales aislados y comandos privilegiados simulados; no es una instalación
+del sistema.
 
-* **X11 / XLibre vía `x11rb 0.13`** — bindings de protocolo seguros en tipos, sin libx11. Solo el WM enlaza `x11rb`; el resto del workspace es `std` puro.
-* **Una sola costura de despacho** — `Engine::dispatch(Action) -> Vec<Effect>` es el *único* camino de un atajo o comando IPC a la mutación de estado. `Effect` es un vocabulario semántico (`ArrangeMonitor`, `FocusWindow`, `SetFullscreen`, …); el `execute()` del backend X11 es el único sitio que los convierte en llamadas de protocolo. Un backend no-X11 futuro implementaría `execute()` contra los mismos efectos sin tocar el núcleo.
-* **Pantalla completa/maximizar como presentación, no como bloqueo de máquina de estados** — `core/present.rs` reescribe solo el rectángulo de la ventana *enfocada* (pantalla completa → toda la pantalla, maximizar → área de trabajo, ambos con precedencia sobre el diseño simple) y reordena en cada transición de foco, en lugar de bloquear la entrada mientras una ventana está a pantalla completa.
-* **Colocación flotante autocalculada** — `manage()` nunca confía en la geometría X bruta que reporta una ventana nueva; las ventanas flotantes se centran sobre la geometría real almacenada del padre transitorio (o el área de trabajo del monitor asignado, para diálogos de portales sin padre real) y se recortan dentro de ella. Solo el ancho/alto vienen de la petición original.
-* **Pipeline de estado deseado explícito, un solo dueño de la geometría aplicada** — `State -> layout::arrange -> present::present_into -> DesiredState -> Reconciler -> AppliedState -> X11`. El `Reconciler` (`backend/x11/reconciler.rs`) es el único lugar que decide si hace falta un `configure_window`, reemplazando detección de cambios que antes vivía duplicada en `render`, `manage` y `events`.
-* **Detección de daño consciente de oclusión en el compositor** — el compositor rastrea *por qué* un frame está sucio (bitflags `DirtyReason`) y se salta el redibujado de ventanas/regiones totalmente tapadas por una ventana opaca encima, en vez de repintar todo el frame ante cualquier cambio.
-* **Plano de control por instancia** — `maverick-sys` da a cada instancia en ejecución una identidad por sesión (un id de sesión aleatorio, independiente de la reutilización de PID) y un protocolo de socket Unix (`ping`/`identify`/`state`/`dispatch`/`restart`/`reload`/`subscribe`/`quit`), cada una en su propio directorio de runtime aislado. `maverickctl` habla con él: `list`, `state`, `msg <acción>`, `subscribe`, `quit[--confirm]`, `quit-all`, `restart`, `reload`, `prune`. Maneja varias instancias en distintos displays/ttys/sesiones sin choques.
-* **Capa TOML de configuración opcional** — `userconfig.rs` analiza `config.toml` y lo fusiona campo a campo sobre `config::compiled_config()`; un archivo que falla al analizar se rechaza entero, una entrada errónea se descarta con aviso. `maverickctl reload` lo relee en vivo, sin reiniciar.
-* **Struts de docks/barras externas** — Los docks se detectan vía `_NET_WM_WINDOW_TYPE_DOCK`/`_DESKTOP` (nunca por nombre de proceso) y reservan espacio leyendo `_NET_WM_STRUT_PARTIAL`/el legado `_NET_WM_STRUT`, seguidos por monitor y liberados al destruir/desmapear. maverick no incluye barra de estado — usa Waybar/Polybar/eww y deja que el WM reserve espacio para ella.
-* **Mapa de clientes `HashMap`** — Búsquedas O(1) por XID.
-* **Diseño de columnas O(N)** — Alturas de fila precalculadas en una sola pasada.
-* **Detección de monitores RandR** — Contabilidad de área de trabajo correcta por monitor.
-* **Soporte EWMH** — Incluye `_NET_WM_STATE`, `_NET_WM_DESKTOP`, `_NET_ACTIVE_WINDOW`, etc.
-* **Reinicio basado en `exec`** — Reemplaza el proceso en sitio, evitando condiciones de carrera en el grab de X11.
-* **Aislamiento `override_redirect`** — Barras y overlays externos permanecen invisibles para el WM.
+`tests/xephyr-*.sh` cubre interacciones fullscreen/puntero, muerte de
+clientes, restart, shutdown, casos borde de IPC, fondo de pantalla, daño del
+compositor y escenarios de monitores. `tests/xephyr-suite.sh` es un harness
+de integración manual separado con aplicaciones reales opcionales; fuerza el
+compositor integrado a off por fallos conocidos de GLX anidado. Estos scripts
+**no están todos aislados con el mismo estándar**: algunos helpers antiguos
+en `tests/common.sh` matan procesos por nombre o usan displays fijos.
+Inspecciona un script antes de ejecutarlo, y ejecuta la suite legacy solo en
+una sesión gráfica desechable, no junto a trabajo que necesites preservar.
 
----
+El harness de capturas de abajo es separado: es dueño de su servidor y sus
+clientes y nunca usa ese helper de limpieza global. Las capturas demuestran
+estados seleccionados, no compatibilidad total de aplicaciones ni corrección
+de animaciones.
 
-## 📂 Estructura del proyecto
+## Desarrollo
+
+El bucle normal de desarrollo es:
+
+```bash
+cargo fmt --all
+cargo check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Usa `cargo fmt --all -- --check` para una comprobación de formato de solo
+lectura. La deriva de formato existente debe manejarse por separado en lugar
+de mezclarla en un cambio de documentación o comportamiento. Mantén el
+trabajo nuevo de layout/política cubierto por tests de estado puros; usa un
+servidor X aislado para comportamiento de protocolo, apilado y foco. Al
+cambiar código del compositor, valida en un driver real además de cualquier
+servidor anidado que soporte la ruta GLX requerida.
+
+## Arquitectura
+
+| Ubicación | Responsabilidad |
+| --- | --- |
+| `src/main.rs` | CLI, selección de configuración, señales, vida útil de instancia/control, arranque del backend |
+| `maverick-core/` | Tipos de dominio sin dependencias y modelo de fuente de fondo |
+| `src/core/` | Motor, acciones/comandos/efectos/eventos, layout, presentación, estado deseado, recuperación de sesión |
+| `src/backend/x11/` | Manejo de eventos, gestión de clientes, entrada, EWMH, struts, reconciliación, planificación de frames, fondo raíz |
+| `src/config.rs`, `src/userconfig.rs` | Defaults compilados, fusión de config, validación |
+| `maverick-x11/` | Arranque de conexión Xlib/XCB compartida |
+| `maverick-sys/` | Identidad/descubrimiento de instancias, socket/hub de control, `maverickctl` y `maverick-msg` |
+| `maverick-render/` | Abstracción orientada al renderer |
+| `maverick-gl/` | Renderer OpenGL/GLX y FFI/carga en el árbol |
+| `maverick-vk/` | Código experimental de device/surface/swapchain Vulkan, no integrado al WM |
+| `maverick-toml/`, `maverick-img/` | Parser TOML-subset y decodificador PNG/conversión externa de imágenes |
+| `tests/` | Sondas X11 reales y scripts de integración, smoke tests del instalador |
+| `scripts/showcase/` | Harness aislado de captura de documentación |
+
+El crate de dominio no es toda la máquina de estados: el `src/core/` del
+ejecutable contiene buena parte de esa lógica. El acceso X11 usa `x11rb` con
+una conexión FFI XCB; no es una pila de protocolo totalmente pura en Rust. La
+implementación no requiere GUI-toolkit ni runtime asíncrono, pero sigue
+dependiendo de librerías X11 nativas.
+
+## Project Layout
 
 ```text
-Maverick/                    # Cargo workspace
-├── src/                     # `maverick` — el binario del WM
-│   ├── main.rs               punto de entrada, señales, autostart, cableado del plano de control
-│   ├── config.rs              config base compilada: Cfg, CompositorCfg, WallpaperCfg, Rule, keybinds
-│   ├── userconfig.rs           config.toml opcional: análisis, carga a prueba de fallos, fusión
-│   ├── types.rs                modelo de datos central: State, Monitor, Workspace, Column, Client, tipos Grid/Fullscreen
-│   ├── log.rs                   logger ligero a stderr
-│   ├── core/                    capa de lógica pura — sin X11
-│   │   ├── engine.rs              Engine::dispatch(Action) -> Vec<Effect>
-│   │   ├── effect.rs               enum Effect (la costura núcleo/backend)
-│   │   ├── present.rs               capa de presentación fullscreen/maximize
-│   │   ├── layout.rs                 arrange_columns / arrange_grid
-│   │   ├── grid.rs                    motor de layout Grid puro (determinista, sin X11/State)
-│   │   ├── desired.rs                 DesiredState — el traspaso explícito hacia el Reconciler
-│   │   ├── session.rs                  persistencia/recuperación de sesión (guarda/restaura topología)
-│   │   ├── wallpaper.rs                 modelo de dominio del wallpaper (fuente/modo, sin tipos GL/X11)
-│   │   ├── invariants.rs                 State::check_invariants() chequeos internos de consistencia
-│   │   ├── ipc.rs                         state_json / parse_action para el socket de control
-│   │   ├── action.rs                       vocabulario unificado de nombre/análisis de Action (TOML + IPC)
-│   │   ├── commands.rs                      manejadores de comando por cada Action
-│   │   └── tests.rs                          tests unitarios
-│   └── backend/                 backend X11 — el único sitio que habla el protocolo
-│       ├── atoms.rs               caché de átomos EWMH / ICCCM
-│       └── x11/                     el WindowManager en ejecución, dividido por preocupación
-│           ├── mod.rs                 WindowManager, bucle de eventos, RandR
-│           ├── manage.rs                descubrimiento de ventanas, lectura de propiedades, setup
-│           ├── events.rs                 tabla de despacho de eventos X
-│           ├── ewmh.rs                    mantenimiento de propiedades EWMH
-│           ├── actions.rs                  do_action / execute (ejecuta Effects del núcleo), reload
-│           ├── input.rs                     keymap, grabs de teclas, suscripción a cambios XKB
-│           ├── pointer.rs                    drag-to-move/resize, click focus
-│           ├── render.rs                      recorte de geometría flotante, foco, restack
-│           ├── reconciler.rs                   único dueño de "qué hay realmente en X11"
-│           ├── struts.rs                        reserva de docks externos
-│           ├── compositor.rs                     detección de daño GL + dibujo GPU del wallpaper
-│           ├── framesched.rs                      scheduler puro de "necesito frame, cuándo"
-│           └── hubevents.rs                        puente de eventos del hub de control
-├── maverick-sys/             # libc FFI + identidad por sesión/socket de control/hub/discover
-│   └── src/
-│       ├── identity.rs         id de sesión por instancia, directorio de runtime aislado, "ficha"
-│       ├── control.rs           ControlServer — el protocolo de socket Unix
-│       ├── hub.rs                 ControlHub — puente al bucle de eventos del WM
-│       ├── discover.rs             list/find/quit instancias (por id de sesión)
-│       └── bin/maverickctl.rs       la CLI `maverickctl`
-├── maverick-gl/               # contexto GLX + primitivas de textura/shader del compositor
-│   └── src/
-├── maverick-img/                # decode de PNG sin dependencias para el wallpaper nativo
-│   └── src/lib.rs
-├── maverick-toml/                # parser de TOML sin dependencias usado por userconfig.rs
-│   └── src/lib.rs
-├── config/
-│   └── config.toml            ejemplo de configuración de usuario completo y comentado
-├── tests/                      # suite de integración basada en Xephyr + clientes C de prueba
-├── CHANGELOG.md
-├── Cargo.toml                 # raíz del workspace + el paquete `maverick`
-├── Cargo.lock
-├── LICENSE
-├── README.md
-└── README.es.md
+.
+├── src/                 # Gestor de ventanas principal
+├── maverick-core/       # Estado compartido y tipos centrales
+├── maverick-x11/        # Integración X11
+├── maverick-gl/         # Compositor OpenGL
+├── maverick-vk/         # Backend Vulkan
+├── maverick-render/     # Soporte de renderizado
+├── maverick-img/        # Soporte de imágenes
+├── maverick-toml/       # Soporte TOML/config
+├── maverick-sys/        # Interfaces IPC/control
+├── config/              # Configuración de ejemplo
+├── docs/                # Recursos de documentación
+├── scripts/             # Herramientas de showcase/documentación
+└── tests/               # Tests de integración y X11
 ```
 
----
+`maverick-vk` es un bootstrap experimental no integrado (véase
+[Compositor](#compositor)); no es un backend de compositor funcional.
 
-## 📜 Licencia
+## Estado actual
 
-Licencia GPL-3.0
+Maverick está en desarrollo activo y no se declara listo para producción. La
+ruta X11 pura implementa el modelo actual de tiling, navegación, floating,
+fullscreen y workspaces; la suite de regresión existe para endurecer esas
+interacciones.
+
+- **Renderizado experimental:** OpenGL está implementado pero sigue siendo
+  opcional y sensible a drivers. Vulkan no está conectado a la composición de
+  ventanas.
+- **Alcance:** solo Linux/X11; sin backend Wayland, shell de escritorio
+  integrado, blur, sombras ni fondo de vídeo.
+- **Layout:** Column es el único layout implementado. Los índices de
+  workspace están limitados a 1–9; los nombres son cosméticos.
+- **Compatibilidad:** el soporte ICCCM/EWMH está implementado para las
+  necesidades del WM, no como afirmación general de protocolo completo o
+  compatibilidad de aplicaciones.
+- **Monitores:** el foco/movimiento cicla el orden de enumeración de
+  monitores, no la dirección física. La recuperación de topología usa
+  rectángulos/índices, no identidades de conector estables; no asumas que un
+  hotplug/reorden arbitrario preserva asignaciones.
+- **Geometría:** X11 tiene un espacio global de coordenadas raíz y límites de
+  tamaño/coordenadas del protocolo. La proyección de scroll y los workareas
+  multi-monitor deben respetar esos límites.
+- **Interfaces:** configuración, APIs internas, política de presentación y
+  comportamiento experimental del renderer pueden cambiar. El parser TOML del
+  árbol soporta un subconjunto, no toda la especificación TOML.
+
+## Hoja de ruta
+
+Direcciones respaldadas por el código actual y el andamiaje de tests, sin
+fechas de release prometidas:
+
+- Extender la cobertura de regresión con clientes reales para geometría
+  flotante, foco, fullscreen, restart y cambios de monitor/workarea.
+- Endurecer el arranque OpenGL, el manejo de daño, el bypass de fullscreen y
+  la cobertura de drivers.
+- Evaluar integrar el bootstrap Vulkan con texturas de ventanas reales y el
+  contrato del renderer antes de llamarlo backend soportado.
+- Mantener fiable el fondo de imagen/shader; el vídeo queda reservado hasta
+  que exista un diseño de decodificador y ciclo de recursos.
+
+## Capturas
+
+Todas las imágenes de abajo se capturaron de sesiones Maverick reales: el WM
+corriendo dentro de Xephyr a 2880×1800, gestionando aplicaciones reales,
+capturado con `import`, submuestreado con Lanczos a 1440×900 (`sRGB`,
+metadatos eliminados) y envuelto en un marco de presentación (1616×1076
+final). Cada píxel dentro del marco es renderizado auténtico de aplicaciones
+a través del layout de Maverick. Sin maquetas, sin imitaciones de apps en
+terminal, sin efectos de post-procesado.
+
+### Escritorio cotidiano
+
+![Escritorio cotidiano de Maverick](docs/screenshots/real-desktop.png)
+
+Un workspace de desarrollador: Neovim en Alacritty sobre fuente real
+(`src/core/layout.rs`), Firefox sobre una página local offline de
+documentación (`file://`, sin red), Zed sobre el repositorio y un shell
+Alacritty con `git status`. Cuatro columnas Maverick; el ribbon ya se extiende
+más allá del viewport, con Neovim asomando por el borde izquierdo.
+
+### Scrolling
+
+![Scrolling de Maverick, viewport A](docs/screenshots/real-scroll-a.png)
+
+![Scrolling de Maverick, viewport B](docs/screenshots/real-scroll-b.png)
+
+Seis columnas (el escritorio de arriba más un gestor de archivos y un monitor
+del sistema); dos viewports del mismo escritorio alcanzados con el foco
+direccional del propio Maverick: el viewport A está sobre Zed
+(`scroll=2764`), el viewport B sobre el gestor de archivos (`scroll=4454`).
+El workspace es más grande que el mosaico visible, y el borde azul siempre
+marca la columna enfocada. También se captura un
+[paseo de foco](docs/screenshots/real-focus.png) terminado en Firefox.
+
+### Ventanas flotantes
+
+![Ventana flotante de Maverick](docs/screenshots/real-floating.png)
+
+Un shell scratch real de Alacritty flotado por el WM (`960×540` en
+`960,540`) se queda quieto mientras los tiles hacen scroll dos columnas
+debajo: los floats conservan geometría en coordenadas de pantalla fuera de
+la transformación del ribbon.
+
+### Compositor
+
+![Compositor de Maverick](docs/screenshots/real-compositor.png)
+
+El mismo escritorio y float con el compositor OpenGL real ON (opacidad
+`0.78`, esquinas redondeadas; renderer por software Mesa bajo Xephyr): el
+contenido de Firefox y Zed se transparenta por el float. Compara con la toma
+flotante de arriba, que es el mismo estado con el compositor OFF.
+
+### Técnicas (clientes sintéticos)
+
+Las escenas `xterm` de vista de fuente quedan para detalle de implementación
+(`tiling`, `navigation`, `floating`, `fullscreen`, `compositor`, más el set
+de regresión de esquinas/fullscreen bajo `docs/screenshots/`). Ya no cargan
+con ser la representación principal de Maverick.
+
+### Reproducción de las capturas
+
+El showcase ejecuta Maverick dentro de Xephyr con clientes controlados,
+directorios privados de configuración/runtime (incluyendo perfiles Firefox
+aislados y directorios de datos Zed; tu `~/.config` nunca se toca) y limpieza
+acotada de procesos. No reemplaza el WM del display padre ni modifica tu
+configuración. Todo funciona offline: Firefox abre una página local `file://`
+y ninguna escena toca la red.
+
+```bash
+./scripts/showcase/run.sh real-desktop
+./scripts/showcase/run.sh real-scroll-a
+./scripts/showcase/run.sh real-scroll-b
+./scripts/showcase/run.sh real-focus
+./scripts/showcase/run.sh real-floating
+./scripts/showcase/run.sh real-compositor
+./scripts/showcase/run.sh tiling
+./scripts/showcase/run.sh all
+```
+
+Cada ejecución renderiza Maverick dentro de Xephyr a 2880×1800, captura la
+ventana raíz, submuestrea con Lanczos a 1440×900 (`sRGB`, metadatos
+eliminados) y envuelve los píxeles auténticos en un marco de presentación
+(1616×1076 final). Verifica las dimensiones de cada etapa, comprueba que las
+escenas GL realmente inicializaron (`Backend: OpenGL/GLX` más un frame
+sometido en el log del WM; un fallback a X11 puro falla la escena en lugar
+de producir una captura engañosa), cosecha cada proceso creado y elimina su
+estado temporal. Dependencias: `Xephyr`, `xdpyinfo`, `xdotool`, `xsetroot`,
+`import`/`identify`/`magick` de ImageMagick, un display X11 host alcanzable
+y — solo para las escenas reales de escritorio — `alacritty`, `firefox`,
+`zeditor`, `nvim` (`nautilus` y `htop` para el par de scrolling). Los
+clientes GL se fuerzan a X11 dentro del harness, así que una sesión host
+Wayland no los rompe.
+
+## Licencia
+
+GPL-3.0. Véase [LICENSE](LICENSE).
