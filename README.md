@@ -113,7 +113,9 @@ The ribbon is a logical coordinate system, not another X11 screen. Its projectio
 includes the monitor's global origin and workarea; X11 still sees ordinary windows
 in the root coordinate space. Floating windows are deliberately outside the ribbon
 transform. This separation matters on multi-monitor desktops and when scrolling,
-zooming, or restoring fullscreen geometry.
+zooming, or restoring fullscreen geometry. Scrolling is an internal layout
+transform over the physical desktop: `_NET_DESKTOP_GEOMETRY` and `_NET_WORKAREA`
+stay physical, and Maverick does not publish `_NET_DESKTOP_VIEWPORT`.
 
 ## Floating windows
 
@@ -537,6 +539,28 @@ The domain crate is not the entire state machine: the executable's `src/core/`
 contains much of that logic. X11 access uses `x11rb` with an XCB FFI connection;
 this is not a wholly pure-Rust protocol stack. The implementation has no GUI-toolkit
 or async-runtime requirement, but still depends on native X11 libraries.
+
+## Project Layout
+
+```text
+.
+├── src/                 # Main window manager
+├── maverick-core/       # Shared state and core types
+├── maverick-x11/        # X11 integration
+├── maverick-gl/         # OpenGL compositor
+├── maverick-vk/         # Vulkan backend
+├── maverick-render/     # Rendering support
+├── maverick-img/        # Image support
+├── maverick-toml/       # TOML/config support
+├── maverick-sys/        # IPC/control interfaces
+├── config/              # Example configuration
+├── docs/                # Documentation assets
+├── scripts/             # Showcase/documentation tooling
+└── tests/               # Integration and X11 tests
+```
+
+`maverick-vk` is an unintegrated experimental bootstrap (see
+[Compositor](#compositor)); it is not a working compositor backend.
 
 ## Current status
 
