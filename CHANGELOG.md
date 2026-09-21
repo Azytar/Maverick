@@ -55,6 +55,10 @@ All notable changes to this project are documented here. Format follows
 
 ### Removed
 
+- **`maverick-installer`.** The leftover legacy Rust installer directory is
+  gone too: it was already out of the workspace and unused (nothing invoked
+  it — `install.sh` is the official installer, CI only syntax-checks that
+  script). `install.sh` + `tests/install-smoke.py` are unchanged.
 - **`maverick-dialog`.** The standalone X11 confirmation client is gone from
   the workspace, `install.sh`, the installer's binary list, `maverickctl`'s
   confirmation fallback and the docs. The `maverickctl quit --confirm` flag

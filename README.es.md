@@ -541,8 +541,6 @@ Maverick/                    # Cargo workspace
 │   └── src/lib.rs
 ├── maverick-toml/                # parser de TOML sin dependencias usado por userconfig.rs
 │   └── src/lib.rs
-├── maverick-installer/         # instalador opcional (miembro del workspace)
-│   └── src/main.rs
 ├── config/
 │   └── config.toml            ejemplo de configuración de usuario completo y comentado
 ├── tests/                      # suite de integración basada en Xephyr + clientes C de prueba
