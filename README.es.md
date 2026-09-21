@@ -281,7 +281,7 @@ action = "spawn:alacritty"
 
 [[keybindings]]
 key = "super+shift+q"
-action = "kill"
+action = "quit"
 
 [[rules]]
 class = "mpv"
