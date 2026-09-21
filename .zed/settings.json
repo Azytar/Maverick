@@ -1,0 +1,47 @@
+// Zed project configuration for Maverick.
+//
+// Deliberately contains NO settings. rust-analyzer's defaults already describe
+// this repository's real Cargo workspace, and the rule for this project is that
+// `cargo`/`rustc` decide whether the code compiles — the editor must not
+// deviate from that. Anything added here would be a second source of truth.
+//
+// What rust-analyzer does by default (verified with Zed 1.20.2 + the distro
+// rust-analyzer, including rust-analyzer's own flycheck output under
+// `target/flycheck0/`):
+//
+//   * Workspace — `Cargo.toml` at the repository root *is* the Cargo workspace
+//     root (the root `maverick` package plus the 8 members it declares).
+//     rust-analyzer resolves packages through Cargo, so every member is
+//     analysed, including `maverick-vk`, which is not in the root package's
+//     dependency graph. No `linkedProjects` needed.
+//
+//   * Features — default features only (`compositor-opengl`). Do NOT enable
+//     everything (`cargo.allFeatures`, or `cargo.features: ["all"]`):
+//     `input-trace` and `window-trace` are diagnostic-only builds and
+//     `compositor-vulkan` is an unwired placeholder, so that would analyse a
+//     configuration nobody develops against. CI agrees —
+//     `.github/workflows/ci.yml` runs plain `cargo clippy --workspace
+//     --all-targets` and `cargo test --workspace`, without `--all-features`.
+//
+//   * Check command — rust-analyzer's default is `cargo check --workspace
+//     --all-targets` with default features, so cargo stays the authority.
+//     `--all-targets` is intentional: it also covers `#[cfg(test)]` code, like
+//     CI does. `cargo check --workspace` alone is a subset of that, so a
+//     diagnostic in test code that plain `cargo check` does not print is real,
+//     not a false positive.
+//
+//   * Toolchain — this project uses the distro rustc/cargo/rust-analyzer, not
+//     rustup. rust-analyzer also needs the *sources* of the standard library;
+//     on Arch that is the `rust-src` package. Without it, rust-analyzer reports
+//       "Workspace .../Cargo.toml has sysroot errors:
+//        can't load standard library from sysroot"
+//     and Zed shows bogus `std::`/`core` errors on every file while
+//     `cargo check` stays clean (rustc ships the compiled `std`, so cargo is
+//     unaffected). That mismatch is a missing component, not a code problem.
+//
+//   * Zed prefers the system `rust-analyzer` over its own downloaded copy
+//     ("found user-installed language server for rust-analyzer"). Pinning a
+//     binary is machine-specific, so if it is ever needed it belongs in the
+//     user's global settings:
+//       "lsp": { "rust-analyzer": { "binary": { "path": "/usr/bin/rust-analyzer" } } }
+{}
