@@ -845,6 +845,21 @@ impl WindowManager {
             .conn
             .send_event(false, win, EventMask::STRUCTURE_NOTIFY, event);
 
+        // `_NET_FRAME_EXTENTS` mirror (single writer): the published extents
+        // must equal the border actually applied. Publish `[bw × 4]` only when
+        // it changed — `emit_geometry` also fires for pure moves, where a
+        // property rewrite would be pure protocol noise.
+        if self.frame_extents.get(&win) != Some(&bw) {
+            let _ = self.conn.change_property32(
+                PropMode::REPLACE,
+                win,
+                self.atoms.net_frame_extents,
+                AtomEnum::CARDINAL,
+                &[bw, bw, bw, bw],
+            );
+            self.frame_extents.insert(win, bw);
+        }
+
         if let Some(c) = self.engine.state.clients.get_mut(&win) {
             if write_client_geom {
                 c.geom = geom;

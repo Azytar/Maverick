@@ -206,6 +206,11 @@ pub struct WindowManager {
     /// was reissued every such frame even though the mask geometry (a pure
     /// function of size, not position) hadn't changed.
     shape_mask_cache: std::collections::HashMap<Window, (u32, u32, i32, u32)>,
+    /// Last `_NET_FRAME_EXTENTS` border width published per window.
+    /// `emit_geometry` is the single writer: it publishes `[bw × 4]` only when
+    /// the applied border changed, so fullscreen/maximize/border-rule
+    /// transitions stay in sync without a property write per configure.
+    frame_extents: std::collections::HashMap<Window, u32>,
     /// No-compositor wallpaper (`rootwall.rs`): the pixmap ID last installed as
     /// the root background, if any. `apply_root_wallpaper` runs repeatedly
     /// (startup, config reload, monitor reconfiguration, GL-failure fallback)
@@ -1056,6 +1061,7 @@ impl WindowManager {
             stack_dirty: false,
             applied: crate::backend::x11::reconciler::AppliedState::default(),
             shape_mask_cache: std::collections::HashMap::new(),
+            frame_extents: std::collections::HashMap::new(),
             last_root_pixmap: None,
             hide_ws_set: std::collections::HashSet::with_capacity(32),
             hide_mon_vec: Vec::with_capacity(64),

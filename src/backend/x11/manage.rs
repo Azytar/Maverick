@@ -467,14 +467,10 @@ impl WindowManager {
 
         self.grab_buttons(win, false)?;
 
-        let bw = client.border_w;
-        let _ = self.conn.change_property32(
-            PropMode::REPLACE,
-            win,
-            self.atoms.net_frame_extents,
-            AtomEnum::CARDINAL,
-            &[bw, bw, bw, bw],
-        );
+        // `_NET_FRAME_EXTENTS` is published by `emit_geometry` (the single X
+        // geometry sink) when `arrange` below applies the first configure, so
+        // it always mirrors the border actually in effect — including later
+        // fullscreen/maximize transitions that change it.
         let _ = self.set_wm_state(win, 1);
 
         // place into workspace structure
@@ -625,6 +621,7 @@ impl WindowManager {
         // configure (its previous applied rect is no longer valid).
         self.applied.forget(win);
         self.shape_mask_cache.remove(&win);
+        self.frame_extents.remove(&win);
 
         // Announce the departure on the typed EventBus.
         self.engine
