@@ -960,7 +960,11 @@ impl WindowManager {
         self.engine.state.x11_input_focus = if e.event == self.root {
             None
         } else {
-            Some(e.event)
+            self.engine
+                .state
+                .clients
+                .contains_key(&e.event)
+                .then_some(e.event)
         };
         self.reconcile_focus()?;
         Ok(())

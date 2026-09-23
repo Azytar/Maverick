@@ -1266,9 +1266,12 @@ impl WindowManager {
             },
             Err(_) => self.engine.state.x11_input_focus,
         };
-        self.engine.state.x11_input_focus = real;
-
-        // The WM's logical intent for the currently selected monitor.
+        // X may report a child or another unmanaged window as the input
+        // focus. The state mirror represents managed clients only; keeping an
+        // unknown XID here violates the state invariant during normal GTK
+        // focus transitions.
+        self.engine.state.x11_input_focus =
+            real.filter(|window| self.engine.state.clients.contains_key(window));
         let logical = self
             .engine
             .state
