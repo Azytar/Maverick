@@ -672,7 +672,7 @@ Firefox offline preferences; no network resource is required.
 ./showcase/run.sh --size 1440x900
 ```
 
-The reference resolution is `1600x1000`; `--size` exists for a different
+The reference resolution is `1920x1080`; `--size` exists for a different
 local development display. The harness verifies capture dimensions, records
 JSON state/tree evidence under `/tmp/opencode/mav-showcase-evidence/`, and
 reaps every owned process before removing its private runtime. See

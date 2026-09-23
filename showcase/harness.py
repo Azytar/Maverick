@@ -24,7 +24,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SIZE = (1600, 1000)
+DEFAULT_SIZE = (1920, 1080)
 DEFAULT_EVIDENCE = Path("/tmp/opencode/mav-showcase-evidence")
 PR_SET_CHILD_SUBREAPER = 36
 

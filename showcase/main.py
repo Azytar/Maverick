@@ -24,7 +24,7 @@ def main() -> int:
     parser.add_argument(
         "--size",
         default=f"{DEFAULT_SIZE[0]}x{DEFAULT_SIZE[1]}",
-        help="nested Xephyr size, for example 1600x1000 (default: %(default)s)",
+        help="nested Xephyr size, for example 1920x1080 (default: %(default)s)",
     )
     parser.add_argument(
         "--bin-dir",

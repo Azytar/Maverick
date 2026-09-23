@@ -33,8 +33,9 @@ From the repository root:
 ./showcase/run.sh
 ```
 
-The default reference is `1600x1000`. A different nested Xephyr size can be
-selected when needed:
+The default reference is `1920x1080`, matching the development display used
+for the checked-in captures. A different nested Xephyr size can be selected
+when needed:
 
 ```bash
 ./showcase/run.sh --size 1440x900
@@ -78,7 +79,7 @@ applications. The bundled page itself has no network dependency.
   for deterministic startup. The OpenGL compositor remains a separate,
   driver-sensitive capability and is not substituted with a fake effect here.
 - The floating proof is strongest when the selected monitor is at least
-  `640x480`; the default `1600x1000` composition is the documented reference.
+  `640x480`; the default `1920x1080` composition is the documented reference.
 - A missing optional application changes the exact client mix, but the scene
   still launches a real application and records the actual WM tree instead of
   pretending that an unavailable application ran.

@@ -300,10 +300,10 @@ user_pref("network.proxy.type", 0);
             ),
             timeout=15,
         )
-        width = min(560, self.session.size[0] // 3)
-        height = min(390, self.session.size[1] // 2)
+        width = min(680, self.session.size[0] // 3)
+        height = min(460, self.session.size[1] // 2)
         x = int(self.session.size[0] * 0.48)
-        y = int(self.session.size[1] * 0.25)
+        y = int(self.session.size[1] * 0.23)
         float_before = self.session.place_float(monitor, width, height, x, y)
         self.session.focus(self.ids["terminal"])
         tiled_before = self.session.geometry(self.ids["terminal"])
