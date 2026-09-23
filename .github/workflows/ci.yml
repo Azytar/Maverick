@@ -33,3 +33,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: bash -n
         run: bash -n install.sh
+      - name: Installer smoke test
+        run: python3 tests/install-smoke.py
+
+  x11-smoke:
+    name: X11 smoke (no compositor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install isolated Xvfb test dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb x11-utils libx11-dev libxcb1-dev
+      - name: Build supported profile
+        run: cargo build --release --no-default-features -p maverick -p maverick-sys
+      - name: Xvfb stacking regression
+        run: python3 tests/xvfb-stacking.py
