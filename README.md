@@ -533,7 +533,7 @@ server that supports the required GLX path.
 | `maverick-vk/` | Experimental Vulkan device/surface/swapchain code, not integrated into the WM |
 | `maverick-toml/`, `maverick-img/` | TOML-subset parser and PNG decoder/external image conversion |
 | `tests/` | Real-X11 probes and integration scripts, installer smoke tests |
-| `scripts/showcase/` | Isolated documentation capture harness |
+| `showcase/` | Isolated, reproducible technical presentation harness |
 
 The domain crate is not the entire state machine: the executable's `src/core/`
 contains much of that logic. X11 access uses `x11rb` with an XCB FFI connection;
@@ -555,7 +555,7 @@ or async-runtime requirement, but still depends on native X11 libraries.
 ├── maverick-sys/        # IPC/control interfaces
 ├── config/              # Example configuration
 ├── docs/                # Documentation assets
-├── scripts/             # Showcase/documentation tooling
+├── showcase/            # Reproducible technical presentation
 └── tests/               # Integration and X11 tests
 ```
 
@@ -614,93 +614,70 @@ release dates:
 
 ## Screenshots
 
-All images below were captured from real Maverick sessions: the WM running
-inside Xephyr at 2880×1800, managing real applications, captured with
-`import`, downsampled with Lanczos to 1440×900 (`sRGB`, stripped metadata),
-and wrapped in a presentation frame (1616×1076 final). Every pixel inside the
-frame is authentic application rendering through Maverick's layout. No
-mock-ups, no terminal imitations of apps, no post-processing effects.
+The showcase is a five-scene technical presentation captured from an isolated
+Xephyr session. These are authentic root-window captures: Maverick lays out
+real X11 clients, the harness dispatches real actions, and the images are not
+painted or reconstructed after capture.
 
-### Everyday desktop
+### Workspace
 
-![Maverick everyday desktop](docs/screenshots/real-desktop.png)
+![Maverick workspace](docs/screenshots/workspace.png)
 
-A developer's workspace: Neovim in Alacritty on real source
-(`src/core/layout.rs`), Firefox on a local offline documentation page
-(`file://`, no network), Zed on the repository, and an Alacritty shell with
-`git status`. Four Maverick columns; the ribbon already extends past the
-viewport, with Neovim peeking in at the left edge.
+A clean three-column start: a real terminal, Neovim reading
+`src/core/layout.rs`, and Firefox on a local offline reference page. The first
+composition is intentionally small enough to read at a glance.
 
-### Scrolling
+### Ribbon and scrolling
 
-![Maverick scrolling, viewport A](docs/screenshots/real-scroll-a.png)
+![Maverick scrolling ribbon](docs/screenshots/ribbon.png)
 
-![Maverick scrolling, viewport B](docs/screenshots/real-scroll-b.png)
+The same workspace gains another source window, an offline reference viewer
+and the live monitor. Maverick's directional focus moves the camera, leaving
+the ribbon larger than the viewport. The browser and editor are real
+application windows; the source views are real terminals running Neovim.
 
-Six columns (the desktop above plus a file manager and a system monitor);
-two viewports of the same desktop reached through Maverick's own directional
-focus: viewport A sits on Zed (`scroll=2764`), viewport B on the file manager
-(`scroll=4454`). The workspace is larger than the visible mosaic, and the
-blue border always marks the focused column. A
-[focus walk](docs/screenshots/real-focus.png) ending on Firefox is also
-captured.
+![Maverick real tools](docs/screenshots/tools.png)
 
-### Floating windows
+A directional-focus step reveals a different view of the same real
+application set. The scene is a navigation state, not a second desktop
+mock-up.
 
-![Maverick floating window](docs/screenshots/real-floating.png)
+### Floating isolation
 
-A real Alacritty scratch shell floated by the WM (`960×540` at `960,540`)
-stays put while the tiles scroll two columns beneath it: floats keep
-screen-space geometry outside the ribbon transform.
+![Maverick floating monitor](docs/screenshots/floating.png)
 
-### Compositor
+`Maverick Monitor` is a small real terminal application that polls
+`maverickctl query tree`. It is floated with Maverick's `toggle_float` action
+and then compared before and after the tiled camera moves: the float remains
+at the same screen-space geometry while the mosaic shifts beneath it.
 
-![Maverick compositor](docs/screenshots/real-compositor.png)
+### Hero composition
 
-The same desktop and float with the real OpenGL compositor ON (`0.78`
-opacity, rounded corners; Mesa software renderer under Xephyr): Firefox and
-Zed content shows through the float. Compare with the floating shot above,
-which is the same state with the compositor OFF.
+![Maverick hero composition](docs/screenshots/hero.png)
 
-### Technical (synthetic clients)
-
-The `xterm` source-viewer scenes remain for implementation detail
-(`tiling`, `navigation`, `floating`, `fullscreen`, `compositor`, plus the
-rounded/fullscreen regression set under `docs/screenshots/`). They no longer
-carry the burden of being the primary representation of Maverick.
+The final scene keeps several columns, varied widths, real clients, scrolling
+and the independent monitor float in one deliberate composition.
 
 ### Reproducing the screenshots
 
-The showcase runs Maverick inside Xephyr with controlled clients, private
-configuration/runtime directories (including isolated Firefox profiles and
-Zed data directories; the user's `~/.config` is never touched), and bounded
-process cleanup. It does not replace the WM on the parent display or modify
-the user's configuration. Everything works offline: Firefox opens a local
-`file://` page and no scene touches the network.
+The presentation lives in [`showcase/`](showcase/README.md) and uses a private
+Xephyr display, private XDG directories, a private Firefox profile and bounded
+process cleanup. It does not replace the host WM or modify the user's
+configuration. The local browser fixture is opened through `file://` with
+Firefox offline preferences; no network resource is required.
 
 ```bash
-./scripts/showcase/run.sh real-desktop
-./scripts/showcase/run.sh real-scroll-a
-./scripts/showcase/run.sh real-scroll-b
-./scripts/showcase/run.sh real-focus
-./scripts/showcase/run.sh real-floating
-./scripts/showcase/run.sh real-compositor
-./scripts/showcase/run.sh tiling
-./scripts/showcase/run.sh all
+./showcase/run.sh
+./showcase/run.sh floating
+./showcase/run.sh --size 1440x900
 ```
 
-Each run renders Maverick inside Xephyr at 2880×1800, captures the root
-window, downsamples with Lanczos to 1440×900 (`sRGB`, stripped metadata),
-and wraps the authentic pixels in a presentation frame (1616×1076 final).
-It verifies every stage's dimensions, checks that the GL scenes really
-initialized (`Backend: OpenGL/GLX` plus a submitted frame in the WM log; a
-plain-X11 fallback fails the scene instead of producing a misleading capture),
-reaps every process it created, and removes its temporary state. Dependencies:
-`Xephyr`, `xdpyinfo`, `xdotool`, `xsetroot`, ImageMagick's `import`/
-`identify`/`magick`, a reachable host X11 display, and — for the real
-desktop scenes only — `alacritty`, `firefox`, `zeditor`, `nvim`
-(`nautilus` and `htop` for the scrolling pair). GL clients are forced onto
-X11 inside the harness, so a Wayland host session does not break them.
+The reference resolution is `1600x1000`; `--size` exists for a different
+local development display. The harness verifies capture dimensions, records
+JSON state/tree evidence under `/tmp/opencode/mav-showcase-evidence/`, and
+reaps every owned process before removing its private runtime. See
+[`showcase/README.md`](showcase/README.md) for dependencies, fallbacks and
+known limitations.
 
 ## License
 

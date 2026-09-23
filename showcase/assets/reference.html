@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Maverick / workspace reference</title>
+  <style>
+    :root { color-scheme: light; --ink:#1c2930; --muted:#63747c; --line:#d7dee1; --accent:#397783; --wash:#f2f5f5; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:#f8f9f9; color:var(--ink); font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    main { max-width:760px; margin:0 auto; padding:34px 42px 48px; }
+    header { border-bottom:1px solid var(--line); padding-bottom:22px; margin-bottom:26px; }
+    .eyebrow { color:var(--accent); font-size:12px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; }
+    h1 { margin:8px 0 8px; font-size:30px; line-height:1.1; letter-spacing:-.02em; }
+    h2 { margin:28px 0 8px; font-size:18px; }
+    p { margin:8px 0 12px; }
+    .lede { color:var(--muted); max-width:620px; }
+    .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:18px 0; }
+    .card { background:#fff; border:1px solid var(--line); border-radius:8px; padding:14px; }
+    .card strong { display:block; margin-bottom:5px; }
+    .card span, .note { color:var(--muted); font-size:13px; }
+    pre { overflow:auto; background:var(--wash); border:1px solid var(--line); border-radius:8px; padding:12px 14px; font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .rule { border-left:3px solid var(--accent); padding-left:14px; }
+    footer { color:var(--muted); border-top:1px solid var(--line); margin-top:32px; padding-top:14px; font-size:13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">Maverick / X11 window manager</div>
+      <h1>A workspace with a point of view.</h1>
+      <p class="lede">Maverick keeps a deliberate column ribbon in screen space. New tiled windows extend the ribbon; navigation moves the camera to the focused column; floating clients remain in the viewport.</p>
+    </header>
+
+    <section>
+      <h2>Column ribbon</h2>
+      <div class="grid">
+        <div class="card"><strong>01 / Terminal</strong><span>Alacritty with a real shell.</span></div>
+        <div class="card"><strong>02 / Editor</strong><span>Neovim reading Maverick source.</span></div>
+        <div class="card"><strong>03 / Browser</strong><span>Firefox on this local page.</span></div>
+      </div>
+      <p class="rule">The important detail is not the number of windows. It is that the workspace has a stable geometry and a camera.</p>
+    </section>
+
+    <section>
+      <h2>Navigation is movement</h2>
+      <p>Directional focus keeps the active column visible without shrinking its neighbours. The showcase uses this action vocabulary against the live WM, not a screenshot mock-up.</p>
+      <pre>focus:left   focus:right   focus:left   focus:right</pre>
+    </section>
+
+    <section>
+      <h2>Floating is a separate coordinate space</h2>
+      <p>A float can sit above the mosaic while the tiled ribbon moves beneath it. Its geometry is observed through <code>maverickctl query tree</code>; the showcase does not draw a fake overlay.</p>
+      <pre>toggle_float → observe float → focus:right × 2 → observe again</pre>
+    </section>
+
+    <footer>Local fixture. No network requests are required or made by this page.</footer>
+  </main>
+</body>
+</html>
