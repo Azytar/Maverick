@@ -459,6 +459,25 @@ mode = "fill"
                 except ProcessLookupError:
                     pass
 
+        # Ask the WM to perform its normal shutdown while Xephyr is still
+        # alive. This closes managed clients through Maverick's real lifecycle
+        # and avoids manufacturing XIO errors by killing the server first.
+        if self.wm is not None and self.wm.poll() is None and self.xephyr is not None and self.xephyr.poll() is None:
+            try:
+                result = run(
+                    [self.binaries / "maverickctl", "quit", "--yes", "--name", "showcase"],
+                    env=self.env,
+                    check=False,
+                    timeout=5,
+                )
+                if result.returncode:
+                    print("showcase: graceful WM quit unavailable; forcing owned cleanup", file=sys.stderr)
+            except ShowcaseError as error:
+                print(f"showcase: graceful WM quit failed; forcing owned cleanup: {error}", file=sys.stderr)
+            deadline = time.monotonic() + 5
+            while self.wm.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.1)
+
         signal_owned(signal.SIGTERM)
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline and descendants():
