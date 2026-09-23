@@ -374,16 +374,30 @@ opacity = {0.78 if self.scene == "compositor" else 1.0}
                 stream.write('\n[[rules]]\ninstance = "showcase6"\nfloat = true\n')
         run([str(self.binaries / "maverick"), "--check-config", str(config)], self.env)
         self.wm = self.spawn([str(self.binaries / "maverick"), "--config", str(config),
-                              "--name", "showcase"], "wm")
+                              "--name", self.NAME], "wm")
         wait_for("Maverick IPC startup", lambda: self.state().get("monitors"))
         run(["xsetroot", "-solid", ROOT_BG], self.env)
         print(f"{self.scene}: WM started on {self.env['DISPLAY']} (pid {self.wm.pid})", flush=True)
 
+    # Every maverickctl call passes --name showcase (the same label the WM
+    # was spawned with, see start()). Without it, resolve_target() falls
+    # through to its DISPLAY+TTY heuristic: the WM is spawned with
+    # start_new_session=True (so close() can reap the whole process group
+    # cleanly), which detaches it from a controlling tty and records
+    # tty_nr=0 in its identity ficha. maverickctl itself, run via plain
+    # subprocess.run, inherits *our* real controlling tty (non-zero), so
+    # the tty match always fails and every call dies with "no running
+    # Maverick instance found for this context" even though the WM logged
+    # "ready" just fine. --name sidesteps that heuristic entirely.
+    NAME = "showcase"
+
     def state(self):
-        return json.loads(run([str(self.binaries / "maverickctl"), "state"], self.env).stdout)
+        return json.loads(run([str(self.binaries / "maverickctl"), "state",
+                               "--name", self.NAME], self.env).stdout)
 
     def tree(self):
-        return json.loads(run([str(self.binaries / "maverickctl"), "query", "tree"], self.env).stdout)
+        return json.loads(run([str(self.binaries / "maverickctl"), "query", "tree",
+                               "--name", self.NAME], self.env).stdout)
 
     def gl_active(self):
         return self._gl_active(self.path / "wm.log")
@@ -397,7 +411,8 @@ opacity = {0.78 if self.scene == "compositor" else 1.0}
         return "Backend: OpenGL/GLX" in text and "event=PresentEnd submitted=true" in text
 
     def action(self, action):
-        result = run([str(self.binaries / "maverickctl"), "msg", action], self.env)
+        result = run([str(self.binaries / "maverickctl"), "msg", action,
+                      "--name", self.NAME], self.env)
         print(f"  {action}: {result.stdout.strip()}", flush=True)
 
     def terminal(self, number, title, source):
@@ -1335,9 +1350,14 @@ def run_real_floating(session, label="real-floating", float_opacity=1.0):
         instance="realfloat", opacity=float_opacity))
     session.action("toggle_float")
     session.stable(windows)
+    # Sized/placed off the column grid on purpose (was flush with the col2
+    # edges at 480,270): a float that lines up exactly with a tile boundary
+    # reads as "a tile got replaced by a blank box", not as a floating
+    # overlay independent of the ribbon. Straddling a column seam and
+    # leaving margin above/below sells the feature instead of hiding it.
     run(["xdotool", "windowsize", windows[-1], str(480 * SUPER), str(360 * SUPER)], session.env)
     session.stable(windows)
-    run(["xdotool", "windowmove", windows[-1], str(480 * SUPER), str(270 * SUPER)], session.env)
+    run(["xdotool", "windowmove", windows[-1], str(560 * SUPER), str(150 * SUPER)], session.env)
     session.stable(windows)
     before = float_geometry(session, windows[-1])
     tiled_before = float_geometry(session, windows[0])
@@ -1355,6 +1375,18 @@ def run_real_floating(session, label="real-floating", float_opacity=1.0):
     floats = tree["monitors"][0]["workspaces"][0]["floats"]
     if not any(str(w["id"]) == windows[-1] for w in floats):
         raise RuntimeError(f"{label} is not in the workspace float list")
+    # Isolation is proven above; the focus:left x2 walk left the float
+    # unfocused (NORMAL border, ~2px pre-downsample) for that check. On the
+    # plain-X11 scene (real-floating, no compositor ring) that border all
+    # but disappears against the dark surface after the Lanczos downsample,
+    # so the capture shows a flat, unlabeled dark box instead of a floating
+    # terminal. Re-focus it for the shot so the accent border is visible —
+    # this only changes what's focused at capture time, not the geometry
+    # already asserted above.
+    run(["xdotool", "windowactivate", "--sync", windows[-1]], session.env)
+    wait_for(f"{label}: float refocused for capture", lambda: any(
+        monitor.get("focused") == int(windows[-1]) for monitor in session.state()["monitors"]))
+    session.stable(windows)
     return windows
 
 
