@@ -309,6 +309,31 @@ fn presentation_value(rect: Rect, radius: u32) -> [f64; 5] {
     ]
 }
 
+/// Rounded-corner radius policy for one composited frame.
+///
+/// Pure over geometry so the live transform (`CompWin::set_transform`) and the
+/// settled presentation goal (`prepare_frame`) cannot diverge: both call this
+/// with the same inputs. `want` is `cfg.corner_radius`; `screen_union` is the
+/// outputs' bounding rect; `screens` holds each monitor's own `screen` rect.
+///
+/// A window is square exactly when its border-inclusive outer rect covers an
+/// output edge-to-edge — the union (single-monitor fullscreen, or a rare
+/// union-spanning overlay) or any single monitor (multi-monitor fullscreen).
+/// Rounding such an overlay just clips content under a curved corner with no
+/// desktop behind it to round into (niri-style; same policy the X11 Shape path
+/// enforces via its `is_fullscreen` flag in `emit_geometry`). Everything else
+/// keeps `want`, clamped to half the shorter side so the SDF never inverts.
+///
+/// The client geometry stays rectangular regardless: this only decides which
+/// part of that rectangular surface the compositor leaves visible.
+fn rounded_radius_for(outer: Rect, want: u32, screen_union: Rect, screens: &[Rect]) -> u32 {
+    if want == 0 || outer == screen_union || screens.contains(&outer) {
+        0
+    } else {
+        want.min((outer.w / 2).min(outer.h / 2))
+    }
+}
+
 fn border_rgba(pixel: u32) -> [f32; 4] {
     [
         ((pixel >> 16) & 0xff) as f32 / 255.0,
@@ -366,7 +391,15 @@ impl CompWin {
         resized
     }
 
-    fn set_transform(&mut self, geom: Rect, bw: u32, radius: u32, screen: Rect, gen: u64) {
+    fn set_transform(
+        &mut self,
+        geom: Rect,
+        bw: u32,
+        radius: u32,
+        screen_union: Rect,
+        screens: &[Rect],
+        gen: u64,
+    ) {
         self.transform = Rect::new(
             geom.x,
             geom.y,
@@ -379,12 +412,9 @@ impl CompWin {
         // an overlay just clips content under a curved corner with no
         // desktop behind it to round into — the same niri-style policy the
         // X11 Shape path enforces in `emit_geometry`. A window is square
-        // exactly when its presentation covers the monitor's screen rect.
-        self.transform_radius = if radius == 0 || self.transform == screen {
-            0
-        } else {
-            radius.min((self.transform.w / 2).min(self.transform.h / 2))
-        };
+        // exactly when its presentation covers the screen union or any single
+        // monitor's screen rect (see `rounded_radius_for`).
+        self.transform_radius = rounded_radius_for(self.transform, radius, screen_union, screens);
         let live = presentation_value(self.transform, self.transform_radius);
         // Exact comparison is intentional: the goal keys are copied from
         // integer-backed rects (only the radius rounds), so equality is a
@@ -784,6 +814,13 @@ pub struct Compositor {
     frame_gen: u64,
     /// Corner radius the WM wants applied (shader SDF), px.
     corner_radius: u32,
+    /// Each monitor's own `screen` rect, refreshed from `State` in
+    /// `prepare_frame` (and seeded by `set_outputs`). The fullscreen-square
+    /// policy (`rounded_radius_for`) checks the border-inclusive outer rect
+    /// against these — not just the outputs' union — so a fullscreen window
+    /// on one monitor of a multi-monitor layout stays square instead of
+    /// wrongly keeping its rounded corners.
+    monitor_screens: Vec<Rect>,
     /// Accumulated screen-space damage for the current frame, rebuilt by
     /// `compute_scene`. Drives partial redraw: when only a few windows repainted
     /// (idle `XDamage`) the region is a small union; when a structural change
@@ -1093,6 +1130,7 @@ impl Compositor {
             occluder_rects: Vec::new(),
             frame_gen: 0,
             corner_radius: cfg.corner_radius,
+            monitor_screens: Vec::new(),
             frame_dirty: DamageRegion::new(),
             needs_full: false,
             damage_acc: DamageRegion::new(),
@@ -1577,10 +1615,15 @@ impl Compositor {
         self.frame_gen = self.frame_gen.wrapping_add(1);
         let gen = self.frame_gen;
         let corner_radius = self.corner_radius;
-        let screen = self.screen_rect;
+        let screen_union = self.screen_rect;
         for &(win, geom, bw) in placements {
             // `ignored` windows are never tracked (see `track`), so the lookup
             // below already rejects them — no separate set probe needed.
+            //
+            // Disjoint field borrows: `wins` mutably for the window under
+            // update, `monitor_screens` immutably for the fullscreen-square
+            // policy. Both live on `self` but never alias.
+            let screens: &[Rect] = &self.monitor_screens;
             let Some(cw) = self.wins.get_mut(&win) else {
                 continue;
             };
@@ -1588,7 +1631,7 @@ impl Compositor {
             let before_gen = cw.transform_gen;
             let trace_transition = crate::backend::x11::trace::enabled()
                 .then(|| cw.presentation.as_ref().map(|t| t.progress.position));
-            cw.set_transform(geom, bw, corner_radius, screen, gen);
+            cw.set_transform(geom, bw, corner_radius, screen_union, screens, gen);
             if let Some(previous) = trace_transition {
                 crate::backend::x11::trace::trace!(
                     "transition",
@@ -1677,6 +1720,12 @@ impl Compositor {
                 m.layout_dirty = true;
             }
         }
+        // Refresh the per-monitor screen list the fullscreen-square policy
+        // reads (see `rounded_radius_for`). Reuses the buffer so the per-frame
+        // path stays allocation-free after the first topology change.
+        self.monitor_screens.clear();
+        self.monitor_screens
+            .extend(state.monitors.iter().map(|m| m.screen));
         // Presentation-transition goals: the *settled* presentation (arrange
         // Phase::Settled + present_into overlay, i.e. exactly what the X11 side
         // applies) per window. Cached per monitor and recomputed only when that
@@ -1720,11 +1769,12 @@ impl Compositor {
                         rect.w.saturating_add(bw.saturating_mul(2)),
                         rect.h.saturating_add(bw.saturating_mul(2)),
                     );
-                    let radius = if outer == self.screen_rect {
-                        0
-                    } else {
-                        cfg.corner_radius.min(outer.w / 2).min(outer.h / 2)
-                    };
+                    let radius = rounded_radius_for(
+                        outer,
+                        cfg.corner_radius,
+                        self.screen_rect,
+                        &self.monitor_screens,
+                    );
                     presentation_value(outer, radius)
                 });
         }
@@ -1907,6 +1957,11 @@ impl Compositor {
     /// wallpaper keeps covering the whole screen after a resize (`RandR` edge case).
     pub fn set_outputs(&mut self, outputs: &[Rect]) {
         self.wallpaper_outputs = outputs.to_vec();
+        // The fullscreen-square policy reads per-monitor screens (not just the
+        // union), so keep that list in sync here too; `prepare_frame` refreshes
+        // it from `State` every frame, this seeds it before the first frame
+        // and on RandR changes driven by the event path.
+        self.monitor_screens = outputs.to_vec();
         if !outputs.is_empty() {
             let mut x0 = i32::MAX;
             let mut y0 = i32::MAX;
@@ -4019,7 +4074,7 @@ mod bench {
 
 #[cfg(test)]
 mod lifecycle_tests {
-    use super::{border_rgba, presentation_value, CompWin};
+    use super::{border_rgba, presentation_value, rounded_radius_for, CompWin};
     use crate::types::Rect;
     use maverick_gl::VisualFormat;
 
@@ -4040,7 +4095,7 @@ mod lifecycle_tests {
         cw.mapped = true;
         let cfg = crate::config::Cfg::default();
         cw.presentation_spring = Some((cfg.animations.stiffness, cfg.animations.damping));
-        cw.set_transform(cw.outer, 0, 18, Rect::new(0, 0, 800, 600), 1);
+        cw.set_transform(cw.outer, 0, 18, Rect::new(0, 0, 800, 600), &[], 1);
         cw
     }
 
@@ -4052,6 +4107,7 @@ mod lifecycle_tests {
                 0,
                 18,
                 Rect::new(0, 0, 800, 600),
+                &[],
                 cw.transform_gen + 1,
             );
             if cw.presentation.is_none() {
@@ -4068,18 +4124,18 @@ mod lifecycle_tests {
         let initial = cw.transform;
         let final_rect = Rect::new(0, 0, 800, 600);
         assert_ne!(initial, final_rect);
-        cw.set_transform(final_rect, 0, 18, final_rect, 2);
+        cw.set_transform(final_rect, 0, 18, final_rect, &[], 2);
         assert_eq!(cw.transform, initial);
         assert_eq!(cw.transform_radius, 18);
         cw.tick_presentation(1.0 / 60.0);
-        cw.set_transform(final_rect, 0, 18, final_rect, 3);
+        cw.set_transform(final_rect, 0, 18, final_rect, &[], 3);
         assert_ne!(cw.transform, initial);
         assert_ne!(cw.transform, final_rect);
         let frames = settle_presentation(&mut cw, final_rect);
         assert!(frames > 1);
         assert_eq!(cw.transform_radius, 0);
         assert_eq!(cw.outer, initial);
-        cw.set_transform(initial, 0, 18, final_rect, cw.transform_gen + 1);
+        cw.set_transform(initial, 0, 18, final_rect, &[], cw.transform_gen + 1);
         assert_eq!(cw.transform, final_rect);
         settle_presentation(&mut cw, initial);
         assert_eq!(cw.transform_radius, 18);
@@ -4094,11 +4150,11 @@ mod lifecycle_tests {
         let c = Rect::new(-300, 8, 313, 584);
         for target in [screen, b, c, b] {
             let before = cw.presentation_value;
-            cw.set_transform(target, 0, 18, screen, cw.transform_gen + 1);
+            cw.set_transform(target, 0, 18, screen, &[], cw.transform_gen + 1);
             assert_eq!(cw.presentation_value, before);
             for _ in 0..5 {
                 cw.tick_presentation(1.0 / 60.0);
-                cw.set_transform(target, 0, 18, screen, cw.transform_gen + 1);
+                cw.set_transform(target, 0, 18, screen, &[], cw.transform_gen + 1);
             }
         }
         settle_presentation(&mut cw, b);
@@ -4111,7 +4167,7 @@ mod lifecycle_tests {
         let mut cw = transitioning_window();
         let screen = Rect::new(0, 0, 800, 600);
         cw.presentation_goal = Some(presentation_value(screen, 0));
-        cw.set_transform(Rect::new(796, 0, 800, 600), 0, 18, screen, 2);
+        cw.set_transform(Rect::new(796, 0, 800, 600), 0, 18, screen, &[], 2);
         let from = cw.presentation.as_ref().unwrap().from;
         for x in (1..796).rev().step_by(20) {
             cw.tick_presentation(1.0 / 60.0);
@@ -4120,6 +4176,7 @@ mod lifecycle_tests {
                 0,
                 18,
                 screen,
+                &[],
                 cw.transform_gen + 1,
             );
             if let Some(transition) = &cw.presentation {
@@ -4136,7 +4193,7 @@ mod lifecycle_tests {
         let mut cw = transitioning_window();
         let screen = Rect::new(0, 0, 800, 600);
         cw.presentation_goal = Some(presentation_value(screen, 0));
-        cw.set_transform(Rect::new(100, 0, 800, 600), 0, 18, screen, 2);
+        cw.set_transform(Rect::new(100, 0, 800, 600), 0, 18, screen, &[], 2);
         for _ in 0..120 {
             cw.tick_presentation(1.0 / 60.0);
             cw.set_transform(
@@ -4144,6 +4201,7 @@ mod lifecycle_tests {
                 0,
                 18,
                 screen,
+                &[],
                 cw.transform_gen + 1,
             );
         }
@@ -4156,7 +4214,7 @@ mod lifecycle_tests {
             cw.presentation.is_some(),
             "ticking alone must not consume the final frame"
         );
-        cw.set_transform(screen, 0, 18, screen, cw.transform_gen + 1);
+        cw.set_transform(screen, 0, 18, screen, &[], cw.transform_gen + 1);
         assert_eq!(cw.transform, screen);
         assert_eq!(cw.transform_radius, 0);
         assert!(cw.presentation.is_none());
@@ -4173,7 +4231,7 @@ mod lifecycle_tests {
     fn navigation_away_from_fullscreen_glides_back_to_the_ribbon() {
         let mut cw = transitioning_window();
         let screen = Rect::new(0, 0, 800, 600);
-        cw.set_transform(screen, 0, 18, screen, cw.transform_gen + 1);
+        cw.set_transform(screen, 0, 18, screen, &[], cw.transform_gen + 1);
         settle_presentation(&mut cw, screen);
         assert_eq!(cw.transform, screen);
         assert_eq!(cw.transform_radius, 0);
@@ -4183,6 +4241,7 @@ mod lifecycle_tests {
             0,
             18,
             screen,
+            &[],
             cw.transform_gen + 1,
         );
         assert_eq!(
@@ -4195,6 +4254,7 @@ mod lifecycle_tests {
             0,
             18,
             screen,
+            &[],
             cw.transform_gen + 1,
         );
         assert_ne!(
@@ -4219,7 +4279,7 @@ mod lifecycle_tests {
         let screen = Rect::new(0, 0, 800, 600);
         let tile = Rect::new(478, 8, 313, 584);
         cw.presentation_goal = Some(presentation_value(tile, 18));
-        cw.set_transform(tile, 0, 18, screen, cw.transform_gen + 1);
+        cw.set_transform(tile, 0, 18, screen, &[], cw.transform_gen + 1);
         settle_presentation(&mut cw, tile);
         // The camera scrolls the window far left: the *presented* rect follows
         // the camera while the settled goal is unchanged — a camera scroll is
@@ -4229,6 +4289,7 @@ mod lifecycle_tests {
             0,
             18,
             screen,
+            &[],
             cw.transform_gen + 1,
         );
         assert!(
@@ -4240,14 +4301,14 @@ mod lifecycle_tests {
         // overlay and the same frame presents the screen rect. The transition
         // must start from the off-screen *presented* value.
         cw.presentation_goal = Some(presentation_value(screen, 0));
-        cw.set_transform(screen, 0, 18, screen, cw.transform_gen + 1);
+        cw.set_transform(screen, 0, 18, screen, &[], cw.transform_gen + 1);
         assert!(
             cw.presentation.is_some(),
             "the settled-goal flip must start a presentation transition"
         );
         assert_eq!(cw.transform, Rect::new(-800, 0, 800, 600));
         cw.tick_presentation(1.0 / 60.0);
-        cw.set_transform(screen, 0, 18, screen, cw.transform_gen + 1);
+        cw.set_transform(screen, 0, 18, screen, &[], cw.transform_gen + 1);
         assert_ne!(cw.transform, Rect::new(-800, 0, 800, 600));
         assert_ne!(cw.transform, screen);
         let frames = settle_presentation(&mut cw, screen);
@@ -4261,12 +4322,12 @@ mod lifecycle_tests {
         let mut cw = transitioning_window();
         let screen = Rect::new(0, 0, 800, 600);
         cw.presentation_spring = None;
-        cw.set_transform(screen, 0, 18, screen, 2);
+        cw.set_transform(screen, 0, 18, screen, &[], 2);
         assert_eq!(cw.transform, screen);
         assert!(cw.presentation.is_none());
         cw.presentation_spring = Some((220.0, 30.0));
         cw.mapped = false;
-        cw.set_transform(cw.outer, 0, 18, screen, 3);
+        cw.set_transform(cw.outer, 0, 18, screen, &[], 3);
         assert_eq!(cw.transform, cw.outer);
         assert!(cw.presentation.is_none());
     }
@@ -4371,6 +4432,7 @@ mod lifecycle_tests {
             1,
             12,
             Rect::new(0, 0, 1440, 900),
+            &[],
             1,
         );
         assert_eq!(cw.transform, Rect::new(100, 200, 402, 302));
@@ -4384,6 +4446,7 @@ mod lifecycle_tests {
             0,
             12,
             Rect::new(0, 0, 1440, 900),
+            &[],
             2,
         );
         assert_eq!(cw.transform, Rect::new(0, 0, 640, 480));
@@ -4411,19 +4474,102 @@ mod lifecycle_tests {
         };
         let screen = Rect::new(0, 0, 1440, 900);
         let mut cw = CompWin::new(Rect::default(), 0, vf);
-        cw.set_transform(Rect::new(0, 0, 1440, 900), 0, 18, screen, 1);
+        cw.set_transform(Rect::new(0, 0, 1440, 900), 0, 18, screen, &[], 1);
         assert_eq!(cw.transform_radius, 0, "screen-covering overlay is square");
-        cw.set_transform(Rect::new(0, 0, 1440, 876), 0, 18, screen, 2);
+        cw.set_transform(Rect::new(0, 0, 1440, 876), 0, 18, screen, &[], 2);
         assert_eq!(
             cw.transform_radius, 18,
             "workarea-sized maximize stays rounded"
         );
-        cw.set_transform(Rect::new(0, 0, 1440, 900), 0, 0, screen, 3);
+        cw.set_transform(Rect::new(0, 0, 1440, 900), 0, 0, screen, &[], 3);
         assert_eq!(cw.transform_radius, 0, "corner_radius 0 disables rounding");
         // Radius clamped to half the border-inclusive shorter side
         // (44x24 outer from a 40x20 content + 2px frame → 12).
-        cw.set_transform(Rect::new(0, 0, 40, 20), 2, 18, screen, 4);
+        cw.set_transform(Rect::new(0, 0, 40, 20), 2, 18, screen, &[], 4);
         assert_eq!(cw.transform_radius, 12);
+    }
+
+    /// Fase 6 regression: the fullscreen-square policy must hold per monitor,
+    /// not just against the outputs' union. A fullscreen window on either
+    /// monitor of a two-monitor layout covers that monitor edge-to-edge, so
+    /// it must be square — the old union-only check kept it rounded, which is
+    /// exactly "rounded corners where the fullscreen contract demands a full
+    /// surface" (and incoherent with the X11 Shape path, which keys on
+    /// `is_fullscreen`, and with bypass, which presents directly).
+    #[test]
+    fn set_transform_squares_fullscreen_on_each_monitor() {
+        let vf = VisualFormat {
+            id: 0,
+            depth: 24,
+            red_bits: 8,
+            green_bits: 8,
+            blue_bits: 8,
+            alpha_bits: 0,
+            direct: true,
+        };
+        let mon0 = Rect::new(0, 0, 800, 600);
+        let mon1 = Rect::new(800, 0, 800, 600);
+        let union = Rect::new(0, 0, 1600, 600);
+        let screens = [mon0, mon1];
+        let mut cw = CompWin::new(Rect::default(), 0, vf);
+        // Fullscreen on the left monitor: outer == mon0, not the union.
+        cw.set_transform(Rect::new(0, 0, 800, 600), 0, 18, union, &screens, 1);
+        assert_eq!(
+            cw.transform_radius, 0,
+            "fullscreen on monitor 0 must be square"
+        );
+        // Fullscreen on the right monitor.
+        cw.set_transform(Rect::new(800, 0, 800, 600), 0, 18, union, &screens, 2);
+        assert_eq!(
+            cw.transform_radius, 0,
+            "fullscreen on monitor 1 must be square"
+        );
+        // A normal tile on one monitor stays rounded.
+        cw.set_transform(Rect::new(808, 8, 700, 500), 1, 18, union, &screens, 3);
+        assert_eq!(cw.transform_radius, 18, "tiled window stays rounded");
+        // A union-spanning overlay (rare) still squares via the union check.
+        cw.set_transform(Rect::new(0, 0, 1600, 600), 0, 18, union, &screens, 4);
+        assert_eq!(cw.transform_radius, 0, "union-covering overlay is square");
+    }
+
+    /// `rounded_radius_for` is the single policy both the live transform and
+    /// the settled presentation goal read, so they cannot diverge. Pin its
+    /// contract directly: zero disables, union or any monitor squares,
+    /// workarea-sized maximize stays rounded, and the radius clamps to half
+    /// the shorter side.
+    #[test]
+    fn rounded_radius_policy_covers_union_monitors_and_clamp() {
+        let union = Rect::new(0, 0, 1600, 600);
+        let screens = [Rect::new(0, 0, 800, 600), Rect::new(800, 0, 800, 600)];
+        assert_eq!(
+            rounded_radius_for(Rect::new(0, 0, 800, 600), 18, union, &screens),
+            0
+        );
+        assert_eq!(
+            rounded_radius_for(Rect::new(800, 0, 800, 600), 18, union, &screens),
+            0
+        );
+        assert_eq!(
+            rounded_radius_for(Rect::new(0, 0, 1600, 600), 18, union, &screens),
+            0
+        );
+        assert_eq!(
+            rounded_radius_for(Rect::new(0, 0, 800, 600), 0, union, &screens),
+            0,
+            "want 0 disables rounding everywhere"
+        );
+        // Workarea-sized maximize (bar 30px): covers neither the monitor nor
+        // the union, so it keeps its rounding — and the client rect it clips
+        // is still the rectangular X11 geometry, only the visible part is cut.
+        assert_eq!(
+            rounded_radius_for(Rect::new(0, 30, 800, 570), 18, union, &screens),
+            18
+        );
+        // Clamp: 44x24 outer (40x20 content + 2px frame) -> 12.
+        assert_eq!(
+            rounded_radius_for(Rect::new(0, 0, 44, 24), 18, union, &screens),
+            12
+        );
     }
 
     /// Border color bookkeeping: `on_border_color` records the pixel and
@@ -4458,6 +4604,7 @@ mod lifecycle_tests {
             1,
             8,
             Rect::new(0, 0, 1440, 900),
+            &[],
             1,
         );
         // Stroke width rides the live transform's border and is suppressed
