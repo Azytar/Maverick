@@ -564,9 +564,13 @@ or async-runtime requirement, but still depends on native X11 libraries.
 
 ## Current status
 
-Maverick is under active development and is not declared production-ready. The
-plain X11 path implements the current tiling, navigation, floating, fullscreen,
-and workspace model; the regression suite exists to harden those interactions.
+Maverick is in **preview** and is not yet declared production-ready. The
+recommended evaluation profile is Linux/X11 with the built-in compositor
+disabled (`--no-default-features` for builds, or `MAVERICK_NO_COMPOSITOR=1` at
+runtime). That profile avoids depending on the experimental GL renderer, but it
+still needs validation on the target machine and with the applications used in
+the session. CI and the integration scripts are regression checks, not a
+certification of broad application compatibility or long-running reliability.
 
 - **Experimental rendering:** OpenGL is implemented but remains optional and
   driver-sensitive. Vulkan is not connected to window compositing.
@@ -584,6 +588,16 @@ and workspace model; the regression suite exists to harden those interactions.
 - **Interfaces:** configuration, internal APIs, presentation policy, and experimental
   renderer behavior can change. The in-tree TOML parser supports a subset, not all
   of the TOML specification.
+
+### Preview launch checklist
+
+Before using Maverick as the only window manager for important work, validate a
+disposable X11 session on the target machine. Confirm login and clean exit,
+application launch and close, focus/input, fullscreen, floating/transient dialogs,
+workspace switching, display sleep/wake, and monitor changes. Keep a way to return
+to the previous session and preserve the user's work before testing shutdown.
+Do not treat the compositor, Vulkan bootstrap, arbitrary monitor hotplug, or
+unlisted Linux distributions as supported release targets yet.
 
 ## Roadmap
 
