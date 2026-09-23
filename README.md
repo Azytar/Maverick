@@ -614,7 +614,7 @@ release dates:
 
 ## Screenshots
 
-The showcase is a five-scene technical presentation captured from an isolated
+The showcase is a six-scene technical presentation captured from an isolated
 Xephyr session. These are authentic root-window captures: Maverick lays out
 real X11 clients, the harness dispatches real actions, and the images are not
 painted or reconstructed after capture.
@@ -641,6 +641,16 @@ application windows; the source views are real terminals running Neovim.
 A directional-focus step reveals a different view of the same real
 application set. The scene is a navigation state, not a second desktop
 mock-up.
+
+### Legibilidad
+
+![Maverick legibility adjustment](docs/screenshots/legibility.png)
+
+La escena parte de una composición compacta y luego utiliza las combinaciones
+reales `Mod+Ctrl+H` y `Mod+Ctrl+L` sobre la columna enfocada. El showcase
+comprueba que la columna se reduce, que `Mod+Ctrl+L` recupera un ancho más
+cómodo, que no aparecen solapamientos y que el resultado mantiene el contenido
+real legible.
 
 ### Floating isolation
 

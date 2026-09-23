@@ -366,6 +366,27 @@ mode = "fill"
             timeout=10,
         )
 
+    def chord(self, key: str, count: int = 1) -> None:
+        """Inject a real Super+Ctrl+key chord into the nested X server."""
+        for _ in range(count):
+            run(
+                [
+                    "xdotool",
+                    "keydown",
+                    "Super_L",
+                    "keydown",
+                    "Control_L",
+                    "key",
+                    key,
+                    "keyup",
+                    "Control_L",
+                    "keyup",
+                    "Super_L",
+                ],
+                env=self.env,
+                timeout=10,
+            )
+
     def focused(self) -> str | None:
         for monitor in self.state().get("monitors", []):
             focused = monitor.get("focused")

@@ -6,7 +6,7 @@ mock-up and not a collection of screenshots with a script painted over them.
 
 ## What it demonstrates
 
-The showcase is a five-step story:
+The showcase is a six-step story:
 
 1. **workspace** — a terminal, a Neovim source window and Firefox form a clean
    three-column mosaic.
@@ -15,11 +15,16 @@ The showcase is a five-step story:
    more work.
 3. **tools** — a real browser, editor, terminal and two purpose-built local
    viewers are shown in the resulting scrollable workspace.
-4. **floating** — the in-tree `Maverick Monitor` is floated through the real
+4. **legibility** — the focused editor is deliberately compacted with the real
+   `Mod+Ctrl+H` shortcut, then expanded with `Mod+Ctrl+L` three times. The
+   harness checks the geometry, checks for tiled overlaps and records the
+   before/compact/after measurements in `legibility-actions.json`.
+5. **floating** — the in-tree `Maverick Monitor` is floated through the real
    `toggle_float` action. Its geometry is compared before and after the tiled
    camera moves; the float must remain stationary.
-5. **hero** — the complete composition uses varied column widths, several real
-   applications, scrolling and the independent floating monitor.
+6. **hero** — the complete composition keeps the readable column width produced
+   by the real shortcut flow, several applications, scrolling and the independent
+   floating monitor.
 
 The captures are root-window screenshots of Maverick's actual output. The only
 post-processing is a deterministic check of the capture dimensions; no windows,

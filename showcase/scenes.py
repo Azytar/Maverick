@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,7 +13,7 @@ from typing import Any, Callable
 from harness import ROOT, Session, ShowcaseError, run
 
 
-SCENES = ("workspace", "ribbon", "tools", "floating", "hero")
+SCENES = ("workspace", "ribbon", "tools", "legibility", "floating", "hero")
 
 
 @dataclass(frozen=True)
@@ -288,6 +289,54 @@ user_pref("network.proxy.type", 0);
         # floating proof adds another client.
         self.session.capture("tools", "real browser, reference terminal, editor and terminal in one scrollable workspace")
 
+    def legibility_scene(self) -> None:
+        editor = self.ids["editor"]
+        self.session.focus(editor)
+        before = self.session.geometry(editor)
+
+        # These are real WM shortcuts, not direct IPC geometry mutations.
+        self.session.chord("h")
+        self.session.stable([editor])
+        compact = self.session.geometry(editor)
+        if compact[2] >= before[2]:
+            raise ShowcaseError(f"Mod+Ctrl+H did not reduce the focused column: {before} -> {compact}")
+
+        self.session.chord("l", count=3)
+        self.session.stable([editor])
+        after = self.session.geometry(editor)
+        if after[2] <= before[2]:
+            raise ShowcaseError(f"Mod+Ctrl+L did not restore readable width: {before} -> {after}")
+
+        tiled = [
+            entry
+            for entry in self.session.entries(self.session.tree())
+            if not entry.get("float")
+        ]
+        for index, first in enumerate(tiled):
+            ax, ay, aw, ah = first.get("real") or first.get("geom") or (0, 0, 0, 0)
+            for second in tiled[index + 1 :]:
+                bx, by, bw, bh = second.get("real") or second.get("geom") or (0, 0, 0, 0)
+                overlaps = ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+                if overlaps:
+                    raise ShowcaseError(f"legibility adjustment created overlap: {first} / {second}")
+
+        (self.session.evidence / "legibility-actions.json").write_text(
+            json.dumps(
+                {
+                    "shortcut_contract": "Mod+Ctrl+H then Mod+Ctrl+L x3",
+                    "window": editor,
+                    "before": before,
+                    "after_compact": compact,
+                    "after_readable": after,
+                    "tiled_windows_checked": len(tiled),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.session.capture("legibility", "Mod+Ctrl+H/L keeps the focused real client readable")
+
     def floating_scene(self) -> None:
         monitor = self.ids["monitor"]
         self.session.focus(monitor)
@@ -318,9 +367,8 @@ user_pref("network.proxy.type", 0);
         self.session.capture("floating", "a real floating monitor over a moving tiled ribbon")
 
     def hero_scene(self) -> None:
-        self.session.focus(self.ids["editor"])
-        self.session.action("grow_col:180")
-        self.session.stable()
+        # The previous legibility scene already widened the editor through
+        # real keyboard shortcuts; keep that result in the hero composition.
         self.session.focus(self.ids["browser"])
         self.session.stable()
         if self.float_window is None:
