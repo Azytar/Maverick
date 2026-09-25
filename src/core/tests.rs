@@ -37,8 +37,6 @@ mod unit_tests {
         }
     }
 
-    // 2. Helper to initialize Engine with a default monitor,
-    // simulating a real desktop environment ready to receive windows.
     fn setup_engine() -> Engine {
         let mut engine = Engine::new(default_cfg());
         engine
@@ -49,7 +47,7 @@ mod unit_tests {
     }
 
     /// Two side-by-side monitors, each with 9 workspaces, so a test can place a
-    /// real overlay + `pending_focus` on a DIFFERENT monitor/workspace than the
+    /// real overlay plus `pending_focus` on a monitor/workspace other than the
     /// selected one and exercise the cross-monitor/cross-workspace deferral.
     fn setup_engine_multi() -> Engine {
         let mut engine = Engine::new(default_cfg());
@@ -189,11 +187,10 @@ mod unit_tests {
 
     #[test]
     fn config_compositor_spring_reaches_camera() {
-        // Regression: `compositor.stiffness` / `compositor.damping` (the
-        // `camera_stiffness` / `camera_damping` config keys) must actually
-        // reach the workspace cameras — previously they were parsed but never
-        // read, leaving the camera hard-coded at 220/30 (a second, ignored
-        // source of truth).
+        // Config is the only source of camera spring constants: `apply_camera_cfg`
+        // is the single writer, so a monitor attached later must get them too.
+        // The values stay inside `sanitize_spring`'s stability region, so the
+        // assertions can compare exactly.
         let mut cfg = default_cfg();
         cfg.animations.stiffness = 999.0;
         cfg.animations.damping = 11.0;
@@ -207,7 +204,7 @@ mod unit_tests {
         let cam = &engine.state.monitors[0].workspaces[0].camera;
         assert!((cam.stiffness - 999.0).abs() < 1e-6);
         assert!((cam.damping - 11.0).abs() < 1e-6);
-        // A second monitor/workspace must also be covered by the loop.
+        // Hotplug: monitors attached after the first pass must also be covered.
         engine
             .state
             .monitors
@@ -280,8 +277,6 @@ mod unit_tests {
         assert_eq!(ws.layout, LayoutKind::Column);
         assert_eq!(ws.layout, LayoutKind::Column);
     }
-
-    // ── move_dir tests ──────────────────────────────────────────────────────
 
     fn setup_two_columns() -> Engine {
         use crate::types::{Client, Column, Focus};
@@ -372,9 +367,11 @@ mod unit_tests {
         assert_eq!(engine.state.monitors[0].workspaces[0].columns.len(), 1);
     }
 
-    // ─── B1: Viewport zoom and Overview are mutually exclusive ─────────────
-    // Exact, deterministic float compares: the code under test drives the
-    // field to exactly `1.0`, so no tolerance is needed.
+    // Viewport zoom and overview are mutually exclusive: both scale the whole
+    // workspace through `alpha`, so whichever was entered last owns that scalar
+    // and the other axis' spring must be reset to 1.0 — otherwise one mode is a
+    // silent no-op or the live `zoom` spring is pulled to a phantom value.
+    // Exact float compares are sound here: the commands assign exactly 1.0.
     #[allow(clippy::float_cmp)]
     #[test]
     fn b1_viewport_then_overview_resets_viewport() {
@@ -386,8 +383,6 @@ mod unit_tests {
         assert_eq!(ws.viewport_mode, ViewportMode::Zoomed);
         assert!(ws.page_zoom_target > 1.0);
         assert!(!ws.overview, "viewport zoom must clear overview");
-        // Toggling Overview while zoomed must drop the viewport state so the
-        // two zoom axes can't fight over `alpha` (bug B1).
         engine.execute(ToggleOverview);
         let ws = &engine.state.monitors[0].workspaces[0];
         assert!(ws.overview);
@@ -402,8 +397,6 @@ mod unit_tests {
         );
     }
 
-    // Exact, deterministic float compares: the code under test drives the
-    // field to exactly `1.0`, so no tolerance is needed.
     #[allow(clippy::float_cmp)]
     #[test]
     fn b1_overview_then_viewport_resets_overview() {
@@ -422,8 +415,6 @@ mod unit_tests {
         );
     }
 
-    // Exact, deterministic float compares: the code under test drives the
-    // field to exactly `1.0`, so no tolerance is needed.
     #[allow(clippy::float_cmp)]
     #[test]
     fn b1_viewport_zoom_does_not_corrupt_live_zoom() {
@@ -431,12 +422,11 @@ mod unit_tests {
         use crate::types::ViewportMode;
         let mut engine = setup_two_columns();
         engine.execute(ViewportZoom(1.0));
-        // While zoomed, overview's zoom_target must NOT silently ease the live
-        // `zoom` spring (bug B1): the zoom axis stays at 1.0 until we exit zoom.
         engine.execute(ToggleOverview);
         let ws = &engine.state.monitors[0].workspaces[0];
         assert_eq!(ws.viewport_mode, ViewportMode::Normal);
-        // settle the animation
+        // 200 steps at 1/60 s is past the spring's settling horizon for the
+        // default 220/30 constants, so the residual is animation, not state.
         for _ in 0..200 {
             engine.state.tick_animations(1.0 / 60.0);
         }
@@ -447,7 +437,9 @@ mod unit_tests {
         );
     }
 
-    // ─── B2: Next/Prev keeps column.focused in sync with the target row ────
+    // Next/Prev must leave `column.focused` on the row the focus actually moved
+    // to: `Column::focused` is what layout reads to pick the tile within a
+    // column, so drift here shows up as the camera centring on the wrong window.
     #[test]
     fn b2_focus_next_syncs_column_focused_row() {
         use crate::core::commands::FocusDirection;
@@ -482,10 +474,10 @@ mod unit_tests {
         );
     }
 
-    // ─── Command system ─────────────────────────────────────────────────────
-    // The typed command system is the unified entry point for keyboard, IPC
-    // and tests. Each command is a pure transformation on State/Cfg producing
-    // Effects. These tests exercise the new `Engine::execute` path directly.
+    // Commands are pure `State`/`Cfg` transformations that emit `Effect`s. The
+    // effect set is the contract the backend drains, so a mutation that changes
+    // geometry must ask for the arrange, and a no-op must stay completely silent
+    // rather than waking every IPC subscriber.
 
     #[test]
     fn test_set_layout_command_emits_arrange() {
@@ -559,11 +551,9 @@ mod unit_tests {
         assert!(engine.state.running, "the core must not flip `running`");
     }
 
-    // ─── EventBus ───────────────────────────────────────────────────────────
-    // The EventBus decouples producers (commands) from consumers (renderer,
-    // IPC, bars, hooks, tests). A command declares its OWN domain event, never
-    // its consumers.
-
+    // A command publishes its own domain event exactly once per mutation; it
+    // never names its consumers, and handlers are called outside the borrow of
+    // `State`, so a handler sees the post-command state.
     #[test]
     fn test_event_bus_notifies_subscribers() {
         use crate::core::commands::SetLayout;
@@ -626,10 +616,8 @@ mod unit_tests {
         );
     }
 
-    // ─── Capability Layer ──────────────────────────────────────────────────
-    // External consumers (bars, hooks, tests) read through `Engine::query()`,
-    // never by reaching into internal State/Client. Each query here must serve
-    // several consumers — no "just in case" queries.
+    // External consumers (bars, hooks, tests) read through `Engine::query()` and
+    // `query_json`, never by reaching into `State`/`Client` directly.
 
     fn seed_engine_with_window() -> Engine {
         use crate::types::{Client, Column, Focus};
@@ -668,11 +656,10 @@ mod unit_tests {
         assert_eq!(q.workspace_count(), 9);
     }
 
-    // Fase 8 observability: `query tree` must carry the non-semantic
-    // desired/applied/real/focus/x11_focus/overlay/pending fields so a live
-    // session can be audited end-to-end. These are read-only mirrors; this test
-    // locks in their presence and that a focused seeded window reports
-    // `focus:true`.
+    // `query tree` carries the non-semantic desired/applied/real/focus/
+    // x11_focus/overlay/pending mirrors so a live session can be audited
+    // end-to-end. They are read-only; this locks in their presence and that a
+    // focused seeded window reports `focus:true`.
     #[test]
     fn query_tree_includes_observability_fields() {
         let engine = seed_engine_with_window();
@@ -711,11 +698,8 @@ mod unit_tests {
         assert_eq!(info.monitor, 0);
     }
 
-    // ─── Focus fallback con overlay (punto 5) ───────────────────────────────
-    // Si un mosaico tapado por una overlay fullscreen (modo peek) se cierra,
-    // `best_focus` debe devolver el foco a la ventana fullscreen de la overlay,
-    // no a un mosaico invisible que quede debajo.
-
+    // A tile hidden under a fullscreen overlay (peek mode) must give the focus
+    // back to the overlay's window, not to an invisible tile underneath.
     #[test]
     fn test_best_focus_prefers_overlay_window() {
         use crate::types::{Client, Column, Focus, WinFlags};
@@ -743,19 +727,18 @@ mod unit_tests {
             .set(WinFlags::FULLSCREEN);
         engine.state.clients.get_mut(&7).unwrap().fullscreen_policy =
             crate::types::FullscreenPolicy::True;
-        // A fullscreen window is only an overlay in the `Grid` layout now (in
-        // `Column` it joins the scrolling ribbon), so switch to Grid to keep
-        // this overlay-preference assertion valid.
+        // Overlay ownership comes from `FullscreenPolicy::True`, not from the
+        // workspace layout: `presented_overlay_owner` never reads `LayoutKind`.
         engine.state.monitors[0].workspaces[0].layout = LayoutKind::Column;
         // Focus history: 42 was peeked most recently, 7 was fullscreen before.
         engine.state.monitors[0].focus_stack = vec![7, 42];
 
-        // Close 42 (the peeked tile) → 7 is still fullscreen →
-        // best_focus must return 7, not a stale in-visible mosaic.
+        // With 42 focused and 7 pinned as the overlay, `best_focus` must still
+        // name 7 — the window the user is actually looking at.
         assert_eq!(engine.state.best_focus(0), Some(7));
 
-        // Without any overlay window, behavior stays column-focused.
-        // Without any overlay window, behavior stays column-focused.
+        // Dropping the fullscreen flag removes the overlay, so the preference
+        // order falls back to the column-focused window.
         engine
             .state
             .clients
@@ -868,9 +851,8 @@ mod unit_tests {
 
     #[test]
     fn test_new_column_single_window_keeps_full_width() {
-        // N3: `NewColumn` on a workspace with a single tiled window must leave
-        // that window's (sole) column with weight ~1.0, not a sub-0.1 sliver
-        // that the previous column-width fallback produced.
+        // The sole column must keep a full-area weight; a sub-0.1 sliver here is
+        // what a stale column-width fallback would produce.
         use crate::core::commands::{Command, NewColumn};
         use crate::types::Client;
         let mut engine = setup_engine();
@@ -941,11 +923,11 @@ mod unit_tests {
 
     #[test]
     fn test_focus_direction_allowed_in_fullscreen() {
-        // 0.18.2 behavior, restored: FocusDirection is never gated on the
-        // focused window's fullscreen flag. Moving focus away from a
-        // fullscreen window is exactly what puts `core::present`'s peek mode
-        // to use — the overlay stays put (see `fullscreen_persists_while_unfocused`
-        // in present.rs) while the newly focused tile renders above it.
+        // `FocusDirection` is never gated on the focused window's fullscreen
+        // flag: moving focus away from a fullscreen window is what puts
+        // `core::present`'s peek mode to use. Under the default policy the flag
+        // survives but the window stays a ribbon participant and scrolls off
+        // with the camera; only `FullscreenPolicy::True` keeps it pinned.
         use crate::core::commands::FocusDirection;
         use crate::core::layout::Placements;
         use crate::types::{Client, Column, Dir, Focus, WinFlags};
@@ -1021,7 +1003,9 @@ mod unit_tests {
 
     #[test]
     fn test_move_window_allowed_in_fullscreen() {
-        // 0.18.2 behavior, restored: MoveWindow is never gated on fullscreen.
+        // `MoveWindow` is never gated on fullscreen: a fullscreen window is a
+        // ribbon participant, so moving it relocates its column in the ribbon
+        // instead of re-pinning an overlay.
         use crate::core::commands::MoveWindow;
         use crate::core::layout::{fs_ctx, Placements};
         use crate::types::{Client, Column, Dir, Focus, WinFlags};
@@ -1062,8 +1046,6 @@ mod unit_tests {
         );
         assert!(engine.state.clients.get(&1).unwrap().is_fullscreen());
 
-        // The fullscreen window is a RIBBON participant: moving it relocates its
-        // column (here to index 1) rather than re-pinning an overlay.
         let mi = engine.state.sel_mon;
         let ws_i = engine.state.monitors[mi].active_ws;
         let fs = fs_ctx(
@@ -1100,23 +1082,11 @@ mod unit_tests {
         );
     }
 
-    // ─── Grid: focus and geometry stay consistent (plan 1786499080900) ────────
-    //
-    // A spatial `FocusDirection` must move focus to the window that is actually
-    // to the left/right/up/down on screen, and a subsequent `arrange` must place
-    // that focused window at the matching geometric cell.
-
-    // ─── Grid fullscreen roundtrip does not destroy grid state ───────────────
-    //
-    // The fullscreen overlay (present.rs) is independent of the base grid
-    // geometry, so the A/B scenario — A fullscreen, create B, fullscreen B,
-    // exit B — must leave A fullscreen and B restored to its grid tile.
-
-    // ─── Scroll-camera desync regression (plan 1786124999628) ───────────────
-    //
-    // The camera must keep the focused column fully on-screen for every column
-    // count and every focus position — the exact symptom that was reported
-    // ("after 3 tiles the camera loses the other tile").
+    // The scroll camera must keep the focused column fully on-screen for every
+    // column count and every focus position, and `ideal_scroll` — the camera's
+    // target derivation — must agree with what `arrange` actually produced.
+    // A disagreement desyncs the camera from the ribbon and the focused tile
+    // ends up off-screen.
 
     /// Build a workspace on monitor 0 with `n` single-window columns of weight
     /// `[1.0, 0.6, 0.6, …]`, focused at `focus_ci`. `overview` drives the
@@ -1212,8 +1182,9 @@ mod unit_tests {
                     "n={n} focus={focus}: focused col right {right} > workarea right {}",
                     wa.x + wa.w as i32 + 1
                 );
-                // Bug #1: the focused column must never be wider than the
-                // visible area (was 2465px on a 1920 screen for column 0).
+                // A focused column wider than the visible area can never be
+                // scrolled fully on-screen, so no focus position can fix it.
+                // The 1 px slack absorbs gap/border rounding.
                 assert!(
                     geom.w as i32 + 2 * bw <= wa.w as i32 - 2 * cfg.gaps_outer as i32 + 1,
                     "n={n} focus={focus}: focused column too wide"
@@ -1386,13 +1357,9 @@ mod unit_tests {
         );
     }
 
-    // ─── Bug #1: FocusDirection(Next/Prev) must move the camera ────────────────
-    //
-    // Next/Prev navigates the focus *stack* (not the column grid), so it used to
-    // update `mon.focused` without syncing `ws.focus.column_idx`. `ideal_scroll`
-    // reads `focus.column_idx`, so the camera stayed on the old column and the
-    // now-focused window could scroll off-screen. The fix re-derives the column
-    // from the target window before recomputing the scroll.
+    // Next/Prev walks the focus *stack*, not the column grid, so both must move
+    // together: `ideal_scroll` reads `focus.column_idx`, and a stale index leaves
+    // the camera on the old column while `mon.focused` has already moved on.
 
     #[test]
     fn focus_direction_next_prev_syncs_column_and_camera() {
@@ -1403,8 +1370,8 @@ mod unit_tests {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
         // Three narrow columns so the ribbon is wider than the screen: centering
-        // one column pushes the others partially off-screen, which is exactly
-        // the condition that exposed the desync.
+        // one column pushes the others partially off-screen, the case a stale
+        // `focus.column_idx` cannot survive.
         {
             let ws = &mut engine.state.monitors[mi].workspaces[0];
             for i in 1..=3u32 {
@@ -1480,8 +1447,6 @@ mod unit_tests {
         );
     }
 
-    // ─── Bug #3: drop-to-tile must update the target column's focused row ──────
-
     #[test]
     fn drop_into_column_sets_focused_row() {
         use crate::types::{Column, Focus, Workspace};
@@ -1515,15 +1480,11 @@ mod unit_tests {
         assert_eq!(ws.columns[0].windows, before);
     }
 
-    // ─── B1: reload with fewer tags must clamp client workspaces ──────────────
-    //
     // `reload_config` reconciles each monitor's workspaces to the new `n_tags`
-    // and clamps any client whose `workspace >= n_tags`. The backend republishes
-    // the EWMH desktop count/names (and per-client `_NET_WM_DESKTOP`) for exactly
-    // those clamped clients. This unit test guards the core invariant behind that
-    // handoff: after a reload that shrinks the tag count, every client's
-    // `workspace` stays strictly below `n_tags` and no monitor keeps stale slots.
-
+    // and clamps every client whose `workspace >= n_tags`; the backend then
+    // republishes the EWMH desktop count and the per-client `_NET_WM_DESKTOP`
+    // for exactly those clients. This guards the core half of that handoff: no
+    // client left above the tag count and no stale slots left on a monitor.
     #[test]
     fn reload_shrinking_tags_clamps_client_workspace() {
         use crate::types::Client;
@@ -1621,13 +1582,10 @@ mod unit_tests {
         assert!((s0 - 0.0).abs() < 1e-6, "empty workspace scroll must be 0");
     }
 
-    // ─── P1: CollapseColumn must absorb the collapsed column's width ──────────
-    //
     // `retain` drops the emptied column and `rebalance_weights` only repairs
-    // weights <= 0 (it never re-normalizes), so if the collapsed column's weight
-    // isn't handed to the target the ribbon permanently loses that much width
-    // and leaves an empty gap on the right of the workarea.
-
+    // weights <= 0 (it never re-normalizes), so the collapsed column's weight
+    // must be handed to the target or the ribbon permanently loses that much
+    // width and leaves a gap on the right of the workarea.
     #[test]
     fn collapse_column_absorbs_collapsed_weight() {
         use crate::core::commands::CollapseColumn;
@@ -1678,12 +1636,9 @@ mod unit_tests {
         );
     }
 
-    // ─── P2: horizontal focus must keep the row you were on ───────────────────
-    //
-    // Up/Down tracks the row by writing `col.focused`; Left/Right used to only
-    // move `focus.column_idx` and then read the destination column's own (stale)
-    // `focused`, so focus jumped to an unrelated window instead of the neighbour.
-
+    // Up/Down writes `col.focused` to track the row; Left/Right must carry that
+    // row into the destination column instead of adopting the destination's own
+    // stale `focused`, which would jump to an unrelated window.
     #[test]
     fn focus_direction_horizontal_keeps_the_focused_row() {
         use crate::core::commands::FocusDirection;
@@ -1746,13 +1701,10 @@ mod unit_tests {
         assert_eq!(engine.state.monitors[mi].focused, Some(7));
     }
 
-    // ─── P4: best_focus must mirror `core::present`'s overlay rule ────────────
-    //
-    // `present` only presents a maximized window while it is `mon.focused`, so a
-    // maximized window sitting in the background must not be `best_focus`'s top
-    // candidate either — otherwise viewing a workspace hands it the focus and it
-    // immediately blows up to fill the workarea.
-
+    // `best_focus` must mirror `core::present`'s overlay rule: a maximized window
+    // is presented only while it is `mon.focused`, so a background maximized
+    // window must not be the top candidate either — otherwise viewing a
+    // workspace hands it the focus and it blows itself up over the workarea.
     #[test]
     fn best_focus_ignores_unfocused_maximized() {
         use crate::core::commands::ViewWorkspace;
@@ -1820,10 +1772,8 @@ mod unit_tests {
              not jump to the unfocused maximized window"
         );
 
-        // A fullscreen window is still an overlay even while unfocused — but
-        // only in the `Grid` layout (in `Column` it joins the ribbon). Switch to
-        // Grid so this assertion stays valid. It covers the screen regardless of
-        // focus, so focus must return to it.
+        // `FullscreenPolicy::True` makes the window the overlay owner whatever
+        // the focus is, and it wins over the column-focused window.
         let c = engine.state.clients.get_mut(&1).unwrap();
         c.flags.clear(WinFlags::MAXIMIZED);
         c.flags.set(WinFlags::FULLSCREEN);
@@ -1832,24 +1782,12 @@ mod unit_tests {
         assert_eq!(engine.state.best_focus(mi), Some(1));
     }
 
-    // ─── Bug: workspace switch must keep the focused window Maverick considers
-    //     focused (lost keyboard focus on return) ──────────────────────────────
-    //
-    // Repro of the reported bug: Alacritty focused on ws0, switch to ws1, switch
-    // back to ws0 — Alacritty is visible again but the real X input focus is gone
-    // until `h`/`l` is pressed. The state-level invariant this test locks: the
-    // window Maverick *considers* focused (`best_focus`, which `ViewWorkspace`
-    // uses to pick its `FocusWindow` target) must survive the trip away and back,
-    // and `ViewWorkspace` must keep emitting `FocusWindow` for that same window.
-    //
-    // The actual desync is in the X11 backend: `Backend::focus` set the real X
-    // input focus and then ran `reconcile_focus()` *before* committing the
-    // logical `mon.focused`, so when a command (like `ViewWorkspace`) did not
-    // pre-write `mon.focused` the reconcile re-asserted focus onto the
-    // previously-focused, now-hidden window (fixed in `backend/x11/render.rs` by
-    // committing `mon.focused` before `reconcile_focus`). This state/effect test
-    // guards the core contract that fix depends on; the X-level reconciliation
-    // itself is validated under Xephyr via the `input-trace` diagnostics.
+    // A workspace round trip must preserve both halves of the focus contract:
+    // `ViewWorkspace` picks its `FocusWindow` target through `best_focus`, so the
+    // window Maverick considers focused has to survive the trip away and back.
+    // The matching X-side requirement — committing `mon.focused` before
+    // `reconcile_focus()` — lives in `backend/x11/render.rs` and is validated
+    // under Xephyr through the `input-trace` diagnostics.
     #[test]
     fn view_workspace_round_trip_keeps_focused_window() {
         use crate::core::commands::ViewWorkspace;
@@ -1930,12 +1868,10 @@ mod unit_tests {
              input focus on the visible window)"
         );
     }
-    // ── GrowColumn clamp panic regression (bug C2) ──────────────────────────────
-    //
-    // With many columns the old `1.0 - 0.05*(n-1)` upper bound drops below the
-    // `0.05` lower bound of the `.clamp`, so `f32::clamp`'s `min <= max` assert
-    // panicked (in debug *and* release) on `GrowCol`. Assert the command runs
-    // without panicking even with 25 columns.
+    // `GrowColumn`'s upper bound `1.0 - 0.05*(n-1)` crosses the `.clamp`'s 0.05
+    // lower bound once the ribbon is wide enough, and `f32::clamp` panics on
+    // `min > max` in debug *and* release. The command must stay total for any
+    // column count.
 
     #[test]
     fn grow_column_does_not_panic_with_many_columns() {
@@ -1948,7 +1884,7 @@ mod unit_tests {
             engine.state.monitors[mi].workspaces[ws_i].add_tiled(w, 1.0 / n as f32);
             engine.state.add_client(Client::new(w, mi, ws_i));
         }
-        // Grow both directions; previously panicked once 21+ columns were present.
+        // Grow in both directions: the clamp bound must hold for either sign.
         engine.dispatch(Action::GrowCol(50));
         engine.dispatch(Action::GrowCol(-50));
         // Sanity: weights stay finite and non-negative, sum preserved by the
@@ -1966,20 +1902,22 @@ mod unit_tests {
 
     #[test]
     fn grow_column_second_tile_can_reach_fullscreen() {
-        // Regresión del segundo mosaico bloqueado a 0.95 con 2 columnas
-        // (`max_w = 1.0-0.05*(n-1)`). Debe poder llegar a 1.0 (pantalla completa).
+        // The upper bound must stay reachable: a second tile in a 2-column
+        // ribbon can still be grown all the way to 1.0 (fullscreen width), and
+        // the clamped delta must not lock it below that.
         use crate::types::Client;
         let mut engine = setup_engine();
         let mi = 0;
         let ws_i = 0;
-        // Dos columnas: la 1ª weight=1.0 (sola), la 2ª weight=0.6 (cfg.column_width)
+        // Two columns: the 1st at weight 1.0 (alone), the 2nd at
+        // `cfg.column_width`.
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, 1.0);
         engine.state.add_client(Client::new(1, mi, ws_i));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(2, 0.6);
         engine.state.add_client(Client::new(2, mi, ws_i));
         engine.state.monitors[mi].focused = Some(2);
         engine.state.monitors[mi].workspaces[ws_i].focus.column_idx = 1;
-        // Empujar la 2ª hasta el tope con deltas grandes
+        // Push the 2nd column to the bound with oversized deltas.
         for _ in 0..30 {
             engine.dispatch(Action::GrowCol(500));
         }
@@ -1988,7 +1926,7 @@ mod unit_tests {
             (w - 1.0).abs() < 1e-6,
             "segundo mosaico debe poder llegar a weight=1.0, got {w}"
         );
-        // Y debe proyectar a ancho de workarea - 2*bw
+        // And it must project to the full inner width.
         let mut out = crate::core::layout::Placements::new();
         let mut scratch = crate::core::layout::RibbonScratch::default();
         let registry = default_registry();
@@ -2007,8 +1945,9 @@ mod unit_tests {
             win2.2, bw,
             "borde del mosaico agrandado debe ser cfg.border_w"
         );
-        // Ancho interior = workarea inset por gaps_outer - 2*bw (lo que `ribbon_geom`
-        // usa como `wa`). Con gaps_outer=6, wa_inset=1908 → inner 1904.
+        // Inner width = workarea inset by `gaps_outer` minus 2 borders, i.e. the
+        // `wa` that `ribbon_geom` works with. With gaps_outer = 6 that is
+        // 1920 - 12 = 1908 and the tile interior is 1908 - 4 = 1904.
         let wa_raw = engine.state.monitors[mi].workarea;
         let gap_outer: i32 = engine.cfg.gaps_outer.min(1_000_000) as i32;
         let gap_outer = gap_outer
@@ -2026,8 +1965,9 @@ mod unit_tests {
 
     #[test]
     fn float_new_window_does_not_tremble_between_manage_and_arrange() {
-        // Nuevo float centrado en manage y luego `arrange` no deben discrepar 4px
-        // por el marco 2*bw — el temblor se arreglaba con Mod+drag (clamp correcto).
+        // A float centred at `manage` and re-clamped by `arrange` must land on
+        // the same rect. The 2*bw frame is the usual source of the 4 px
+        // disagreement, and the next `arrange` turns that into a visible jump.
         fn clamp(mut g: crate::types::Rect, wa: crate::types::Rect, bw: u32) -> crate::types::Rect {
             let frame = 2 * bw as i32;
             let max_w = (wa.w as i32 - frame).max(1) as u32;
@@ -2064,18 +2004,17 @@ mod unit_tests {
             clamped_manage, g2,
             "clamp del float debe ser idempotente, no temblar"
         );
-        // Y debe ser el mismo que produciría `arrange` (misma fórmula)
+        // `arrange` clamps with the same formula, so a third pass is a fixed
+        // point too.
         let again = clamp(g2, wa, bw);
         assert_eq!(g2, again);
     }
 
-    // ─── Fullscreen-as-ribbon-regression (plan 1786166283911) ────────────────────
-    //
-    // The invariant: `ribbon_geom` is the single source of truth shared by
-    // `arrange_columns`, `ideal_scroll` and `column_screen_extents`. A fullscreen
-    // column must feed its special width through `ribbon_geom` so all three agree.
-    // This mirrors `layout.rs`'s `ribbon_invariants_hold_with_fullscreen` at the
-    // higher-level `Engine`/`arrange` boundary.
+    // `ribbon_geom` is the single source of truth shared by `arrange_columns`,
+    // `ideal_scroll` and `column_screen_extents`, so a fullscreen column must
+    // feed its special width through it and all three must agree. Mirrors
+    // `ribbon_invariants_hold_with_fullscreen` in `layout.rs` at the
+    // `Engine`/`arrange` boundary.
 
     #[test]
     fn fullscreen_column_invariants_match_ribbon_functions() {
@@ -2159,13 +2098,11 @@ mod unit_tests {
         );
     }
 
-    // ─── ToggleFullscreen moves a float in/out of the tiling (plan 1786166283911) ─
-    //
-    // Entering fullscreen from a float pulls the window into the tiling (as a fresh
-    // column) and remembers it was floating; leaving fullscreen returns it to its
-    // float. The core command owns this topology change AND the FULLSCREEN flag;
-    // the backend's `SetFullscreen` handler is now X11-only (EWMH atom + bypass
-    // hint) and must not mutate logical state.
+    // Entering fullscreen from a float pulls the window into the tiling as a
+    // fresh column and remembers that it was floating; leaving fullscreen
+    // restores the float. The core command owns both the topology change and the
+    // FULLSCREEN flag, so the backend's `SetFullscreen` handler only has to emit
+    // the EWMH atom and the bypass hint without touching logical state.
 
     #[test]
     fn float_fullscreen_moves_to_tiling_and_back() {
@@ -2242,19 +2179,13 @@ mod unit_tests {
         }
     }
 
-    // ─── Fullscreen target resolves from the logically-focused window ───────────
-    //
-    // Bug (plan 1786493542516): when B is created while A is a fullscreen/
-    // maximized overlay, manage() must advance the *logical* focus to B (without
-    // moving X input focus off the overlay). Keyboard actions resolve from
-    // `mon.focused`, so `Mod4+F` must target B, not the overlay A. manage()
-    // itself needs a real X11 connection, so the scenario is reproduced here at
-    // the command layer: A fullscreen + X-input-focused, B tiled with the
-    // logical focus advanced to B (exactly what the fixed manage() does).
-    //
-    // The `FULLSCREEN` flag is owned by the `ToggleFullscreen` Command, so we
-    // assert on the *target* window the command emits (the flag is already set
-    // by the command; no backend simulation needed).
+    // The fullscreen target resolves from the *logically* focused window. When B
+    // is managed while A is a fullscreen/maximized overlay, `manage` must advance
+    // the logical focus to B without moving X input focus off the overlay, so the
+    // keyboard path — which resolves from `mon.focused` — targets B. `manage`
+    // itself needs a live X11 connection, so the scenario is reproduced here at
+    // the command layer. The FULLSCREEN flag is owned by `ToggleFullscreen`, so
+    // what is asserted is the target of the emitted `SetFullscreen` effect.
 
     /// Find the `SetFullscreen` effect emitted for `ToggleFullscreen`, if any.
     fn fs_target(
@@ -2286,9 +2217,9 @@ mod unit_tests {
         engine.state.monitors[mi].focus_stack = vec![a];
         engine.state.x11_input_focus = Some(a);
 
-        // B is created and tiled under the overlay. Per the managed-window
-        // policy (plan 1786493542516 §E), manage() advances the *logical*
-        // focus to B while leaving the X input focus on the overlay A.
+        // B is created and tiled under the overlay. The managed-window policy
+        // advances the *logical* focus to B while leaving the X input focus on
+        // the overlay A.
         let b = 2u32;
         let mut cb = Client::new(b, mi, ws_i);
         cb.border_w = 2;
@@ -2356,7 +2287,6 @@ mod unit_tests {
         let target = fs_target(&report).expect("a SetFullscreen effect must be emitted");
 
         assert_eq!(target, (b, true), "B must be the fullscreen target");
-        // The Command already set B's FULLSCREEN flag.
         assert!(
             engine.state.clients.get(&a).unwrap().is_fullscreen(),
             "the overlay A must keep its fullscreen"
@@ -2366,11 +2296,11 @@ mod unit_tests {
 
     #[test]
     fn toggle_fullscreen_stale_focus_targets_overlay_not_new() {
-        // Documents the root-cause coupling this fix closes: when the logical
-        // focus is NOT advanced to the newly-created B (the old divergent
-        // state), `ToggleFullscreen(None)` resolves from `mon.focused` (= A) and
-        // so it un-fullscreens the overlay instead of targeting B. This is the
-        // exact bug; the manage() fix advances logical focus to B to avoid it.
+        // Pins the coupling the target resolution has: with the logical focus
+        // left on A while the column pointer has already moved to B,
+        // `ToggleFullscreen(None)` resolves from `mon.focused` and un-fullscreens
+        // the overlay. The managed-window policy exists to keep that state
+        // unreachable, and this test keeps the coupling visible if it ever does.
         use crate::core::commands::{Command, ToggleFullscreen};
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
@@ -2391,8 +2321,8 @@ mod unit_tests {
         cb.border_w = 2;
         engine.state.add_client(cb);
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(b, engine.cfg.column_width);
-        // Divergent (pre-fix) state: logical focus stays on A, column pointer
-        // already moved to B by add_tiled.
+        // Divergent state: the logical focus stays on A while the column pointer
+        // has already moved to B by `add_tiled`.
         engine.state.monitors[mi].focused = Some(a);
 
         let report = ToggleFullscreen(None).execute(&mut engine.state, &mut engine.cfg);
@@ -2406,16 +2336,11 @@ mod unit_tests {
         assert_eq!(engine.state.monitors[mi].focused, Some(a));
     }
 
-    // ─── Fase 1: the EWMH fullscreen path must promote a float too (bug C1/A1) ────
-    //
-    // The keyboard and EWMH paths both go through `ToggleFullscreen`, which owns
-    // the `FULLSCREEN` flag and the float→tiling promotion together via
-    // `apply_fullscreen_topology`. The EWMH path used to skip the promotion
-    // entirely: a float — mpv is the canonical case — stayed in `ws.floats`, was
-    // laid out from `client.geom`, and the old `Rect::default()` sentinel
-    // collapsed it to 0×0 (bug C1/A1). This test exercises the shared topology
-    // helper directly:
-
+    // The keyboard and EWMH paths share `ToggleFullscreen`, which owns the
+    // FULLSCREEN flag and the float→tiling promotion together via
+    // `apply_fullscreen_topology`. A promoted float must be laid out from the
+    // tiling: left in `ws.floats` it is placed from `client.geom`, and the
+    // `Rect::default()` sentinel that path used collapses it to 0×0.
     #[test]
     fn ewmh_fullscreen_promotes_float_and_never_collapses_to_zero() {
         use crate::core::commands::apply_fullscreen_topology;
@@ -2484,7 +2409,6 @@ mod unit_tests {
             &mut p,
             &mut RibbonScratch::default(),
         );
-        // Apply present overlay for True fullscreen
         crate::core::present::present_into(
             &engine.state,
             &engine.state.monitors[mi],
@@ -2522,15 +2446,11 @@ mod unit_tests {
             .contains(&win));
     }
 
-    // ─── Fase 0 (plan 1786564084575): fullscreen restore must be EXACT ──────────
-    //
-    // The single `saved_geom: Rect` that used to remember the pre-fullscreen
-    // geometry is fragile: `set_maximized` also writes it, so a window
-    // maximized *while fullscreen* clobbers the float rect, and leaving
-    // fullscreen then restores the wrong geometry. The fix (Fase 3) captures a
-    // `FullscreenSnapshot { prior mode, exact rect }` on enter and restores it
-    // verbatim on leave. These tests are the anchor for that contract.
-
+    // Leaving fullscreen must restore the geometry captured on *enter*, exactly.
+    // A single shared `saved_geom` cannot carry that contract: `set_maximized`
+    // writes it too, so a window maximized while fullscreen would clobber the
+    // pre-fullscreen rect. `FullscreenSnapshot` (prior mode + exact rect) is the
+    // only state the restore path is allowed to read.
     #[test]
     fn fullscreen_restore_exact_after_intervening_maximize() {
         use crate::core::commands::{Command, ToggleFullscreen};
@@ -2561,8 +2481,8 @@ mod unit_tests {
             assert!(c.flags.has(WinFlags::FS_WAS_FLOAT));
         }
 
-        // While fullscreen, the window is ALSO maximized. The old code wrote
-        // `saved_geom = geom` here, clobbering the float rect (the bug).
+        // While fullscreen, the window is ALSO maximized, which writes
+        // `saved_geom` — the clobber the snapshot has to survive.
         {
             let c = engine.state.clients.get_mut(&win).unwrap();
             c.flags.set(WinFlags::MAXIMIZED);
@@ -2586,9 +2506,9 @@ mod unit_tests {
 
     #[test]
     fn fullscreen_a_then_b_normalize_exact() {
-        // The plan's named scenario: A fullscreen + create B + fullscreen B,
-        // then B leaves and A leaves — A must return to its exact pre-fullscreen
-        // rect and topology, never collapsing or stealing B's geometry.
+        // Two snapshots must not interfere: A fullscreen, then B fullscreen, then
+        // B leaves and A leaves. Each must normalize to its own exact
+        // pre-fullscreen rect and topology.
         use crate::core::commands::{Command, ToggleFullscreen};
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
@@ -2639,11 +2559,10 @@ mod unit_tests {
 
     #[test]
     fn fullscreen_toggle_promotes_policy_and_restores_it() {
-        // Column-only design (commit 9dbce98): entering fullscreen via the
-        // Command promotes to `True` (exclusive overlay: present pins it,
-        // manage defers behind it, bypass can step aside). Leaving restores
-        // the snapshotted prior policy so a `Deny`/`True` rule is never
-        // clobbered by one toggle cycle (S6 regression test).
+        // Entering fullscreen promotes the policy to `True` (exclusive overlay:
+        // `present` pins it, `manage` defers behind it, bypass can step aside).
+        // Leaving restores the snapshotted prior policy so a `Deny`/`True` rule
+        // is never clobbered by one toggle cycle.
         use crate::core::commands::{Command, ToggleFullscreen};
         use crate::types::{Client, FullscreenPolicy, WinFlags};
         let mut engine = setup_engine();
@@ -2703,8 +2622,8 @@ mod unit_tests {
         engine.state.add_client(c);
         engine.state.monitors[mi].workspaces[ws_i].floats.push(win);
 
-        // The Command runs it once; the EWMH path would call it too, but the
-        // backend no longer does. Either way the second call must change nothing.
+        // The command runs this once per transition; any second "entering" pass
+        // must change nothing.
         assert!(apply_fullscreen_topology(
             &mut engine.state,
             &cfg,
@@ -2849,7 +2768,7 @@ mod unit_tests {
             "page_zoom target must grow past 1.0"
         );
 
-        // The live `page_zoom` is an animated spring (Fase 11); advance it so
+        // The live `page_zoom` is an animated spring; advance it so
         // `ribbon_geom` reads the enlarged factor.
         for _ in 0..40 {
             engine.state.tick_animations(1.0 / 60.0);
@@ -2935,7 +2854,6 @@ mod unit_tests {
         );
     }
 
-    //
     // Drive ≥10k random Create/Destroy/Focus/Move/Resize/Fullscreen/Scroll/
     // View/Layout sequences through the real command layer and assert
     // `State::check_invariants()` after every step, plus that the layout is
@@ -3181,22 +3099,18 @@ mod unit_tests {
             }
         }
 
-        // Layout must still be valid/deterministic at the end.
         engine
             .state
             .check_invariants()
             .expect("final state must satisfy invariants");
     }
 
-    // ─── Canonical overlay predicate + focus / pending-focus suite ────────────
-    //
-    // `State::presented_overlay_owner` is the SINGLE source of truth for "who
-    // owns the presented overlay": a fullscreen window only counts in `Grid` (or
-    // under `FullscreenPolicy::True`) — a `Column`-layout Normal fullscreen is
-    // just a ribbon tile — plus the *focused* maximized window
-    // (`presented_maximize`). The helpers below mirror the backend paths that
-    // consume it (`manage`, `unmanage`, `focus`) so the tests exercise the same
-    // decisions without an X server.
+    // `State::presented_overlay_owner` is the single source of truth for overlay
+    // ownership: a fullscreen window counts only under `FullscreenPolicy::True`
+    // (a Normal-policy fullscreen is just a ribbon tile) plus the *focused*
+    // maximized window (`presented_maximize`). The `t_*` helpers below mirror the
+    // backend paths that consume it (`manage`, `unmanage`, `focus`) so these
+    // tests exercise the same decisions without an X server.
 
     /// Logical half of the backend's `focus()`: logical focus + MRU stack + the
     /// single `presented_maximize` writer. Mirrors `Backend::focus` by also moving
@@ -3330,7 +3244,6 @@ mod unit_tests {
         }
     }
 
-    // 1.
     #[test]
     fn fullscreen_column_normal_new_window_receives_focus() {
         let mut engine = setup_engine();
@@ -3361,7 +3274,6 @@ mod unit_tests {
         );
     }
 
-    // 2.
     #[test]
     fn fullscreen_true_keeps_overlay() {
         let mut engine = setup_engine();
@@ -3382,7 +3294,6 @@ mod unit_tests {
         );
     }
 
-    // 3.
     #[test]
     fn maximized_presented_keeps_overlay_unfocused_does_not() {
         let mut engine = setup_engine();
@@ -3406,7 +3317,6 @@ mod unit_tests {
         );
     }
 
-    // 4.
     #[test]
     fn fullscreen_a_create_b_destroy_b_focus_returns_to_a() {
         let mut engine = setup_engine();
@@ -3431,7 +3341,6 @@ mod unit_tests {
         );
     }
 
-    // 5.
     #[test]
     fn fullscreen_a_create_b_focus_b_does_not_hijack_a() {
         use crate::core::effect::Effect;
@@ -3466,7 +3375,6 @@ mod unit_tests {
         assert_eq!(engine.state.monitors[mi].focused, Some(2));
     }
 
-    // 6.
     #[test]
     fn repeated_create_destroy_keeps_focus_stack_consistent() {
         let mut engine = setup_engine();
@@ -3500,7 +3408,6 @@ mod unit_tests {
         }
     }
 
-    // 7.
     #[test]
     fn workspace_switch_does_not_steal_focus_via_pending() {
         let mut engine = setup_engine();
@@ -3535,7 +3442,6 @@ mod unit_tests {
         );
     }
 
-    // 8.
     #[test]
     fn focus_fullscreen_create_destroy_never_leaves_invalid_focus() {
         let mut engine = setup_engine();
@@ -3573,7 +3479,6 @@ mod unit_tests {
             .expect("fullscreen create/destroy churn must preserve invariants");
     }
 
-    // 9.
     #[test]
     fn property_random_window_ops_preserve_invariants() {
         use crate::core::commands::{
@@ -3723,7 +3628,8 @@ mod unit_tests {
                 }
                 // Manage a window on a randomly-selected monitor/workspace so the
                 // deferral can be bound to a monitor/workspace that is NOT the
-                // selected one — this is what previously orphaned deferred windows.
+                // selected one — the shape that strands a deferral whose owner is
+                // no longer the presented overlay anywhere.
                 6 => {
                     if live.len() < MAX_WINS {
                         let nmon = engine.state.monitors.len();
@@ -3764,7 +3670,6 @@ mod unit_tests {
         }
     }
 
-    // 10.
     #[test]
     fn pending_focus_consumed_on_fullscreen_keyboard_dismiss() {
         let mut engine = setup_engine();
@@ -3794,7 +3699,6 @@ mod unit_tests {
         );
     }
 
-    // 11.
     #[test]
     fn pending_focus_consumed_on_maximize_keyboard_dismiss() {
         let mut engine = setup_engine();
@@ -3824,7 +3728,6 @@ mod unit_tests {
         );
     }
 
-    // 12.
     #[test]
     fn pending_focus_invalidated_when_deferred_window_gone() {
         let mut engine = setup_engine();
@@ -3852,7 +3755,6 @@ mod unit_tests {
         );
     }
 
-    // 13.
     #[test]
     fn destroy_overlay_owner_consumes_pending() {
         let mut engine = setup_engine();
@@ -3877,9 +3779,10 @@ mod unit_tests {
             .expect("overlay teardown must preserve invariants");
     }
 
-    // 13b. Orphan fix — scenario 4: an overlay destroyed on a NON-active
-    // workspace (selected monitor) must still hand focus to the deferred window
-    // instead of orphaning it.
+    // A deferral is keyed by (monitor, workspace, owner), so tearing the overlay
+    // down after the user has navigated away must still consume it: on a
+    // non-active workspace, after a monitor+workspace round trip, and on a
+    // non-selected monitor.
     #[test]
     fn orphan_defer_not_lost_when_overlay_destroyed_on_non_active_ws() {
         let mut engine = setup_engine_multi();
@@ -3912,10 +3815,6 @@ mod unit_tests {
             .expect("orphan fix (scenario 4): invariants");
     }
 
-    // 13c. Orphan fix — scenario 8: a pending deferral created on mon0/ws0 must be
-    // consumed when the overlay is dismissed after a monitor+workspace switch,
-    // i.e. when the teardown happens on a different selected monitor/workspace
-    // than when the deferral was created.
     #[test]
     fn orphan_defer_not_lost_when_ws_switch_then_dismiss_on_other_ws() {
         use crate::core::effect::Effect;
@@ -3952,8 +3851,6 @@ mod unit_tests {
             .expect("orphan fix (scenario 8): invariants");
     }
 
-    // 13d. Orphan fix — scenario 9: an overlay destroyed on a NON-selected monitor
-    // must still hand focus to the deferred window on that monitor.
     #[test]
     fn orphan_defer_not_lost_when_overlay_destroyed_on_non_selected_monitor() {
         let mut engine = setup_engine_multi();
@@ -3985,7 +3882,8 @@ mod unit_tests {
             .expect("orphan fix (scenario 9): invariants");
     }
 
-    // 1.4 (c). Moving the overlay owner to another workspace dismisses it.
+    // Moving the overlay owner off the deferral's (monitor, workspace) dismisses
+    // the overlay, which must resolve the deferral rather than leave it dangling.
     #[test]
     fn pending_focus_resolved_when_overlay_owner_moved_to_other_ws() {
         let mut engine = setup_engine();
@@ -4025,7 +3923,6 @@ mod unit_tests {
             .expect("MoveToWorkspace dismiss must preserve invariants");
     }
 
-    // 1.4 (d). Moving the overlay owner to another monitor dismisses it.
     #[test]
     fn pending_focus_resolved_when_overlay_owner_moved_to_other_mon() {
         let mut engine = setup_engine_multi();
@@ -4063,8 +3960,8 @@ mod unit_tests {
             .expect("MoveWindowToMonitor dismiss must preserve invariants");
     }
 
-    // 1.4 (e). NEGATIVE: a deferral whose overlay lives on a now-hidden workspace
-    // must SURVIVE a workspace switch (the overlay is merely hidden, not dismissed).
+    // Negative case: a deferral whose overlay only moved to a hidden workspace
+    // must SURVIVE — hidden is not dismissed, so there is nothing to resolve it.
     #[test]
     fn pending_focus_survives_when_overlay_hidden_by_workspace_switch() {
         let mut engine = setup_engine();
@@ -4102,8 +3999,8 @@ mod unit_tests {
             .expect("workspace switch must not break invariants");
     }
 
-    // 1.4 (f). NEGATIVE: a deferral bound to a different (now non-selected) monitor
-    // must SURVIVE a monitor switch — its overlay is still presented there.
+    // Negative case: a deferral bound to a now non-selected monitor must SURVIVE
+    // a monitor switch — its overlay is still presented over there.
     #[test]
     fn pending_focus_survives_when_overlay_on_non_selected_monitor() {
         let mut engine = setup_engine_multi();
@@ -4133,7 +4030,6 @@ mod unit_tests {
             .expect("monitor switch must not break invariants");
     }
 
-    // 14.
     #[test]
     fn maximize_roundtrip_and_unmaximize() {
         let mut engine = setup_engine();
@@ -4176,7 +4072,6 @@ mod unit_tests {
             .expect("unmaximize must preserve invariants");
     }
 
-    // 15.
     #[test]
     fn destroy_background_window_keeps_active_monitor_focus() {
         let mut engine = setup_engine();
@@ -4222,13 +4117,11 @@ mod unit_tests {
             .expect("background teardown must preserve invariants");
     }
 
-    // ─── Wave 3 (Phase 10/11): geometry pipeline + reconcile contract ────────
-    //
-    // These drive the pure `arrange` + `present_into` + `DesiredState::from_placements`
-    // + `reconcile` pipeline (no X server) and pin the geometry each window
-    // *should* receive for every state the WM produces. `reconcile` is the single
-    // owner of "what has actually been written to X11" and these tests assert the
-    // Desired it is diffed against is exactly the layout/present projection.
+    // These drive the pure `arrange` + `present_into` +
+    // `DesiredState::from_placements` + `reconcile` pipeline (no X server) and pin
+    // the geometry each window *should* receive. `reconcile` is the single owner
+    // of "what has actually been written to X11", so the Desired it diffs
+    // against must be exactly the layout/present projection.
 
     /// Run the production geometry pipeline for monitor `mi` and return the
     /// explicit `DesiredState` (exactly what `reconcile` is later diffed against).
@@ -4256,7 +4149,6 @@ mod unit_tests {
         DesiredState::from_placements(&placements, &raise)
     }
 
-    // 5. A fullscreen (Grid) window's desired geometry is the whole screen.
     #[test]
     fn overlay_desired_geometry_matches_layout() {
         use crate::types::LayoutKind;
@@ -4283,7 +4175,6 @@ mod unit_tests {
         );
     }
 
-    // 6. Fullscreen desired geometry equals the monitor screen (multi-window).
     #[test]
     fn fullscreen_desired_geometry() {
         use crate::types::LayoutKind;
@@ -4315,7 +4206,6 @@ mod unit_tests {
         assert!(other.rect.w > 0 && other.rect.h > 0);
     }
 
-    // 7. A maximized window's desired geometry equals the workarea (border 0).
     #[test]
     fn maximize_desired_geometry() {
         let mut engine = setup_engine();
@@ -4339,7 +4229,6 @@ mod unit_tests {
         assert_eq!(entry.border, 0, "maximized desired border must be 0");
     }
 
-    // 8. A floating window's desired geometry equals its client.geom.
     #[test]
     fn float_desired_geometry() {
         use crate::types::{Client, WinFlags};
@@ -4368,10 +4257,10 @@ mod unit_tests {
         );
     }
 
-    // 8b. Origin vs layout mode: ToggleFloat must never blur the window's
-    //     floating ORIGIN (`WinFlags::FLOAT_NATIVE`), so a born-floating window
-    //     (dialog/splash/transient/rule) stays distinguishable from a tile the
-    //     user tore off — even after both have been through tiled→float→tiled.
+    // Origin vs layout mode: `ToggleFloat` must never blur the window's floating
+    // ORIGIN (`WinFlags::FLOAT_NATIVE`), so a born-floating window (dialog,
+    // splash, transient, rule) stays distinguishable from a tile the user tore
+    // off — even after both have been through tiled→float→tiled.
     #[test]
     fn toggle_float_preserves_window_origin() {
         use crate::core::commands::{Command, ToggleFloat};
@@ -4415,10 +4304,9 @@ mod unit_tests {
         assert!(engine.state.clients.get(&2).unwrap().is_native_float());
     }
 
-    // 8c. Native-float geometry ownership: a native float smaller than a tile
-    //     keeps its own rect (never stretched to the column width), and one
-    //     larger than the workarea is clamped to the WORKAREA — never to a
-    //     column/tile rectangle.
+    // Native-float geometry ownership: a native float smaller than a tile keeps
+    // its own rect (never stretched to the column width), and one larger than the
+    // workarea is clamped to the WORKAREA — never to a column/tile rectangle.
     #[test]
     fn native_float_geometry_is_independent_from_tile_rect() {
         use crate::types::{Client, WinFlags};
@@ -4475,7 +4363,8 @@ mod unit_tests {
             .iter()
             .find(|d| d.window == 3)
             .expect("oversized native float present in Desired");
-        // Clamp incluye el marco 2*border_w, igual que `clamp_float_to_workarea`.
+        // The clamp includes the 2*border_w frame, same as
+        // `clamp_float_to_workarea`.
         let bw = engine.cfg.border_w;
         let exp_w = (wa.w as i32 - 2 * bw as i32).max(1) as u32;
         let exp_h = (wa.h as i32 - 2 * bw as i32).max(1) as u32;
@@ -4489,12 +4378,12 @@ mod unit_tests {
         );
     }
 
-    // 8d. Autoridad del cliente sobre su flotante: cuando el WM adopta un
-    //     `ConfigureRequest` verbatim (sink de events.rs), sella
-    //     `float_client_authority` y el arrange proyecta ESE rect tal cual —
-    //     sin re-normalizarlo — incluso cuando un snap a hints lo movería.
-    //     Sin el sello, el WM reescribe lo prometido, el cliente reclama su
-    //     rect y el flotante "salta solo" (ping-pong de dos autoridades).
+    // Client authority over its float: when the WM adopts a `ConfigureRequest`
+    // verbatim (the `events.rs` sink), it seals `float_client_authority` and
+    // `arrange` must project THAT rect verbatim instead of re-normalizing it,
+    // even where snapping to the hints would move it. Without the seal the WM
+    // rewrites what it promised, the client claims its rect back, and the float
+    // moves on its own — two authorities ping-ponging.
     #[test]
     fn adopted_float_request_is_projected_verbatim() {
         use crate::types::{Client, SizeHints, WinFlags};
@@ -4502,7 +4391,7 @@ mod unit_tests {
         let mi = engine.state.sel_mon;
         let ws_i = engine.state.monitors[mi].active_ws;
 
-        // Flotante con rejilla de hints (base 0, incremento 10, min 100x100).
+        // Float on a size-hints grid (base 0, increment 10, min 100x100).
         let hints = SizeHints {
             base_w: 0,
             base_h: 0,
@@ -4517,7 +4406,7 @@ mod unit_tests {
             flags: 0,
             valid: true,
         };
-        let requested = Rect::new(60, 70, 600, 400); // en rejilla, snap-neutral
+        let requested = Rect::new(60, 70, 600, 400); // on-grid, snap-neutral
         let mut f = Client::new(2, mi, ws_i);
         f.flags.set(WinFlags::FLOAT);
         f.geom = requested;
@@ -4527,7 +4416,7 @@ mod unit_tests {
         engine.state.add_client(f);
         engine.state.monitors[mi].workspaces[ws_i].floats.push(2);
 
-        // El sink adoptó la petición verbatim y selló la autoridad.
+        // The sink adopted the request verbatim and sealed the authority.
         engine
             .state
             .clients
@@ -4551,10 +4440,10 @@ mod unit_tests {
         );
     }
 
-    // 8e. Contexto nuevo para un flotante (ToggleFloat, cambio de workspace o
-    //     de monitor): el rect se re-asienta como punto fijo de la proyección
-    //     del nuevo workarea, de modo que el primer arrange no lo corrija con
-    //     un salto visible. Helper único: `layout::settle_float_in_workarea`.
+    // A float that gains a new context (`ToggleFloat`, a workspace or monitor
+    // change) must have its rect re-settled as a fixed point of the new
+    // workarea's projection, so the first `arrange` cannot correct it with a
+    // visible jump. Single helper: `layout::settle_float_in_workarea`.
     #[test]
     fn float_gaining_new_context_is_settled_before_first_arrange() {
         use crate::types::{Client, WinFlags};
@@ -4562,8 +4451,8 @@ mod unit_tests {
         let mi = engine.state.sel_mon;
         let ws_i = engine.state.monitors[mi].active_ws;
 
-        // ToggleFloat: el tile proyectado (800x1080-ish, off-grid) nace
-        // flotante ya re-asentado a la rejilla de hints (inc 10).
+        // ToggleFloat: the projected tile (~800x1080, off-grid) must be born
+        // floating already re-settled onto the hint grid (inc 10).
         engine.state.add_client(Client::new(1, mi, ws_i));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, engine.cfg.column_width);
         engine.state.monitors[mi].focused = Some(1);
@@ -4574,8 +4463,8 @@ mod unit_tests {
             c.hints.inc_h = hints_inc as i32;
             c.hints.valid = true;
         }
-        // Estado pre-toggle como en producción: el arrange ya escribió el tile
-        // proyectado en `client.geom` (tipicamente off-grid respecto a hints).
+        // Pre-toggle state as in production: `arrange` has already written the
+        // projected tile into `client.geom` (typically off-grid w.r.t. hints).
         use crate::core::commands::Command;
         let pre = pipeline_desired(&engine, mi);
         let tile = pre
@@ -4607,11 +4496,11 @@ mod unit_tests {
             "first arrange after settling must not move the float"
         );
 
-        // MoveWindowToMonitor: un flotante quieto cambia a un workarea nuevo
-        // (otro monitor) y sale re-asentado dentro de él en el mismo Command.
+        // MoveWindowToMonitor: a still float changes to a new workarea (another
+        // monitor) and must come out re-settled inside it in the same command.
         let mut f = Client::new(2, mi, ws_i);
         f.flags.set(WinFlags::FLOAT);
-        f.geom = Rect::new(100, 100, 200, 150); // fuera del monitor 1 (x>=1920)
+        f.geom = Rect::new(100, 100, 200, 150); // off monitor 1 (x >= 1920)
         f.saved_geom = f.geom;
         engine.state.add_client(f);
         engine.state.monitors[mi].workspaces[ws_i].floats.push(2);
@@ -4629,8 +4518,8 @@ mod unit_tests {
         );
     }
 
-    // 9. A tiled window's self-resize request is DENIED: client.geom (the desired)
-    //    stays the WM-authored tile, never the client's divergent request.
+    // A tiled window's self-resize request is DENIED: `client.geom` (the
+    // desired) stays the WM-authored tile, never the client's divergent request.
     #[test]
     fn self_resize_does_not_mutate_desired() {
         use crate::backend::x11::reconciler::{
@@ -4688,8 +4577,8 @@ mod unit_tests {
         );
     }
 
-    // 10. A tiled window that diverges (geometry_dirty set) must re-apply: the
-    //     next pipeline run's reconcile returns a Configure for it.
+    // A tiled window that diverges (`geometry_dirty`) must re-apply: the next
+    // pipeline run's reconcile returns a Configure for it.
     #[test]
     fn self_resize_tiled_causes_reapply() {
         use crate::backend::x11::reconciler::{reconcile, AppliedState, AppliedWindow};
@@ -4734,8 +4623,8 @@ mod unit_tests {
         assert!(effects.is_empty(), "once forced, identical rect is a no-op");
     }
 
-    // 11. A float that self-resizes is followed: the model adopts the requested
-    //     rect, and the pipeline's Desired for that window matches client.geom.
+    // A float that self-resizes is followed: the model adopts the requested rect
+    // and the pipeline's Desired for that window matches `client.geom`.
     #[test]
     fn self_resize_float_can_follow() {
         use crate::backend::x11::reconciler::{
@@ -4790,14 +4679,13 @@ mod unit_tests {
         );
     }
 
-    // ─── Phase 11: property test — geometry pipeline stays consistent ───────
-    //
-    // Mirror `property_random_window_ops_preserve_invariants` but assert on the
-    // *geometry* contract across a randomized Create/Destroy/Fullscreen/Maximize/
-    // Float/MoveResize/WorkspaceSwitch/MonitorSwitch/LayoutChange chaos. After
-    // every step we build the explicit Desired for every monitor, diff it against
-    // a single long-lived AppliedState via `reconcile`, and assert the invariants
-    // that the backend relies on to never write a bogus Configure to X11.
+    // The geometry counterpart of `property_random_window_ops_preserve_invariants`:
+    // same kind of randomized Create/Destroy/Fullscreen/Maximize/Float/
+    // MoveResize/WorkspaceSwitch/MonitorSwitch/LayoutChange chaos, but asserting
+    // the *geometry* contract. After every step the explicit Desired for every
+    // monitor is diffed against a single long-lived `AppliedState` through
+    // `reconcile`, and the invariants the backend relies on to never write a
+    // bogus Configure are asserted.
 
     #[test]
     fn property_geometry_pipeline_consistency() {
@@ -5121,13 +5009,10 @@ mod unit_tests {
         );
     }
 
-    // ─── AUDITORÍA DE RESISTENCIA REAL (fases 1–5 y 9) ───────────────────────
-    //
-    // Audit-only tests. They drive the existing production paths (Engine::execute,
-    // t_manage/t_destroy/t_set_fullscreen/t_set_maximized, pipeline_desired, the
-    // reconciler `reconcile`/`classify_configure`) and assert invariants. They
-    // NEVER modify core WM code. Any test that reveals wrong behaviour is marked
-    // `#[ignore]` with the panic text and reported as a FOUND BUG.
+    // The `audit_*` cluster drives the production paths — `Engine::execute`, the
+    // `t_*` model helpers, `pipeline_desired`, `reconcile`/`classify_configure`
+    // — and only ever asserts invariants. It never adjusts WM behaviour to make a
+    // case pass.
 
     /// Mirror the backend focus sink: run a command, then apply the `FocusWindow`
     /// effect it emitted to `mon.focused` (the core command only *emits* focus).
@@ -5143,8 +5028,6 @@ mod unit_tests {
         }
         effects
     }
-
-    // ─── Phase 1 — hostile-client behaviour matrix ───────────────────────────
 
     #[test]
     fn audit_p1_tiled_self_resize_reassert() {
@@ -5378,14 +5261,12 @@ mod unit_tests {
 
     #[test]
     fn audit_p1_invalid_configure_request_model_clamped() {
-        // NOTE: the real X11 handler `events.rs::on_configure_request` float
-        // branch is NOT in-memory testable (it performs an X11 round-trip: reads
-        // the reported rect, optionally ignores it, and calls configure_window on
-        // the server). We therefore test only the PURE MODEL contract: feeding a
-        // bogus requested geometry into a floating window's `client.geom` and
-        // then running `arrange()` (via `pipeline_desired`) must clamp the float
-        // into the monitor workarea and keep `State::check_invariants()` Ok. The
-        // X11 event handler itself is deferred to the Xephyr integration phase.
+        // Boundary: `events.rs::on_configure_request`'s float branch cannot be
+        // tested in memory — it round-trips to the X server. Only the pure model
+        // contract is pinned here: a bogus requested geometry written into a
+        // floating window's `client.geom` must be clamped into the monitor
+        // workarea by `arrange()` (via `pipeline_desired`) and leave
+        // `State::check_invariants()` Ok.
         use crate::types::WinFlags;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
@@ -5430,11 +5311,11 @@ mod unit_tests {
         }
     }
 
-    // Fase 1.3 (model-level, tiled): a hostile ConfigureRequest with invalid
-    // geometry (0×0, 60000×60000, off-monitor) against a TILED window must be
-    // classified `Diverged { follow: false }` AND the WM's own Desired must stay
-    // positive — the model never collapses to a degenerate rect, and
-    // `client.geom` is never overwritten by the bogus report.
+    // A hostile ConfigureRequest with invalid geometry (0×0, 60000×60000,
+    // off-monitor) against a TILED window must be classified `Stale`, so the WM
+    // re-asserts, AND the WM's own Desired must stay positive — the model never
+    // collapses to a degenerate rect, and `client.geom` is never overwritten by
+    // the bogus report.
     #[test]
     fn audit_p1_tiled_invalid_geometry_never_collapses_to_zero() {
         use crate::backend::x11::reconciler::{
@@ -5497,8 +5378,6 @@ mod unit_tests {
             .check_invariants()
             .expect("invariants after tiled invalid-geometry requests");
     }
-
-    // ─── Phase 2 — fullscreen / new windows ──────────────────────────────────
 
     #[test]
     fn audit_p2_fullscreen_lifecycle_no_orphan_overlay() {
@@ -5606,9 +5485,8 @@ mod unit_tests {
             ConfigureObservation::Stale,
             "B (tiled) must NOT be classified as our echo"
         );
-        // This proves no "fullscreen == overlay" regression: the WM is the
-        // authority for tiled AND fullscreen windows — both reports are stale
-        // traffic it re-asserts over, never adopted as the model.
+        // The WM is the geometry authority for tiled AND fullscreen windows:
+        // both reports are stale traffic it re-asserts over, never adopts.
 
         engine.execute(crate::core::commands::ViewWorkspace(1));
         assert_eq!(engine.state.monitors[mi].active_ws, 1);
@@ -5654,8 +5532,6 @@ mod unit_tests {
         );
         assert_eq!(engine.state.monitors[mi].focused, Some(2));
     }
-
-    // ─── Phase 3 — maximize / float ──────────────────────────────────────────
 
     #[test]
     fn audit_p3_maximize_unmaximize_tracks_presented() {
@@ -5791,8 +5667,6 @@ mod unit_tests {
             .expect("after tiled re-assert");
     }
 
-    // ─── Phase 4 — transient / dialogs ───────────────────────────────────────
-
     #[test]
     fn audit_p4_fullscreen_dialog_steals_focus() {
         use crate::core::commands::decide_manage_focus;
@@ -5921,13 +5795,11 @@ mod unit_tests {
             .expect("after destroying orphan transient (readers use clients.get guards)");
     }
 
-    // ─── Riesgo 5 — transient-chain depth ────────────────────────────────────
-    //
     // `render::MAX_TRANSIENT_DEPTH` (4) bounds the *stacking* question "is this
     // float owned by the presented overlay?" — the bound exists because
     // `WM_TRANSIENT_FOR` is unvalidated client input and can describe a cycle.
-    // The bound is a stacking answer only; it must never leak into ownership of
-    // the model. These tests build chains at, below and beyond the bound and
+    // The bound is a stacking answer only; it must never leak into model
+    // ownership. These tests build chains at, below and beyond the bound and
     // assert the model stays coherent while the chain is torn down in every
     // order: no dangling `transient_parent`, no dangling deferred-transient
     // queue entry, no focus/overlay pointing at a destroyed window.
@@ -6046,8 +5918,9 @@ mod unit_tests {
         engine.state.check_invariants().expect(ctx);
     }
 
-    /// Root window `1` presenting an overlay (fullscreen in `Grid`, or focused-
-    /// maximized) plus a transient chain `1 → 2 → … → depth+1`.
+    /// Root window `1` presenting an overlay (fullscreen under
+    /// `FullscreenPolicy::True`, or focused-maximized) plus a transient chain
+    /// `1 → 2 → … → depth+1`.
     fn r5_build_chain(depth: u32, maximized: bool) -> Engine {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
@@ -6174,10 +6047,10 @@ mod unit_tests {
 
     #[test]
     fn audit_r5_destroyed_parent_orphans_no_child() {
-        // The concrete regression behind the fix: destroying the parent used to
-        // leave every child's `transient_parent` pointing at a window id that is
-        // no longer a client. With XID reuse that stale id can come back as an
-        // unrelated window, which would then inherit these orphans as its popups.
+        // Destroying a parent must cut exactly the dead edge and no other. A
+        // stale `transient_parent` is worse than a missing one: with XID reuse
+        // the id can come back as an unrelated window, which would then inherit
+        // these orphans as its popups.
         let mut engine = r5_build_chain(3, false);
         t_destroy(&mut engine, 1);
         assert_eq!(
@@ -6231,8 +6104,6 @@ mod unit_tests {
         );
         r5_assert_coherent(&engine, "deferred transient destroyed");
     }
-
-    // ─── Phase 5 — multi-monitor / multi-workspace ───────────────────────────
 
     #[test]
     fn audit_p5_monitor_switch_keeps_other_overlay() {
@@ -6359,10 +6230,10 @@ mod unit_tests {
             .expect("after fullscreen owner destroyed");
     }
 
-    // Fase 5 (deterministic): move a window ACROSS monitors, then destroy it.
-    // Neither the old monitor nor the new one may retain a Desired/Applied or
-    // tree reference to the dead window; `check_invariants` must stay green and
-    // no stale `presented_maximize`/`pending_focus` may name it.
+    // Move a window ACROSS monitors, then destroy it. Neither the old monitor
+    // nor the new one may retain a Desired/Applied or tree reference to the dead
+    // window; `check_invariants` must stay green and no stale
+    // `presented_maximize`/`pending_focus` may name it.
     #[test]
     fn audit_p5_move_to_monitor_then_destroy_leaves_no_orphan() {
         use crate::types::Dir;
@@ -6419,9 +6290,9 @@ mod unit_tests {
             .expect("after move-across-monitor + destroy");
     }
 
-    // Fixed: the production move/destroy path no longer leaves a stale
-    // `presented_maximize` referencing a window that has moved away or been
-    // destroyed (see `remove_client` + `MoveWindowToMonitor`/`MoveToWorkspace`).
+    // The move/destroy path must never leave a stale `presented_maximize`
+    // referencing a window that has moved away or been destroyed (see
+    // `remove_client`, `MoveWindowToMonitor`, `MoveToWorkspace`).
     #[test]
     fn audit_p5_multi_monitor_minifuzz() {
         use crate::backend::x11::reconciler::AppliedState;
@@ -6649,7 +6520,10 @@ mod unit_tests {
             .expect("final invariants (structural)");
     }
 
-    // ─── Phase 9 — bug hunt (A–G) ────────────────────────────────────────────
+    // `reconcile` is the only writer of the Applied record, so every divergence
+    // between Applied and Desired must be detected and re-emitted, and a
+    // destroyed or moved window must leave no reference behind in Desired,
+    // Applied, `pending_focus` or `presented_maximize`.
 
     #[test]
     fn audit_p9a_stale_applied_detected_and_converges() {
@@ -6745,7 +6619,7 @@ mod unit_tests {
                 sequence: None,
             },
         );
-        // Set a pending_focus referencing the window (8c context).
+        // Set a pending_focus referencing the window (the #8c context).
         engine.state.pending_focus = Some(crate::types::PendingFocus {
             window: 1,
             owner: 1,
@@ -6931,36 +6805,27 @@ mod unit_tests {
             .expect("invariants after 200-iteration storm");
     }
 
-    // ─── AUDITORÍA FASE 6: property harness realista ───────────────────────────
-    //
-    // A realistic, in-memory property test that fuzzes the FULL client
-    // interaction surface (manage / destroy / focus / fullscreen / maximize /
-    // float / move-resize / workspace-switch / monitor-switch / ConfigureRequest
-    // / ConfigureNotify) and checks invariants after EVERY step. ConfigureX
-    // events are simulated at the model/policy level via the reconciler's
-    // `classify_configure` — NO X11 connection is opened. The backend's last-
-    // written geometry is a single long-lived `AppliedState`; each step merges
-    // `pipeline_desired` across both monitors to build the whole-desktop Desired,
-    // asserts structural properties, then `reconcile`s and applies the effects.
-    // Coverage counters guarantee the run was not vacuous.
-
-    // PHASE 6 property harness — realistic client-resistance fuzz.
+    // A realistic, in-memory property test over the FULL client interaction
+    // surface (manage / destroy / focus / fullscreen / maximize / float /
+    // move-resize / workspace-switch / monitor-switch / ConfigureRequest /
+    // ConfigureNotify), checking invariants after EVERY step. ConfigureX is
+    // simulated at the model/policy level through the reconciler's
+    // `classify_configure`; no X11 connection is opened. The backend's
+    // last-written geometry is one long-lived `AppliedState`; each step merges
+    // `pipeline_desired` across both monitors into the whole-desktop Desired,
+    // asserts the structural properties, then reconciles and applies the
+    // effects. Coverage counters guarantee the run was not vacuous.
     //
     // The column/ribbon scroll model (niri-style) deliberately scrolls
-    // NON-FOCUSED columns partially or fully off-screen; the compositor clips
-    // them per monitor. `State::check_invariants` (src/types.rs:1476) does NOT
-    // assert geometry-positivity or on-screen bounds — those hold only after a
-    // placement pass and many valid transient states have off-screen rects. So
-    // off-screen Desired rects are BY DESIGN, not a bug (and even the focused
-    // window can be off-screen transiently while the camera spring is mid-
-    // animation, so the harness does NOT assert focused-within-screen either).
-    // This harness therefore only checks FINITE + positive rects for every
-    // Desired window (rect coords are i32, so "finite" is inherent — this is a
-    // non-positive-size guard), plus that every Desired window id exists in
-    // `state.clients` and that the `raise` list references known windows.
-    // Full check_invariants runs every step; reconcile convergence,
-    // classify_configure policy, and the destroy-before-reconcile race are all
-    // exercised.
+    // NON-FOCUSED columns partially or fully off-screen and the compositor
+    // clips them per monitor, so `State::check_invariants` asserts neither
+    // geometry positivity nor on-screen bounds. Off-screen Desired rects are by
+    // design, and even the focused window can be off-screen while the camera
+    // spring is mid-animation — so this harness asserts only that every Desired
+    // rect is positive, every Desired window id exists in `state.clients`, and
+    // the `raise` list names known windows. `check_invariants` itself runs every
+    // step, which also exercises reconcile convergence, the
+    // `classify_configure` policy and the destroy-before-reconcile race.
     struct ResistanceCounters {
         overlay_present: usize,
         pending_focus_present: usize,
@@ -7072,29 +6937,19 @@ mod unit_tests {
             }
         };
 
-        // Mirror the backend's focus sink: commands that emit `FocusWindow`
-        // actually move `mon.focused` (the core command only *emits*). The real
-        // `Backend::focus()` focuses on the window's OWN monitor (`mon_i =
-        // c.monitor`) AND sets `sel_mon = mon_i` (render.rs:746, 798-799), so a
-        // focus on a window living on another monitor keeps `sel_mon` consistent
-        // with the focused window's monitor. Mirror both here: setting
-        // `monitors[sel_mon].focused` alone would desync them and let a later
-        // `ToggleFloat`/`ToggleFullscreen` act on `sel_mon` and re-insert the
-        // window into the wrong monitor's tree (a false cross-monitor duplicate).
         macro_rules! run {
             ($cmd:expr) => {{
-                // Mirror the real backend's `Backend::focus()`: the engine always
+                // Mirror the backend's focus sink: a command only *emits*
+                // `FocusWindow`, and the real `Backend::focus()` focuses on the
+                // window's OWN monitor (`mon_i = c.monitor`) AND sets
+                // `sel_mon = mon_i` (render.rs:746, 798-799). The engine always
                 // acts on `sel_mon`, so `sel_mon` must name the monitor that
-                // actually contains the focused window. A desync here (the
-                // focused window living on a *different* monitor) would make a
+                // actually holds the focused window: a desync makes a
                 // sel_mon-based command (`ToggleFloat`/`ToggleMaximize`/
                 // `ToggleFullscreen`/`MoveResize` all remove from and re-insert
                 // into `monitors[sel_mon]`) tear the window out of its true tree
                 // and re-insert it on the wrong monitor — a false cross-monitor
-                // duplicate that has nothing to do with the WM core. The
-                // production backend never desyncs because `focus()` sets
-                // `mon_i = c.monitor` AND `sel_mon = mon_i`; the harness must do
-                // the same before every command it drives.
+                // duplicate that has nothing to do with the WM core.
                 if let Some(fw) = engine.state.monitors[engine.state.sel_mon].focused {
                     if let Some(fm) = engine.state.clients.get(&fw).map(|c| c.monitor) {
                         engine.state.sel_mon = fm;
@@ -7579,14 +7434,11 @@ mod unit_tests {
             // Build the whole-desktop Desired for this step.
             let desired = run_pipeline_all(&engine);
 
-            // Directed Desired assertions (WEAK — off-screen Desired rects are by
-            // design; the ribbon/column scroll model places non-focused columns
-            // off-screen and the camera spring can transiently hold even the
-            // focused window off-screen, so we do NOT assert on-screen bounds):
+            // Directed Desired assertions — deliberately weak, see the harness
+            // header for why on-screen bounds are not asserted:
             //  - every Desired window id exists in state.clients
-            //  - every Desired rect is finite + positive (real corruption only;
-            //    Rect coords are i32 so NaN/inf cannot occur — this is just a
-            //    non-positive-size guard)
+            //  - every Desired rect is positive (a non-positive size is real
+            //    corruption; coords are i32 so NaN/inf cannot occur)
             //  - the raise list references only known windows
             for d in &desired.windows {
                 assert!(
@@ -7724,8 +7576,9 @@ mod unit_tests {
                 applied.forget(w);
             }
 
-            // Keep the focus deferral consistent with the backend's teardown
-            // policy: if the owning overlay is gone, consume the deferral.
+            // End-of-step mirror of the same consume-on-stale check the pre-command
+            // heal above performs, so `check_invariants` never sees a deferral whose
+            // owner stopped being an overlay mid-step.
             if let Some(pf) = engine.state.pending_focus {
                 let owner_presented = engine.state.monitors.get(pf.monitor).is_some_and(|m| {
                     let focused = m.focused;
@@ -7745,7 +7598,7 @@ mod unit_tests {
                 }
             }
 
-            // The structural manifesto: full invariants after EVERY step.
+            // Full invariants after EVERY step.
             if let Err(v) = engine.state.check_invariants() {
                 panic!(
                     "seed {seed:#x} step {step} op {op}: invariant violation: {}",
@@ -7845,7 +7698,9 @@ mod unit_tests {
         );
     }
 
-    // ─── Riesgo-3: model A fullscreen ConfigureRequest is ignored / WM reasserts Desired ─
+    // A fullscreen ConfigureRequest is ignored: `on_configure_request`'s
+    // fullscreen branch returns early without adopting the client rect, and the
+    // WM re-asserts its own Desired.
     #[test]
     fn configure_request_fullscreen_is_ignored_model_a() {
         use crate::backend::x11::reconciler::{
@@ -7855,10 +7710,8 @@ mod unit_tests {
         use crate::types::{Action, LayoutKind, Rect, WindowId};
 
         let mut engine = setup_engine();
-        // Model A: the fullscreen ConfigureRequest path in `on_configure_request`
-        // returns early without adopting the client rect — the WM reasserts its own
-        // Desired. Force a Grid layout so a fullscreen window becomes a presented
-        // overlay owner (the model-A branch).
+        // `ToggleFullscreen` below promotes the policy to `True`, which is what
+        // makes the window a presented overlay owner.
         engine.dispatch(Action::SetLayout(LayoutKind::Column));
 
         let w: WindowId = 1;
@@ -7915,8 +7768,6 @@ mod unit_tests {
             .expect("model A: final state must satisfy invariants");
     }
 
-    // ─── EWMH `_NET_ACTIVE_WINDOW` focus-theft policy ──────────────────────────
-    //
     // `decide_active_window` is the pure policy the X11 handler calls for every
     // `_NET_ACTIVE_WINDOW` request. It must refuse to let an unrelated window
     // steal focus from a presented fullscreen/maximize overlay on the *same*
@@ -7924,7 +7775,7 @@ mod unit_tests {
     // owner itself and any dialog it owns.
 
     /// Register + tile `win` on an explicit (monitor, workspace), optionally
-    /// making it a Grid fullscreen overlay owner there.
+    /// making it a fullscreen overlay owner there.
     fn aw_add_client(
         engine: &mut Engine,
         win: WindowId,
@@ -7952,13 +7803,13 @@ mod unit_tests {
     fn net_active_window_respects_presented_overlay_policy() {
         use crate::core::commands::{decide_active_window, ActiveWindowIntent};
 
-        // 1) Plain tiled B cannot steal focus from a Grid fullscreen overlay A on
-        //    the same (mon0, ws0).
+        // 1) Plain tiled B cannot steal focus from a fullscreen overlay A on the
+        //    same (mon0, ws0).
         {
             let mut engine = setup_engine();
             let mi = engine.state.sel_mon;
             let ws_i = engine.state.monitors[mi].active_ws;
-            aw_add_client(&mut engine, 1, mi, ws_i, true); // A: Grid fullscreen overlay
+            aw_add_client(&mut engine, 1, mi, ws_i, true); // A: fullscreen overlay
             aw_add_client(&mut engine, 2, mi, ws_i, false); // B: plain tiled
             assert_eq!(engine.state.presented_overlay_owner(mi), Some(1));
             assert_eq!(
@@ -8079,8 +7930,6 @@ mod unit_tests {
             );
         }
     }
-    // ── P1-A: ViewWorkspace keeps `focused` coherent with `active_ws` ─────────────
-
     /// Fixture: monitor with window 1 tiled+focused on ws0 and window 2 tiled on ws1.
     fn build_view_fixture() -> crate::types::State {
         let mut state = crate::types::State::new();
@@ -8155,8 +8004,6 @@ mod unit_tests {
         );
     }
 
-    // ── P1-B: ToggleFloat rejects cross-monitor focus corruption ─────────────────
-
     /// If the focused window belongs to a DIFFERENT monitor than the selected one
     /// (logical focus corruption), `ToggleFloat` must not mutate the selected
     /// monitor's trees (no `remove from tree A / insert into floating B` split).
@@ -8227,11 +8074,12 @@ mod unit_tests {
             );
 
             for (win, rect, _bw) in placements {
-                // Ensure dimensions are positive
                 assert!(rect.w > 0, "{desc}: window {win} width must be > 0");
                 assert!(rect.h > 0, "{desc}: window {win} height must be > 0");
 
-                // Ensure coordinates stay vaguely within/around workarea, not completely blowing up to 500,000
+                // Coordinates must stay within a 100 px slack of the workarea: a
+                // pathological gap/workarea must not blow the origin up to the
+                // hundreds of thousands of pixels.
                 assert!(
                     rect.y <= wa.y + wa.h as i32 + 100,
                     "{desc}: window {win} y is completely off-screen: {}",
