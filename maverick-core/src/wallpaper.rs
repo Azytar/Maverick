@@ -1,29 +1,29 @@
-// maverick/src/core/wallpaper.rs
-//
-// The wallpaper *domain model* — kept entirely free of any GL/X11 type so the
-// upper layers (State, Engine, WindowManager) never name OpenGL. The actual GPU
-// work goes through the `WallpaperGpu` trait (implemented inside the x11/GL
-// backend as `GlWallpaper`), which is the seam the plan requires for a future
-// Vulkan backend.
+//! Wallpaper domain model: source, mapping mode, and the pure per-output
+//! geometry. Deliberately free of any GL/X11 type so `State` and the command
+//! layer never name OpenGL. Uploading and drawing happen behind the
+//! `WallpaperGpu` trait, which the x11/GL compositor implements and which a
+//! Vulkan backend can implement over the same opaque handles.
 
 use crate::types::Rect;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-/// Where the wallpaper pixels come from. `Video` is reserved (Fase 10): the enum
-/// variant exists so the type system and IPC round-trip it, but the backend
-/// does not yet implement a video decoder.
+/// Where the wallpaper pixels come from.
+///
+/// `Video` is reserved: the variant exists so the type and the IPC round-trip
+/// it, but no backend implements a video decoder yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WallpaperSource {
     None,
     /// A still image: PNG (decoded natively) or any other format via the
-    /// external-converter fallback. Path is the user-supplied (possibly
-    /// space-containing) path.
+    /// external-converter fallback. The path is the user-supplied one, spaces
+    /// and all.
     Image(PathBuf),
     /// A user GLSL fragment shader (the compositor supplies `u_time`,
     /// `u_resolution`, `u_delta_time`). Compiled once and re-drawn every frame.
     Shader(PathBuf),
-    /// Reserved for a future external video backend (mpv/ffmpeg). Not decoded yet.
+    /// Reserved for an external video decoder; carried through `State` and IPC
+    /// but never decoded.
     Video(PathBuf),
 }
 
@@ -37,7 +37,10 @@ pub enum WallpaperMode {
     Fit,
     /// Stretch to the whole output (distorts aspect ratio).
     Stretch,
-    /// Draw 1:1 pixels, centred; crops when larger, gaps when smaller.
+    /// Drawn at 1:1 pixels and centred. When the image exceeds the output on
+    /// both axes the source UV rect is cropped to the output; otherwise the
+    /// whole image is used, so a mixed aspect ratio overflows on the larger
+    /// axis rather than being scaled.
     Center,
 }
 
@@ -154,12 +157,8 @@ pub struct GpuImage(pub u32);
 /// Compute, for every output, the destination rect (screen pixels) and the
 /// source UV rectangle (0..1, top-down) to draw the wallpaper image. Pure: no
 /// GL, no allocation beyond the returned `Vec`. One tuple per output; the image
-/// is a single shared texture, each quad uses its own src/dst.
-///
-/// * `Fill`    — cover (crop to output aspect, no distortion).
-/// * `Fit`     — contain (letterbox, no distortion).
-/// * `Stretch` — fill output exactly (distorts).
-/// * `Center`  — 1:1 px, centered (crops when larger, gaps when smaller).
+/// is a single shared texture, each quad uses its own src/dst. The mapping per
+/// mode is documented on [`WallpaperMode`].
 pub fn compute_wallpaper_rects(
     img_w: u32,
     img_h: u32,
@@ -170,13 +169,16 @@ pub fn compute_wallpaper_rects(
     let mut out = Vec::with_capacity(outputs.len());
     for o in outputs {
         let (ow, oh) = (o.w as f64, o.h as f64);
+        // Degenerate input (0px image or 0px output): sample everything rather
+        // than dividing by a zero scale.
         if iw <= 0.0 || ih <= 0.0 || ow <= 0.0 || oh <= 0.0 {
             out.push((*o, [0.0, 0.0, 1.0, 1.0]));
             continue;
         }
         let (dst, src) = match mode {
             WallpaperMode::Fill => {
-                // Cover: scale = max, then centre the overflowing axis.
+                // The quad is the whole output, so the crop has to happen in UV
+                // space: take the visible fraction on each axis and centre it.
                 let scale = (ow / iw).max(oh / ih);
                 let disp_w = iw * scale;
                 let disp_h = ih * scale;
@@ -187,7 +189,8 @@ pub fn compute_wallpaper_rects(
                 (*o, [u0, v0, u0 + fu, v0 + fv])
             }
             WallpaperMode::Fit => {
-                // Contain: scale = min, letterbox the shortfall.
+                // Contain: the quad shrinks inside the output and the whole
+                // image is sampled, so the shortfall letterboxes.
                 let scale = (ow / iw).min(oh / ih);
                 let disp_w = iw * scale;
                 let disp_h = ih * scale;
@@ -210,14 +213,16 @@ pub fn compute_wallpaper_rects(
             WallpaperMode::Stretch => (*o, [0.0, 0.0, 1.0, 1.0]),
             WallpaperMode::Center => {
                 if iw >= ow && ih >= oh {
-                    // Image larger than output: crop, centred.
+                    // Larger on both axes: crop the source rect to the output.
                     let u0 = ((iw - ow) / 2.0 / iw) as f32;
                     let v0 = ((ih - oh) / 2.0 / ih) as f32;
                     let fu = (ow / iw) as f32;
                     let fv = (oh / ih) as f32;
                     (*o, [u0, v0, u0 + fu, v0 + fv])
                 } else {
-                    // Image smaller: 1:1, centred with letterbox gaps.
+                    // Not larger on both axes: the image is drawn 1:1 and
+                    // centred, letterboxing when it is smaller and overflowing
+                    // on the larger axis of a mixed aspect ratio.
                     let x = o.x as f64 + (ow - iw) / 2.0;
                     let y = o.y as f64 + (oh - ih) / 2.0;
                     (
@@ -232,7 +237,6 @@ pub fn compute_wallpaper_rects(
     out
 }
 
-/// Unit tests for the pure wallpaper geometry.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,12 +248,13 @@ mod tests {
 
     #[test]
     fn fill_covers_output() {
-        // Image 4:3, output 16:9 → image is taller relative to width, so we
-        // crop top/bottom and cover the full output width.
+        // 4:3 image on a 16:9 output: cover keeps the full output width and
+        // crops top/bottom instead of scaling to fit.
         let rects = compute_wallpaper_rects(800, 600, WallpaperMode::Fill, &[r(0, 0, 1920, 1080)]);
         let (dst, src) = rects[0];
         assert_eq!(dst, r(0, 0, 1920, 1080));
-        // Vertical crop: disp 1920x1440, fv=0.75, v0=0.125
+        // Displayed 1920x1440, so the visible V range is the centred 75%
+        // [0.125, 0.875].
         assert!((src[0] - 0.0).abs() < 1e-6);
         assert!((src[2] - 1.0).abs() < 1e-6);
         assert!((src[1] - 0.125).abs() < 1e-3);
@@ -260,7 +265,6 @@ mod tests {
     fn fit_letterboxes() {
         let rects = compute_wallpaper_rects(800, 600, WallpaperMode::Fit, &[r(0, 0, 1920, 1080)]);
         let (dst, _src) = rects[0];
-        // 800x600 → fit means height matches output, width is smaller.
         assert_eq!(dst.w, 1440);
         assert_eq!(dst.h, 1080);
         let x = (1920 - 1440) / 2;
