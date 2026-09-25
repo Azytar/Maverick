@@ -219,6 +219,34 @@ pub(crate) fn normalize_float_request(g: Rect, hints: SizeHints, wa: Rect, bw: u
     normalize_float_geom(g, hints, wa, bw)
 }
 
+/// Re-decide one float for the workarea its monitor now has: settle the rect
+/// with the single WM-owned normalization and release the client's authority
+/// seal over it. Returns the rect to apply, or `None` when the float already
+/// sits where this workarea wants it and held no seal — nothing to configure.
+///
+/// The seal (`Client::float_client_authority`) states that the rect was adopted
+/// verbatim from a `ConfigureRequest`, so a projection must leave it alone. That
+/// claim is scoped to the workarea it was made under: a rect the client chose
+/// under the old one carries no authority over the new one, and the rect
+/// settled here is the WM's own choice. Releasing the seal is therefore part of
+/// reclaiming the workarea, not an extra step — a surviving seal would keep the
+/// projection on a rect the WM has already replaced, and a client re-asserting
+/// its old geometry would be adopted verbatim again, off the new workarea, with
+/// nothing left to pull it back.
+///
+/// Nothing bounces off the settled rect: `normalize_float_geom` is idempotent,
+/// so it already is the fixed point of the client's own hint grid.
+///
+/// Pure over `(&mut Client, Rect)`: no X11, no `&self`.
+fn reclaim_float_to_workarea(c: &mut Client, wa: Rect) -> Option<Rect> {
+    let settled = normalize_float_geom(c.geom, c.hints, wa, c.border_w);
+    if settled == c.geom && !c.float_client_authority {
+        return None;
+    }
+    c.float_client_authority = false;
+    Some(settled)
+}
+
 /// Adopt the geometry a **client** asked for (a float's `ConfigureRequest`).
 ///
 /// The client is the authority for its own floating window; the WM only drops
@@ -368,6 +396,12 @@ impl WindowManager {
     /// geometry change. Clamps each float's size *and* position so its whole
     /// frame remains inside the new workarea — including floats that are larger
     /// than the workarea itself (see `clamp_float_to_workarea`).
+    ///
+    /// Every float it visits is re-decided by the WM, so on return none of
+    /// them — the monitor's workspace floats and its sticky floats — still
+    /// holds a `float_client_authority` seal: the projection that follows
+    /// (`arrange`) treats each as the WM-owned rect it just settled, and a
+    /// `ConfigureRequest` arriving later is the client's answer to *that* rect.
     pub(super) fn reposition_floats(
         &mut self,
         mon_idx: usize,
@@ -380,33 +414,35 @@ impl WindowManager {
         // Collect all floats that need repositioning to avoid borrow conflicts
         let mut to_reposition: Vec<(WindowId, Rect, u32)> = Vec::new();
 
-        // Regular floats in workspaces. Use the single normalization with hints
-        // (see `layout::normalize_float_geom`): after RandR the arrange already
+        // Regular floats in workspaces. Reuse the single normalization with
+        // hints (`reclaim_float_to_workarea`): after RandR the arrange already
         // projected with the same function, so only what actually changed is
         // repositioned and the float does not jump twice (here and then in
-        // `arrange`). Settling also clears the `float_client_authority` seal:
-        // the workarea changed (RandR/strut), the WM claims the geometry, and a
-        // rect adopted under the *old* workarea is no longer authority over the
-        // new one.
+        // `arrange`).
         for ws in &self.engine.state.monitors[mon_idx].workspaces {
             for &win in &ws.floats {
-                if let Some(client) = self.engine.state.clients.get(&win) {
-                    let (bw, sealed) = (client.border_w, client.float_client_authority);
-                    let g = normalize_float_geom(client.geom, client.hints, wa, bw);
-                    if g != client.geom || sealed {
-                        to_reposition.push((win, g, bw));
+                if let Some(client) = self.engine.state.clients.get_mut(&win) {
+                    if let Some(g) = reclaim_float_to_workarea(client, wa) {
+                        to_reposition.push((win, g, client.border_w));
                     }
                 }
             }
         }
 
-        // Sticky floats that belong to this monitor
-        for (&win, client) in &self.engine.state.clients {
-            if client.monitor == mon_idx && client.is_sticky() && client.is_float() {
-                let (bw, sealed) = (client.border_w, client.float_client_authority);
-                let g = normalize_float_geom(client.geom, client.hints, wa, bw);
-                if g != client.geom || sealed {
-                    to_reposition.push((win, g, bw));
+        // Sticky floats that belong to this monitor, collected up front: the
+        // settle needs `&mut Client` and cannot run while the map is walked.
+        let sticky: Vec<WindowId> = self
+            .engine
+            .state
+            .clients
+            .iter()
+            .filter(|(_, c)| c.monitor == mon_idx && c.is_sticky() && c.is_float())
+            .map(|(&win, _)| win)
+            .collect();
+        for win in sticky {
+            if let Some(client) = self.engine.state.clients.get_mut(&win) {
+                if let Some(g) = reclaim_float_to_workarea(client, wa) {
+                    to_reposition.push((win, g, client.border_w));
                 }
             }
         }
@@ -2455,5 +2491,80 @@ mod tests {
         f[8] = 100;
         let fh = parse_wm_normal_hints(&f).unwrap();
         assert!(fixed_size_hints(&fh));
+    }
+
+    // A workarea change re-decides float geometry, so the client's authority
+    // over its own rect cannot survive it: the seal is released and the rect
+    // re-settled against the new workarea. A seal that outlived the change
+    // would keep the projection on the adopted rect (`layout::arrange` reads it
+    // verbatim) after the WM has already moved the window, and a client
+    // re-asserting its old geometry would then be adopted again — off the new
+    // workarea, with no path left to reclaim it.
+
+    /// A float adopted under a larger workarea: its frame hangs off the right
+    /// edge of the shrunk one, so re-settling genuinely moves it.
+    fn adopted_float(hints: SizeHints, geom: Rect) -> Client {
+        let mut c = Client::new(1, 0, 0);
+        c.flags.set(WinFlags::FLOAT);
+        c.geom = geom;
+        c.saved_geom = geom;
+        c.hints = hints;
+        c.border_w = 2;
+        c.float_client_authority = true;
+        c
+    }
+
+    #[test]
+    fn workarea_change_releases_the_client_authority_seal() {
+        let wa = Rect::new(0, 22, 1920, 1058);
+        let hints = term_hints();
+        let mut c = adopted_float(hints, Rect::new(1750, 900, 640, 480));
+
+        let settled = reclaim_float_to_workarea(&mut c, wa)
+            .expect("a sealed float is always re-decided, even when it does not move");
+        assert!(
+            !c.float_client_authority,
+            "the WM re-decided this rect: the client is no longer its authority"
+        );
+        assert_ne!(
+            settled, c.geom,
+            "the adopted rect hangs off the new workarea and must not survive it"
+        );
+        assert!(
+            fits_normalized(settled, wa, 2),
+            "settled={settled:?} must sit inside wa={wa:?}"
+        );
+        // Releasing the seal costs no later movement: the settled rect is the
+        // fixed point of the projection that runs without it.
+        assert_eq!(normalize_float_geom(settled, hints, wa, 2), settled);
+    }
+
+    /// Same change, same contract, for a rect the new workarea cannot improve:
+    /// there is no configure to make and the only thing left to decide is the
+    /// seal, which is released just the same.
+    #[test]
+    fn workarea_change_releases_the_seal_of_an_unmoved_float() {
+        let wa = Rect::new(0, 22, 1920, 1058);
+        let hints = term_hints();
+        let mut c = adopted_float(hints, Rect::new(300, 300, 640, 480));
+
+        let settled = reclaim_float_to_workarea(&mut c, wa)
+            .expect("a sealed float is always re-decided, even when it does not move");
+        assert_eq!(settled, c.geom, "this rect is already inside the workarea");
+        assert!(
+            !c.float_client_authority,
+            "an unmoved rect is still a WM-owned rect once the workarea changed"
+        );
+    }
+
+    /// The other half of the contract: a float that is already where the
+    /// workarea wants it and carries no seal needs no configure at all, so a
+    /// workarea change stays silent for the windows it cannot improve.
+    #[test]
+    fn workarea_change_is_silent_for_an_unsealed_settled_float() {
+        let wa = Rect::new(0, 22, 1920, 1058);
+        let mut c = adopted_float(term_hints(), Rect::new(300, 300, 640, 480));
+        c.float_client_authority = false;
+        assert!(reclaim_float_to_workarea(&mut c, wa).is_none());
     }
 }
