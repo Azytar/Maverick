@@ -422,26 +422,26 @@ impl Default for Column {
 
 // ─── Camera (scroll ribbon, spring-damped) ─────────────────────────────────────
 //
-// 1D camera for the Scroll (niri-style ribbon) layout. `position` is the current
-// scroll offset in px (world space -> screen). `target` is where focus wants the
-// camera; a second-order spring-damper eases `position` toward it, giving inertia
-// without overshoot. It is never the source of truth for geometry
-// — `arrange_columns` derives each window's x from it, so there is no drift.
+// 1D camera for the Scroll (niri-style ribbon) layout. `position` is the
+// current visual offset in px (world space -> screen). `target` is where focus
+// wants the camera; an analytical damped transition eases `position` toward it.
+// It is never the source of truth for logical geometry — `arrange_columns`
+// derives each window's x from the selected phase, so animation cannot mutate
+// the WM's settled layout.
 
 /// 1D scroll camera for the ribbon layout.
 ///
-/// `position` is the current scroll offset in px (world→screen); `target` is
-/// where focus wants the camera. A second-order spring-damper eases `position`
-/// toward `target`, giving inertia without overshoot. The camera is never the
-/// source of truth for geometry — `arrange_columns` derives each window's `x`
-/// from it, so no drift is possible.
+/// `position` is the current visual scroll offset in px; `target` is the
+/// logical destination. A closed-form damped transition eases `position` toward
+/// `target`, and retargeting preserves the visual position while explicitly
+/// resetting old-direction momentum.
 ///
 /// # Invariants
 ///
 /// - `position`, `target`, `velocity` are finite (NaN/Inf snaps to target).
-/// - `stiffness`/`damping` are clamped at integration time to
-///   `[MIN_STIFFNESS, MAX_SPRING]` / `[MIN_DAMPING, MAX_SPRING]` so the settle
-///   predicate is reachable even after direct field mutation.
+/// - `stiffness`/`damping` are sanitized at integration time; damping is also
+///   bounded relative to `sqrt(stiffness)` so a slow overdamped pole cannot keep
+///   a pixel-settled camera active indefinitely.
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
     /// Current scroll offset in px.
@@ -452,29 +452,34 @@ pub struct Camera {
     pub velocity: f32,
     /// Spring stiffness (`220.0` default, clamped to `[MIN_STIFFNESS, MAX_SPRING]`).
     pub stiffness: f32,
-    /// Damper (`30.0` default, clamped to `[MIN_DAMPING, MAX_SPRING]`).
+    /// Damper (`30.0` default, bounded by `MIN_DAMPING` and the stability
+    /// ratio derived from stiffness).
     pub damping: f32,
 }
 
-/// Integrator stability bound for `Camera::step`: explicit Euler on a
-/// spring-damper is stable for `ω·dt < 2` with `ω = √stiffness`; the frame
-/// driver slices every frame into `SUBSTEP_MS = 8 ms` substeps, giving
-/// `stiffness < (2 / 0.008)² = 62 500`.
+/// Upper bound for a user-supplied spring constant. `Camera::step` evaluates
+/// the damped oscillator analytically, so this is a configuration/sanitization
+/// bound rather than an Euler stability condition.
 pub(crate) const MAX_SPRING: f32 = 62_500.0;
 /// Smallest tolerated stiffness. `Camera::step` re-clamps on every step, so
 /// even a caller that bypasses `sanitize_spring` cannot disable restoration.
 pub(crate) const MIN_STIFFNESS: f32 = 1.0;
-/// Smallest tolerated damping. Semantics, not an arbitrary guard: the settle
-/// predicate of `Camera::step` can only be reached if the damper removes
-/// energy. With `damping > 0` the per-substep velocity update is a strict
-/// contraction (`v ← v·(1 − c·dt)`, `c·dt = 0.0008` at the minimum), so
-/// `|velocity|` decays monotonically toward the 0.01 px/s settle threshold
-/// and the camera terminates. At `damping = 0` explicit Euler *injects*
-/// energy into an oscillating spring — the audited eternal-`moving` bug —
-/// so 0 is illegal. 0.1 is one order of magnitude below the default 30:
-/// every "very low damping" user intent survives verbatim while the
-/// mechanical guarantee above holds.
+/// Smallest tolerated damping. A positive damper is required for the settle
+/// predicate to be reachable for every supported configuration.
 pub(crate) const MIN_DAMPING: f32 = 0.1;
+/// Bound the slow pole of an overdamped spring. Without a ratio bound, a
+/// finite but enormous damping value makes the exact solution physically
+/// converge over minutes even though the compositor has no more useful visual
+/// work to perform.
+const MAX_DAMPING_RATIO: f32 = 10.0;
+const CAMERA_SETTLE_POSITION: f32 = 0.5;
+const CAMERA_SETTLE_VELOCITY: f32 = 0.01;
+
+#[inline]
+fn bounded_damping(stiffness: f32, damping: f32) -> f32 {
+    let max = (MAX_DAMPING_RATIO * stiffness.max(MIN_STIFFNESS).sqrt()).min(MAX_SPRING);
+    damping.clamp(MIN_DAMPING, max)
+}
 
 impl Camera {
     /// Create a camera at rest at `pos` (position = target, velocity = 0).
@@ -487,12 +492,47 @@ impl Camera {
             damping: 30.0,
         }
     }
-    /// Advance one step of `dt` seconds. Returns true while still moving.
+
+    /// Change only the logical destination. The animated position is retained
+    /// so a retarget never teleports; derivative momentum is reset explicitly,
+    /// matching the reference camera policy and preventing a reversal from
+    /// briefly accelerating farther in the old direction.
+    pub fn retarget(&mut self, target: f32) {
+        if target.is_finite() {
+            // Repeated focus/arrange notifications for the same endpoint must
+            // not continuously cancel an in-flight spring.
+            if (self.target - target).abs() > 1e-4 {
+                self.velocity = 0.0;
+            }
+            self.target = target;
+        }
+    }
+
+    /// Whether the camera still has a meaningful visual transition.
     ///
-    /// P2 hardening: a non-finite `dt` (or an already-poisoned state) can never
-    /// enter the integrator — it would propagate NaN into `position`, which
-    /// feeds the layout projection, freezing every window at an undefined
-    /// coordinate. A poisoned state snaps to target instead of staying NaN.
+    /// This is separate from `step`'s return value because a zero or invalid
+    /// frame delta must not make a pending retarget look settled to the
+    /// scheduler. Non-finite state is sanitized by the next valid `step`.
+    pub fn needs_update(&self) -> bool {
+        if !self.position.is_finite() || !self.target.is_finite() || !self.velocity.is_finite() {
+            return true;
+        }
+        (self.position - self.target).abs() > CAMERA_SETTLE_POSITION
+            || self.velocity.abs() > CAMERA_SETTLE_VELOCITY
+    }
+
+    /// Advance the camera by elapsed `dt` seconds and return whether it remains
+    /// animated.
+    ///
+    /// The state is sampled from the closed-form solution of the damped
+    /// harmonic oscillator for a constant target:
+    ///
+    /// `x'' + c·x' + k·(x - target) = 0`.
+    ///
+    /// This is deliberately not `position += velocity·dt`. The exact
+    /// transition makes a fixed elapsed interval independent of how that
+    /// interval is partitioned into render frames, while retaining the existing
+    /// stiffness/damping configuration and explicit target changes.
     pub fn step(&mut self, dt: f32) -> bool {
         if !dt.is_finite() || dt <= 0.0 {
             return false;
@@ -505,27 +545,71 @@ impl Camera {
             }
             return false;
         }
-        let disp = self.position - self.target;
-        // P2 hardening: enforce strict lower bounds during integration itself,
-        // so no direct mutation of the public fields can bypass sanitization
-        // and create an undamped infinite loop (see the MIN_DAMPING/MIN_
-        // STIFFNESS const docs for why exactly these bounds).
-        let stiffness = self.stiffness.clamp(MIN_STIFFNESS, MAX_SPRING);
-        let damping = self.damping.clamp(MIN_DAMPING, MAX_SPRING);
-        let accel = -stiffness * disp - damping * self.velocity;
-        self.velocity += accel * dt;
-        self.position += self.velocity * dt;
-        // Overflow guard: an extreme (but finite) config can still blow the
-        // integrator up in one step; clamp to a finite sentinel rather than
-        // propagate infinity.
+
+        // If the state is already inside the visual settle envelope, install
+        // the exact endpoint. This prevents a last sampled subpixel from being
+        // left in the compositor forever when no further frame is scheduled.
+        if !self.needs_update() {
+            self.snap(self.target);
+            return false;
+        }
+
+        let stiffness = self.stiffness.clamp(MIN_STIFFNESS, MAX_SPRING) as f64;
+        let damping = bounded_damping(stiffness as f32, self.damping) as f64;
+        let x0 = self.position as f64;
+        let v0 = self.velocity as f64;
+        let target = self.target as f64;
+        let y0 = x0 - target;
+        let t = dt as f64;
+        let (y1, v1) = if damping * damping > 4.0 * stiffness {
+            // Over-damped: two real characteristic roots.
+            let root = (damping * damping - 4.0 * stiffness).sqrt();
+            let r1 = (-damping + root) * 0.5;
+            let r2 = (-damping - root) * 0.5;
+            let a = (v0 - r2 * y0) / (r1 - r2);
+            let b = y0 - a;
+            let e1 = (r1 * t).exp();
+            let e2 = (r2 * t).exp();
+            (a * e1 + b * e2, r1 * a * e1 + r2 * b * e2)
+        } else if damping * damping < 4.0 * stiffness {
+            // Under-damped: exponentially decaying sinusoid.
+            let alpha = damping * 0.5;
+            let omega = (4.0 * stiffness - damping * damping).sqrt() * 0.5;
+            let decay = (-alpha * t).exp();
+            let cos = (omega * t).cos();
+            let sin = (omega * t).sin();
+            let b = (v0 + alpha * y0) / omega;
+            let y = decay * (y0 * cos + b * sin);
+            let v = decay * (v0 * cos - (stiffness * y0 + alpha * v0) / omega * sin);
+            (y, v)
+        } else {
+            // Critically damped: the repeated-root limit.
+            let alpha = stiffness.sqrt();
+            let b = v0 + alpha * y0;
+            let decay = (-alpha * t).exp();
+            let y = decay * (y0 + b * t);
+            let v = decay * (v0 - alpha * b * t);
+            (y, v)
+        };
+
+        self.position = (target + y1) as f32;
+        self.velocity = v1 as f32;
         if !self.position.is_finite() || !self.velocity.is_finite() {
             self.snap(self.target);
             return false;
         }
-        self.velocity.abs() > 0.01 || disp.abs() > 0.5
+
+        if self.needs_update() {
+            true
+        } else {
+            self.snap(self.target);
+            false
+        }
     }
+
     /// Snap immediately (no animation) — used on first layout / unmanage.
     pub fn snap(&mut self, pos: f32) {
+        let pos = if pos.is_finite() { pos } else { 0.0 };
         self.position = pos;
         self.target = pos;
         self.velocity = 0.0;
@@ -2229,6 +2313,11 @@ impl State {
             for ws in &mut mon.workspaces {
                 if ws.layout == LayoutKind::Column {
                     anim |= ws.camera.step(dt);
+                    // A zero-resolution Instant must not turn a pending camera
+                    // retarget into an apparently settled state. `step` still
+                    // owns numerical sanitisation; this keeps one more frame
+                    // scheduled until a positive monotonic interval arrives.
+                    anim |= ws.camera.needs_update();
                     // Per-column accordion: every column eases its own `boost`
                     // toward 1.0 if it is the focused one, else toward 0.0. This
                     // makes column widths glide when focus changes (bug C10)
@@ -2293,15 +2382,20 @@ impl State {
 }
 
 /// Critically-damped-ish exponential approach of `cur` toward `target`.
-/// Returns true while still moving meaningfully. Stable for any dt.
+/// Returns true while still moving meaningfully, including a pending finite
+/// target when `dt` is zero so the scheduler does not park mid-transition.
+/// Stable for any positive dt.
 ///
 /// P2 hardening: a non-finite `target` or `dt` must not poison `cur` — an
 /// infinite target would push `cur` to infinity on the first step and the
 /// layout projection would follow. Poisoned inputs are ignored and the
 /// spring reports "settled" so the animator can drop the frame.
 pub fn spring_smooth(cur: &mut f32, target: f32, dt: f32) -> bool {
-    if !dt.is_finite() || dt <= 0.0 {
+    if !dt.is_finite() {
         return false;
+    }
+    if dt <= 0.0 {
+        return target.is_finite() && (!cur.is_finite() || (*cur - target).abs() > 0.001);
     }
     if !target.is_finite() {
         // Never chase a non-finite target; if `cur` is already poisoned,
@@ -2318,27 +2412,18 @@ pub fn spring_smooth(cur: &mut f32, target: f32, dt: f32) -> bool {
         *cur = target;
         return false;
     }
-    (*cur - target).abs() > 0.001
+    if (*cur - target).abs() <= 0.001 {
+        *cur = target;
+        false
+    } else {
+        true
+    }
 }
 
-/// Sanitize user-supplied spring parameters (P2) against the real stability
-/// region of the explicit integrator used by `Camera::step`.
-///
-/// The animation driver slices every frame into `SUBSTEP_MS = 8 ms` substeps
-/// (see compositor), so the stability bound for explicit Euler on a
-/// spring-damper is `ω·dt < 2` with `ω = √stiffness`, i.e.
-/// `stiffness < (2 / dt)² = 62 500` at dt = 8 ms. That bound — not an
-/// arbitrary aesthetic region — is the clamp used here. Over-damped systems
-/// (any `damping ≥ 0`) are legitimate and stay allowed.
-///
-/// * `stiffness` non-finite or `≤ 0` → default 220.0 (a zero/negative
-///   stiffness makes the spring never restore, and NaN poisons everything).
-/// * `damping` non-finite or `≤ 0` → default 30.0 (at zero explicit Euler
-///   injects energy: the camera never settles — see [`MIN_DAMPING`]).
-/// * Both are then clamped into `[MIN_STIFFNESS or MIN_DAMPING, MAX_SPRING]`;
-///   the const docs justify the lower bounds from the integrator's settle
-///   semantics, and the upper bound is the hard stability region at the
-///   8 ms substep, not an aesthetic region.
+/// Sanitize user-supplied spring parameters before they enter the analytical
+/// camera transition. Stiffness is bounded for numerical range; damping is
+/// additionally bounded relative to `sqrt(stiffness)` so an overdamped camera
+/// cannot retain a practically invisible slow pole for minutes.
 pub fn sanitize_spring(stiffness: f32, damping: f32) -> (f32, f32) {
     let stiffness = if !stiffness.is_finite() || stiffness <= 0.0 {
         220.0
@@ -2348,7 +2433,7 @@ pub fn sanitize_spring(stiffness: f32, damping: f32) -> (f32, f32) {
     let damping = if !damping.is_finite() || damping <= 0.0 {
         30.0
     } else {
-        damping.clamp(MIN_DAMPING, MAX_SPRING)
+        bounded_damping(stiffness, damping)
     };
     (stiffness, damping)
 }
@@ -2517,14 +2602,16 @@ mod spring_hardening_tests {
     }
 
     #[test]
-    fn damping_extreme_is_allowed_but_bounded_by_integrator_stability() {
-        // Over-damping is legitimate physics: no arbitrary region imposed.
+    fn damping_extreme_is_bounded_relative_to_stiffness() {
+        // A finite overdamped value is accepted, but its slow pole is bounded
+        // so the exact transition cannot spend minutes below pixel precision.
         let (k, c) = sanitize_spring(500.0, 10_000.0);
-        assert_eq!((k, c), (500.0, 10_000.0));
-        // But both are clamped to the explicit-Euler stability bound at the
-        // 8 ms substep (ω·dt < 2 → spring < 62 500).
+        assert!((k - 500.0).abs() < 1e-6);
+        assert!(c > 0.0 && c < 10_000.0);
+        // Both parameters remain finite and stiffness keeps its global bound.
         let (k, c) = sanitize_spring(1.0e9, 1.0e9);
-        assert_eq!((k, c), (62_500.0, 62_500.0));
+        assert!((k - 62_500.0).abs() < 1e-6);
+        assert!(c.is_finite() && c > 0.0 && c <= 2_500.0);
     }
 
     #[test]
@@ -2538,6 +2625,79 @@ mod spring_hardening_tests {
         cam.position = f32::NAN;
         assert!(!cam.step(1.0 / 60.0));
         assert!(cam.position.is_finite());
+    }
+
+    fn advance(cam: &mut Camera, seconds: f32, fps: u32) {
+        let frame = 1.0 / fps as f32;
+        let mut elapsed = 0.0;
+        while elapsed < seconds {
+            let dt = frame.min(seconds - elapsed);
+            cam.step(dt);
+            elapsed += dt;
+        }
+    }
+
+    #[test]
+    fn camera_trajectory_is_frame_rate_independent() {
+        let mut positions = Vec::new();
+        for fps in [30_u32, 60, 120] {
+            let mut cam = Camera::new(0.0);
+            cam.target = 1_000.0;
+            advance(&mut cam, 0.25, fps);
+            positions.push(cam.position);
+        }
+        let spread = positions.iter().copied().fold(0.0_f32, f32::max)
+            - positions.iter().copied().fold(f32::INFINITY, f32::min);
+        assert!(spread < 0.05, "partition changed trajectory: {positions:?}");
+    }
+
+    #[test]
+    fn camera_retarget_keeps_visual_state_and_resets_velocity() {
+        let mut cam = Camera::new(0.0);
+        cam.target = 1_000.0;
+        advance(&mut cam, 0.10, 60);
+        let current = cam.position;
+        cam.retarget(-500.0);
+        assert!(
+            (cam.position - current).abs() < 1e-6,
+            "retarget must not teleport"
+        );
+        assert!(
+            cam.velocity.abs() < 1e-6,
+            "retarget must not keep old-direction momentum"
+        );
+        assert!((cam.target + 500.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn camera_snap_and_zero_delta_are_not_motion() {
+        let mut cam = Camera::new(0.0);
+        cam.target = 100.0;
+        assert!(!cam.step(0.0));
+        assert!(
+            cam.needs_update(),
+            "a pending retarget must keep scheduling"
+        );
+        cam.position = 99.8;
+        cam.velocity = 0.0;
+        assert!(!cam.step(1.0 / 60.0));
+        assert!((cam.position - cam.target).abs() < 1e-6);
+        assert!(cam.velocity.abs() < 1e-6);
+        assert!(!cam.needs_update());
+    }
+
+    #[test]
+    fn camera_repeated_direction_changes_do_not_teleport() {
+        let mut cam = Camera::new(0.0);
+        cam.target = 1_000.0;
+        advance(&mut cam, 0.08, 60);
+        for target in [-500.0, 1_000.0, -500.0, 1_000.0] {
+            let before = cam.position;
+            cam.retarget(target);
+            assert!((cam.position - before).abs() < 1e-6);
+            cam.step(1.0 / 60.0);
+            assert!(cam.position.is_finite());
+        }
     }
 
     #[test]
@@ -2603,6 +2763,16 @@ mod spring_hardening_tests {
         );
         assert!(!spring_smooth(&mut cur, 10.0, f32::INFINITY));
         assert!((cur - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn spring_smooth_zero_dt_keeps_pending_state_and_snaps_endpoint() {
+        let mut cur = 0.0;
+        assert!(spring_smooth(&mut cur, 1.0, 0.0));
+        assert!(cur.abs() < 1e-6);
+        cur = 0.9995;
+        assert!(!spring_smooth(&mut cur, 1.0, 0.016));
+        assert!((cur - 1.0).abs() < 1e-6);
     }
 
     /// Integrator-level invariant (fix #1 of the final audit): `Camera` fields

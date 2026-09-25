@@ -704,26 +704,38 @@ pub(crate) fn column_screen_extents(
     workarea: Rect,
     fs: &FsCtx,
 ) -> Vec<(f32, f32)> {
-    let g = ribbon_geom(ws, cfg, workarea, false, fs);
-    g.cols
-        .iter()
-        .enumerate()
-        .map(|(i, &(x, w))| {
-            // Match `arrange_columns`' geometry exactly: the right edge is the
-            // *inner* (border-exclusive) width, so the hit-test extent agrees
-            // with the `client.geom` X11 hit-tests against (invariant A). A
-            // fullscreen column is drawn with border 0, so it contributes no
-            // border to subtract; tiled columns use `cfg.border_w`.
-            let bw = if fs.cols.contains(&i) {
-                0.0
-            } else {
-                cfg.border_w as f32
-            };
-            let l = g.wa.x as f32 + (x - ws.camera.position) * g.alpha + g.cx;
-            let inner_w = (w * g.alpha - 2.0 * bw).max(1.0);
-            (l, l + inner_w)
-        })
-        .collect()
+    let mut out = Vec::new();
+    let mut scratch = RibbonScratch::default();
+    column_screen_extents_into(ws, cfg, workarea, fs, &mut out, &mut scratch);
+    out
+}
+
+/// Allocation-free variant used by the compositor's visual path.
+pub(crate) fn column_screen_extents_into(
+    ws: &Workspace,
+    cfg: &Cfg,
+    workarea: Rect,
+    fs: &FsCtx,
+    out: &mut Vec<(f32, f32)>,
+    scratch: &mut RibbonScratch,
+) {
+    let g = ribbon_geom_into(ws, cfg, workarea, false, fs, &mut scratch.cols);
+    out.clear();
+    out.extend(g.cols.iter().enumerate().map(|(i, &(x, w))| {
+        // Match `arrange_columns`' geometry exactly: the right edge is the
+        // *inner* (border-exclusive) width, so the hit-test extent agrees
+        // with the `client.geom` X11 hit-tests against (invariant A). A
+        // fullscreen column is drawn with border 0, so it contributes no
+        // border to subtract; tiled columns use `cfg.border_w`.
+        let bw = if fs.cols.contains(&i) {
+            0.0
+        } else {
+            cfg.border_w as f32
+        };
+        let l = g.wa.x as f32 + (x - ws.camera.position) * g.alpha + g.cx;
+        let inner_w = (w * g.alpha - 2.0 * bw).max(1.0);
+        (l, l + inner_w)
+    }));
 }
 
 /// Compute the ideal scroll so the focused column is fully visible (niri-style

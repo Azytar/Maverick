@@ -81,9 +81,9 @@ use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements, RibbonScra
 use crate::core::present::present_into;
 use crate::types::{Rect, State, WindowId};
 
-/// Soft upper bound on substep length (seconds). The camera spring (`damping`
-/// 30) is unstable above ~8 ms, so every animation frame is split into pieces
-/// no longer than this — see `WindowManager::run_once`.
+/// Soft upper bound on substep length (seconds). The camera now uses an
+/// analytical transition; short slices remain for the exponential presentation
+/// springs so their endpoint behavior stays conservative.
 const SUBSTEP_MS: f32 = 8.0;
 
 /// Projection signature for the compositor's live layout cache — mirrors
@@ -109,12 +109,74 @@ fn proj_signature(ws: &crate::types::Workspace, cfg: &Cfg) -> ProjSig {
     }
 }
 
-fn live_alpha(ws: &crate::types::Workspace) -> f32 {
-    let a = ws.zoom.max(0.05);
-    if ws.viewport_mode == crate::types::ViewportMode::Zoomed {
-        ws.page_zoom.max(0.05)
-    } else {
-        a
+/// Inputs that can invalidate a cached live placement projection.
+#[derive(Default, Clone, Copy)]
+struct LiveProjectionInputs {
+    animating: bool,
+    layout_dirty: bool,
+    signature_changed: bool,
+    camera_changed: bool,
+}
+
+/// Whether the live placement cache must be rebuilt from `State` rather than
+/// reused as a translated integer cache. Camera motion is deliberately part
+/// of this predicate: a visual camera value is never advanced by adding a
+/// rounded pixel delta to a previous render state.
+#[inline]
+fn live_projection_needs_rebuild(inputs: LiveProjectionInputs) -> bool {
+    inputs.animating || inputs.layout_dirty || inputs.signature_changed || inputs.camera_changed
+}
+
+/// Fractional compositor geometry. `Rect` remains the WM/X11 authority; this
+/// type is used only after the live projection reaches the compositor.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct VisualRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+fn visual_draw_dst(visual: VisualRect) -> [f32; 4] {
+    [visual.x, visual.y, visual.x + visual.w, visual.y + visual.h]
+}
+
+struct TransformInput {
+    geom: Rect,
+    bw: u32,
+    radius: u32,
+    visual_x: Option<f32>,
+}
+
+impl VisualRect {
+    fn from_rect(rect: Rect) -> Self {
+        Self {
+            x: rect.x as f32,
+            y: rect.y as f32,
+            w: rect.w as f32,
+            h: rect.h as f32,
+        }
+    }
+
+    /// Expand to an integer rectangle that contains every covered pixel.
+    fn enclosing(self) -> Rect {
+        let x0 = self.x.floor();
+        let y0 = self.y.floor();
+        let x1 = (self.x + self.w.max(0.0)).ceil();
+        let y1 = (self.y + self.h.max(0.0)).ceil();
+        if !x0.is_finite() || !y0.is_finite() || !x1.is_finite() || !y1.is_finite() {
+            return Rect::default();
+        }
+        let left = x0 as i32;
+        let top = y0 as i32;
+        let right = x1.max(x0 + 1.0) as i32;
+        let bottom = y1.max(y0 + 1.0) as i32;
+        Rect::new(
+            left,
+            top,
+            right.saturating_sub(left).max(1) as u32,
+            bottom.saturating_sub(top).max(1) as u32,
+        )
     }
 }
 
@@ -276,6 +338,10 @@ struct CompWin {
     /// — `N` windows × `N` transforms every frame, for a value the writer
     /// already had a direct handle to.
     transform: Rect,
+    /// Fractional visual geometry used only for the GPU draw path. `transform`
+    /// remains the conservative integer bounds used by X11-facing caches,
+    /// damage, culling and scissor.
+    visual_transform: VisualRect,
     transform_radius: u32,
     transform_border_w: u32,
     presentation: Option<PresentationTransition>,
@@ -296,6 +362,7 @@ struct CompWin {
     /// drawn last frame (just appeared / was off-screen), so only the current
     /// rect needs repainting.
     prev_visual: Option<Rect>,
+    prev_visual_f: Option<VisualRect>,
     prev_visual_radius: u32,
     /// Fase 12 — true when this window is fully hidden behind a single opaque,
     /// square-cornered window above it this frame, so it need not be drawn.
@@ -369,6 +436,7 @@ impl CompWin {
             has_alpha_visual: format.alpha_bits > 0,
             has_shape: false,
             transform: Rect::default(),
+            visual_transform: VisualRect::default(),
             transform_radius: 0,
             transform_border_w: 0,
             presentation: None,
@@ -380,6 +448,7 @@ impl CompWin {
             // the first frame is generation 1.
             transform_gen: 0,
             prev_visual: None,
+            prev_visual_f: None,
             prev_visual_radius: 0,
             occluded: false,
         }
@@ -402,6 +471,7 @@ impl CompWin {
         resized
     }
 
+    #[cfg(test)]
     fn set_transform(
         &mut self,
         geom: Rect,
@@ -411,6 +481,32 @@ impl CompWin {
         screens: &[Rect],
         gen: u64,
     ) {
+        self.set_transform_with_visual(
+            TransformInput {
+                geom,
+                bw,
+                radius,
+                visual_x: None,
+            },
+            screen_union,
+            screens,
+            gen,
+        );
+    }
+
+    fn set_transform_with_visual(
+        &mut self,
+        input: TransformInput,
+        screen_union: Rect,
+        screens: &[Rect],
+        gen: u64,
+    ) {
+        let TransformInput {
+            geom,
+            bw,
+            radius,
+            visual_x,
+        } = input;
         self.transform = Rect::new(
             geom.x,
             geom.y,
@@ -426,7 +522,16 @@ impl CompWin {
         // exactly when its presentation covers the screen union or any single
         // monitor's screen rect (see `rounded_radius_for`).
         self.transform_radius = rounded_radius_for(self.transform, radius, screen_union, screens);
-        let live = presentation_value(self.transform, self.transform_radius);
+        let live_x = visual_x
+            .filter(|x| x.is_finite())
+            .unwrap_or(self.transform.x as f32) as f64;
+        let live = [
+            live_x,
+            self.transform.y as f64,
+            self.transform.w as f64,
+            self.transform.h as f64,
+            self.transform_radius as f64,
+        ];
         // Exact comparison is intentional: the goal keys are copied from
         // integer-backed rects (only the radius rounds), so equality is a
         // token change test, not a float proximity test.
@@ -489,6 +594,12 @@ impl CompWin {
                 self.transform_radius = goal[4].round() as u32;
             }
         }
+        self.visual_transform = VisualRect {
+            x: self.presentation_value[0] as f32,
+            y: self.presentation_value[1] as f32,
+            w: self.presentation_value[2] as f32,
+            h: self.presentation_value[3] as f32,
+        };
         self.transform_gen = gen;
     }
 
@@ -518,6 +629,14 @@ impl CompWin {
     /// pixels below them are never discarded.
     fn can_occlude(&self, radius: u32) -> bool {
         self.opacity >= 1.0 && radius == 0 && !self.has_alpha_visual && !self.has_shape
+    }
+
+    fn current_visual_rect(&self, gen: u64) -> VisualRect {
+        if self.transform_gen == gen {
+            self.visual_transform
+        } else {
+            VisualRect::from_rect(self.outer)
+        }
     }
 
     /// Whether `r` is entirely outside the `[0,0,w,h]` viewport (plus a small
@@ -745,6 +864,14 @@ pub(crate) fn plan_aged_damage(
     (FrameMode::Partial, damage)
 }
 
+/// Whether a fractional visual changed, even when both states share the same
+/// enclosing integer rectangle. The caller must then add a conservative
+/// current-bounds damage entry.
+#[inline]
+fn visual_moved(previous: Option<VisualRect>, current: VisualRect) -> bool {
+    previous != Some(current)
+}
+
 /// Fase 7: the screen rects that must be repainted when a window's drawn rect
 /// moves from `prev` (last frame) to `cur` (this frame). Both are emitted so
 /// neither the pixels the window left behind nor the pixels it slid into linger
@@ -752,7 +879,7 @@ pub(crate) fn plan_aged_damage(
 /// or was off-screen) only needs its current rect. Pure and allocation-free:
 /// the result is written into the caller's `[Rect; 2]` and the count returned,
 /// so the hot path reuses a stack buffer instead of allocating.
-pub(crate) fn anim_damage_rects(prev: Option<Rect>, cur: Rect, out: &mut [Rect; 2]) -> usize {
+fn anim_damage_rects(prev: Option<Rect>, cur: Rect, out: &mut [Rect; 2]) -> usize {
     let mut n = 0;
     if let Some(p) = prev {
         if p != cur {
@@ -998,11 +1125,19 @@ pub struct Compositor {
     trace_mode_partial: u64,
     /// Frames the planner chose Partial but the age gate forced a Full repaint.
     trace_partial_to_full: u64,
-    /// Timestamp of the previous present, for the present-to-present interval.
+    /// Timestamp of the previous present, retained for trace/diagnostic
+    /// intervals; animation timing is supplied by the event loop's frame `dt`.
     last_present: Option<Instant>,
+    /// Monotonic elapsed time for the current compositor frame. This is the
+    /// same sample consumed by camera, layout and presentation springs.
+    frame_dt: f32,
     // ── Presentation caches — owned by the compositor so the WM core never
     // hands GPU transforms (WindowManager does not import Renderer details).
     live_cache: Vec<Vec<(Window, crate::types::Rect, u32)>>,
+    /// Fractional left edge for the current live frame, keyed by window.
+    /// Rebuilt from the current layout/camera projection; never accumulated.
+    visual_x_cache: std::collections::HashMap<Window, f32>,
+    visual_extents: Vec<(f32, f32)>,
     settled_cache: Vec<Placements>,
     cam_cache: Vec<f32>,
     proj_cache: Vec<Option<ProjSig>>,
@@ -1013,6 +1148,13 @@ pub struct Compositor {
 }
 
 impl Compositor {
+    /// Whether the active GL context really has swap-interval pacing enabled.
+    /// This can differ from the configured mode when a driver lacks the
+    /// requested extension; the scheduler must use the actual state.
+    pub fn vsync_active(&self) -> bool {
+        self.renderer.vsync
+    }
+
     /// Try to bring up the compositor. Returns `None` (logging why) when GL is
     /// unavailable or another compositor already owns the screen.
     pub fn init(
@@ -1411,7 +1553,10 @@ impl Compositor {
             trace_mode_partial: 0,
             trace_partial_to_full: 0,
             last_present: None,
+            frame_dt: 0.0,
             live_cache: Vec::new(),
+            visual_x_cache: std::collections::HashMap::new(),
+            visual_extents: Vec::new(),
             settled_cache: Vec::new(),
             cam_cache: Vec::new(),
             proj_cache: Vec::new(),
@@ -2065,6 +2210,7 @@ impl Compositor {
         let corner_radius = self.corner_radius;
         let screen_union = self.screen_rect;
         for &(win, geom, bw) in placements {
+            let visual_x = self.visual_x_cache.get(&win).copied();
             // `ignored` windows are never tracked (see `track`), so the lookup
             // below already rejects them — no separate set probe needed.
             //
@@ -2079,7 +2225,17 @@ impl Compositor {
             let before_gen = cw.transform_gen;
             let trace_transition = crate::backend::x11::trace::enabled()
                 .then(|| cw.presentation.as_ref().map(|t| t.progress.position));
-            cw.set_transform(geom, bw, corner_radius, screen_union, screens, gen);
+            cw.set_transform_with_visual(
+                TransformInput {
+                    geom,
+                    bw,
+                    radius: corner_radius,
+                    visual_x,
+                },
+                screen_union,
+                screens,
+                gen,
+            );
             if let Some(previous) = trace_transition {
                 crate::backend::x11::trace::trace!(
                     "transition",
@@ -2140,16 +2296,18 @@ impl Compositor {
         cfg: &Cfg,
         registry: &LayoutRegistry,
         anim_per_mon: &[bool],
+        frame_dt: f32,
     ) {
-        // Advance before installing transforms so the frame that finishes a
-        // transition also draws its endpoint, rather than waiting for another turn.
-        let dt = self.last_present.map_or(0.0, |t| t.elapsed().as_secs_f32());
-        let trace_raw_dt = dt;
-        let dt = dt.clamp(0.0, crate::backend::x11::framesched::ONE_REFRESH * 2.0);
-        crate::backend::x11::trace::trace!(
-            "presentation_dt",
-            "raw_s={trace_raw_dt} clamped_s={dt}"
-        );
+        // Use the event loop's monotonic sample for every visual subsystem.
+        // `last_present` remains a telemetry timestamp only; using it here
+        // would create a second, independently clamped animation clock.
+        let dt = if frame_dt.is_finite() {
+            frame_dt.max(0.0)
+        } else {
+            0.0
+        };
+        self.frame_dt = dt;
+        crate::backend::x11::trace::trace!("presentation_dt", "frame_s={}", self.frame_dt);
         for cw in self.wins.values_mut() {
             cw.tick_presentation(dt);
         }
@@ -2230,13 +2388,22 @@ impl Compositor {
         for i in 0..nmon {
             let anim_i = anim_per_mon.get(i).copied().unwrap_or(false);
             let cam_now = state.monitors[i].ws().camera.position;
-            let (sig, alpha) = {
-                let ws = state.monitors[i].ws();
-                (proj_signature(ws, cfg), live_alpha(ws))
-            };
+            let sig = proj_signature(state.monitors[i].ws(), cfg);
             let layout_dirty = state.monitors[i].layout_dirty;
             let sig_changed = self.proj_cache[i].as_ref() != Some(&sig);
-            let recompute = anim_i || layout_dirty || sig_changed;
+            // Rebuild from the current camera value whenever it moved. The old
+            // fast path translated an integer cache by `round(dx)`, which
+            // discarded the fractional part of a subpixel camera motion and
+            // could turn a smooth visual state into one-pixel jumps. Caching is
+            // still useful while the monitor is idle; it must not be used as a
+            // second, rounded animation state.
+            let camera_changed = (cam_now - self.cam_cache[i]).abs() > 1e-4;
+            let recompute = live_projection_needs_rebuild(LiveProjectionInputs {
+                animating: anim_i,
+                layout_dirty,
+                signature_changed: sig_changed,
+                camera_changed,
+            });
             if recompute {
                 self.presentation_desired.clear();
                 live_placements(
@@ -2253,31 +2420,6 @@ impl Compositor {
                 self.cam_cache[i] = cam_now;
                 self.proj_cache[i] = Some(sig);
                 state.monitors[i].layout_dirty = false;
-            } else if (cam_now - self.cam_cache[i]).abs() > 1e-4 {
-                let dx = (-(cam_now - self.cam_cache[i]) * alpha).round() as i32;
-                self.presentation_desired.clear();
-                let ws = state.monitors[i].ws();
-                for &(win, g, bw) in &self.live_cache[i] {
-                    let stationary = ws.floats.contains(&win)
-                        || state
-                            .clients
-                            .get(&win)
-                            .is_some_and(|c| c.is_maximized() || c.is_true_fullscreen());
-                    let nx = if stationary {
-                        g.x
-                    } else {
-                        g.x.saturating_add(dx)
-                    };
-                    self.presentation_desired
-                        .push((win, Rect::new(nx, g.y, g.w, g.h), bw));
-                }
-                crate::core::present::present_into(
-                    state,
-                    &state.monitors[i],
-                    &mut self.presentation_desired,
-                    &mut self.presentation_raise_scratch,
-                );
-                self.cam_cache[i] = cam_now;
             } else {
                 self.presentation_desired.clear();
                 self.presentation_desired
@@ -2286,6 +2428,13 @@ impl Compositor {
             self.presentation_transforms
                 .extend(self.presentation_desired.iter().copied());
         }
+        refresh_visual_x_cache(
+            state,
+            cfg,
+            &mut self.visual_x_cache,
+            &mut self.visual_extents,
+            &mut self.presentation_ribbon_scratch,
+        );
         // Install transforms (frame_gen bump + per-window write).
         // Avoid per-frame Vec clone (allocation) by moving the buffer out,
         // borrowing it, and restoring it — no allocation, just a pointer swap.
@@ -2426,6 +2575,23 @@ impl Compositor {
             self.screen_w = (x1 - x0).max(1) as u32;
             self.screen_h = (y1 - y0).max(1) as u32;
             self.screen_rect = Rect::new(x0, y0, self.screen_w, self.screen_h);
+
+            // The composite overlay is a real X drawable, not a logical
+            // viewport that can be resized by changing GL uniforms alone.
+            // Reconfigure it whenever RandR changes the root dimensions so
+            // the GLX drawable grows with the screen; otherwise new pixels
+            // remain outside the drawable and appear clipped after a resize.
+            let wire_w = self.screen_w.clamp(1, u16::MAX as u32) as u16;
+            let wire_h = self.screen_h.clamp(1, u16::MAX as u32) as u16;
+            if let Err(e) = self.conn.configure_window(
+                self.overlay,
+                &ConfigureWindowAux::new()
+                    .width(u32::from(wire_w))
+                    .height(u32::from(wire_h)),
+            ) {
+                log::warn!("compositor: overlay resize configure failed: {e}");
+            }
+            let _ = self.conn.flush();
         }
         self.update_overlay_shape();
         self.mark_full(DirtyReason::GEOMETRY);
@@ -2818,19 +2984,28 @@ impl Compositor {
                 cw.occluded = false;
                 continue;
             }
-            let (outer, radius) = if cw.transform_gen == gen {
-                (cw.transform, cw.transform_radius)
+            let visual = cw.current_visual_rect(gen);
+            let outer = visual.enclosing();
+            let radius = if cw.transform_gen == gen {
+                cw.transform_radius
             } else {
-                (cw.outer, 0)
+                0
             };
             if outer.w == 0 || outer.h == 0 {
                 cw.occluded = false;
                 continue;
             }
             let onscreen = !CompWin::offscreen(outer, self.screen_rect);
+            let fractional = visual.x.fract() != 0.0
+                || visual.y.fract() != 0.0
+                || visual.w.fract() != 0.0
+                || visual.h.fract() != 0.0;
             let opaque = cw.can_occlude(radius);
-            cw.occluded = onscreen && fully_covered_by(outer, &self.occluder_rects);
-            if onscreen && opaque && !cw.occluded {
+            // Integer enclosing bounds are not sufficient to prove exact
+            // coverage when either edge is fractional. Keep drawing in that
+            // case; a missed cull is safe, a false cull leaves holes.
+            cw.occluded = !fractional && onscreen && fully_covered_by(outer, &self.occluder_rects);
+            if onscreen && opaque && !fractional && !cw.occluded {
                 self.occluder_rects.push(outer);
             }
         }
@@ -2906,6 +3081,33 @@ impl Compositor {
                 continue;
             }
             if cw.occluded {
+                // Occlusion suppresses drawing, not invalidation. A window
+                // moving behind an opaque rectangle can expose pixels that
+                // were visible in the previous frame; skip its texture binding,
+                // but still damage the old ∪ new transform before continuing.
+                let visual = cw.current_visual_rect(gen);
+                let outer = visual.enclosing();
+                let radius = if cw.transform_gen == gen {
+                    cw.transform_radius
+                } else {
+                    0
+                };
+                if cw.prev_visual != Some(outer)
+                    || visual_moved(cw.prev_visual_f, visual)
+                    || cw.prev_visual_radius != radius
+                {
+                    let mut aout = [Rect::default(); 2];
+                    let n = anim_damage_rects(cw.prev_visual, outer, &mut aout);
+                    for &r in &aout[..n] {
+                        self.frame_dirty.add(r);
+                    }
+                    if n == 0 {
+                        self.frame_dirty.add(outer);
+                    }
+                    cw.prev_visual = Some(outer);
+                    cw.prev_visual_f = Some(visual);
+                    cw.prev_visual_radius = radius;
+                }
                 if float_dbg {
                     log::info!(
                         "[SCENE] frame={} win={:#x} mapped={} outer={:?} transform={:?} transform_gen={} frame_gen={} tex={} included=false skip_reason=Occluded",
@@ -2914,6 +3116,15 @@ impl Compositor {
                 }
                 continue;
             }
+            // Fractional visual geometry for the GPU path, with conservative
+            // integer bounds for damage/culling/texture sampling.
+            let visual = cw.current_visual_rect(gen);
+            let outer = visual.enclosing();
+            let radius = if cw.transform_gen == gen {
+                cw.transform_radius
+            } else {
+                0
+            };
             let Some(tex) = cw.tex.as_mut() else {
                 if float_dbg {
                     log::info!(
@@ -2933,12 +3144,9 @@ impl Compositor {
                 }
                 cw.damaged = false;
             }
-            // Live outer rect, or fall back to the X geometry (OR windows).
-            let (outer, radius) = if cw.transform_gen == gen {
-                (cw.transform, cw.transform_radius)
-            } else {
-                (cw.outer, 0)
-            };
+            // Fractional visual geometry is captured before borrowing the
+            // texture; all subsequent damage and draw operations use that
+            // immutable snapshot.
             if outer.w == 0 || outer.h == 0 {
                 if float_dbg {
                     log::info!(
@@ -2961,15 +3169,21 @@ impl Compositor {
             // entry. A stationary, undamaged window contributes nothing, so the
             // partial-redraw bounding box no longer balloons to the whole screen
             // every frame (B5).
-            let moved = cw.prev_visual != Some(outer) || cw.prev_visual_radius != radius;
+            let moved = cw.prev_visual != Some(outer)
+                || visual_moved(cw.prev_visual_f, visual)
+                || cw.prev_visual_radius != radius;
             if was_damaged || moved {
                 let mut aout = [Rect::default(); 2];
                 let n = anim_damage_rects(cw.prev_visual, outer, &mut aout);
                 for &r in &aout[..n] {
                     self.frame_dirty.add(r);
                 }
+                if n == 0 {
+                    self.frame_dirty.add(outer);
+                }
             }
             cw.prev_visual = Some(outer);
+            cw.prev_visual_f = Some(visual);
             cw.prev_visual_radius = radius;
             // Cull windows that are entirely outside the screen. This is the
             // single biggest draw-time win: a 50-window ribbon only has ~5 on
@@ -2998,14 +3212,9 @@ impl Compositor {
                 Filter::Nearest
             };
             let q = DrawQuad {
-                dst: [
-                    outer.x as f32,
-                    outer.y as f32,
-                    (outer.x + outer.w as i32) as f32,
-                    (outer.y + outer.h as i32) as f32,
-                ],
+                dst: visual_draw_dst(visual),
                 src: [0.0, 0.0, 1.0, 1.0],
-                size: [outer.w as f32, outer.h as f32],
+                size: [visual.w, visual.h],
                 radius: radius as f32,
                 border_width: if cw.transform_gen == gen && cw.border_color.is_some() {
                     cw.transform_border_w as f32
@@ -3326,6 +3535,15 @@ impl Compositor {
         self.dirty = false;
         self.needs_full = false;
         self.dirty_reasons.clear();
+        // `retry_pending_tracks` runs before this commit boundary. Preserve its
+        // retry request when it could not bind a source window yet; otherwise
+        // the unconditional clear below would strand the pending CreateNotify
+        // until an unrelated event woke the compositor.
+        if !self.pending_track.is_empty() {
+            self.dirty = true;
+            self.needs_full = true;
+            self.dirty_reasons.insert(DirtyReason::SURFACE);
+        }
         // A transition that is still mid-flight (or a newly triggered one whose
         // first interpolated frame was just produced) keeps the loop awake the
         // same way an ongoing camera animation does — through the one-shot
@@ -3334,11 +3552,9 @@ impl Compositor {
             self.dirty = true;
             self.dirty_reasons.insert(DirtyReason::GEOMETRY);
         }
-        // Stamp the present timestamp unconditionally: the presentation
-        // transitions read the inter-present interval as their dt, which must
-        // work with tracing off (the trace block below only *reports* it).
-        // Stamp the present timestamp before the trace block so interval
-        // metrics use the previous presentation, not the current one.
+        // Stamp the present timestamp for trace/diagnostic interval metrics.
+        // Visual animation timing is supplied by the event loop's `frame_dt`;
+        // this timestamp must not become a second animation clock.
         let previous_present = self.last_present;
         self.last_present = t_frame_start;
 
@@ -3857,18 +4073,21 @@ fn map_damage_rect(cw: &CompWin, local: Rect, geometry_x: i32, geometry_y: i32) 
         cw.outer.w.saturating_sub(cw.border_w.saturating_mul(2)),
         cw.outer.h.saturating_sub(cw.border_w.saturating_mul(2)),
     );
-    let drawn = if cw.transform.w > 0 && cw.transform.h > 0 {
-        cw.transform
+    let visual = if cw.visual_transform.w > 0.0 && cw.visual_transform.h > 0.0 {
+        cw.visual_transform
     } else {
-        cw.outer
+        VisualRect::from_rect(cw.outer)
     };
+    let drawn = visual.enclosing();
     if source.w == 0 || source.h == 0 || drawn.w == 0 || drawn.h == 0 {
         return cw.outer;
     }
-    let x0 = (local.x as i64 * drawn.w as i64 / source.w as i64) as i32;
-    let y0 = (local.y as i64 * drawn.h as i64 / source.h as i64) as i32;
-    let x1 = ((local.x as i64 + local.w as i64) * drawn.w as i64 / source.w as i64) as i32;
-    let y1 = ((local.y as i64 + local.h as i64) * drawn.h as i64 / source.h as i64) as i32;
+    let x0 = ((local.x as f64 * visual.w as f64 / source.w as f64).floor()) as i32;
+    let y0 = ((local.y as f64 * visual.h as f64 / source.h as f64).floor()) as i32;
+    let x1 =
+        (((local.x as f64 + local.w as f64) * visual.w as f64 / source.w as f64).ceil()) as i32;
+    let y1 =
+        (((local.y as f64 + local.h as f64) * visual.h as f64 / source.h as f64).ceil()) as i32;
     Rect::new(
         drawn.x.saturating_add(x0),
         drawn.y.saturating_add(y0),
@@ -3910,6 +4129,44 @@ fn selection_owned(conn: &XConn, atom: Atom) -> bool {
         return r.owner != x11rb::NONE;
     }
     false
+}
+
+/// Rebuild fractional horizontal positions from the same live camera projection
+/// used by layout. This is a derived cache, not an accumulated transform.
+fn refresh_visual_x_cache(
+    state: &State,
+    cfg: &Cfg,
+    out: &mut std::collections::HashMap<Window, f32>,
+    extents: &mut Vec<(f32, f32)>,
+    scratch: &mut RibbonScratch,
+) {
+    use crate::core::layout::{column_screen_extents_into, fs_ctx};
+    out.clear();
+    for mon in &state.monitors {
+        let ws = mon.ws();
+        if ws.layout != crate::types::LayoutKind::Column {
+            continue;
+        }
+        let fs = fs_ctx(&state.clients, ws, mon.screen);
+        column_screen_extents_into(ws, cfg, mon.workarea, &fs, extents, scratch);
+        for (ci, col) in ws.columns.iter().enumerate() {
+            let Some(&(left, _)) = extents.get(ci) else {
+                continue;
+            };
+            for &win in &col.windows {
+                let Some(client) = state.clients.get(&win) else {
+                    continue;
+                };
+                if client.is_maximized()
+                    || client.is_fullscreen_overlay()
+                    || mon.ws().presented_maximize == Some(win)
+                {
+                    continue;
+                }
+                out.insert(win, left);
+            }
+        }
+    }
 }
 
 /// Compute the *live* placements for one monitor (same projection as the
@@ -4111,10 +4368,14 @@ mod stack_tests {
 /// be exercised entirely in CI.
 #[cfg(test)]
 mod damage_tests {
-    use super::{anim_damage_rects, fully_covered_by, DamageRegion};
+    use super::{
+        anim_damage_rects, fully_covered_by, map_damage_rect, visual_moved, CompWin, DamageRegion,
+        VisualRect,
+    };
     use crate::types::Rect;
+    use maverick_gl::VisualFormat;
 
-    /// Fase 7: a window that moved from `A` to `B` must repaint *both* rects, so
+    /// A window that moved from `A` to `B` must repaint *both* rects, so
     /// neither the pixels it left nor the ones it slid into linger. The helper
     /// returns exactly the union pair, nothing more.
     #[test]
@@ -4128,7 +4389,73 @@ mod damage_tests {
         assert_eq!(out[1], cur);
     }
 
-    /// A window that did not move emits only its current rect — no spurious
+    /// Occlusion suppresses texture work, not movement damage: the old rect
+    /// can contain pixels that become exposed when the window moves behind an
+    /// opaque rectangle.
+    #[test]
+    fn occluded_moving_window_still_damages_old_and_new() {
+        let prev = Rect::new(0, 0, 100, 100);
+        let cur = Rect::new(20, 0, 100, 100);
+        let occluder = Rect::new(20, 0, 100, 100);
+        assert!(fully_covered_by(cur, &[occluder]));
+        let mut out = [Rect::default(); 2];
+        let n = anim_damage_rects(Some(prev), cur, &mut out);
+        assert_eq!(n, 2);
+        assert_eq!(out[0], prev);
+        assert_eq!(out[1], cur);
+    }
+
+    #[test]
+    fn fractional_damage_uses_outward_enclosing_bounds() {
+        let old = VisualRect {
+            x: 10.2,
+            y: 20.2,
+            w: 20.0,
+            h: 20.0,
+        };
+        let new = VisualRect {
+            x: 10.8,
+            y: 20.8,
+            w: 20.0,
+            h: 20.0,
+        };
+        let old_bounds = old.enclosing();
+        let new_bounds = new.enclosing();
+        let mut out = [Rect::default(); 2];
+        let n = anim_damage_rects(Some(old_bounds), new_bounds, &mut out);
+        assert!(visual_moved(Some(old), new));
+        assert_eq!(
+            n, 1,
+            "same enclosing bounds still retain a current-bounds damage entry"
+        );
+        assert_eq!(out[0], new_bounds);
+    }
+
+    #[test]
+    fn fractional_map_damage_expands_without_truncation() {
+        let mut cw = CompWin::new(
+            Rect::new(10, 20, 100, 80),
+            0,
+            VisualFormat {
+                id: 0,
+                depth: 24,
+                red_bits: 8,
+                green_bits: 8,
+                blue_bits: 8,
+                alpha_bits: 0,
+                direct: true,
+            },
+        );
+        cw.visual_transform = VisualRect {
+            x: 10.25,
+            y: 20.75,
+            w: 100.0,
+            h: 80.0,
+        };
+        let damage = map_damage_rect(&cw, Rect::new(0, 0, 1, 1), 10, 20);
+        assert_eq!(damage, Rect::new(10, 20, 1, 1));
+    }
+
     /// damage that would force a larger (or full) redraw.
     #[test]
     fn stationary_window_damages_only_current() {
@@ -4564,7 +4891,10 @@ mod frameplan_tests {
 /// budget at realistic window counts.
 #[cfg(test)]
 mod bench {
-    use super::{decide_redraw, live_placements, DamageRegion, FrameMode};
+    use super::{
+        decide_redraw, live_placements, live_projection_needs_rebuild, refresh_visual_x_cache,
+        visual_draw_dst, DamageRegion, FrameMode, LiveProjectionInputs, VisualRect,
+    };
     use crate::config::Cfg;
     use crate::core::framebench::CountAllocs;
     use crate::core::layout::{LayoutRegistry, Placements, RibbonScratch};
@@ -4594,6 +4924,72 @@ mod bench {
         state.monitors[0].workspaces[0].camera.position = 137.0;
         state.monitors[0].workspaces[0].camera.target = 900.0;
         state
+    }
+
+    #[test]
+    fn camera_motion_never_reuses_a_translated_integer_cache() {
+        assert!(live_projection_needs_rebuild(LiveProjectionInputs {
+            camera_changed: true,
+            ..LiveProjectionInputs::default()
+        }));
+        assert!(!live_projection_needs_rebuild(
+            LiveProjectionInputs::default()
+        ));
+        assert!(live_projection_needs_rebuild(LiveProjectionInputs {
+            layout_dirty: true,
+            ..LiveProjectionInputs::default()
+        }));
+    }
+
+    #[test]
+    fn visual_x_projection_preserves_fraction_and_is_not_accumulated() {
+        let cfg = Cfg::default();
+        let mut state = ribbon(2);
+        state.monitors[0].workspaces[0].camera.position = 0.0;
+        let logical = state.clients.get(&1).unwrap().geom;
+        let mut cache = std::collections::HashMap::new();
+        let mut extents = Vec::new();
+        let mut scratch = RibbonScratch::default();
+        refresh_visual_x_cache(&state, &cfg, &mut cache, &mut extents, &mut scratch);
+        let first = *cache.get(&1).unwrap();
+
+        let mut samples = Vec::new();
+        for camera in [0.1_f32, 0.2, 0.3] {
+            state.monitors[0].workspaces[0].camera.position = camera;
+            refresh_visual_x_cache(&state, &cfg, &mut cache, &mut extents, &mut scratch);
+            samples.push(*cache.get(&1).unwrap());
+        }
+        assert!((samples[0] - first + 0.1).abs() < 1e-4);
+        assert!((samples[1] - first + 0.2).abs() < 1e-4);
+        assert!((samples[2] - first + 0.3).abs() < 1e-4);
+        assert_eq!(state.clients.get(&1).unwrap().geom, logical);
+        assert!((samples[0] - samples[1] - 0.1).abs() < 1e-4);
+    }
+
+    #[test]
+    fn visual_rect_encloses_fractional_bounds_outwards() {
+        let rect = VisualRect {
+            x: 10.25,
+            y: 20.75,
+            w: 100.5,
+            h: 50.25,
+        }
+        .enclosing();
+        assert_eq!(rect, Rect::new(10, 20, 101, 51));
+    }
+
+    #[test]
+    fn renderer_quad_keeps_fractional_dst() {
+        let dst = visual_draw_dst(VisualRect {
+            x: 123.5,
+            y: 456.25,
+            w: 100.0,
+            h: 50.0,
+        });
+        let expected = [123.5, 456.25, 223.5, 506.25];
+        for (actual, expected) in dst.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
     }
 
     /// Time the steady-state projection over `iters` frames, averaged. Also
@@ -4771,6 +5167,25 @@ mod lifecycle_tests {
         cw.presentation_spring = Some((cfg.animations.stiffness, cfg.animations.damping));
         cw.set_transform(cw.outer, 0, 18, Rect::new(0, 0, 800, 600), &[], 1);
         cw
+    }
+
+    #[test]
+    fn visual_transform_preserves_fraction_until_draw() {
+        let mut cw = transitioning_window();
+        cw.presentation_spring = None;
+        cw.set_transform_with_visual(
+            super::TransformInput {
+                geom: Rect::new(500, 8, 313, 584),
+                bw: 0,
+                radius: 18,
+                visual_x: Some(499.75),
+            },
+            Rect::new(0, 0, 800, 600),
+            &[],
+            cw.transform_gen + 1,
+        );
+        assert!((cw.visual_transform.x - 499.75).abs() < 1e-5);
+        assert_eq!(cw.transform.x, 500);
     }
 
     fn settle_presentation(cw: &mut CompWin, target: Rect) -> usize {

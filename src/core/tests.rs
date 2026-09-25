@@ -2912,7 +2912,29 @@ mod unit_tests {
         );
     }
 
-    // ─── Fase 5 (plan 1786564084575): property-based invariant harness ─────────
+    #[test]
+    fn page_snap_does_not_jump_when_ribbon_fits() {
+        use crate::types::{Action, Client, Dir};
+        let cfg = default_cfg();
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        engine.state.add_client(Client::new(1, mi, ws_i));
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, cfg.column_width);
+        // Recompute the settled center through the same command used by zoom
+        // navigation, then install it as the current visual endpoint.
+        engine.dispatch(Action::ViewportZoom(0.0));
+        let center = engine.state.monitors[mi].workspaces[ws_i].camera.target;
+        engine.state.monitors[mi].workspaces[ws_i]
+            .camera
+            .snap(center);
+        engine.dispatch(Action::PageSnap(Dir::Right));
+        assert!(
+            (engine.state.monitors[mi].workspaces[ws_i].camera.target - center).abs() < 1e-4,
+            "a page snap inside a non-overflowing ribbon must be a no-op"
+        );
+    }
+
     //
     // Drive ≥10k random Create/Destroy/Focus/Move/Resize/Fullscreen/Scroll/
     // View/Layout sequences through the real command layer and assert

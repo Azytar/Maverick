@@ -232,7 +232,7 @@ impl WindowManager {
         let cfg = &self.engine.cfg;
         for ws in &mut monitors[mon_idx].workspaces {
             let fs = fs_ctx(clients, ws, screen);
-            ws.camera.target = ideal_scroll(ws, cfg, wa, fs);
+            ws.camera.retarget(ideal_scroll(ws, cfg, wa, fs));
         }
     }
 

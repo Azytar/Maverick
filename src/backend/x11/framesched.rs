@@ -21,9 +21,9 @@
 //!
 //! # Protocol why
 //!
-//! - `clamp_frame_dt` bounds `dt` to `ONE_REFRESH` on first animating
-//!   frame and `2*ONE_REFRESH` thereafter so a long idle gap cannot inject an
-//!   absurd spring step.
+//! - `clamp_frame_dt` bounds the idle→animating edge to `ONE_REFRESH` and
+//!   active animation to `MAX_ANIMATION_DT`, preserving ordinary elapsed time
+//!   without allowing an unbounded catch-up loop.
 //! - `timeout_ms` returns `Some(0)` for a pending frame and `None` for an
 //!   idle scene. The X11 loop then blocks on X11 plus the control self-pipe;
 //!   continuous animation gets its refresh-derived deadline outside this pure
@@ -91,14 +91,29 @@ impl FrameReason {
 /// never produces an absurd spring step on the first frame after activity.
 pub(crate) const ONE_REFRESH: f32 = 1.0 / 60.0;
 
-/// Clamp the raw time since the previous present into a sane `dt` for the spring
-/// integrator (Fase 9 / B8). While animating we allow up to ~2 refreshes as a
-/// guard against a stalled GPU; on the idle→animating edge (`was_animating ==
-/// false`) we seed it to at most one refresh so a scroll that begins after a
-/// long idle gap does not jump by the whole idle duration. Pure and testable.
+/// Clamp the raw time since the previous present into a bounded `dt` for the
+/// frame clock. An idle→animating edge is seeded to one refresh so a scroll that
+/// begins after a long sleep never applies the whole idle gap. Once animation is
+/// already active, the elapsed interval is preserved up to a generous one-second
+/// stall guard; this keeps 15/30/60/120 Hz and ordinary compositor stalls on the
+/// same monotonic timeline without allowing an unbounded catch-up loop.
+pub(crate) const MAX_ANIMATION_DT: f32 = 1.0;
+
+/// Whether the event loop should add a software refresh wait after a present.
+/// GLX swap interval 1 already blocks until vblank when `VSync` is enabled.
+pub(crate) const fn should_wait_after_swap(vsync_on: bool) -> bool {
+    !vsync_on
+}
+
+/// A transition which was active and settles during this tick still needs one
+/// compositor frame to install its exact endpoint.
+pub(crate) const fn needs_endpoint_frame(was_animating: bool, animating: bool) -> bool {
+    was_animating && !animating
+}
+
 pub(crate) fn clamp_frame_dt(raw_dt: f32, was_animating: bool) -> f32 {
     if was_animating {
-        raw_dt.clamp(0.0, ONE_REFRESH * 2.0)
+        raw_dt.clamp(0.0, MAX_ANIMATION_DT)
     } else {
         raw_dt.clamp(0.0, ONE_REFRESH)
     }
@@ -256,17 +271,16 @@ mod tests {
     //!
     //! # Animation pacing
     //!
-    //! `clamp_frame_dt` bounds `dt` to [0, 2×refresh] and
-    //! includes `glXSwapBuffers` blocking time in the measurement
-    //! (B8 fix). The scheduler does NOT re-seed after present;
-    //! the blocking time is already accounted for.
+    //! `clamp_frame_dt` bounds the idle edge to one refresh and active animation
+    //! to `MAX_ANIMATION_DT`, and includes `glXSwapBuffers` blocking time in the
+    //! measurement (B8 fix). The scheduler does NOT re-seed after present; the
+    //! blocking time is already accounted for.
     //!
     //! # Idle pacing
     //!
-    //! When no frame is needed, `timeout_ms` returns 100 ms
-    //! (B1: the swap buffer is the only synchroniser, so no
-    //! idle busy-wait is needed). The event loop polls the
-    //! X11 socket with this timeout.
+    //! When no frame is needed, `timeout_ms` returns `None`; the event loop
+    //! blocks on X11/control rather than waking periodically. A pending frame
+    //! returns `Some(0)` and is processed immediately.
     //!
     //! # Invariants
     //!
@@ -506,6 +520,19 @@ mod tests {
         assert_eq!(stopped.timeout_ms(), None);
     }
 
+    #[test]
+    fn vsync_on_relies_on_swap_instead_of_a_second_timer() {
+        assert!(!should_wait_after_swap(true));
+        assert!(should_wait_after_swap(false));
+    }
+
+    #[test]
+    fn endpoint_transition_gets_one_terminal_frame() {
+        assert!(needs_endpoint_frame(true, false));
+        assert!(!needs_endpoint_frame(false, false));
+        assert!(!needs_endpoint_frame(true, true));
+    }
+
     /// The idle→animating edge must never hand the integrator an absurd `dt`.
     // Exact, deterministic comparisons against known clamp outputs.
     #[allow(clippy::float_cmp)]
@@ -513,8 +540,10 @@ mod tests {
     fn idle_to_animating_produces_no_absurd_dt() {
         // Long idle gap: a 5 s raw delta is seeded to at most one refresh.
         assert_eq!(clamp_frame_dt(5.0, false), ONE_REFRESH);
-        // While animating a 5 s stall is clamped to ~2 refreshes, never left raw.
-        assert_eq!(clamp_frame_dt(5.0, true), ONE_REFRESH * 2.0);
+        // Once active, elapsed time is retained through ordinary stalls; only a
+        // pathological multi-second gap hits the one-second safety guard.
+        assert_eq!(clamp_frame_dt(0.1, true), 0.1);
+        assert_eq!(clamp_frame_dt(5.0, true), MAX_ANIMATION_DT);
         // Normal small deltas pass through unchanged.
         assert_eq!(clamp_frame_dt(1.0 / 120.0, true), 1.0 / 120.0);
         assert_eq!(clamp_frame_dt(1.0 / 120.0, false), 1.0 / 120.0);
@@ -555,8 +584,9 @@ mod tests {
         // excluded from the delta: ~55x too small. The scroll then crawls, and
         // the f32 integrator cannot even reach its settle threshold — so
         // `animating` would latch on and the loop would never go idle again.
+        let small = frames_to_settle(0.0003, 200_000);
         assert!(
-            frames_to_settle(0.0003, 200_000).is_none(),
+            small.is_none(),
             "a loop-overhead-sized dt must not be mistaken for a frame period"
         );
     }

@@ -122,6 +122,10 @@ mod placeholder {
         pub fn wallpaper_animating(&self) -> bool {
             false
         }
+        #[inline(always)]
+        pub fn vsync_active(&self) -> bool {
+            false
+        }
         /// No presentation transitions exist without the compositor feature,
         /// so the loop never stays awake for one.
         #[inline(always)]
@@ -139,6 +143,7 @@ mod placeholder {
             _cfg: &crate::config::Cfg,
             _registry: &crate::core::layout::LayoutRegistry,
             _anim_per_mon: &[bool],
+            _frame_dt: f32,
         ) {
         }
         #[inline(always)]

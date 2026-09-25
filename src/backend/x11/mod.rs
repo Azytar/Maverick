@@ -559,18 +559,23 @@ impl WindowManager {
         // ── animation phase ──────────────────────────────────────────────────
         // Advance camera (and accordion/zoom) springs. While anything is still
         // moving we use a refresh-derived deadline; once the scene settles the
-        // loop parks on X11 plus the control self-pipe.
-        let was_animating = self.animating;
+        // loop parks on X11 plus the control self-pipe. Presentation and
+        // animated-wallpaper state are included here so their dt uses the same
+        // active-clock policy as the camera.
+        let compositor_animating = self
+            .compositor
+            .as_ref()
+            .is_some_and(|c| c.presentation_animating() || c.wallpaper_animating());
+        let was_animating = self.animating || compositor_animating;
         let now = Instant::now();
         // `dt` is the time since the previous turn's animation phase. Because
         // the loop presents at most once per turn, that span *is* the
         // present-to-present interval — including the time `glXSwapBuffers`
         // spends blocked on the retrace, which is most of the frame and must be
-        // integrated or the springs run in slow motion. The clamping policy
-        // (seed one refresh on the idle→animating edge so a scroll does not jump
-        // by the whole idle gap (B8); clamp to ~2 refreshes while animating as a
-        // guard against a stalled GPU) lives in `framesched::clamp_frame_dt` so
-        // it is unit-testable.
+        // the integrated elapsed time (seed one refresh on the idle→animating
+        // edge so a scroll does not jump by the whole idle gap; bound only
+        // pathological multi-second catch-up while active) lives in
+        // `framesched::clamp_frame_dt` so it is unit-testable.
         let raw_dt = (now - self.last_frame).as_secs_f32();
         let dt = crate::backend::x11::framesched::clamp_frame_dt(raw_dt, was_animating);
         self.last_frame = now;
@@ -623,14 +628,16 @@ impl WindowManager {
             } else {
                 comp.disengage_all_bypass();
             }
-            // Compositor path: the camera is substepped (its semi-implicit
-            // integrator is unstable above ~8 ms) and the *live* layout — read
-            // from the spring's current value — is drawn by the GPU. Swap
-            // interval 1 (set at init) paces the present from inside `end_frame`,
-            // so there is no explicit vblank wait here — the flip is scheduled by
-            // the server for the next retrace (B1). The WM's settled geometry was
-            // already written by whichever action triggered the change, so no
-            // per-frame `ConfigureWindow` storm.
+            // Compositor path: the camera samples an analytical damped
+            // transition for each elapsed slice. The live layout reads the
+            // animated camera value and is drawn by the GPU. Substeps remain a
+            // defensive bound for the remaining exponential presentation
+            // springs, but the camera trajectory is not Euler/FPS-dependent.
+            // Swap interval 1 (set at init) paces the present from inside
+            // `end_frame`, so there is no explicit vblank wait here — the flip
+            // is scheduled by the server for the next retrace (B1). The WM's
+            // settled geometry was already written by whichever action
+            // triggered the change, so no per-frame `ConfigureWindow` storm.
             let nmon = self.engine.state.monitors.len();
             if self.anim_per_mon.len() != nmon {
                 self.anim_per_mon = vec![false; nmon];
@@ -649,6 +656,34 @@ impl WindowManager {
                 self.anim_per_mon.fill(false);
             }
             self.animating = anim;
+            // If the last animated tick snapped to its endpoint, the next
+            // scheduler would otherwise see no reason to render and the GPU
+            // could retain the previous (up to 0.5 px) transform indefinitely.
+            // Queue one compositor frame that installs the exact endpoint.
+            if framesched::needs_endpoint_frame(was_animating, anim) {
+                comp.invalidate();
+            }
+            // Diagnostic snapshot: the compositor trace deliberately records the
+            // logical target, the animated camera value, and the exact delta used
+            // for this turn.  Keeping these in the same monotonic trace stream
+            // makes retarget/FPS regressions measurable without changing the hot
+            // path when tracing is disabled.
+            if trace::enabled() {
+                for (mi, mon) in self.engine.state.monitors.iter().enumerate() {
+                    let ws = mon.ws();
+                    trace!(
+                        "camera_tick",
+                        "monitor={} target={} current={} velocity={} raw_dt_s={} dt_s={} animating={}",
+                        mi,
+                        ws.camera.target,
+                        ws.camera.position,
+                        ws.camera.velocity,
+                        raw_dt,
+                        dt,
+                        anim,
+                    );
+                }
+            }
             // Advance the wallpaper animation clock with the same clamped `dt` the
             // WM springs use (no separate timer). A static wallpaper leaves
             // `wallpaper_animating` false and the loop goes idle.
@@ -657,7 +692,7 @@ impl WindowManager {
             // WM-side animation flag, the wallpaper animation flag, and the
             // compositor's *why* (its reason bits), so the render-loop decision is
             // explicit and testable. Idle stays free: when the scheduler reports no
-            // reason we do no GL work and the wait phase below parks on a 100 ms poll.
+            // reason we do no GL work and the wait phase blocks on X11/control.
             sched = FrameScheduler::from_compositor(
                 self.animating || comp.presentation_animating(),
                 comp.wallpaper_animating(),
@@ -708,6 +743,7 @@ impl WindowManager {
                     &self.engine.cfg,
                     &self.layout_registry,
                     &self.anim_per_mon,
+                    dt,
                 );
                 drop(prepare_trace);
                 let render_trace = trace::Span::new("render");
@@ -764,11 +800,16 @@ impl WindowManager {
                     .as_ref()
                     .is_some_and(compositor::Compositor::presentation_animating),
         );
-        self.animation_due = if sched.is_continuous() {
-            Some(Instant::now() + self.frame_period)
-        } else {
-            None
-        };
+        let vsync_on = self
+            .compositor
+            .as_ref()
+            .is_some_and(compositor::Compositor::vsync_active);
+        self.animation_due =
+            if sched.is_continuous() && framesched::should_wait_after_swap(vsync_on) {
+                Some(Instant::now() + self.frame_period)
+            } else {
+                None
+            };
 
         drop(after_trace);
         trace!(
@@ -856,7 +897,7 @@ impl WindowManager {
         );
         crate::log::config_trace(
             "scheduler_policy",
-            format_args!("compositor_actual={} animations_enabled={} off_path=snap_animations on_path=substeps_if_enabled idle_poll_ms=100 frame_poll_ms=0 pacing=swap_only existing_trace_enabled={}", self.compositor.is_some(), crate::config::animations_enabled(&self.engine.cfg), trace::enabled()),
+            format_args!("compositor_actual={} animations_enabled={} off_path=snap_animations on_path=analytic_substeps idle_poll=block pacing=swap_only existing_trace_enabled={}", self.compositor.is_some(), crate::config::animations_enabled(&self.engine.cfg), trace::enabled()),
         );
         while self.engine.state.running {
             if let Err(e) = self.run_once() {

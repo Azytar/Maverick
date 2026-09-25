@@ -56,7 +56,7 @@ fn scroll_to_focused(state: &mut State, cfg: &Cfg, mi: usize, ws_i: usize) {
     // Re-borrow after the shared reads above.
     if let Some(mon) = state.monitors.get_mut(mi) {
         if let Some(ws) = mon.workspaces.get_mut(ws_i) {
-            ws.camera.target = scroll;
+            ws.camera.retarget(scroll);
         }
     }
 }
@@ -99,7 +99,7 @@ pub fn retarget_focus_to_window(state: &mut State, cfg: &Cfg, win: WindowId) -> 
             ws.columns[ci].focused = ri;
         }
         let fs = fs_ctx(clients, ws, screen);
-        ws.camera.target = ideal_scroll(ws, cfg, wa, fs);
+        ws.camera.retarget(ideal_scroll(ws, cfg, wa, fs));
     }
     Some(mi)
 }
@@ -463,7 +463,7 @@ impl Command for ViewportZoom {
         }
         // Keep the focused column centered under the new zoom (camera animates).
         if ws.layout == LayoutKind::Column {
-            ws.camera.target = ideal_scroll(ws, cfg, wa, fs);
+            ws.camera.retarget(ideal_scroll(ws, cfg, wa, fs));
         }
         cmds.push(Effect::ArrangeMonitor(mi));
         CommandReport::with_event(
@@ -498,16 +498,27 @@ impl Command for PageSnap {
             return CommandReport::new(cmds);
         }
         let g = ribbon_geom(ws, cfg, wa, true, &fs);
-        // One visible-page worth of world space at the current zoom.
-        let step = (wa.w as f32) / g.alpha;
+        // One visible-page worth of world space at the settled zoom. The
+        // geometry subtracts `gaps_outer` into `g.wa`, and the screen projection
+        // scales that already-inset width; using the outer workarea here would
+        // overshoot the real page and compute a different max scroll.
+        let visible_w = (g.wa.w as f32 / g.alpha).max(1.0);
+        let step = visible_w;
         let dir = match self.0 {
             Dir::Left => -1.0,
             Dir::Right => 1.0,
             _ => return CommandReport::new(cmds),
         };
-        let max_scroll = (g.total_w - (wa.w as f32) / g.alpha).max(0.0);
-        let new = (ws.camera.target + dir * step).clamp(0.0, max_scroll);
-        ws.camera.target = new;
+        let cam_min = g.cx / g.alpha;
+        let cam_max = g.total_w - (g.wa.w as f32 - g.cx) / g.alpha;
+        let (lo, hi) = if cam_max <= cam_min {
+            let center = (g.total_w - g.wa.w as f32) / 2.0;
+            (center, center)
+        } else {
+            (cam_min, cam_max)
+        };
+        let new = (ws.camera.target + dir * step).clamp(lo, hi);
+        ws.camera.retarget(new);
         cmds.push(Effect::ArrangeMonitor(mi));
         CommandReport::with_event(
             cmds,
@@ -607,7 +618,7 @@ impl Command for FocusDirection {
                     wa,
                     fs_of(state, mi, ws_i),
                 );
-                state.monitors[mi].workspaces[ws_i].camera.target = scroll;
+                state.monitors[mi].workspaces[ws_i].camera.retarget(scroll);
                 state.monitors[mi].workspaces[ws_i].columns[new_ci].focused_win()
             }
             Dir::Up | Dir::Down => {
@@ -636,7 +647,7 @@ impl Command for FocusDirection {
                     wa,
                     fs_of(state, mi, ws_i),
                 );
-                state.monitors[mi].workspaces[ws_i].camera.target = scroll;
+                state.monitors[mi].workspaces[ws_i].camera.retarget(scroll);
                 Some(target)
             }
             Dir::Next | Dir::Prev => {
@@ -692,7 +703,7 @@ impl Command for FocusDirection {
                     wa,
                     fs_of(state, mi, ws_i),
                 );
-                state.monitors[mi].workspaces[ws_i].camera.target = scroll;
+                state.monitors[mi].workspaces[ws_i].camera.retarget(scroll);
                 Some(target)
             }
         };
@@ -765,7 +776,7 @@ impl Command for MoveWindow {
             wa,
             fs_of(state, mi, ws_i),
         );
-        state.monitors[mi].workspaces[ws_i].camera.target = scroll;
+        state.monitors[mi].workspaces[ws_i].camera.retarget(scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
         cmds.push(Effect::FocusWindow(Some(self.0)));
         CommandReport::with_event(cmds, Event::WindowMoved(self.0))
@@ -1065,8 +1076,8 @@ impl Command for CycleLayout {
             if layout == LayoutKind::Column {
                 let wa = state.monitors[mi].workarea;
                 let fs = fs_of(state, mi, ws_i);
-                state.monitors[mi].workspaces[ws_i].camera.target =
-                    ideal_scroll(&state.monitors[mi].workspaces[ws_i], cfg, wa, fs);
+                let scroll = ideal_scroll(&state.monitors[mi].workspaces[ws_i], cfg, wa, fs);
+                state.monitors[mi].workspaces[ws_i].camera.retarget(scroll);
             }
             cmds.push(Effect::ArrangeMonitor(mi));
             return CommandReport::with_event(
@@ -1100,8 +1111,8 @@ impl Command for SetLayout {
             if self.0 == LayoutKind::Column {
                 let wa = state.monitors[mi].workarea;
                 let fs = fs_of(state, mi, ws_i);
-                state.monitors[mi].workspaces[ws_i].camera.target =
-                    ideal_scroll(&state.monitors[mi].workspaces[ws_i], cfg, wa, fs);
+                let scroll = ideal_scroll(&state.monitors[mi].workspaces[ws_i], cfg, wa, fs);
+                state.monitors[mi].workspaces[ws_i].camera.retarget(scroll);
             }
             cmds.push(Effect::ArrangeMonitor(mi));
             return CommandReport::with_event(
@@ -1297,7 +1308,7 @@ impl Command for GrowColumn {
         ws.columns[ci].weight = (old_weight + delta_weight).clamp(0.05, max_w);
 
         let scroll = ideal_scroll(ws, cfg, wa, fs);
-        ws.camera.target = scroll;
+        ws.camera.retarget(scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
         CommandReport::new(cmds)
     }
@@ -1374,7 +1385,7 @@ impl Command for NewColumn {
         ws.rebalance_weights();
 
         let scroll = ideal_scroll(ws, cfg, wa, fs);
-        ws.camera.target = scroll;
+        ws.camera.retarget(scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
         cmds.push(Effect::FocusWindow(Some(win)));
         CommandReport::with_event(
@@ -1429,7 +1440,7 @@ impl Command for CollapseColumn {
             state.monitors[mi].workarea,
             fs_of(state, mi, ws_i),
         );
-        state.monitors[mi].workspaces[ws_i].camera.target = scroll;
+        state.monitors[mi].workspaces[ws_i].camera.retarget(scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
         CommandReport::new(cmds)
     }
@@ -1563,19 +1574,25 @@ impl Command for MoveWindowToMonitor {
         // and the destination (which just gained one) so neither monitor is left
         // with a stale camera that hides the focused column.
         let src_wa = state.monitors[mi].workarea;
-        state.monitors[mi].workspaces[src_ws_real].camera.target = ideal_scroll(
+        let src_scroll = ideal_scroll(
             &state.monitors[mi].workspaces[src_ws_real],
             cfg,
             src_wa,
             fs_of(state, mi, src_ws_real),
         );
+        state.monitors[mi].workspaces[src_ws_real]
+            .camera
+            .retarget(src_scroll);
         let dst_wa = state.monitors[new_mi].workarea;
-        state.monitors[new_mi].workspaces[dst_ws].camera.target = ideal_scroll(
+        let dst_scroll = ideal_scroll(
             &state.monitors[new_mi].workspaces[dst_ws],
             cfg,
             dst_wa,
             fs_of(state, new_mi, dst_ws),
         );
+        state.monitors[new_mi].workspaces[dst_ws]
+            .camera
+            .retarget(dst_scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
         cmds.push(Effect::ArrangeMonitor(new_mi));
         state.sel_mon = new_mi;
@@ -1744,7 +1761,7 @@ impl Command for ToggleOverview {
         } else {
             0.0
         };
-        ws.camera.target = scroll;
+        ws.camera.retarget(scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
         CommandReport::with_event(
             cmds,
@@ -1796,7 +1813,7 @@ impl Command for OverviewNav {
         } else {
             0.0
         };
-        ws.camera.target = scroll;
+        ws.camera.retarget(scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
         // Overview navigation must also move the real input focus to the window
         // we just selected, otherwise the keyboard keeps going to the previous
@@ -1842,7 +1859,7 @@ impl Command for OverviewEnter {
         } else {
             0.0
         };
-        ws.camera.target = scroll;
+        ws.camera.retarget(scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
         // "Enter" drops into the selected column: move the real focus there too,
         // so the key window matches `ws.focus.column_idx` (bug C4).
