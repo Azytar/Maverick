@@ -8793,26 +8793,25 @@ mod unit_tests {
             .prop_map(|v| v.into_iter().collect())
         }
 
-        /// Reduced, deterministic reproducer for a reported defect rather than a
-        /// property: the four-step sequence below is the shortest this investigation
-        /// found that leaves window 1 referenced from two places at once, which
-        /// `State::check_invariants` reports as "window referenced twice" and
-        /// "stored at one place but tiled at another".
+        /// Contract: the four-step sequence below leaves the model consistent —
+        /// window 1 referenced from exactly one placement, and the client record
+        /// naming that placement.
         ///
-        /// `MoveToWorkspace(1)` is the step that does it: the client leaves the
-        /// ribbon of workspace 0 but stays reachable in workspace 1's column tree,
-        /// so the two placement indexes disagree about where it lives.
+        /// This is the sequence that used to leave window 1 referenced from two
+        /// places at once, which `State::check_invariants` reports as "window
+        /// referenced twice" and "stored at one place but tiled at another".
         ///
-        /// The assertion is on a caught panic rather than on a returned
-        /// `Err`, because in a debug build `Engine::execute` calls
-        /// `State::assert_invariants` itself, so the violation aborts the
-        /// transition before any caller can inspect the resulting state. The hook
-        /// is swapped out for the duration so the captured message is the only
-        /// thing written to stderr.
+        /// Step 2 is the divergence: the `FocusWindow` effect is applied by the
+        /// X sink on the *selected* monitor, so from step 2 on monitor 1's focus
+        /// slot names window 1 while window 1 is still placed on monitor 0.
+        /// `MoveToWorkspace(1)` then took its source monitor from `sel_mon` and
+        /// its source workspace from the client record, so the removal addressed
+        /// a workspace that never held the window and the re-insert duplicated
+        /// it. Addressing a placement by the client's own
+        /// `(monitor, workspace)` — the pair `State::remove_client` uses — is
+        /// what keeps one client in one placement here.
         #[test]
-        #[ignore = "known defect: MoveToWorkspace can leave a client referenced from \
-                    two placements. Reported, not fixed."]
-        fn known_violation_move_to_workspace_duplicates_a_reference() {
+        fn move_to_workspace_keeps_one_placement_per_client() {
             let sc = Scenario {
                 n_mon: 2,
                 seed: 1,
@@ -8828,27 +8827,142 @@ mod unit_tests {
                     Op::Cmd(GenCmd::MoveToWorkspace(1)),
                 ],
             };
-            let previous_hook = std::panic::take_hook();
-            std::panic::set_hook(Box::new(|_| {}));
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut engine = seed_engine(&sc);
-                for op in &sc.ops {
-                    run_op(&mut engine, op);
+            let mut engine = seed_engine(&sc);
+            for (i, op) in sc.ops.iter().enumerate() {
+                run_op(&mut engine, op);
+                if let Err(v) = engine.state.check_invariants() {
+                    panic!(
+                        "step {i} ({op:?}) broke the state contract:\n  - {}\nSTATE:\n{}",
+                        v.join("\n  - "),
+                        logical_dump(&engine)
+                    );
                 }
-            }));
-            std::panic::set_hook(previous_hook);
-
-            let payload = outcome
-                .expect_err("the sequence is expected to trip the debug invariant check")
-                .downcast_ref::<String>()
-                .cloned()
-                .unwrap_or_default();
+            }
+            // The window the last step named is the moved one; it must be placed
+            // once, and the client record must be the authority on where.
+            let moved = 1;
+            let placements = placements_of(&engine.state, moved);
+            assert_eq!(
+                placements.len(),
+                1,
+                "window {moved} must be referenced from exactly one placement, got {placements:?}\nSTATE:\n{}",
+                logical_dump(&engine)
+            );
+            let c = &engine.state.clients[&moved];
+            assert_eq!(
+                (placements[0].0, placements[0].1),
+                (c.monitor, c.workspace),
+                "the client record must name the placement the window actually has"
+            );
+            // Convergent: the same request again is absorbed outright, with no
+            // second placement and no effects at all.
+            let again = run_op(&mut engine, &sc.ops[3]);
             assert!(
-                payload.contains("referenced twice") || payload.contains("but tiled at"),
-                "expected the duplicate-reference violation, got: {payload}"
+                again.is_empty(),
+                "repeating the move must be absorbed, got {again:?}"
+            );
+            assert_eq!(
+                placements_of(&engine.state, moved),
+                placements,
+                "repeating the move changed the placement"
             );
         }
 
+        /// Every `(monitor, workspace, kind)` placement slot that names `win`.
+        /// The same two slot kinds `State::check_invariants` sweeps: a tiled
+        /// column entry and a float entry.
+        fn placements_of(s: &State, win: WindowId) -> Vec<(usize, usize, &'static str)> {
+            let mut out = Vec::new();
+            for (mi, mon) in s.monitors.iter().enumerate() {
+                for (ws_i, ws) in mon.workspaces.iter().enumerate() {
+                    for col in &ws.columns {
+                        if col.windows.contains(&win) {
+                            out.push((mi, ws_i, "column"));
+                        }
+                    }
+                    if ws.floats.contains(&win) {
+                        out.push((mi, ws_i, "float"));
+                    }
+                }
+            }
+            out
+        }
+
+        /// Run `ops` from `sc`'s seeded state, asserting the contract after every
+        /// single step: the model must stay structurally valid, and a failure has
+        /// to name the step that broke it. Debug builds panic inside
+        /// `Engine::execute` on the first violation, so the panic message is the
+        /// step marker there and this assertion covers the paths that mutate
+        /// `State` without going through it.
+        fn run_ops_leaving_state_valid(sc: &Scenario) -> Engine {
+            let mut engine = seed_engine(sc);
+            for (i, op) in sc.ops.iter().enumerate() {
+                run_op(&mut engine, op);
+                if let Err(v) = engine.state.check_invariants() {
+                    panic!(
+                        "step {i} ({op:?}) broke the state contract:\n  - {}\nSTATE:\n{}",
+                        v.join("\n  - "),
+                        logical_dump(&engine)
+                    );
+                }
+            }
+            engine
+        }
+
+        /// Contract: splitting the focused window out of its column references it
+        /// from exactly one placement, even when the focus slot names a window
+        /// that is tiled on *another* monitor.
+        ///
+        /// `NewColumn` reads the workspace to operate on from the client record
+        /// (so a window focused on a non-active workspace is still found) but
+        /// took the monitor from `sel_mon`. Once the X sink had written the
+        /// selected monitor's focus slot with a window placed on the other one,
+        /// the split inserted that window into this monitor's tree while it was
+        /// still tiled over there — "window referenced twice" and "stored at one
+        /// place but tiled at another". Moving a window across monitors is
+        /// `MoveWindowToMonitor`'s job, so a cross-monitor focus slot absorbs the
+        /// request instead.
+        /// Contract: a command that only *requests* an input-focus change
+        /// resolves the deferral that change orphans.
+        ///
+        /// `Engine::execute` runs its `pending_focus` safety net before the sink
+        /// applies the `FocusWindow` effect, so at net time the overlay that owns
+        /// the deferral still looks presented and the deferral survives — while
+        /// the pending effect is about to take the focus (and with it the
+        /// overlay's presentation) away from that owner. The queued window would
+        /// then get the input focus behind an overlay nobody can see.
+        /// Contract: `presented_maximize` is derived state, and every transition
+        /// that changes what the derivation reads re-derives *all* the monitors
+        /// that can be showing the window.
+        ///
+        /// A monitor's maximize owner is the window its focus slot names on its
+        /// active workspace, so a window placed on one monitor can be the
+        /// presented owner of another whose slot names it. Refreshing only
+        /// `c.monitor` on a flag change left the other monitor naming a window
+        /// that was no longer maximized ("presented_maximize 1 is not
+        /// maximized"); the same staleness appears when the window moves to
+        /// another workspace ("presented_maximize 1 on wrong workspace").
+        /// Contract: a monitor's focus stack names each client at most once.
+        ///
+        /// Moving a window to another monitor makes it the most recently focused
+        /// window there, so it belongs at the top of that monitor's stack exactly
+        /// once — the same `retain`-then-`push` shape `focus_logical_on` uses. A
+        /// bare `push` duplicated the entry whenever the destination stack already
+        /// named the window (a focus slot left on the other monitor), which the
+        /// invariant checker rejects as "focus_stack has duplicate entries".
+        /// Contract: a placement index only ever names live clients.
+        ///
+        /// The teardown path purges the focus bookkeeping of the monitor the
+        /// window was *placed* on, so a focus slot on another monitor can still
+        /// name a window that is gone. Toggling float on such a slot pushed the
+        /// dead id into `floats` — an index naming a window that does not exist.
+        ///
+        /// The stale slot itself is a separate defect (the teardown only purges
+        /// one monitor's focus bookkeeping), so this asserts the contract of the
+        /// toggle alone: it must not compound the stale slot into a placement
+        /// index. The command is invoked directly because the debug invariant
+        /// check `Engine::execute` runs would trip on that pre-existing stale
+        /// slot before this contract could be observed.
         proptest! {
             #![proptest_config(ProptestConfig {
                 cases: 64,

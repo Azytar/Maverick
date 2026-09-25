@@ -1197,10 +1197,30 @@ impl Command for MoveToWorkspace {
             Some(w) => w,
             None => return CommandReport::new(cmds),
         };
-        let src_ws = match state.clients.get(&win) {
-            Some(c) => c.workspace,
+        // A placement is addressed by the client's OWN `(monitor, workspace)`
+        // pair — the same pair `State::remove_client` uses, and the only
+        // authority on where the window actually lives. Taking the workspace
+        // from the client record while taking the monitor from `sel_mon` mixes
+        // two coordinate systems, and the two can disagree: the focus slot is
+        // written by the X sink on the monitor the user is looking at, so it can
+        // name a window that is placed on another monitor. The removal then
+        // addresses a workspace that never held the window, is a silent no-op,
+        // and the re-insert below leaves the client referenced from two
+        // placements at once.
+        let (src_mi, src_ws) = match state.clients.get(&win) {
+            Some(c) => (c.monitor, c.workspace),
             None => return CommandReport::new(cmds),
         };
+        // A workspace belongs to exactly one monitor, so this command can only
+        // relocate a window that is already on the selected monitor. A window
+        // belonging to another monitor is `MoveWindowToMonitor`'s business — that
+        // command re-derives the focus and re-arranges *both* monitors, which a
+        // workspace move must not emulate halfway. Absorb instead of half-moving
+        // the window, which is the only way the destination insert can be
+        // guaranteed to land next to an exact source removal.
+        if src_mi != mi {
+            return CommandReport::new(cmds);
+        }
         let ws_idx = self.0;
         let n_ws = state.monitors.get(mi).map_or(0, |m| m.workspaces.len());
         if n_ws == 0 || ws_idx >= n_ws {
@@ -1212,6 +1232,17 @@ impl Command for MoveToWorkspace {
             return CommandReport::new(cmds);
         }
         if src_ws == ws_idx {
+            return CommandReport::new(cmds);
+        }
+        // `remove_window` is a no-op when the tree does not actually contain
+        // `win` (a stale client record), so bail out rather than duplicating the
+        // window into the destination. Same guard `MoveWindowToMonitor` uses.
+        let contained = state.monitors[mi].workspaces[src_ws]
+            .columns
+            .iter()
+            .any(|c| c.windows.contains(&win))
+            || state.monitors[mi].workspaces[src_ws].floats.contains(&win);
+        if !contained {
             return CommandReport::new(cmds);
         }
         let is_float = state
@@ -1230,7 +1261,11 @@ impl Command for MoveToWorkspace {
             // sent it to another workspace), not by the client.
             crate::core::layout::settle_float_in_workarea(state, mi, win);
         } else {
-            state.monitors[mi].workspaces[ws_idx].remove_window(win);
+            // The source removal above already took the window out of its only
+            // placement (the `contained` guard proved where that was), so the
+            // destination insert needs no second removal: the two workspaces are
+            // distinct, and re-removing from the destination is what used to
+            // address the wrong workspace when the source coordinate was wrong.
             state.monitors[mi].workspaces[ws_idx].add_tiled(win, cfg.column_width);
         }
         if let Some(c) = state.clients.get_mut(&win) {
