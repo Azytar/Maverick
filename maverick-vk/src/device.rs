@@ -241,3 +241,133 @@ impl Drop for Device {
         }
     }
 }
+
+// The ranking is the one piece of device selection that is pure, so it is
+// exercised here rather than in `tests/`: `score_device_type` is crate-private
+// and making it public to reach it from an integration test would commit this
+// crate to an API it does not otherwise need. `#[cfg(test)]` keeps the test out
+// of the library build entirely, so `proptest` stays a dev-dependency.
+#[cfg(test)]
+mod tests {
+    use super::score_device_type;
+    use ash::vk;
+    use proptest::prelude::*;
+
+    /// The five types the ranking names. The order of this list is not a
+    /// preference, it only makes every named type reachable in one draw.
+    static KNOWN: [vk::PhysicalDeviceType; 5] = [
+        vk::PhysicalDeviceType::DISCRETE_GPU,
+        vk::PhysicalDeviceType::INTEGRATED_GPU,
+        vk::PhysicalDeviceType::VIRTUAL_GPU,
+        vk::PhysicalDeviceType::CPU,
+        vk::PhysicalDeviceType::OTHER,
+    ];
+
+    proptest! {
+        /// Ranking has to survive every value the type can hold, including the
+        /// ones no version of `ash` names: an unknown device type is a driver
+        /// Maverick does not recognise, and a `match` that treated it as
+        /// impossible would take the whole bootstrap down over a device it would
+        /// only have skipped. What has to come back is one of the five classes
+        /// the ranking defines — a value of its own would be a preference no
+        /// named type could be compared against.
+        #[test]
+        fn device_type_score_is_total_over_the_whole_type_space(raw in any::<i32>()) {
+            let ty = vk::PhysicalDeviceType::from_raw(raw);
+            let score = score_device_type(ty);
+            let classes: Vec<i32> = KNOWN.iter().map(|t| score_device_type(*t)).collect();
+
+            prop_assert!(
+                classes.contains(&score),
+                "{ty:?} scored {score}, which is not one of the ranked classes {classes:?}"
+            );
+            prop_assert_eq!(
+                score,
+                score_device_type(vk::PhysicalDeviceType::from_raw(raw)),
+                "the same type must always score the same"
+            );
+        }
+
+        /// The selection loop only ever compares scores, so they have to form a
+        /// strict order over the named types: no two of them may tie, or which
+        /// one wins would come down to the order the loader happened to
+        /// enumerate the devices in. A discrete GPU is the best candidate
+        /// whatever else is plugged in, and transitivity is what makes "better
+        /// than" a single relation rather than a cycle the enumeration order
+        /// could break.
+        #[test]
+        fn known_device_types_form_a_strict_order_with_discrete_first(
+            a in prop::sample::select(&KNOWN[..]),
+            b in prop::sample::select(&KNOWN[..]),
+            c in prop::sample::select(&KNOWN[..]),
+        ) {
+            let a_score = score_device_type(a);
+            let b_score = score_device_type(b);
+            let c_score = score_device_type(c);
+
+            // A discrete GPU is the best candidate whatever else is plugged in.
+            // Checked over all five named types rather than over the drawn
+            // ones, so "best" is a total claim and not a statistical one.
+            let discrete = score_device_type(vk::PhysicalDeviceType::DISCRETE_GPU);
+            for t in KNOWN {
+                if t != vk::PhysicalDeviceType::DISCRETE_GPU {
+                    prop_assert!(
+                        discrete > score_device_type(t),
+                        "a discrete GPU ({discrete}) did not outrank {:?} ({})",
+                        t,
+                        score_device_type(t)
+                    );
+                }
+            }
+            if a != b {
+                prop_assert_ne!(
+                    a_score,
+                    b_score,
+                    "{:?} and {:?} tie, so the first one enumerated would win",
+                    a,
+                    b
+                );
+            }
+            if a_score > b_score && b_score > c_score {
+                prop_assert!(
+                    a_score > c_score,
+                    "{a:?} beats {b:?} beats {c:?}, yet not {a:?} over {c:?}"
+                );
+            }
+        }
+
+        /// A type Maverick does not know must never be preferred over a
+        /// discrete GPU. That is not a judgement about the hardware: an
+        /// unrecognised value is a driver reporting something outside the spec,
+        /// and letting it outrank the best known candidate would hand the
+        /// compositor to whatever the driver claimed. Unknown types also share
+        /// one class, so they tie with each other and the loop's "first
+        /// candidate wins" rule applies to them rather than to the order they
+        /// happened to be enumerated in.
+        #[test]
+        fn unknown_device_type_never_outranks_a_discrete_gpu(
+            raw in any::<i32>(),
+            other in any::<i32>(),
+        ) {
+            let ty = vk::PhysicalDeviceType::from_raw(raw);
+            let other = vk::PhysicalDeviceType::from_raw(other);
+            prop_assume!(!KNOWN.contains(&ty), "{:?} is a type the ranking names", ty);
+            prop_assume!(
+                !KNOWN.contains(&other),
+                "{:?} is a type the ranking names",
+                other
+            );
+
+            let score = score_device_type(ty);
+            prop_assert!(
+                score < score_device_type(vk::PhysicalDeviceType::DISCRETE_GPU),
+                "an unrecognised type outranked a discrete GPU with {score}"
+            );
+            prop_assert_eq!(
+                score,
+                score_device_type(other),
+                "two unrecognised types must share one class, or the winner would depend on enumeration order"
+            );
+        }
+    }
+}
