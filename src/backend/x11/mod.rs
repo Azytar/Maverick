@@ -69,6 +69,7 @@ use std::rc::Rc;
 use std::time::Instant;
 use x11rb::connection::Connection;
 use x11rb::errors::ConnectionError;
+use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xkb;
 use x11rb::protocol::{xproto::*, Event};
 use x11rb::wrapper::ConnectionExt as _;
@@ -287,8 +288,13 @@ pub struct WindowManager {
     /// Timestamp of the previous animation frame, for `dt` in `tick_animations`.
     last_frame: Instant,
     /// True while any camera/zoom/accordion spring is still moving; drives the
-    /// frame-clock timeout (high rate while animating, idle 100ms otherwise).
+    /// frame-clock timeout (high rate while animating, idle indefinite otherwise).
     animating: bool,
+    /// Nominal fallback period when no presentation-completion feedback is
+    /// available. It is a rate limit, not a replacement for GLX vsync.
+    frame_period: std::time::Duration,
+    /// Deadline for the next continuous animation frame, when pacing is needed.
+    animation_due: Option<Instant>,
     /// Per-monitor cached stacking order (top-to-bottom) so `stack_overlay`
     /// only re-issues `raise()` when the order actually changed, instead of
     /// re-raising every float/popup on every animation frame (bug C6).
@@ -356,6 +362,10 @@ impl WindowManager {
             Event::UnmapNotify(e) => self.on_unmap(e)?,
             #[cfg(feature = "compositor-opengl")]
             Event::DamageNotify(e) => self.on_damage_notify(e)?,
+            #[cfg(feature = "compositor-opengl")]
+            Event::XfixesSelectionNotify(e) => self.on_xfixes_selection_notify(e)?,
+            #[cfg(feature = "compositor-opengl")]
+            Event::ShapeNotify(e) => self.on_shape_notify(e)?,
             // RandR change events (config/grab selected in `setup_root`): both
             // the 1.5 `NotifyEvent` (crtc/output changes) and the classic
             // `ScreenChangeNotifyEvent` funnel into the same re-detect handler as
@@ -446,6 +456,9 @@ impl WindowManager {
     /// check window) and remove the control socket / identity ficha. Safe to
     /// call before `exec` in `restart`.
     pub fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(mut compositor) = self.compositor.take() {
+            compositor.disable();
+        }
         let _ = self.conn.ungrab_key(0u8, self.root, ModMask::ANY);
 
         // A drag in flight holds an active pointer grab: release it so
@@ -543,9 +556,8 @@ impl WindowManager {
 
         // ── animation phase ──────────────────────────────────────────────────
         // Advance camera (and accordion/zoom) springs. While anything is still
-        // moving we keep ticking at a high frame rate; otherwise we fall back to
-        // the idle 100ms wake so control-socket commands are still drained
-        // promptly.
+        // moving we use a refresh-derived deadline; once the scene settles the
+        // loop parks on X11 plus the control self-pipe.
         let was_animating = self.animating;
         let now = Instant::now();
         // `dt` is the time since the previous turn's animation phase. Because
@@ -661,6 +673,13 @@ impl WindowManager {
                     why.join(", ")
                 );
             }
+            if comp.comp_trace {
+                log::info!(
+                    "x11 compositor decision dirty={} reasons={}",
+                    comp.dirty_reasons_bits() != 0,
+                    comp.dirty_reasons_bits()
+                );
+            }
             let wants_frame = sched.needs_frame();
             trace!("scheduler", "gl_active=true needs_frame={wants_frame} dirty={} reasons={} wm_animation={} presentation_animation={} wallpaper_animation={}", comp.dirty_reasons_bits(), sched.trace_bits(), self.animating, comp.presentation_animating(), comp.wallpaper_animating());
             if wants_frame {
@@ -690,11 +709,10 @@ impl WindowManager {
                 );
                 drop(prepare_trace);
                 let render_trace = trace::Span::new("render");
-                // A GL failure disables the compositor and returns us to the
-                // classic path. `panic = "abort"` means a GL panic would kill
-                // the whole WM, so the draw is isolated behind `catch_unwind`.
-                let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| comp.render()))
-                    .unwrap_or(false);
+                // A GL failure is reported through the render result and
+                // disables the compositor; release builds use panic=abort, so
+                // there is no unreliable catch_unwind fallback here.
+                let ok = comp.render();
                 drop(render_trace);
                 trace!("frame_returned", "ok={ok}");
                 if !ok {
@@ -723,8 +741,8 @@ impl WindowManager {
             // `Effect::ArrangeMonitor` → `arrange` (Phase::Settled) path, so
             // there is nothing to animate and nothing to reconfigure per
             // frame. The camera springs snap straight to their target so the
-            // logical state stays settled; the loop then goes idle (100 ms
-            // poll) exactly like the compositor path does when static.
+            // logical state stays settled; the loop then parks on X11 plus the
+            // control self-pipe exactly like a settled compositor.
             self.engine.state.snap_animations();
             self.anim_per_mon.fill(false);
             self.animating = false;
@@ -744,6 +762,11 @@ impl WindowManager {
                     .as_ref()
                     .is_some_and(compositor::Compositor::presentation_animating),
         );
+        self.animation_due = if sched.is_continuous() {
+            Some(Instant::now() + self.frame_period)
+        } else {
+            None
+        };
 
         drop(after_trace);
         trace!(
@@ -757,36 +780,38 @@ impl WindowManager {
         );
 
         // ── wait phase ────────────────────────────────────────────────────────
-        // Block on the X/control-socket fd just long enough to wake for the next
-        // decision. The swap (interval 1) already paced the present, so while a
-        // frame is needed we block on the socket for 0 ms and drain events
-        // promptly; when idle we park on a 100 ms poll so control-socket commands
-        // and keyboard changes are still picked up quickly. There is no separate
-        // vblank-sync branch — the swap is the only synchroniser (B1).
+        // Wait on X11 plus the control self-pipe. A continuous animation has a
+        // refresh-derived rate limit; a settled WM blocks indefinitely, so idle
+        // does not wake on a heartbeat timer.
         let fd = self.conn.as_raw_fd();
-        // Fase 9 — the one authoritative scheduler (post-present: dirty bits
-        // cleared, only `Animation` survives) decides the wait window. A frame
-        // still due -> block on the socket for 0 ms and drain promptly; idle ->
-        // park on a 100 ms poll so control-socket commands and keyboard changes
-        // are still picked up quickly. The swap (interval 1) remains the only
-        // synchroniser (B1) — there is no separate vblank branch.
-        let mut timeout_ms: u64 = sched.timeout_ms();
+        let requested_timeout = sched.timeout_ms();
+        let mut timeout = requested_timeout.map(std::time::Duration::from_millis);
+        if sched.is_continuous() {
+            if let Some(due) = self.animation_due {
+                timeout = Some(due.saturating_duration_since(Instant::now()));
+            }
+        }
         // Never sleep past a pending keyboard refresh, or the coalescing window
         // would stretch to the idle timeout.
         if let Some(due) = self.kbd_refresh_due {
             let left = due.saturating_duration_since(Instant::now());
-            timeout_ms = timeout_ms.min(left.as_millis() as u64);
+            timeout = Some(timeout.map_or(left, |current| current.min(left)));
         }
 
         trace!(
             "scheduler_wait",
-            "requested_ms={} effective_ms={timeout_ms} reasons={}",
-            sched.timeout_ms(),
+            "requested_ms={:?} effective_ms={:?} reasons={}",
+            requested_timeout,
+            timeout.map(|d| d.as_millis()),
             sched.trace_bits()
         );
-        if timeout_ms > 0 {
+        if timeout != Some(std::time::Duration::ZERO) {
             let wait_trace = trace::Span::new("wait");
-            maverick_sys::wait_readable(fd, std::time::Duration::from_millis(timeout_ms));
+            let mut fds = vec![fd];
+            if let Some(hub) = &self.hub {
+                fds.push(hub.wake_fd());
+            }
+            maverick_sys::wait_readable_fds(&fds, timeout);
             drop(wait_trace);
             // Drain for anything that arrived while we were blocked.
             while let Some(ev) = self.conn.poll_for_event()? {
@@ -876,6 +901,7 @@ impl WindowManager {
         let root = screen.root;
         let depth = screen.root_depth;
         let visual = screen.root_visual;
+        let frame_period = detect_frame_period(&conn, root);
 
         log::info!(
             "maverick: X11 connected root={} {}x{}",
@@ -1082,6 +1108,8 @@ impl WindowManager {
             last_event_time: 0,
             last_frame: std::time::Instant::now(),
             animating: false,
+            frame_period,
+            animation_due: None,
             last_stack_order: std::collections::HashMap::new(),
             fs_covering: std::collections::HashMap::new(),
             compositor,
@@ -1736,6 +1764,45 @@ fn read_wm_hints_value(
         }
     }
     Ok(None)
+}
+
+fn frame_period_from_mode(mode: &x11rb::protocol::randr::ModeInfo) -> Option<std::time::Duration> {
+    let pixels = u128::from(mode.htotal) * u128::from(mode.vtotal);
+    let dot_clock = u128::from(mode.dot_clock) * 1_000;
+    if dot_clock == 0 || pixels == 0 {
+        return None;
+    }
+    let period_ns = 1_000_000_000u128
+        .checked_mul(pixels)?
+        .checked_div(dot_clock)?;
+    let period = std::time::Duration::from_nanos(u64::try_from(period_ns).ok()?);
+    // Reject impossible RandR values; retain slow displays but avoid a
+    // zero/overflow deadline in the scheduler.
+    (std::time::Duration::from_millis(3)..=std::time::Duration::from_millis(100))
+        .contains(&period)
+        .then_some(period)
+}
+
+fn detect_frame_period(conn: &XConn, root: Window) -> std::time::Duration {
+    let Ok(resources) = conn.randr_get_screen_resources_current(root) else {
+        return std::time::Duration::from_secs_f64(1.0 / 60.0);
+    };
+    let Ok(resources) = resources.reply() else {
+        return std::time::Duration::from_secs_f64(1.0 / 60.0);
+    };
+    resources
+        .crtcs
+        .iter()
+        .filter_map(|crtc| {
+            conn.randr_get_crtc_info(*crtc, x11rb::CURRENT_TIME)
+                .ok()?
+                .reply()
+                .ok()
+        })
+        .filter_map(|info| resources.modes.iter().find(|m| m.id == info.mode))
+        .filter_map(frame_period_from_mode)
+        .max_by_key(|p| *p) // lowest reported refresh across outputs
+        .unwrap_or_else(|| std::time::Duration::from_secs_f64(1.0 / 60.0))
 }
 
 #[inline]

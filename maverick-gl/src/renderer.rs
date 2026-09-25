@@ -581,8 +581,6 @@ impl fmt::Display for Rejects {
 pub struct Renderer {
     dpy: XDisplay,
     screen: c_int,
-    #[allow(dead_code)]
-    lib: Lib,
     gl: Gl,
     glx: Glx,
     ctx: GLXContext,
@@ -752,6 +750,10 @@ impl Renderer {
         if ctx.is_null() {
             return Err("glXCreateContextAttribsARB(3.3 core) failed".into());
         }
+        if unsafe { (glx.glXIsDirect)(d, ctx) } == 0 {
+            unsafe { (glx.glXDestroyContext)(d, ctx) };
+            return Err("GLX compositor context is indirect".into());
+        }
 
         let glx_win =
             unsafe { (glx.glXCreateWindow)(d, win_cfg, c_ulong::from(overlay), std::ptr::null()) };
@@ -801,7 +803,6 @@ impl Renderer {
         let mut r = Renderer {
             dpy,
             screen,
-            lib,
             gl,
             glx,
             ctx,
@@ -1010,15 +1011,21 @@ impl Renderer {
     /// Enable a scissor rectangle. `x`/`y` are top-left screen coordinates
     /// (y grows downward); GL's scissor origin is bottom-left, so the y is
     /// flipped against `height`.
-    pub fn set_scissor(&mut self, x: i32, y: i32, w: u32, h: u32, height: u32) {
+    pub fn set_scissor(&mut self, x: i32, y: i32, w: u32, h: u32, width: u32, height: u32) {
+        let x0 = x.clamp(0, width as i32) as u32;
+        let y0 = y.clamp(0, height as i32) as u32;
+        let right = (x as i64 + w as i64).clamp(0, width as i64) as u32;
+        let bottom = (y as i64 + h as i64).clamp(0, height as i64) as u32;
+        let clipped_w = right.saturating_sub(x0);
+        let clipped_h = bottom.saturating_sub(y0);
         let gl = &self.gl;
         unsafe {
             (gl.glEnable)(GL_SCISSOR_TEST);
             (gl.glScissor)(
-                x as GLint,
-                (height - (y as u32 + h)) as GLint,
-                w as GLsizei,
-                h as GLsizei,
+                x0 as GLint,
+                (height - clipped_h - y0) as GLint,
+                clipped_w as GLsizei,
+                clipped_h as GLsizei,
             );
         }
     }
@@ -1078,14 +1085,14 @@ impl Renderer {
     }
 
     /// Draw a quad given a texture handle, the previously-bound texture id (for
-    /// bind-cache elision), and the quad parameters. Used by the
-    /// compositor's explicit-scene path, where the `Texture` itself stays owned
-    /// by `CompWin` (so the filter cache and flip flag are read there and passed
-    /// in), and only the handle travels in the `DrawItem`.
+    /// bind-cache elision), the TFP orientation, and the quad parameters. Used
+    /// by the compositor's explicit-scene path, where the `Texture` itself stays
+    /// owned by `CompWin` and only the handle travels in the `DrawItem`.
     pub fn draw_raw(
         &mut self,
         tex: TextureHandle,
         prev_tex: TextureHandle,
+        flip: bool,
         q: &DrawQuad,
     ) -> TextureHandle {
         let gl = &self.gl;
@@ -1113,7 +1120,7 @@ impl Renderer {
                 q.border_color[3],
             );
             (gl.glUniform1f)(self.u_opacity, q.opacity);
-            (gl.glUniform1f)(self.u_flip, 0.0);
+            (gl.glUniform1f)(self.u_flip, if flip { 1.0 } else { 0.0 });
             (gl.glDrawArrays)(GL_TRIANGLES, 0, 6);
         }
         bound
@@ -1121,8 +1128,9 @@ impl Renderer {
 
     /// Present the frame. With swap interval 1 this blocks until the vertical
     /// blank, which is what paces the whole animation loop.
-    pub fn end_frame(&mut self) {
+    pub fn end_frame(&mut self) -> bool {
         unsafe { (self.glx.glXSwapBuffers)(self.dpy.as_ptr(), self.glx_win) };
+        self.gl.take_error() == GL_NO_ERROR
     }
 
     /// Block until the next vertical retrace (`GLX_SGI_video_sync`). Retained for
@@ -1196,16 +1204,7 @@ impl Renderer {
         if verify {
             self.dpy.sync();
             if let Some(code) = crate::xlib::take_x_error() {
-                // Keep `verified` set: a transient first-bind error must NOT re-open
-                // the sync gate. The old code removed the visual from `verified`,
-                // so every later resize of a window on that visual re-ran
-                // `dpy.sync()` — a blocking X round trip — inside the event handler,
-                // which is exactly the floating-window resize freeze. The fbconfig
-                // decision is retried independently on the next pixmap, so the gate
-                // only needs to fire once.
-                // `glXCreatePixmap` already handed back a (possibly invalid) XID, so
-                // free it to avoid leaking the GLXPixmap; a `0` means creation truly
-                // failed and there is nothing to free.
+                self.verified.remove(&visual.id);
                 if glx_pixmap != 0 {
                     unsafe {
                         (self.glx.glXDestroyPixmap)(self.dpy.as_ptr(), glx_pixmap);
@@ -1244,7 +1243,21 @@ impl Renderer {
             // would skip the update it needs.
             filter: Filter::Linear,
         };
-        self.bind(&mut t);
+        if let Err(e) = self.bind(&mut t) {
+            self.destroy_texture(t);
+            return Err(e);
+        }
+        if verify {
+            self.dpy.sync();
+            if let Some(code) = crate::xlib::take_x_error() {
+                self.destroy_texture(t);
+                self.verified.remove(&visual.id);
+                return Err(format!(
+                    "glXBindTexImageEXT for {visual} failed with {} ({tfp})",
+                    crate::xlib::x_error_name(code),
+                ));
+            }
+        }
         Ok(t)
     }
 
@@ -1252,11 +1265,11 @@ impl Renderer {
     /// not a copy — and mandatory after every damage event: the TFP spec leaves
     /// the texture contents *undefined* once the client has drawn into the
     /// drawable while it was bound.
-    pub fn bind(&mut self, t: &mut Texture) {
+    pub fn bind(&mut self, t: &mut Texture) -> Result<(), String> {
         let (Some(bind), Some(release)) =
             (self.glx.glXBindTexImageEXT, self.glx.glXReleaseTexImageEXT)
         else {
-            return;
+            return Err("GLX_EXT_texture_from_pixmap entry points are unavailable".into());
         };
         let d = self.dpy.as_ptr();
         let handle = t.handle();
@@ -1280,6 +1293,12 @@ impl Renderer {
             bind(d, t.glx_pixmap, GLX_FRONT_LEFT_EXT, std::ptr::null());
         }
         t.bound = true;
+        let err = self.gl.take_error();
+        if err != GL_NO_ERROR {
+            t.bound = false;
+            return Err(format!("glXBindTexImageEXT generated GL error 0x{err:x}"));
+        }
+        Ok(())
     }
 
     /// Delete a raw GL texture (one not backed by a GLX pixmap) created by
@@ -1451,6 +1470,23 @@ impl Renderer {
             (gl.glDrawArrays)(GL_TRIANGLES, 0, 6);
         }
     }
+    pub fn destroy_shader(&mut self, shader: ShaderId) {
+        if shader.0 == 0 {
+            return;
+        }
+        unsafe {
+            (self.gl.glDeleteProgram)(shader.0);
+        }
+        if self.wp_prog == shader.0 {
+            self.wp_prog = 0;
+            self.wp_u_dst = -1;
+            self.wp_u_res = -1;
+            self.wp_u_time = -1;
+            self.wp_u_resolution = -1;
+            self.wp_u_delta_time = -1;
+        }
+    }
+
     pub fn destroy_texture(&mut self, mut t: Texture) {
         let d = self.dpy.as_ptr();
         if glx_trace_enabled() {
@@ -1629,10 +1665,6 @@ fn enable_vsync(
     exts: &str,
     mode: VsyncMode,
 ) -> bool {
-    if mode == VsyncMode::Off {
-        let _ = screen;
-        return false;
-    }
     let interval: c_int = match mode {
         VsyncMode::Adaptive => {
             if has_extension(exts, "GLX_EXT_swap_control_tear") {
@@ -1644,21 +1676,20 @@ fn enable_vsync(
         VsyncMode::On => 1,
         VsyncMode::Off => 0,
     };
-    if has_extension(exts, "GLX_EXT_swap_control") {
+    // `glXSwapIntervalEXT` is provided by EXT_swap_control and, for the
+    // negative interval, by EXT_swap_control_tear. Try it before the
+    // interval-1-only MESA/SGI fallbacks, including for `Off` so the setting
+    // actually disables an inherited interval.
+    if has_extension(exts, "GLX_EXT_swap_control")
+        || (interval == -1 && has_extension(exts, "GLX_EXT_swap_control_tear"))
+    {
         if let Some(f) = glx.glXSwapIntervalEXT {
             unsafe { f(d, drawable, interval) };
             return interval != 0;
         }
     }
-    if has_extension(exts, "GLX_EXT_swap_control_tear") && interval == -1 {
-        if let Some(f) = glx.glXSwapIntervalEXT {
-            unsafe { f(d, drawable, -1) };
-            return true;
-        }
-    }
-    // Mesa/SGI only support interval 1, not -1
+    // MESA/SGI only support interval 1 (or 0 for MESA), not -1.
     if interval == -1 {
-        // fallback to On when adaptive not available via this path
         if has_extension(exts, "GLX_MESA_swap_control") {
             if let Some(f) = glx.glXSwapIntervalMESA {
                 return unsafe { f(1) } == 0;
@@ -1674,12 +1705,12 @@ fn enable_vsync(
     }
     if has_extension(exts, "GLX_MESA_swap_control") {
         if let Some(f) = glx.glXSwapIntervalMESA {
-            return unsafe { f(interval as c_uint) } == 0;
+            return unsafe { f(interval as c_uint) } == 0 && interval != 0;
         }
     }
     if has_extension(exts, "GLX_SGI_swap_control") {
         if let Some(f) = glx.glXSwapIntervalSGI {
-            return unsafe { f(interval) } == 0;
+            return unsafe { f(interval) } == 0 && interval != 0;
         }
     }
     let _ = screen;

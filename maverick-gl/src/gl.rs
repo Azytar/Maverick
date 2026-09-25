@@ -183,9 +183,8 @@ impl Gl {
             .into_owned()
     }
 
-    /// Drain and return the pending GL error, if any. Used at the end of
-    /// initialisation; the per-frame path never calls this (a `glGetError` is a
-    /// pipeline stall).
+    /// Drain and return the pending GL error, if any. Used after initialization,
+    /// TFP binds, and frame submission so a failed draw cannot stay hidden.
     pub fn take_error(&self) -> GLenum {
         unsafe { (self.glGetError)() }
     }

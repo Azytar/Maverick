@@ -52,6 +52,7 @@
 use super::render::normalize_float_request;
 use super::*;
 use crate::core::layout::fs_ctx;
+use x11rb::protocol::shape::ConnectionExt as _;
 
 // ── input-trace instrumentation (feature `input-trace`) ───────────────────────
 #[cfg(feature = "input-trace")]
@@ -461,6 +462,7 @@ impl WindowManager {
                         | EventMask::STRUCTURE_NOTIFY,
                 ),
         );
+        let _ = self.conn.shape_select_input(win, true);
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.on_border_color(win, self.engine.cfg.col_normal);
         }

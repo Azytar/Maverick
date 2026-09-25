@@ -391,6 +391,7 @@ impl WindowManager {
     /// the topology actually changed — same monitor count and geometry means
     /// nothing to do, so repeated events cause no reflow.
     pub(super) fn handle_monitor_change(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.frame_period = detect_frame_period(&self.conn, self.root);
         let setup = self.conn.setup();
         let screen = &setup.roots[self.screen_num];
         let new_mons = detect_monitors(&self.conn, screen, &self.engine.cfg)?;
@@ -626,20 +627,23 @@ impl WindowManager {
             return Ok(());
         }
 
-        if e.state == Property::DELETE {
-            return Ok(());
-        }
-
-        // `_NET_WM_WINDOW_OPACITY`: tell the compositor the new value so it can
-        // fade the window's texture without re-`ConfigureWindow`ing it.
+        // `_NET_WM_WINDOW_OPACITY`: deletion resets the source to fully opaque;
+        // handle this before the generic DELETE guard or stale opacity remains.
         if e.atom == self.atoms.net_wm_window_opacity {
             if let Some(c) = self.compositor.as_mut() {
-                let opacity =
-                    read_window_opacity(&self.conn, e.window, self.atoms.net_wm_window_opacity)
-                        .unwrap_or(1.0);
+                let opacity = (e.state != Property::DELETE)
+                    .then(|| {
+                        read_window_opacity(&self.conn, e.window, self.atoms.net_wm_window_opacity)
+                    })
+                    .flatten()
+                    .unwrap_or(1.0);
                 c.on_opacity(e.window, opacity);
                 return Ok(());
             }
+        }
+
+        if e.state == Property::DELETE {
+            return Ok(());
         }
 
         if self.engine.state.clients.contains_key(&e.window) {
@@ -652,6 +656,35 @@ impl WindowManager {
             // `WM_NORMAL_HINTS` is handled by its own early arm above (fresh
             // `client.hints` for the float snap); anything else just flows to
             // `publish_state()` below.
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "compositor-opengl")]
+    pub(super) fn on_xfixes_selection_notify(
+        &mut self,
+        e: x11rb::protocol::xfixes::SelectionNotifyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let keep = self
+            .compositor
+            .as_mut()
+            .is_none_or(|c| c.selection_owner_changed(e.selection, e.owner));
+        if !keep {
+            if let Some(mut c) = self.compositor.take() {
+                c.disable();
+            }
+            self.apply_root_wallpaper();
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "compositor-opengl")]
+    pub(super) fn on_shape_notify(
+        &mut self,
+        e: x11rb::protocol::shape::NotifyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(c) = self.compositor.as_mut() {
+            c.on_shape(e.affected_window, e.shaped);
         }
         Ok(())
     }
@@ -682,7 +715,7 @@ impl WindowManager {
         e: DamageNotifyEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(c) = self.compositor.as_mut() {
-            c.on_damage(e.drawable);
+            c.on_damage(e.drawable, &e);
         }
         Ok(())
     }

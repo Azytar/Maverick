@@ -48,6 +48,8 @@
 //! `*` the query reply is sent exactly once into an empty 1-slot channel, so it
 //! never blocks; if the requester already timed out the send just fails.
 
+use std::io::{Read, Write};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -105,6 +107,12 @@ struct Inner {
     cmd_tx: SyncSender<ControlCommand>,
     /// Receiver half; guarded so `drain()` can be called from the WM thread.
     cmd_rx: Mutex<Receiver<ControlCommand>>,
+    /// Readable end of a self-pipe used to wake the X11 poll loop when a
+    /// control command is queued.
+    wake_read: Mutex<std::os::unix::net::UnixStream>,
+    /// Server-thread write end. Writes are non-blocking; a full pipe already
+    /// means the reader has a wakeup pending.
+    wake_write: Mutex<std::os::unix::net::UnixStream>,
     /// Latest state snapshot as JSON, published by the WM.
     state: Mutex<String>,
     /// Live `subscribe` sinks. Dead ones are pruned on the next `emit`.
@@ -119,10 +127,20 @@ impl ControlHub {
     /// Create a fresh hub with empty state and no subscribers.
     pub fn new() -> Self {
         let (cmd_tx, cmd_rx) = sync_channel(CMD_CAP);
+        let (wake_read, wake_write) =
+            std::os::unix::net::UnixStream::pair().expect("UnixStream pair for control wakeup");
+        wake_read
+            .set_nonblocking(true)
+            .expect("nonblocking control wake reader");
+        wake_write
+            .set_nonblocking(true)
+            .expect("nonblocking control wake writer");
         ControlHub {
             inner: Arc::new(Inner {
                 cmd_tx,
                 cmd_rx: Mutex::new(cmd_rx),
+                wake_read: Mutex::new(wake_read),
+                wake_write: Mutex::new(wake_write),
                 state: Mutex::new(String::from("{}")),
                 subscribers: Mutex::new(Vec::new()),
                 dropped: AtomicUsize::new(0),
@@ -137,7 +155,35 @@ impl ControlHub {
     /// has gone away (receiver dropped); the caller must reply `error busy`
     /// instead of `ok` so the loss is visible.
     pub fn push_command(&self, cmd: ControlCommand) -> bool {
-        self.inner.cmd_tx.try_send(cmd).is_ok()
+        if self.inner.cmd_tx.try_send(cmd).is_err() {
+            return false;
+        }
+        // A byte is only a readiness edge; a full nonblocking pipe is already
+        // readable and needs no additional notification.
+        if let Ok(mut wake) = self.inner.wake_write.lock() {
+            let _ = wake.write(&[1u8]);
+        }
+        true
+    }
+
+    /// Raw descriptor included in the WM's `poll(2)` set.
+    pub fn wake_fd(&self) -> RawFd {
+        if let Ok(wake) = self.inner.wake_read.lock() {
+            wake.as_raw_fd()
+        } else {
+            -1
+        }
+    }
+
+    fn drain_wake(&self) {
+        let mut buf = [0u8; 64];
+        if let Ok(mut wake) = self.inner.wake_read.lock() {
+            while let Ok(n) = wake.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+            }
+        }
     }
 
     /// Read the latest published state snapshot (JSON). Called from the server
@@ -174,6 +220,7 @@ impl ControlHub {
                 out.push(cmd);
             }
         }
+        self.drain_wake();
         out
     }
 
@@ -275,6 +322,23 @@ mod tests {
         let cmds = b.drain_commands();
         assert_eq!(cmds.len(), 1);
         assert!(matches!(cmds[0], ControlCommand::Reload));
+    }
+
+    #[test]
+    fn command_wakes_the_x11_poll_loop() {
+        let hub = ControlHub::new();
+        assert!(hub.push_command(ControlCommand::Reload));
+        assert!(crate::wait_readable_fds(
+            &[hub.wake_fd()],
+            Some(std::time::Duration::from_millis(100))
+        ));
+        let cmds = hub.drain_commands();
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], ControlCommand::Reload));
+        assert!(!crate::wait_readable_fds(
+            &[hub.wake_fd()],
+            Some(std::time::Duration::from_millis(1))
+        ));
     }
 
     #[test]

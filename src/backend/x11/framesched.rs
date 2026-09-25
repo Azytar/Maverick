@@ -21,13 +21,13 @@
 //!
 //! # Protocol why
 //!
-//! - `clamp_frame_dt` (B8) bounds `dt` to `ONE_REFRESH` on first animating
+//! - `clamp_frame_dt` bounds `dt` to `ONE_REFRESH` on first animating
 //!   frame and `2*ONE_REFRESH` thereafter so a long idle gap cannot inject an
-//!   absurd spring step and the swap-blocked present interval *is* the `dt`.
-//! - `timeout_ms` returns 0 ms when a frame is needed (render now, poll without
-//!   delay; the swap is the only synchroniser) and 100 ms when idle so the
-//!   control socket and `MapNotify` are still drained promptly. No separate
-//!   vblank branch (B1).
+//!   absurd spring step.
+//! - `timeout_ms` returns `Some(0)` for a pending frame and `None` for an
+//!   idle scene. The X11 loop then blocks on X11 plus the control self-pipe;
+//!   continuous animation gets its refresh-derived deadline outside this pure
+//!   policy object.
 
 use crate::backend::x11::compositor::DirtyReason;
 
@@ -220,18 +220,18 @@ impl FrameScheduler {
             .filter(move |r| self.has(*r))
     }
 
-    /// How long (ms) the loop should block on the X/control-socket fd before
-    /// waking to re-evaluate. When a frame is needed the swap (interval 1) has
-    /// already paced the present, so we block on the socket for 0 ms and drain
-    /// events promptly; when idle we park on a 100 ms poll so control-socket
-    /// commands and keyboard changes are still picked up quickly. There is no
-    /// separate "vblank synced" branch: the swap is the only synchroniser (B1).
-    pub(crate) fn timeout_ms(&self) -> u64 {
-        if self.needs_frame() {
-            0
-        } else {
-            100
-        }
+    /// True when the only pending work is an ongoing animation/shader. A dirty
+    /// reason remains eligible for immediate presentation; continuous work may
+    /// use a refresh-derived deadline.
+    pub(crate) fn is_continuous(&self) -> bool {
+        self.is_animating() || self.has(FrameReason::WallpaperAnimation)
+    }
+
+    /// How long the loop may block after this decision. A pending frame wakes
+    /// immediately; a settled WM parks indefinitely on X11 plus the control
+    /// self-pipe, so idle does not become a heartbeat poll.
+    pub(crate) fn timeout_ms(&self) -> Option<u64> {
+        self.needs_frame().then_some(0)
     }
 }
 
@@ -284,10 +284,10 @@ mod tests {
         let mut scheduler = FrameScheduler::from_compositor(false, false, DirtyReason::GEOMETRY);
         assert!(!scheduler.is_animating());
         scheduler.after_present(true);
-        assert_eq!(scheduler.timeout_ms(), 0);
+        assert_eq!(scheduler.timeout_ms(), Some(0));
         assert!(!scheduler.has_dirty());
         scheduler.after_present(false);
-        assert_eq!(scheduler.timeout_ms(), 100);
+        assert_eq!(scheduler.timeout_ms(), None);
     }
 
     #[test]
@@ -296,7 +296,7 @@ mod tests {
         scheduler.after_present(false);
         assert!(!scheduler.is_animating());
         assert!(scheduler.has(FrameReason::WallpaperAnimation));
-        assert_eq!(scheduler.timeout_ms(), 0);
+        assert_eq!(scheduler.timeout_ms(), Some(0));
     }
 
     #[test]
@@ -306,7 +306,7 @@ mod tests {
             !s.needs_frame(),
             "a fresh scheduler must not request frames"
         );
-        assert_eq!(s.timeout_ms(), 100, "idle parks on the 100 ms poll");
+        assert_eq!(s.timeout_ms(), None, "idle parks on the 100 ms poll");
     }
 
     #[test]
@@ -316,15 +316,15 @@ mod tests {
         assert!(s.needs_frame());
         assert!(s.has(FrameReason::Animation));
         // a frame is needed -> block on the socket only (0 ms).
-        assert_eq!(s.timeout_ms(), 0);
+        assert_eq!(s.timeout_ms(), Some(0));
     }
 
     #[test]
-    fn damage_without_vsync_falls_back_to_short_poll() {
+    fn idle_scheduler_parks_without_a_heartbeat_timeout() {
         let mut s = FrameScheduler::new();
         s.mark(FrameReason::Damage);
         assert!(s.needs_frame());
-        assert_eq!(s.timeout_ms(), 0);
+        assert_eq!(s.timeout_ms(), Some(0));
     }
 
     #[test]
@@ -369,7 +369,7 @@ mod tests {
         assert!(s.is_animating());
         assert!(s.has_dirty());
         // A pending frame parks on the 0 ms socket poll.
-        assert_eq!(s.timeout_ms(), 0);
+        assert_eq!(s.timeout_ms(), Some(0));
     }
 
     /// A one-shot dirty reason yields exactly one frame, then idles.
@@ -389,7 +389,7 @@ mod tests {
         );
         assert!(!s.is_animating());
         assert!(!s.has_dirty());
-        assert_eq!(s.timeout_ms(), 100);
+        assert_eq!(s.timeout_ms(), None);
     }
 
     /// Animation keeps requesting frames every turn until it stops.
@@ -408,7 +408,7 @@ mod tests {
         );
         assert!(s.is_animating());
         assert!(!s.has_dirty());
-        assert_eq!(s.timeout_ms(), 0);
+        assert_eq!(s.timeout_ms(), Some(0));
     }
 
     /// When the animation ends the scheduler returns to idle (the loop calls
@@ -427,7 +427,7 @@ mod tests {
             "settled animation must not keep rendering"
         );
         assert!(!idle.is_animating());
-        assert_eq!(idle.timeout_ms(), 100);
+        assert_eq!(idle.timeout_ms(), None);
     }
 
     #[test]
@@ -436,7 +436,7 @@ mod tests {
         s.mark(FrameReason::WallpaperAnimation);
         assert!(s.needs_frame());
         assert!(s.has(FrameReason::WallpaperAnimation));
-        assert_eq!(s.timeout_ms(), 0);
+        assert_eq!(s.timeout_ms(), Some(0));
     }
 
     #[test]
@@ -453,7 +453,7 @@ mod tests {
         );
         assert!(s.has(FrameReason::WallpaperAnimation));
         assert!(!s.has(FrameReason::Damage));
-        assert_eq!(s.timeout_ms(), 0);
+        assert_eq!(s.timeout_ms(), Some(0));
     }
 
     #[test]
@@ -466,7 +466,7 @@ mod tests {
             !idle.needs_frame(),
             "a static wallpaper must not keep the render loop awake"
         );
-        assert_eq!(idle.timeout_ms(), 100);
+        assert_eq!(idle.timeout_ms(), None);
     }
 
     /// Regression for the idle-wallpaper-CPU-burn bug: a *static* shader
@@ -485,7 +485,7 @@ mod tests {
             "a static shader wallpaper must not keep the loop awake"
         );
         assert!(!s.has(FrameReason::WallpaperAnimation));
-        assert_eq!(s.timeout_ms(), 100);
+        assert_eq!(s.timeout_ms(), None);
     }
 
     #[test]
@@ -495,7 +495,7 @@ mod tests {
         let mut s = FrameScheduler::from_compositor(false, true, DirtyReason::NONE);
         assert!(s.needs_frame());
         assert!(s.has(FrameReason::WallpaperAnimation));
-        assert_eq!(s.timeout_ms(), 0);
+        assert_eq!(s.timeout_ms(), Some(0));
         // A present consumes the dirty (one-shot) reasons but the animated
         // wallpaper survives, so the loop keeps ticking…
         s.clear_dirty();
@@ -503,7 +503,7 @@ mod tests {
         // …until the compositor stops reporting it (shader removed / static).
         let stopped = FrameScheduler::from_compositor(false, false, DirtyReason::NONE);
         assert!(!stopped.needs_frame());
-        assert_eq!(stopped.timeout_ms(), 100);
+        assert_eq!(stopped.timeout_ms(), None);
     }
 
     /// The idle→animating edge must never hand the integrator an absurd `dt`.

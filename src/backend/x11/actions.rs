@@ -389,7 +389,32 @@ impl WindowManager {
         }
 
         self.engine.cfg = cfg;
-        // Re-apply the scroll-camera spring constants from the freshly reloaded
+        let wants_compositor = crate::config::compositor_enabled(&self.engine.cfg)
+            && crate::config::validate_compositor_backend(&self.engine.cfg).is_ok();
+        if !wants_compositor {
+            if let Some(mut compositor) = self.compositor.take() {
+                compositor.disable();
+            }
+            self.apply_root_wallpaper();
+        } else if self.compositor.is_none() {
+            match compositor::Compositor::init(
+                self.conn.clone(),
+                self.dpy,
+                self.root,
+                self.screen_num,
+                self.check_win,
+                &self.engine.cfg,
+            ) {
+                Some(mut compositor) => {
+                    compositor.set_wallpaper(&self.engine.state.wallpaper);
+                    self.compositor = Some(compositor);
+                    log::info!("reload: compositor enabled");
+                }
+                None => {
+                    log::warn!("reload: compositor initialization failed; staying on X11 path");
+                }
+            }
+        }
         // config to every workspace camera.
         self.engine.apply_camera_cfg();
         self.keymap = build_keymap(&self.engine.cfg);

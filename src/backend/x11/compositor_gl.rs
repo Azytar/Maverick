@@ -68,8 +68,10 @@ use crate::core::wallpaper::{
 use crate::log;
 use x11rb::connection::Connection;
 use x11rb::protocol::composite::{ConnectionExt as _, Redirect};
+use x11rb::protocol::damage::NotifyEvent as DamageNotifyEvent;
 use x11rb::protocol::damage::{ConnectionExt as _, Damage, ReportLevel};
-use x11rb::protocol::shape::SK;
+use x11rb::protocol::shape::{ConnectionExt as _, SK};
+use x11rb::protocol::sync::{ConnectionExt as _, Fence};
 use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::protocol::xproto::*;
 
@@ -188,7 +190,7 @@ fn subtract_rect(r: Rect, hole: Rect) -> Vec<Rect> {
     out.into_iter().filter(|r| r.w > 0 && r.h > 0).collect()
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn global_to_local(global: Rect, origin: Rect) -> Rect {
     Rect::new(global.x - origin.x, global.y - origin.y, global.w, global.h)
 }
@@ -259,6 +261,13 @@ struct CompWin {
     /// 32-bit visuals with different channel layouts), and the fbconfig used to
     /// bind the pixmap has to match this one, not merely its width in bits.
     format: VisualFormat,
+    /// The visual exposes an alpha channel. Such a window must not be treated as
+    /// an opaque occluder merely because `_NET_WM_WINDOW_OPACITY` is 1.0: the
+    /// client may have written transparent pixels into its redirected surface.
+    has_alpha_visual: bool,
+    /// The client currently supplies a non-rectangular `XFixes` shape, or we have
+    /// seen a `ShapeNotify` and must conservatively assume it may do so later.
+    has_shape: bool,
     /// Live (this-frame) outer rect the WM wants this window drawn at, and the
     /// corner radius to round it with.
     ///
@@ -357,6 +366,8 @@ impl CompWin {
             mapped: false,
             hidden: false,
             format,
+            has_alpha_visual: format.alpha_bits > 0,
+            has_shape: false,
             transform: Rect::default(),
             transform_radius: 0,
             transform_border_w: 0,
@@ -502,6 +513,13 @@ impl CompWin {
         true
     }
 
+    /// Whether this source is safe to use as a rectangular opaque occluder.
+    /// Alpha visuals and any observed client shape remain conservative draws so
+    /// pixels below them are never discarded.
+    fn can_occlude(&self, radius: u32) -> bool {
+        self.opacity >= 1.0 && radius == 0 && !self.has_alpha_visual && !self.has_shape
+    }
+
     /// Whether `r` is entirely outside the `[0,0,w,h]` viewport (plus a small
     /// margin so partially-visible windows — including ones with a shadow or a
     /// translucent halo — are never clipped). Used to skip the GPU draw for the
@@ -509,12 +527,14 @@ impl CompWin {
     /// monitor; those still cost a `HashMap` lookup, but no `glDrawArrays`,
     /// texture bind or quad upload. Windows mid-scroll (camera animation) keep
     /// being drawn the instant any part enters the margin.
-    fn offscreen(r: Rect, w: u32, h: u32) -> bool {
+    fn offscreen(r: Rect, viewport: Rect) -> bool {
         const M: i32 = 64; // px of grace around the screen edge
-        r.x + r.w as i32 <= -M
-            || r.y + r.h as i32 <= -M
-            || r.x >= w as i32 + M
-            || r.y >= h as i32 + M
+        let right = viewport.x.saturating_add(viewport.w as i32);
+        let bottom = viewport.y.saturating_add(viewport.h as i32);
+        r.x.saturating_add(r.w as i32) <= viewport.x.saturating_sub(M)
+            || r.y.saturating_add(r.h as i32) <= viewport.y.saturating_sub(M)
+            || r.x >= right.saturating_add(M)
+            || r.y >= bottom.saturating_add(M)
     }
 }
 
@@ -561,13 +581,27 @@ impl DamageRegion {
         self.needs_full = false;
     }
 
-    /// Add a screen rect to the damaged area. Zero-size rects are ignored.
+    /// Add a screen rect to the damaged area. Overlapping or contained rects
+    /// are merged so repeated motion/damage reports do not consume the bounded
+    /// history or inflate a future scissor. Zero-size rects are ignored.
     fn add(&mut self, r: Rect) {
-        if r.w == 0 || r.h == 0 {
+        if self.needs_full || r.w == 0 || r.h == 0 {
             return;
         }
+        let mut candidate = r;
+        while let Some(index) = (0..self.count).find(|&i| {
+            let other = self.rects[i];
+            rects_overlap(candidate, other)
+                || candidate.contains_rect(other)
+                || other.contains_rect(candidate)
+        }) {
+            candidate = candidate.union(self.rects[index]);
+            let last = self.count - 1;
+            self.rects[index] = self.rects[last];
+            self.count = last;
+        }
         if self.count < Self::CAP {
-            self.rects[self.count] = r;
+            self.rects[self.count] = candidate;
             self.count += 1;
         } else {
             // Ran out of slots — be conservative and repaint everything.
@@ -575,12 +609,29 @@ impl DamageRegion {
         }
     }
 
+    /// Union another stable damage snapshot into this region.
+    fn union(&mut self, other: &DamageRegion) {
+        if other.needs_full {
+            self.full();
+            return;
+        }
+        for &r in &other.rects[..other.count] {
+            self.add(r);
+        }
+    }
+
+    /// Rectangles that need repainting. They are pairwise non-overlapping when
+    /// the region did not overflow its capacity; callers can use them as
+    /// independent scissor rectangles.
+    fn rects(&self) -> &[Rect] {
+        &self.rects[..self.count]
+    }
+
     /// Force a full-screen redraw this frame.
     fn full(&mut self) {
         self.needs_full = true;
     }
 
-    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.count == 0 && !self.needs_full
     }
@@ -665,6 +716,35 @@ pub(crate) fn decide_redraw(has_buffer_age: bool, needs_full: bool, damaged: boo
     }
 }
 
+/// Plan a buffer-age repaint from the current damage and the committed journal.
+/// This is deliberately pure: the production render loop supplies the queried
+/// age, and tests can prove the off-by-one/full-marker invariants without a GL
+/// context.
+pub(crate) fn plan_aged_damage(
+    has_buffer_age: bool,
+    force_full: bool,
+    current: &DamageRegion,
+    history: &[DamageRegion],
+    age: u32,
+) -> (FrameMode, DamageRegion) {
+    if !has_buffer_age
+        || force_full
+        || current.needs_full
+        || age == 0
+        || age as usize > history.len().saturating_add(1)
+    {
+        return (FrameMode::Full, DamageRegion::new());
+    }
+    let mut damage = *current;
+    for prior in history.iter().take(age as usize - 1) {
+        damage.union(prior);
+        if damage.needs_full {
+            return (FrameMode::Full, DamageRegion::new());
+        }
+    }
+    (FrameMode::Partial, damage)
+}
+
 /// Fase 7: the screen rects that must be repainted when a window's drawn rect
 /// moves from `prev` (last frame) to `cur` (this frame). Both are emitted so
 /// neither the pixels the window left behind nor the pixels it slid into linger
@@ -703,10 +783,33 @@ pub(crate) fn fully_covered_by(inner: Rect, occluders: &[Rect]) -> bool {
 /// WM's `Placements` (only the geometry source) and from `stack` (which still
 /// includes off-screen windows).
 struct DrawItem {
-    #[allow(dead_code)]
     win: Window,
     quad: DrawQuad,
     tex: TextureHandle,
+    /// GLX texture orientation from the selected TFP config.
+    flip: bool,
+}
+
+macro_rules! checked_void {
+    ($request:expr) => {
+        match $request {
+            Ok(cookie) => cookie.check().map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    };
+}
+
+fn require_x_extension(conn: &XConn, name: &str) -> Result<(), String> {
+    let info = conn
+        .query_extension(name.as_bytes())
+        .map_err(|e| format!("{name} QueryExtension failed: {e}"))?
+        .reply()
+        .map_err(|e| format!("{name} QueryExtension reply failed: {e}"))?;
+    if info.present {
+        Ok(())
+    } else {
+        Err(format!("{name} extension is not present"))
+    }
 }
 
 pub struct Compositor {
@@ -721,6 +824,14 @@ pub struct Compositor {
     root: Window,
     #[allow(dead_code)]
     overlay: Window,
+    /// WM check window used as the compositor selection owner.
+    wm_win: Window,
+    /// `_NET_WM_CM_S<screen>`, retained for graceful ownership release.
+    cm_atom: Atom,
+    /// Optional `XSync` fence used to order client X rendering before sampling.
+    sync_fence: Option<Fence>,
+    selection_active: bool,
+    disabled: bool,
     screen_w: u32,
     screen_h: u32,
     screen_rect: Rect,
@@ -731,6 +842,10 @@ pub struct Compositor {
     root_format: VisualFormat,
     /// The WM's own windows that must never be composited.
     ignored: HashSet<Window>,
+    /// Windows seen in `CreateNotify` before their X resource is queryable. A
+    /// small retry queue closes that cross-client event-order gap.
+    pending_track: HashSet<Window>,
+    pending_track_attempts: HashMap<Window, u8>,
     /// Composition-policy bypass: for each output (monitor) that is in `Bypass`
     /// mode, the XID of the single eligible fullscreen window Maverick has
     /// *un-redirected* so it presents directly (no GL texture, no overlay draw).
@@ -833,11 +948,11 @@ pub struct Compositor {
     /// path. Reset to empty on every full repaint (structural change, or when
     /// buffer-age is unavailable so we always full-redraw).
     damage_acc: DamageRegion,
-    /// History of per-frame `frame_dirty` for `GLX_EXT_buffer_age` support.
-    /// Double-buffered fbconfigs report `age==2` (spec), so a single-frame
-    /// accumulator would force `Full` every frame. Keeping the last 4 frames
-    /// lets `Partial` succeed for `age` 1..4, which is the spec's valid range.
+    /// Damage history at the last actual swap boundary.
     damage_history: Vec<DamageRegion>,
+    /// Stable `XDamage` snapshots collected between frames. `compute_scene` moves
+    /// this into the per-frame region after queued events are drained.
+    pending_damage: DamageRegion,
     /// OPT-IN DIAGNOSTIC (`MAV_FLOAT_TRACE`): when set, emit [FLOAT]/[TRANSFORM]/
     /// [SCENE]/[RENDER]/[PRESENT] trace lines. Never changes rendering behaviour.
     pub(crate) float_trace: bool,
@@ -944,40 +1059,127 @@ impl Compositor {
             );
         }
 
+        // QueryExtension is authoritative; extension-specific version requests
+        // are checked before any other request so absent/old servers fail
+        // closed instead of leaving a half-initialized compositor.
+        // X.Org spells these extension names exactly as shown here in
+        // QueryExtension; `Damage` is not equivalent to the server's `DAMAGE`.
+        for name in ["Composite", "DAMAGE", "XFIXES", "GLX"] {
+            if let Err(e) = require_x_extension(&conn, name) {
+                log::warn!("compositor: {e}; staying on the X11 path");
+                return None;
+            }
+        }
+        let composite = match conn.composite_query_version(0, 4) {
+            Ok(c) => c
+                .reply()
+                .map_err(|e| format!("CompositeQueryVersion failed: {e}")),
+            Err(e) => Err(format!("CompositeQueryVersion request failed: {e}")),
+        };
+        let damage = match conn.damage_query_version(1, 1) {
+            Ok(c) => c
+                .reply()
+                .map_err(|e| format!("DamageQueryVersion failed: {e}")),
+            Err(e) => Err(format!("DamageQueryVersion request failed: {e}")),
+        };
+        let xfixes = match conn.xfixes_query_version(5, 0) {
+            Ok(c) => c
+                .reply()
+                .map_err(|e| format!("XFixesQueryVersion failed: {e}")),
+            Err(e) => Err(format!("XFixesQueryVersion request failed: {e}")),
+        };
+        let composite = match composite {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("compositor: {e}; staying on the X11 path");
+                return None;
+            }
+        };
+        let damage = match damage {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("compositor: {e}; staying on the X11 path");
+                return None;
+            }
+        };
+        let xfixes = match xfixes {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("compositor: {e}; staying on the X11 path");
+                return None;
+            }
+        };
+        if composite.major_version == 0 && composite.minor_version < 4
+            || damage.major_version < 1
+            || (damage.major_version == 1 && damage.minor_version < 1)
+            || xfixes.major_version < 5
+        {
+            log::warn!(
+                "compositor: unsupported extension versions Composite {}.{}, Damage {}.{}, XFixes {}.{}; staying on the X11 path",
+                composite.major_version,
+                composite.minor_version,
+                damage.major_version,
+                damage.minor_version,
+                xfixes.major_version,
+                xfixes.minor_version
+            );
+            return None;
+        }
+
         // Refuse to start if another compositor already owns the selection.
         let cm_atom = match intern_cm_atom(&conn, screen_num) {
             Ok(a) => a,
             Err(e) => {
-                log::warn!("compositor: cannot intern _NET_WM_CM_S0: {e}");
+                log::warn!("compositor: cannot intern _NET_WM_CM_S{screen_num}: {e}");
                 return None;
             }
         };
         if selection_owned(&conn, cm_atom) {
             log::info!(
-                "compositor: _NET_WM_CM_S0 already owned (another compositor is running); \
-                 staying on the X11 path"
+                "compositor: _NET_WM_CM_S{screen_num} already owned (another compositor is running); staying on the X11 path"
             );
             return None;
         }
 
-        // Composite / Damage / XFIXES versions must be queried before any other
-        // call in those extensions — that's what lets x11rb decode their events.
-        let _ = conn.composite_query_version(0, 4);
-        let _ = conn.damage_query_version(1, 1);
-        let _ = conn.xfixes_query_version(5, 0);
-
-        // Claim the compositing selection so others (picom) back off, then
-        // redirect every subwindow to Manual so we get a redirected pixmap to
-        // texture from.
-        if let Err(e) = conn.set_selection_owner(wm_win, cm_atom, x11rb::CURRENT_TIME) {
-            log::warn!("compositor: cannot own _NET_WM_CM_S0: {e}");
+        // Claim the compositing selection so others back off, then redirect every
+        // subwindow manually. Both requests are checked because their protocol
+        // errors arrive asynchronously.
+        if let Err(e) =
+            checked_void!(conn.set_selection_owner(wm_win, cm_atom, x11rb::CURRENT_TIME,))
+        {
+            log::warn!("compositor: cannot own _NET_WM_CM_S{screen_num}: {e}");
             return None;
         }
-        if conn
-            .composite_redirect_subwindows(root, Redirect::MANUAL)
-            .is_err()
-        {
-            log::warn!("compositor: CompositeRedirectSubwindows failed");
+        let owner = match conn.get_selection_owner(cm_atom) {
+            Ok(c) => c
+                .reply()
+                .map_err(|e| format!("cannot verify CM selection: {e}")),
+            Err(e) => Err(format!("cannot verify CM selection: {e}")),
+        };
+        match owner {
+            Ok(r) if r.owner == wm_win => {}
+            Ok(r) => {
+                log::warn!("compositor: lost CM selection race (owner {:#x})", r.owner);
+                return None;
+            }
+            Err(e) => {
+                log::warn!("compositor: {e}; staying on the X11 path");
+                let _ = conn.set_selection_owner(x11rb::NONE, cm_atom, x11rb::CURRENT_TIME);
+                return None;
+            }
+        }
+        if let Err(e) = checked_void!(conn.composite_redirect_subwindows(root, Redirect::MANUAL,)) {
+            log::warn!("compositor: CompositeRedirectSubwindows failed: {e}");
+            let _ = conn.set_selection_owner(x11rb::NONE, cm_atom, x11rb::CURRENT_TIME);
+            return None;
+        }
+        if let Err(e) = checked_void!(conn.xfixes_select_selection_input(
+            wm_win,
+            cm_atom,
+            x11rb::protocol::xfixes::SelectionEventMask::SET_SELECTION_OWNER,
+        )) {
+            log::warn!("compositor: cannot monitor CM selection ownership: {e}");
+            let _ = conn.composite_unredirect_subwindows(root, Redirect::MANUAL);
             let _ = conn.set_selection_owner(x11rb::NONE, cm_atom, x11rb::CURRENT_TIME);
             return None;
         }
@@ -985,23 +1187,66 @@ impl Compositor {
         // The overlay window: our drawing surface. It already sits above
         // everything; we only need to make its *input* shape empty so clicks
         // fall through to the real windows.
-        let overlay = if let Some(reply) = conn
-            .composite_get_overlay_window(root)
-            .ok()
-            .and_then(|c| c.reply().ok())
-        {
-            reply.overlay_win
-        } else {
-            log::warn!("compositor: CompositeGetOverlayWindow failed");
-            let _ = conn.composite_unredirect_subwindows(root, Redirect::MANUAL);
-            let _ = conn.set_selection_owner(x11rb::NONE, cm_atom, x11rb::CURRENT_TIME);
-            return None;
+        let overlay = match conn.composite_get_overlay_window(root) {
+            Ok(c) => match c.reply() {
+                Ok(reply) => reply.overlay_win,
+                Err(e) => {
+                    log::warn!("compositor: CompositeGetOverlayWindow reply failed: {e}");
+                    let _ = conn.composite_unredirect_subwindows(root, Redirect::MANUAL);
+                    let _ = conn.set_selection_owner(x11rb::NONE, cm_atom, x11rb::CURRENT_TIME);
+                    return None;
+                }
+            },
+            Err(e) => {
+                log::warn!("compositor: CompositeGetOverlayWindow request failed: {e}");
+                let _ = conn.composite_unredirect_subwindows(root, Redirect::MANUAL);
+                let _ = conn.set_selection_owner(x11rb::NONE, cm_atom, x11rb::CURRENT_TIME);
+                return None;
+            }
         };
 
         // Empty input region → the overlay passes all pointer events through.
         if let Err(e) = set_empty_input_region(&conn, overlay) {
-            log::warn!("compositor: could not empty overlay input shape: {e}");
+            log::warn!(
+                "compositor: could not empty overlay input shape: {e}; staying on the X11 path"
+            );
+            let _ = conn.composite_release_overlay_window(root);
+            let _ = conn.composite_unredirect_subwindows(root, Redirect::MANUAL);
+            let _ = conn.set_selection_owner(x11rb::NONE, cm_atom, x11rb::CURRENT_TIME);
+            return None;
         }
+
+        // XSync is optional. Create the fence only after all startup requests
+        // that can fail have completed, so a failed init cannot leak a fence XID.
+        let sync_fence = match require_x_extension(&conn, "SYNC") {
+            Ok(()) => match conn.sync_initialize(3, 1) {
+                Ok(c) => match c.reply() {
+                    Ok(v)
+                        if v.major_version > 3
+                            || (v.major_version == 3 && v.minor_version >= 1) =>
+                    {
+                        match conn.generate_id() {
+                            Ok(fence) => {
+                                match checked_void!(conn.sync_create_fence(root, fence, false)) {
+                                    Ok(()) => Some(fence),
+                                    Err(e) => {
+                                        log::debug!("compositor: cannot create XSync fence: {e}");
+                                        None
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::debug!("compositor: cannot allocate XSync fence: {e}");
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                },
+                Err(_) => None,
+            },
+            Err(_) => None,
+        };
 
         let gl_vsync = match cfg.compositor.vsync {
             crate::config::VsyncMode::On => GlVsyncMode::On,
@@ -1027,6 +1272,9 @@ impl Compositor {
             Ok(r) => r,
             Err(e) => {
                 log::warn!("compositor: GL init failed: {e}; staying on the X11 path");
+                if let Some(fence) = sync_fence {
+                    let _ = checked_void!(conn.sync_destroy_fence(fence));
+                }
                 let _ = conn.composite_release_overlay_window(root);
                 let _ = conn.composite_unredirect_subwindows(root, Redirect::MANUAL);
                 let _ = conn.set_selection_owner(x11rb::NONE, cm_atom, x11rb::CURRENT_TIME);
@@ -1098,12 +1346,19 @@ impl Compositor {
             renderer: CompositorRenderer::Gl(renderer),
             root,
             overlay,
+            wm_win,
+            cm_atom,
+            sync_fence,
+            selection_active: true,
+            disabled: false,
             screen_w,
             screen_h,
             screen_rect: Rect::new(0, 0, screen_w, screen_h),
             formats,
             root_format,
             ignored,
+            pending_track: HashSet::new(),
+            pending_track_attempts: HashMap::new(),
             wins: HashMap::new(),
             damages: HashMap::new(),
             warned_visuals: HashSet::new(),
@@ -1134,7 +1389,8 @@ impl Compositor {
             frame_dirty: DamageRegion::new(),
             needs_full: false,
             damage_acc: DamageRegion::new(),
-            damage_history: Vec::with_capacity(4),
+            damage_history: Vec::with_capacity(8),
+            pending_damage: DamageRegion::new(),
             force_full_redraw: std::env::var_os("MAVERICK_FORCE_FULL_REDRAW").is_some(),
             float_trace: std::env::var_os("MAV_FLOAT_TRACE").is_some(),
             comp_trace: std::env::var_os("MAV_COMP_TRACE").is_some(),
@@ -1187,35 +1443,62 @@ impl Compositor {
         if self.ignored.contains(&win) || self.wins.contains_key(&win) {
             return;
         }
-        // `GetWindowAttributes` is the only place the window's *visual* comes
-        // from; `GetGeometry` reports a depth, and a depth is not a pixel
-        // format. Asking for both is one extra round trip per window, once.
-        let Some(attrs) = self
-            .conn
-            .get_window_attributes(win)
-            .ok()
-            .and_then(|c| c.reply().ok())
-        else {
-            return;
+        // Query geometry first. It is a simple, early Map-time barrier and is
+        // already required for the outer rect; asking for attributes first can
+        // block behind a just-created client's request stream.
+        let g = match self.conn.get_geometry(win) {
+            Ok(c) => match c.reply() {
+                Ok(g) => g,
+                Err(err) => {
+                    if self.comp_trace {
+                        log::info!("compositor: track {win:#x} GetGeometry reply failed: {err}");
+                    }
+                    return;
+                }
+            },
+            Err(err) => {
+                if self.comp_trace {
+                    log::info!("compositor: track {win:#x} GetGeometry request failed: {err}");
+                }
+                return;
+            }
         };
-        // InputOnly windows have no pixels at all — no depth, no visual, no
-        // off-screen pixmap. Redirecting one is a guaranteed `BadMatch`.
-        if attrs.class == WindowClass::INPUT_ONLY {
+        // `GetWindowAttributes` supplies the visual/class. If a Create/Map
+        // notification races the client's request, the geometry fallback above
+        // still lets us identify a same-depth root visual safely.
+        let attrs = match self.conn.get_window_attributes(win) {
+            Ok(c) => match c.reply() {
+                Ok(attrs) => Some(attrs),
+                Err(err) => {
+                    if self.comp_trace {
+                        log::info!("compositor: track {win:#x} GetWindowAttributes reply failed: {err}; using geometry fallback");
+                    }
+                    None
+                }
+            },
+            Err(err) => {
+                if self.comp_trace {
+                    log::info!(
+                        "compositor: track {win:#x} GetWindowAttributes request failed: {err}; using geometry fallback"
+                    );
+                }
+                None
+            }
+        };
+        if attrs
+            .as_ref()
+            .is_some_and(|attrs| attrs.class == WindowClass::INPUT_ONLY)
+        {
             return;
         }
-        let Some(g) = self
-            .conn
-            .get_geometry(win)
-            .ok()
-            .and_then(|c| c.reply().ok())
+        let Some(&format) = attrs
+            .as_ref()
+            .and_then(|attrs| self.formats.get(&attrs.visual))
+            .or_else(|| self.formats.values().find(|format| format.depth == g.depth))
         else {
-            return;
-        };
-        let Some(&format) = self.formats.get(&attrs.visual) else {
-            log::debug!(
-                "compositor: window {win} uses unknown visual 0x{:x}; not composited",
-                attrs.visual
-            );
+            if self.comp_trace {
+                log::info!("compositor: track {win:#x} failed: no format for visual/depth");
+            }
             return;
         };
         if format.depth != g.depth {
@@ -1233,12 +1516,106 @@ impl Compositor {
             g.width as u32 + 2 * bw,
             g.height as u32 + 2 * bw,
         );
-        let cw = CompWin::new(geom, bw, format);
+        let mut cw = CompWin::new(geom, bw, format);
+        cw.mapped = attrs
+            .as_ref()
+            .is_none_or(|attrs| attrs.map_state == MapState::VIEWABLE);
+        let override_redirect = attrs.as_ref().is_none_or(|attrs| attrs.override_redirect);
+        let _ = self.conn.shape_select_input(win, true);
+        // Shape events are selected by the WM for managed clients. For existing
+        // or override-redirect windows, query the current shape once; if the
+        // query is unavailable, stay conservative and keep the window out of
+        // the opaque-occluder fast path.
+        cw.has_shape = override_redirect
+            || self
+                .conn
+                .shape_query_extents(win)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .is_none_or(|r| r.bounding_shaped);
         self.wins.insert(win, cw);
+        if self.comp_trace {
+            log::info!(
+                "compositor: tracked {win:#x} visual=0x{:x} depth={} class={:?} override={}",
+                attrs.as_ref().map_or(0, |attrs| attrs.visual),
+                format.depth,
+                attrs.as_ref().map(|attrs| attrs.class),
+                override_redirect
+            );
+        }
 
         if let Ok(dmg) = self.conn.generate_id() {
-            let _ = self.conn.damage_create(dmg, win, ReportLevel::NON_EMPTY);
-            self.damages.insert(win, dmg);
+            if checked_void!(self.conn.damage_create(dmg, win, ReportLevel::NON_EMPTY)).is_ok() {
+                self.damages.insert(win, dmg);
+            } else {
+                log::warn!("compositor: DamageCreate failed for {win:#x}; bypassing window");
+                self.bypass_window(win);
+            }
+        } else {
+            self.bypass_window(win);
+        }
+    }
+
+    /// Retry windows whose `CreateNotify` arrived before their XID was
+    /// queryable. The X server can interleave requests from the creating client
+    /// and this compositor; dropping the first lookup would permanently leave
+    /// an override-redirect window unmanaged.
+    fn retry_pending_tracks(&mut self) {
+        if self.pending_track.is_empty() {
+            return;
+        }
+        let pending: Vec<Window> = self.pending_track.iter().copied().collect();
+        for win in pending {
+            if self.ignored.contains(&win) {
+                self.pending_track.remove(&win);
+                self.pending_track_attempts.remove(&win);
+                continue;
+            }
+            let attempts = self
+                .pending_track_attempts
+                .get(&win)
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(1);
+            self.pending_track_attempts.insert(win, attempts);
+            if !self.wins.contains_key(&win) {
+                self.track(win);
+            }
+            let Some(cw) = self.wins.get(&win) else {
+                if attempts >= 8 {
+                    self.pending_track.remove(&win);
+                    self.pending_track_attempts.remove(&win);
+                }
+                continue;
+            };
+            if !cw.mapped {
+                let viewable = self
+                    .conn
+                    .get_window_attributes(win)
+                    .ok()
+                    .and_then(|cookie| cookie.reply().ok())
+                    .is_some_and(|attrs| attrs.map_state == MapState::VIEWABLE);
+                if viewable {
+                    if let Some(cw) = self.wins.get_mut(&win) {
+                        cw.mapped = true;
+                        cw.damaged = true;
+                        cw.needs_rebind = true;
+                    }
+                    self.mark_full(DirtyReason::SURFACE);
+                }
+            }
+            if self.wins.get(&win).is_some_and(|cw| cw.mapped) || attempts >= 8 {
+                self.pending_track.remove(&win);
+                self.pending_track_attempts.remove(&win);
+            } else if self.comp_trace {
+                log::info!("compositor: pending track retry remains for {win:#x}");
+            }
+        }
+        if !self.pending_track.is_empty() {
+            // A CreateNotify can be delivered before the creating client's X
+            // request is visible to this connection. Retry a bounded number of
+            // presented frames instead of dropping the source permanently.
+            self.mark_full(DirtyReason::SURFACE);
         }
     }
 
@@ -1248,39 +1625,28 @@ impl Compositor {
         if self.bypassed_set.contains(&win) {
             // The bypassed window itself was recreated (rare): keep its bookkeeping
             // consistent but leave the bypass state untouched.
-            self.track(win);
+            self.pending_track.remove(&win);
+            self.pending_track_attempts.remove(&win);
             if !self.ignored.contains(&win) {
                 stack_add_top(&mut self.stack, win);
             }
             return;
         }
-        self.track(win);
-        // A window appeared while we were bypassing. If it overlaps the bypassed
-        // window's screen area we must composite again; if it's on another monitor
-        // (no overlap) we keep bypass to avoid flicker on unrelated outputs (P0).
-        if !self.bypassed_set.is_empty() {
-            let new_geom = self.wins.get(&win).map(|c| c.outer);
-            let should_disengage = match new_geom {
-                Some(ng) if ng.w != 0 && ng.h != 0 => self.bypassed.values().any(|bw| {
-                    self.wins
-                        .get(bw)
-                        .is_some_and(|cw| rects_overlap(cw.outer, ng))
-                }),
-                _ => true,
-            };
-            if should_disengage {
-                self.disengage_all_bypass();
-            }
+        // Do not synchronously query a window from its CreateNotify. A client
+        // can publish that event while its CreateWindow request is still being
+        // serialized relative to this connection; the Map/Configure event is the
+        // first reliable point at which the XID is fully queryable. Keep the
+        // sibling slot now, and reconcile the source at map time.
+        if !self.ignored.contains(&win) {
+            self.pending_track.insert(win);
+            self.pending_track_attempts.entry(win).or_default();
+            stack_add_top(&mut self.stack, win);
         }
         if self.comp_trace {
             log::info!(
-                "[LIFECYCLE] win={:#x} event=CreateNotify tracked={}",
-                win,
-                self.wins.contains_key(&win)
+                "[LIFECYCLE] win={:#x} event=CreateNotify pending_track=true",
+                win
             );
-        }
-        if !self.ignored.contains(&win) {
-            stack_add_top(&mut self.stack, win);
         }
     }
 
@@ -1323,6 +1689,8 @@ impl Compositor {
                 tx,
             );
         }
+        self.pending_track.remove(&win);
+        self.pending_track_attempts.remove(&win);
         if let Some(cw) = self.wins.remove(&win) {
             self.release_texture(cw);
         }
@@ -1353,6 +1721,17 @@ impl Compositor {
         }
         if !self.wins.contains_key(&win) {
             self.track(win);
+            if !self.wins.contains_key(&win) {
+                self.pending_track.insert(win);
+                self.pending_track_attempts.entry(win).or_default();
+                self.mark_full(DirtyReason::SURFACE);
+                if self.comp_trace {
+                    log::info!("compositor: MapNotify track deferred for {win:#x}");
+                }
+                return;
+            }
+            self.pending_track.remove(&win);
+            self.pending_track_attempts.remove(&win);
         }
         // Refresh the cached outer rect from the server BEFORE the overlap
         // check below: at CreateNotify the window is typically still 1x1 at
@@ -1433,6 +1812,9 @@ impl Compositor {
     /// `render` already skips unmapped windows. Dropping and re-adding it would
     /// silently promote it to the top the next time it maps.
     pub fn on_unmap(&mut self, win: Window) {
+        if self.wins.get(&win).is_some_and(|cw| !cw.mapped) {
+            return;
+        }
         // The bypassed fullscreen window going away means the scene is no longer
         // safe to bypass — return to Compose (which re-redirects it; the normal
         // path below then marks it unmapped).
@@ -1492,6 +1874,12 @@ impl Compositor {
             self.update_overlay_shape();
             return;
         }
+        if !self.wins.contains_key(&win) {
+            self.track(win);
+            if !self.wins.contains_key(&win) {
+                return;
+            }
+        }
         let (resized, mapped) = match self.wins.get_mut(&win) {
             Some(cw) => (cw.observe_configure(x, y, w, h, bw), cw.mapped),
             None => return,
@@ -1542,33 +1930,93 @@ impl Compositor {
         self.mark_full(DirtyReason::GEOMETRY);
     }
 
-    /// Damage reported (`DamageNotify`). Re-arm and mark dirty; the texture is
-    /// rebound right before drawing.
-    pub fn on_damage(&mut self, win: Window) {
-        // I4: damage bookkeeping (DamageSubtract) must happen for every
-        // DamageNotify, even while bypassed. Bypass only suppresses render
-        // scheduling (damaged/dirty), never the X Damage state.
-        if let Some(dmg) = self.damages.get(&win) {
-            let _ = self.conn.damage_subtract(*dmg, x11rb::NONE, x11rb::NONE);
+    /// Damage reported (`DamageNotify`). The `XFixes` region is fetched after a
+    /// `DamageSubtract` cut so damage that arrives during the request remains
+    /// pending in the server object. No `DamageSubtract(None,None)` fast path:
+    /// that would discard damage without giving the compositor a region to
+    /// repair.
+    pub fn on_damage(&mut self, win: Window, e: &DamageNotifyEvent) {
+        // I4: damage bookkeeping must happen for every DamageNotify, even while
+        // bypassed. Bypass only suppresses render scheduling, never XDamage.
+        let Some(&dmg) = self.damages.get(&win) else {
+            return;
+        };
+        let mut snapshot = DamageRegion::new();
+        let region = match self.conn.generate_id() {
+            Ok(region) => region,
+            Err(err) => {
+                log::debug!("compositor: cannot allocate damage region for {win:#x}: {err}");
+                snapshot.full();
+                self.finish_damage(win, e, &snapshot);
+                return;
+            }
+        };
+        if checked_void!(self.conn.xfixes_create_region(region, &[])).is_err() {
+            snapshot.full();
+            self.finish_damage(win, e, &snapshot);
+            return;
         }
+        // Requests on one XCB connection execute in order. The fetch therefore
+        // observes the stable region populated by this subtraction, while later
+        // client damage remains accumulated in `dmg` for another report.
+        let _ = self.conn.damage_subtract(dmg, x11rb::NONE, region);
+        let fetched = match self.conn.xfixes_fetch_region(region) {
+            Ok(c) => c.reply().ok(),
+            Err(_) => None,
+        };
+        let _ = checked_void!(self.conn.xfixes_destroy_region(region));
+        if let Some(reply) = fetched {
+            for r in reply.rectangles {
+                if r.width == 0 || r.height == 0 {
+                    continue;
+                }
+                let local = Rect::new(r.x as i32, r.y as i32, r.width as u32, r.height as u32);
+                if let Some(cw) = self.wins.get(&win) {
+                    snapshot.add(map_damage_rect(
+                        cw,
+                        local,
+                        e.geometry.x as i32,
+                        e.geometry.y as i32,
+                    ));
+                }
+            }
+            if snapshot.is_empty() {
+                // A report can race a second subtract for the same object.
+                // Full is safer than assuming that the event carried no
+                // paintable region.
+                snapshot.full();
+            }
+        } else {
+            log::debug!("compositor: cannot fetch damage region for {win:#x}");
+            snapshot.full();
+        }
+        self.finish_damage(win, e, &snapshot);
+    }
+
+    fn finish_damage(&mut self, win: Window, e: &DamageNotifyEvent, snapshot: &DamageRegion) {
         if self.comp_trace {
             let pending = self.wins.get(&win).is_some_and(|c| c.damaged);
             log::info!(
-                "[LIFECYCLE] win={:#x} event=DamageNotify damage_pending_before={} mapped={}",
+                "[LIFECYCLE] win={:#x} event=DamageNotify level={} rects={} damage_pending_before={} mapped={}",
                 win,
+                u8::from(e.level),
+                snapshot.rects().len(),
                 pending,
                 self.wins.get(&win).is_some_and(|c| c.mapped),
             );
         }
-        // Bypass suppresses render scheduling only.
         if self.bypassed_set.contains(&win) {
             return;
         }
+        self.pending_damage.union(snapshot);
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.damaged = true;
         }
         self.dirty = true;
         self.dirty_reasons.insert(DirtyReason::DAMAGE);
+        if self.comp_trace {
+            log::info!("compositor: damage queued dirty for {win:#x}");
+        }
     }
 
     /// `_NET_WM_WINDOW_OPACITY` changed (`PropertyNotify`).
@@ -1594,9 +2042,9 @@ impl Compositor {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn on_shape(&mut self, win: Window) {
+    pub fn on_shape(&mut self, win: Window, shaped: bool) {
         if let Some(cw) = self.wins.get_mut(&win) {
+            cw.has_shape = shaped;
             cw.damaged = true;
         }
         self.mark_full(DirtyReason::GEOMETRY);
@@ -1908,7 +2356,9 @@ impl Compositor {
         if let Some(t) = self.wallpaper_native.take() {
             self.renderer.destroy_raw(TextureHandle(t.0));
         }
-        self.wallpaper_shader = None;
+        if let Some(shader) = self.wallpaper_shader.take() {
+            self.renderer.destroy_shader(shader);
+        }
         self.wallpaper_animating = false;
         self.wallpaper_animated = false;
         self.wallpaper_clock = 0.0;
@@ -1992,6 +2442,9 @@ impl Compositor {
             self.wallpaper_clock += dt;
             self.wallpaper_last_dt = dt;
             self.wallpaper_animating = true;
+            // The shader is a full-screen source; a queued animation frame must
+            // actually redraw it rather than taking the Idle path.
+            self.mark_full(DirtyReason::WALLPAPER);
         } else {
             self.wallpaper_animating = false;
         }
@@ -2028,7 +2481,7 @@ impl WallpaperGpu for Compositor {
             ..Default::default()
         };
         self.renderer
-            .draw_raw(TextureHandle(img.0), TextureHandle(0), &q);
+            .draw_raw(TextureHandle(img.0), TextureHandle(0), false, &q);
     }
     fn draw_shader(&mut self, s: ShaderId, out: Rect, time: f32, dt: f32) {
         self.renderer.draw_shader(
@@ -2184,7 +2637,10 @@ impl Compositor {
     /// The `CompWin` is kept (so its last `outer` rect is still available for
     /// the wallpaper-skip decision) but is never drawn while bypassed.
     fn bypass_window(&mut self, win: Window) {
-        let _ = self.conn.composite_unredirect_window(win, Redirect::MANUAL);
+        if let Err(e) = checked_void!(self.conn.composite_unredirect_window(win, Redirect::MANUAL))
+        {
+            log::debug!("compositor: unredirect {win:#x} failed: {e}");
+        }
         if let Some(cw) = self.wins.get_mut(&win) {
             cw.mapped = true; // still mapped, just shown by X directly
             let (tex, pix) = (cw.tex.take(), cw.pixmap.take());
@@ -2205,7 +2661,9 @@ impl Compositor {
     /// marks the window for re-composition; it does not synchronously create GL
     /// resources (that stays in the render phase, per the floating-freeze fix).
     fn resume_window(&mut self, win: Window) {
-        let _ = self.conn.composite_redirect_window(win, Redirect::MANUAL);
+        if let Err(e) = checked_void!(self.conn.composite_redirect_window(win, Redirect::MANUAL)) {
+            log::debug!("compositor: redirect {win:#x} failed while resuming: {e}");
+        }
         if !self.wins.contains_key(&win) {
             self.track(win);
         }
@@ -2225,8 +2683,14 @@ impl Compositor {
         }
         if !self.damages.contains_key(&win) {
             if let Ok(dmg) = self.conn.generate_id() {
-                let _ = self.conn.damage_create(dmg, win, ReportLevel::NON_EMPTY);
-                self.damages.insert(win, dmg);
+                if checked_void!(self.conn.damage_create(dmg, win, ReportLevel::NON_EMPTY)).is_ok()
+                {
+                    self.damages.insert(win, dmg);
+                } else {
+                    self.bypass_window(win);
+                }
+            } else {
+                self.bypass_window(win);
             }
         }
         self.mark_full(DirtyReason::SURFACE);
@@ -2326,13 +2790,14 @@ impl Compositor {
     /// submits to the GPU.
     fn compute_scene(&mut self) {
         let gen = self.frame_gen;
-        let (sw, sh) = (self.screen_w, self.screen_h);
         let mut items: Vec<DrawItem> = std::mem::take(&mut self.scene);
         items.clear();
         // Rebuild the damage accounting from scratch every frame: only the
         // windows that repainted since the last frame contribute their rect,
         // plus `needs_full` (set by structural changes) forcing a full repaint.
         self.frame_dirty.clear();
+        self.frame_dirty.union(&self.pending_damage);
+        self.pending_damage.clear();
 
         // ── Fase 12, pass 1 (top→bottom): occlusion culling. A window fully
         // hidden behind a single opaque, square-cornered, on-screen window above
@@ -2362,12 +2827,21 @@ impl Compositor {
                 cw.occluded = false;
                 continue;
             }
-            let onscreen = !CompWin::offscreen(outer, sw, sh);
-            let opaque = cw.opacity >= 1.0 && radius == 0;
+            let onscreen = !CompWin::offscreen(outer, self.screen_rect);
+            let opaque = cw.can_occlude(radius);
             cw.occluded = onscreen && fully_covered_by(outer, &self.occluder_rects);
             if onscreen && opaque && !cw.occluded {
                 self.occluder_rects.push(outer);
             }
+        }
+
+        if self.comp_trace && self.stack.len() <= 8 {
+            log::info!(
+                "[SCENE] frame={} stack_bottom_to_top={:?} occluders={:?}",
+                self.dbg_frame,
+                self.stack,
+                self.occluder_rects
+            );
         }
 
         // ── pass 2 (bottom→top): build the scene, skipping occluded windows.
@@ -2399,19 +2873,18 @@ impl Compositor {
             // filter. That is one hash per stack entry saved every frame.
             let needs_fixup = match self.wins.get(&win) {
                 Some(cw) if !cw.mapped || cw.hidden || cw.occluded => false,
-                // A window with no texture yet must always be bound. A window
-                // whose previous bind failed (`needs_rebind`) is retried only when
-                // a *fresh* `DamageNotify`/`ConfigureNotify` arrived (`damaged`):
-                // without this gate a persistently-unbindable window would retry
-                // `rename_and_bind` on every frame, pinning `dirty` and pegging
-                // the loop at 100% (a busy "freeze") while never drawing the
-                // window. The next client repaint re-arms the retry.
+                // A window with no texture must be bound. A previously failed
+                // bind bypasses the window immediately, so it cannot create a
+                // permanent hole or spin retrying an unusable driver config.
                 Some(cw) => cw.tex.is_none() || (cw.needs_rebind && cw.damaged),
                 None => false,
             };
             if needs_fixup {
                 let has_pix = self.wins.get(&win).and_then(|cw| cw.pixmap).is_some();
-                self.rename_and_bind(win, has_pix);
+                if !self.rename_and_bind(win, has_pix) {
+                    self.bypass_window(win);
+                    continue;
+                }
             }
             let Some(cw) = self.wins.get_mut(&win) else {
                 if float_dbg {
@@ -2453,7 +2926,11 @@ impl Compositor {
             // Rebind the texture if the client repainted.
             let was_damaged = cw.damaged;
             if was_damaged {
-                self.renderer.bind(tex);
+                if let Err(e) = self.renderer.bind(tex) {
+                    log::warn!("compositor: TFP rebind failed for {win:#x}: {e}; bypassing window");
+                    self.bypass_window(win);
+                    continue;
+                }
                 cw.damaged = false;
             }
             // Live outer rect, or fall back to the X geometry (OR windows).
@@ -2498,7 +2975,7 @@ impl Compositor {
             // single biggest draw-time win: a 50-window ribbon only has ~5 on
             // screen at once; the rest are scrolled off the edges and would
             // otherwise each issue a `glDrawArrays` + texture bind for nothing.
-            if CompWin::offscreen(outer, sw, sh) {
+            if CompWin::offscreen(outer, self.screen_rect) {
                 if float_dbg {
                     log::info!(
                         "[SCENE] frame={} win={:#x} mapped={} outer={:?} transform={:?} transform_gen={} frame_gen={} tex={} included=true skip_reason=None offscreen=true",
@@ -2549,6 +3026,7 @@ impl Compositor {
                 win,
                 quad: q,
                 tex: tex.handle(),
+                flip: tex.flip,
             });
         }
         // Structural changes (resize/restack/opacity/…) cannot be expressed as a
@@ -2557,6 +3035,20 @@ impl Compositor {
             self.frame_dirty.full();
         }
         self.scene = items;
+        if self.comp_trace && self.stack.len() <= 8 {
+            let items = self
+                .scene
+                .iter()
+                .map(|item| {
+                    format!(
+                        "win={:#x} dst={:?} flip={}",
+                        item.win, item.quad.dst, item.flip
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            log::info!("[SCENE-ITEMS] frame={} items=[{}]", self.dbg_frame, items);
+        }
     }
 
     /// Render one frame: wallpaper, then every on-screen window bottom→top.
@@ -2573,11 +3065,28 @@ impl Compositor {
                 self.scene.len(),
             );
         }
+        if let Some(fence) = self.sync_fence {
+            if checked_void!(self.conn.sync_trigger_fence(fence)).is_err() {
+                log::warn!(
+                    "compositor: XSync trigger failed; disabling fence-based synchronization"
+                );
+                return false;
+            }
+        }
         if self.stack_dirty {
             self.refresh_stack();
         }
+        self.retry_pending_tracks();
         let t_frame_start = Some(Instant::now());
         self.compute_scene();
+        if let Some(fence) = self.sync_fence {
+            if checked_void!(self.conn.sync_await_fence(&[fence])).is_err()
+                || checked_void!(self.conn.sync_reset_fence(fence)).is_err()
+            {
+                log::warn!("compositor: XSync await/reset failed; disabling compositor");
+                return false;
+            }
+        }
         let t_build = t_frame_start.map(|t| t.elapsed().as_nanos() as u64);
 
         let (sw, sh) = (self.screen_w, self.screen_h);
@@ -2593,47 +3102,26 @@ impl Compositor {
         let decided_partial = mode == FrameMode::Partial;
         let mut observed_age: u32 = 0;
 
-        // Honest partial with buffer-age history (P0): keep the last 4 frames
-        // of `frame_dirty` so `age` 1..4 (the spec range) can be honoured.
-        // Double-buffered fbconfigs report `age==2` (exchange), so a single-frame
-        // `damage_acc` would force `Full` every frame and defeat partial redraw.
-        // Per `GLX_EXT_buffer_age`: 0=undefined, 1=previous frame (copy), 2+=N
-        // frames old. We union the last `age` frame damages; 0 or >4 → Full.
+        // Keep a bounded history of the regions actually presented. Buffer age
+        // describes *which frame* is in the back buffer, never which pixels are
+        // damaged. For age N, repair the current region plus the previous N-1
+        // committed regions. A full frame is retained as a marker rather than
+        // clearing the journal.
         if mode == FrameMode::Partial {
             observed_age = if has_age {
                 self.renderer.back_buffer_age()
             } else {
                 0
             };
-            if (1..=4).contains(&observed_age) {
-                self.damage_history.push(self.frame_dirty);
-                if self.damage_history.len() > 4 {
-                    self.damage_history.remove(0);
-                }
-                self.damage_acc.clear();
-                let n = self.damage_history.len();
-                let start = n.saturating_sub(observed_age as usize);
-                for hist in &self.damage_history[start..] {
-                    for r in &hist.rects[..hist.count] {
-                        self.damage_acc.add(*r);
-                        if self.damage_acc.needs_full {
-                            break;
-                        }
-                    }
-                    if self.damage_acc.needs_full {
-                        break;
-                    }
-                    if hist.needs_full {
-                        self.damage_acc.full();
-                        break;
-                    }
-                }
-                if self.damage_acc.needs_full {
-                    mode = FrameMode::Full;
-                }
-            } else {
-                mode = FrameMode::Full;
-            }
+            let (planned_mode, planned_damage) = plan_aged_damage(
+                has_age,
+                false,
+                &self.frame_dirty,
+                &self.damage_history,
+                observed_age,
+            );
+            mode = planned_mode;
+            self.damage_acc = planned_damage;
         }
 
         if self.float_trace {
@@ -2672,7 +3160,7 @@ impl Compositor {
                     self.renderer.begin_frame(sw, sh, true);
                 } else {
                     self.renderer.begin_frame(sw, sh, false);
-                    self.renderer.set_scissor(x, y, w, h, sh);
+                    self.renderer.set_scissor(x, y, w, h, sw, sh);
                     self.renderer.scissor_clear();
                 }
             }
@@ -2737,7 +3225,7 @@ impl Compositor {
                     };
                     last_tex = self
                         .renderer
-                        .draw_raw(TextureHandle(native.0), last_tex, &q);
+                        .draw_raw(TextureHandle(native.0), last_tex, false, &q);
                 }
             }
         } else if let Some(wp) = self.wallpaper.as_mut() {
@@ -2748,15 +3236,20 @@ impl Compositor {
             // in the other monitors' gaps for the duration of the bypass — an
             // acceptable, documented limitation of the legacy wallpaper path.
             if !bypass_active {
-                self.renderer.bind(wp);
-                last_tex = wp.handle();
-                self.renderer.draw(
-                    wp,
-                    &DrawQuad {
-                        dst: [0.0, 0.0, sw as f32, sh as f32],
-                        ..Default::default()
-                    },
-                );
+                if let Err(e) = self.renderer.bind(wp) {
+                    log::warn!("compositor: root-wallpaper TFP bind failed: {e}");
+                    self.wallpaper = None;
+                    self.wallpaper_pixmap = None;
+                } else {
+                    last_tex = wp.handle();
+                    self.renderer.draw(
+                        wp,
+                        &DrawQuad {
+                            dst: [0.0, 0.0, sw as f32, sh as f32],
+                            ..Default::default()
+                        },
+                    );
+                }
             }
         }
 
@@ -2773,7 +3266,9 @@ impl Compositor {
                 item.quad.radius,
                 item.quad.opacity
             );
-            last_tex = self.renderer.draw_raw(item.tex, last_tex, &item.quad);
+            last_tex = self
+                .renderer
+                .draw_raw(item.tex, last_tex, item.flip, &item.quad);
         }
 
         if matches!(mode, FrameMode::Partial) {
@@ -2789,7 +3284,10 @@ impl Compositor {
         }
         crate::backend::x11::trace::trace!("swap_begin", "");
         let trace_swap_start = crate::backend::x11::trace::enabled().then(Instant::now);
-        self.renderer.end_frame();
+        if !self.renderer.end_frame() {
+            log::warn!("compositor: GL error during swap; disabling compositor");
+            return false;
+        }
         let trace_swap_duration = trace_swap_start.map(|start| start.elapsed().as_nanos());
         if let Some(duration) = trace_swap_duration {
             crate::backend::x11::trace::trace!(
@@ -2808,10 +3306,23 @@ impl Compositor {
         // accumulated damage describes only what changed since this present.
         // Clearing it each frame bounds the partial-redraw work and stops the
         // region from growing until it covers the whole screen (B4).
-        self.damage_acc.clear();
-        if mode == FrameMode::Full {
+        // Commit history only after `end_frame` has successfully submitted the
+        // frame boundary. A full repaint is recorded as a full marker so a
+        // later multi-buffer age still requests a full repair when necessary.
+        if has_age {
+            let committed = if mode == FrameMode::Partial {
+                self.damage_acc
+            } else {
+                let mut full = DamageRegion::new();
+                full.full();
+                full
+            };
+            self.damage_history.insert(0, committed);
+            self.damage_history.truncate(8);
+        } else {
             self.damage_history.clear();
         }
+        self.damage_acc.clear();
         self.dirty = false;
         self.needs_full = false;
         self.dirty_reasons.clear();
@@ -2826,6 +3337,9 @@ impl Compositor {
         // Stamp the present timestamp unconditionally: the presentation
         // transitions read the inter-present interval as their dt, which must
         // work with tracing off (the trace block below only *reports* it).
+        // Stamp the present timestamp before the trace block so interval
+        // metrics use the previous presentation, not the current one.
+        let previous_present = self.last_present;
         self.last_present = t_frame_start;
 
         if self.trace {
@@ -2847,14 +3361,13 @@ impl Compositor {
                 if decided_partial && mode != FrameMode::Partial {
                     self.trace_partial_to_full += 1;
                 }
-                if let Some(last) = self.last_present {
-                    let iv = ts.duration_since(last).as_nanos() as u64;
+                if let Some(last) = previous_present {
+                    let iv = ts.saturating_duration_since(last).as_nanos() as u64;
                     if iv > 0 {
                         self.trace_ns_interval_total += iv;
                         self.trace_ns_interval_max = self.trace_ns_interval_max.max(iv);
                     }
                 }
-                self.last_present = Some(ts);
 
                 if self.trace_count >= 120 {
                     let n = self.trace_count;
@@ -2910,8 +3423,39 @@ impl Compositor {
         true
     }
 
+    /// React to an `XFixes` selection-owner transition for `_NET_WM_CM_S<n>`.
+    /// A different compositor taking the selection is an explicit handoff: the
+    /// caller disables this instance rather than fighting over redirection.
+    pub fn selection_owner_changed(&mut self, selection: Atom, owner: Window) -> bool {
+        if selection != self.cm_atom {
+            return true;
+        }
+        if owner == self.wm_win {
+            return true;
+        }
+        if owner == x11rb::NONE {
+            // The previous owner released the selection; reclaim it only while
+            // this compositor is still active.
+            let _ = checked_void!(self.conn.set_selection_owner(
+                self.wm_win,
+                self.cm_atom,
+                x11rb::CURRENT_TIME,
+            ));
+            return true;
+        }
+        log::warn!(
+            "compositor: _NET_WM_CM_S{} selection moved to {owner:#x}; yielding",
+            self.cm_atom
+        );
+        false
+    }
+
     /// Disable and release everything (fallback / cleanup).
     pub fn disable(&mut self) {
+        if self.disabled {
+            return;
+        }
+        self.disabled = true;
         let wins: Vec<CompWin> = self.wins.drain().map(|(_, cw)| cw).collect();
         for cw in wins {
             self.release_texture(cw);
@@ -2919,20 +3463,40 @@ impl Compositor {
         if let Some(t) = self.wallpaper.take() {
             self.renderer.destroy_texture(t);
         }
+        if let Some(image) = self.wallpaper_native.take() {
+            self.renderer.destroy_raw(TextureHandle(image.0));
+        }
+        if let Some(shader) = self.wallpaper_shader.take() {
+            self.renderer.destroy_shader(shader);
+        }
         // `wallpaper_pixmap` is deliberately *not* freed: it is the wallpaper
         // setter's resource, not ours.
         self.wallpaper_pixmap = None;
         for (_, dmg) in self.damages.drain() {
             let _ = self.conn.damage_destroy(dmg);
         }
-        let _ = self
+        if self.selection_active {
+            let _ = checked_void!(self.conn.xfixes_select_selection_input(
+                self.wm_win,
+                self.cm_atom,
+                x11rb::protocol::xfixes::SelectionEventMask::from(0u32),
+            ));
+            let _ = checked_void!(self.conn.set_selection_owner(
+                x11rb::NONE,
+                self.cm_atom,
+                x11rb::CURRENT_TIME,
+            ));
+            self.selection_active = false;
+        }
+        let _ = checked_void!(self
             .conn
-            .composite_unredirect_subwindows(self.root, Redirect::MANUAL);
+            .composite_unredirect_subwindows(self.root, Redirect::MANUAL,));
         let _ = self.conn.composite_release_overlay_window(self.root);
+        if let Some(fence) = self.sync_fence.take() {
+            let _ = checked_void!(self.conn.sync_destroy_fence(fence));
+        }
         self.renderer.destroy();
     }
-
-    // ── internals ────────────────────────────────────────────────────────────
 
     /// Repair the bottom→top order from the server.
     ///
@@ -3065,23 +3629,16 @@ impl Compositor {
     }
 
     /// Name the window's off-screen pixmap and wrap it as a GL texture.
-    ///
-    /// On a bind failure this keeps the named pixmap (when `keep_pixmap` and one
-    /// already exists) and sets `needs_rebind`, so `compute_scene` retries the
-    /// bind on the next damage report rather than leaving the window as a
-    /// permanent hole in the frame. The TFP spec leaves the texture contents
-    /// undefined after a rebind, so a freshly (re)bound window is always marked
-    /// `damaged` and repainted from the client's next draw.
-    fn rename_and_bind(&mut self, win: Window, keep_pixmap: bool) {
+    /// Failure returns `false`; the caller unredirection-bypasses the window so
+    /// a driver/config race cannot leave a permanent hole in the output.
+    fn rename_and_bind(&mut self, win: Window, keep_pixmap: bool) -> bool {
         let Some(cw) = self.wins.get(&win) else {
-            return;
+            return false;
         };
         if !cw.mapped {
-            return;
+            return false;
         }
         let format = cw.format;
-        // Zero sizes fall back to 1x1; >64k sizes are clamped — a raw
-        // `as u16` truncates (e.g. 65537 → 1) into a corrupt texture.
         let (w, h) = if cw.outer.w == 0 || cw.outer.h == 0 {
             (1u16, 1u16)
         } else {
@@ -3090,53 +3647,82 @@ impl Compositor {
                 cw.outer.h.clamp(1, u16::MAX as u32) as u16,
             )
         };
-        // Reuse the existing named pixmap when retrying a failed bind, so we do
-        // not leak a new server-side allocation on every damage repaint.
+        if self.comp_trace {
+            log::info!("compositor: rename-bind start win={win:#x} keep={keep_pixmap}");
+        }
         let pixmap = if keep_pixmap {
             if let Some(p) = cw.pixmap {
                 p
             } else {
                 let Ok(p) = self.conn.generate_id() else {
-                    return;
+                    return false;
                 };
                 p
             }
         } else {
             let Ok(p) = self.conn.generate_id() else {
-                return;
+                return false;
             };
             p
         };
-        if (!keep_pixmap || cw.pixmap != Some(pixmap))
-            && self.conn.composite_name_window_pixmap(win, pixmap).is_err()
-        {
-            return;
+        let newly_named = !keep_pixmap || cw.pixmap != Some(pixmap);
+        if newly_named {
+            if let Err(e) = checked_void!(self.conn.composite_name_window_pixmap(win, pixmap)) {
+                log::debug!("compositor: NameWindowPixmap {win:#x} failed: {e}");
+                let _ = self.conn.free_pixmap(pixmap);
+                return false;
+            }
+        }
+        // The Name request is a void request. GetGeometry on the generated
+        // pixmap is an ordering barrier and validates the current generation's
+        // dimensions before it can become a GLX source.
+        let pixmap_geometry = self
+            .conn
+            .get_geometry(pixmap)
+            .ok()
+            .and_then(|c| c.reply().ok());
+        if pixmap_geometry.is_none_or(|g| g.width != w || g.height != h) {
+            if newly_named {
+                let _ = self.conn.free_pixmap(pixmap);
+            }
+            return false;
+        }
+        if self.comp_trace {
+            log::info!(
+                "compositor: rename-bind geometry win={win:#x} pixmap={pixmap:#x} size={w}x{h}"
+            );
         }
         match self.renderer.texture_from_pixmap(pixmap, format, w, h) {
             Ok(t) => {
+                if self.comp_trace {
+                    log::info!(
+                        "compositor: rename-bind success win={win:#x} tex={:#x}",
+                        t.handle().0
+                    );
+                }
                 if let Some(cw) = self.wins.get_mut(&win) {
                     cw.tex = Some(t);
                     cw.pixmap = Some(pixmap);
                     cw.damaged = true;
                     cw.needs_rebind = false;
+                    true
                 } else {
-                    // The window vanished while we were binding.
                     self.renderer.destroy_texture(t);
                     let _ = self.conn.free_pixmap(pixmap);
+                    false
                 }
             }
             Err(e) => {
                 if self.warned_visuals.insert(format.id) {
                     log::warn!("compositor: cannot texture windows of {format}: {e}");
                 }
-                // Keep the named pixmap and retry on the next damage instead of
-                // dropping the window into a permanent hole (RC-1).
-                if let Some(cw) = self.wins.get_mut(&win) {
-                    cw.needs_rebind = true;
-                    if !keep_pixmap || cw.pixmap != Some(pixmap) {
-                        cw.pixmap = Some(pixmap);
-                    }
+                if newly_named {
+                    let _ = self.conn.free_pixmap(pixmap);
                 }
+                if let Some(cw) = self.wins.get_mut(&win) {
+                    cw.needs_rebind = false;
+                }
+                false
             }
         }
     }
@@ -3152,6 +3738,12 @@ impl Compositor {
         if let Some(pm) = cw.pixmap.take() {
             let _ = self.conn.free_pixmap(pm);
         }
+    }
+}
+
+impl Drop for Compositor {
+    fn drop(&mut self) {
+        self.disable();
     }
 }
 
@@ -3256,13 +3848,47 @@ fn screen_visuals(screen: &Screen) -> Vec<VisualFormat> {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn set_empty_input_region(conn: &XConn, win: Window) -> Result<(), Box<dyn std::error::Error>> {
+/// Translate a drawable-local `XDamage` rectangle into the compositor's root
+/// coordinate system, including the current presentation transform.
+fn map_damage_rect(cw: &CompWin, local: Rect, geometry_x: i32, geometry_y: i32) -> Rect {
+    let source = Rect::new(
+        geometry_x.saturating_add(cw.border_w as i32),
+        geometry_y.saturating_add(cw.border_w as i32),
+        cw.outer.w.saturating_sub(cw.border_w.saturating_mul(2)),
+        cw.outer.h.saturating_sub(cw.border_w.saturating_mul(2)),
+    );
+    let drawn = if cw.transform.w > 0 && cw.transform.h > 0 {
+        cw.transform
+    } else {
+        cw.outer
+    };
+    if source.w == 0 || source.h == 0 || drawn.w == 0 || drawn.h == 0 {
+        return cw.outer;
+    }
+    let x0 = (local.x as i64 * drawn.w as i64 / source.w as i64) as i32;
+    let y0 = (local.y as i64 * drawn.h as i64 / source.h as i64) as i32;
+    let x1 = ((local.x as i64 + local.w as i64) * drawn.w as i64 / source.w as i64) as i32;
+    let y1 = ((local.y as i64 + local.h as i64) * drawn.h as i64 / source.h as i64) as i32;
+    Rect::new(
+        drawn.x.saturating_add(x0),
+        drawn.y.saturating_add(y0),
+        (x1.saturating_sub(x0)).max(1) as u32,
+        (y1.saturating_sub(y0)).max(1) as u32,
+    )
+}
+
+fn set_empty_input_region(conn: &XConn, win: Window) -> Result<(), String> {
     // XFIXES: set the window's input region to the empty region. We create an
     // empty region (no rectangles) and assign it as the window's input shape.
-    let region = conn.generate_id()?;
-    conn.xfixes_create_region(region, &[])?;
-    conn.xfixes_set_window_shape_region(win, SK::INPUT, 0, 0, region)?;
-    conn.xfixes_destroy_region(region)?;
+    let region = conn.generate_id().map_err(|e| e.to_string())?;
+    checked_void!(conn.xfixes_create_region(region, &[]))?;
+    if let Err(e) =
+        checked_void!(conn.xfixes_set_window_shape_region(win, SK::INPUT, 0, 0, region,))
+    {
+        let _ = checked_void!(conn.xfixes_destroy_region(region));
+        return Err(e);
+    }
+    checked_void!(conn.xfixes_destroy_region(region))?;
     Ok(())
 }
 
@@ -3338,28 +3964,36 @@ mod stack_tests {
         const W: u32 = 1920;
         const H: u32 = 1080;
         // Fully on screen.
-        assert!(!CompWin::offscreen(Rect::new(100, 100, 400, 300), W, H));
+        let viewport = Rect::new(0, 0, W, H);
+        assert!(!CompWin::offscreen(Rect::new(100, 100, 400, 300), viewport));
         // Touches the left edge.
-        assert!(!CompWin::offscreen(Rect::new(0, 100, 400, 300), W, H));
+        assert!(!CompWin::offscreen(Rect::new(0, 100, 400, 300), viewport));
         // Just inside the right edge (within the margin).
         assert!(!CompWin::offscreen(
             Rect::new((W as i32) - 60, 100, 400, 300),
-            W,
-            H
+            viewport
         ));
         // Fully to the left, beyond the margin.
-        assert!(CompWin::offscreen(Rect::new(-200, 100, 100, 300), W, H));
+        assert!(CompWin::offscreen(Rect::new(-200, 100, 100, 300), viewport));
         // Fully below.
         assert!(CompWin::offscreen(
             Rect::new(100, (H as i32) + 200, 100, 300),
-            W,
-            H
+            viewport
         ));
         // Entirely past the right edge.
         assert!(CompWin::offscreen(
             Rect::new((W as i32) + 100, 100, 100, 300),
-            W,
-            H
+            viewport
+        ));
+        // A negative-origin viewport is handled in root coordinates.
+        let negative = Rect::new(-1280, 0, W, H);
+        assert!(!CompWin::offscreen(
+            Rect::new(-1200, 100, 400, 300),
+            negative
+        ));
+        assert!(CompWin::offscreen(
+            Rect::new(-1500, 100, 100, 300),
+            negative
         ));
     }
 
@@ -3575,6 +4209,16 @@ mod damage_tests {
         r.add(Rect::new(0, 0, 0, 100));
         r.add(Rect::new(0, 0, 100, 0));
         assert!(r.is_empty(), "degenerate rects must not dirty the frame");
+    }
+
+    #[test]
+    fn overlapping_rects_are_merged_without_losing_disjoint_regions() {
+        let mut r = DamageRegion::new();
+        r.add(Rect::new(0, 0, 100, 100));
+        r.add(Rect::new(50, 0, 100, 100));
+        r.add(Rect::new(500, 0, 10, 10));
+        assert_eq!(r.rects().len(), 2);
+        assert_eq!(r.rects()[0], Rect::new(0, 0, 150, 100));
     }
 
     #[test]
@@ -3853,7 +4497,8 @@ mod coverage_tests {
 /// is a free function of three booleans, so the policy is fully covered in CI.
 #[cfg(test)]
 mod frameplan_tests {
-    use super::{decide_redraw, FrameMode};
+    use super::{decide_redraw, plan_aged_damage, DamageRegion, FrameMode};
+    use crate::types::Rect;
 
     #[test]
     fn nothing_damaged_is_idle() {
@@ -3877,6 +4522,35 @@ mod frameplan_tests {
     #[test]
     fn buffer_age_plus_damage_is_partial() {
         assert_eq!(decide_redraw(true, false, true), FrameMode::Partial);
+    }
+
+    #[test]
+    fn age_two_replays_one_previous_region() {
+        let mut current = DamageRegion::new();
+        current.add(Rect::new(20, 20, 10, 10));
+        let mut previous = DamageRegion::new();
+        previous.add(Rect::new(0, 0, 5, 5));
+        let (mode, damage) = plan_aged_damage(true, false, &current, &[previous], 2);
+        assert_eq!(mode, FrameMode::Partial);
+        assert_eq!(damage.rects().len(), 2);
+    }
+
+    #[test]
+    fn age_too_old_for_journal_forces_full() {
+        let mut current = DamageRegion::new();
+        current.add(Rect::new(20, 20, 10, 10));
+        let (mode, _) = plan_aged_damage(true, false, &current, &[], 2);
+        assert_eq!(mode, FrameMode::Full);
+    }
+
+    #[test]
+    fn full_history_marker_stays_full_for_multi_buffer_age() {
+        let mut current = DamageRegion::new();
+        current.add(Rect::new(20, 20, 10, 10));
+        let mut previous = DamageRegion::new();
+        previous.full();
+        let (mode, _) = plan_aged_damage(true, false, &current, &[previous], 2);
+        assert_eq!(mode, FrameMode::Full);
     }
 }
 

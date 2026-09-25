@@ -281,22 +281,37 @@ pub fn detach_from_terminal() {
 /// (including `EINTR`) are treated as "wake up and let the caller re-check",
 /// i.e. they return `true` so the loop makes progress.
 pub fn wait_readable(fd: std::os::unix::io::RawFd, timeout: std::time::Duration) -> bool {
-    let mut pfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let ms = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
-    // SAFETY: `pfd` is a valid, initialized pollfd for the duration of the call.
-    let r = unsafe { libc::poll(&mut pfd, 1, ms) };
+    wait_readable_fds(&[fd], Some(timeout))
+}
+
+/// Wait until one of the X11/control wake descriptors is readable. `None`
+/// blocks until an event (or EINTR) instead of imposing a heartbeat poll.
+pub fn wait_readable_fds(
+    fds: &[std::os::unix::io::RawFd],
+    timeout: Option<std::time::Duration>,
+) -> bool {
+    if fds.is_empty() {
+        return true;
+    }
+    let mut pfds: Vec<libc::pollfd> = fds
+        .iter()
+        .copied()
+        .map(|fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    let ms = timeout
+        .map(|v| v.as_millis().min(i32::MAX as u128) as libc::c_int)
+        .unwrap_or(-1);
+    // SAFETY: every pollfd points at a caller-owned descriptor and remains
+    // valid for the duration of the call.
+    let r = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, ms) };
     match r {
-        0 => false, // timeout, nothing readable
-        n if n > 0 => {
-            // Only claim readable if POLLIN is set; POLLERR/POLLHUP/POLLNVAL
-            // should wake the caller so it can react to the error.
-            pfd.revents & libc::POLLIN != 0
-        }
-        _ => true, // error/EINTR: wake and let the caller re-check
+        0 => false,
+        n if n > 0 => pfds.iter().any(|p| p.revents & libc::POLLIN != 0),
+        _ => true,
     }
 }
 
