@@ -1,53 +1,48 @@
 //! Neutral renderer contract — backend-agnostic trait boundary for the compositor.
 //!
-//! This crate defines the `Renderer` trait and the types that flow between the
-//! compositor and the GPU backends (`maverick-gl` and a future Vulkan backend).
-//! The WM core never imports `maverick-gl` or `maverick-vk` symbols — it only
-//! talks to this crate, so the rendering backend can be swapped without touching
-//! window-management logic. No X11, no `maverick-core` state, no frame
-//! scheduling or layout geometry lives here.
+//! This crate holds the `Renderer` trait and the value types that cross the
+//! backend boundary (`Rect`, `DrawQuad`, `Filter`, `TextureHandle`,
+//! `VisualDesc`, `RendererInfo`). Depending on the trait rather than on a
+//! concrete backend is what keeps the rendering implementation swappable
+//! without touching window-management logic. No X11 types, no
+//! `maverick-core` state, no frame scheduling and no layout geometry belong
+//! here.
 //!
 //! # Ownership
 //!
-//! The `Renderer` trait owns no state beyond the GPU context itself. Textures
-//! are created and destroyed by the backend; the compositor only holds opaque
-//! `TextureHandle` values. The backend is `Send` so the renderer can move
-//! across threads if the architecture requires it.
+//! A backend owns the GPU context and every resource behind a
+//! [`TextureHandle`]; the caller owns the `Renderer`. Textures are created and
+//! destroyed through trait methods, and [`Renderer::destroy`] invalidates every
+//! handle the renderer handed out. `Renderer: Send` so a caller may move a
+//! renderer across threads.
 //!
-//! What this crate does **not** own:
-//! - Logical state (`State`, `Client`, `Workspace`, `Monitor`) — owned by
-//!   `maverick-core`.
-//! - X connection, workarea, or `ConfigureWindow` placement — owned by the X11
-//!   backend.
-//! - Frame scheduling, damage tracking, or presentation logic — owned by the
-//!   compositor.
-//! - Window geometry or focus — computed upstream and passed in as `Rect`/
+//! Not owned here:
+//! - Logical state (`State`, `Client`, `Workspace`, `Monitor`) — `maverick-core`.
+//! - X connection, workarea, `ConfigureWindow` placement — the X11 backend.
+//! - Frame scheduling, damage tracking, presentation — the compositor.
+//! - Window geometry and focus — computed upstream, passed in as `Rect`/
 //!   `DrawQuad`.
 //!
-//! # Lifecycle
+//! # Frame lifetime
 //!
-//! 1. Backend creates a `Renderer` (GL/Vk context current).
-//! 2. Compositor calls `begin_frame` → `draw` (repeated) → `end_frame`.
-//! 3. Textures are uploaded (`upload_rgba` / `texture_from_pixmap`) and
-//!    destroyed (`destroy_texture`) by the compositor when windows unmap or the
-//!    compositor shuts down.
-//! 4. On shutdown the compositor calls `destroy`, which cleans up all GPU
-//!    resources and makes the context current-free.
+//! `begin_frame` → `draw*` → `end_frame`. [`Renderer::end_frame`] is the only
+//! vsync synchroniser; all drawing belongs between `begin_frame` and
+//! `end_frame`, and textures are uploaded before the frame that draws them.
 //!
 //! # Errors
 //!
-//! All fallible operations return `Result<_, String>`. The compositor logs
-//! errors and falls back to the non-composited `ConfigureWindow` path rather
-//! than crashing.
+//! Fallible methods return `Err(String)` for logging. A failure means the
+//! compositor falls back to the non-composited `ConfigureWindow` path, never
+//! that the window manager aborts.
 
 #![allow(dead_code)]
 
 use std::fmt;
 
-/// Screen-space rectangle in pixels.
+/// Screen-space rectangle in pixels, top-left origin.
 ///
-/// Used for window geometry, scissor regions, and output dimensions.
-/// Coordinates are top-left origin; `w`/`h` are always non-negative.
+/// Carries window geometry, scissor regions and output dimensions; `w`/`h` are
+/// unsigned, so a rectangle is never negative.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
@@ -84,10 +79,9 @@ pub enum Filter {
     Linear,
 }
 
-/// Opaque handle to a GPU texture. The underlying value is
-/// backend-private — `u32` in GL (a `GLuint`), `u32` in Vulkan
-/// (a `VkImageView` index). Do not construct manually; always
-/// obtain via `upload_rgba` or `texture_from_pixmap`.
+/// Opaque handle to a backend-owned GPU texture. The wrapped value is
+/// backend-private (a `GLuint` in GL); never construct one by hand — obtain it
+/// from [`Renderer::upload_rgba`] or [`Renderer::texture_from_pixmap`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TextureHandle(pub u32);
 
@@ -102,9 +96,9 @@ pub struct VisualDesc {
     pub direct: bool,
 }
 
-/// Hardware vs software acceleration classification.
-/// Returned by `RendererInfo::acceleration` so the compositor
-/// can log and, if needed, fall back to software path.
+/// Hardware vs software acceleration classification, reported through
+/// [`RendererInfo::accelerated`] so the compositor can log it and, if it needs
+/// to, fall back to a software path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Acceleration {
     #[default]
@@ -124,10 +118,9 @@ impl fmt::Display for Acceleration {
 }
 
 /// Structured renderer info returned to the compositor for startup logging.
-/// `backend` is a static string identifying the crate
-/// ("OpenGlGlx" / "Vulkan"); `vendor`/`renderer`/`version`
-/// are the GPU driver strings; `accelerated` classifies
-/// whether the renderer is using real GPU or software fallback.
+/// `backend` names the backend ("OpenGL/GLX", ...); `vendor`/`renderer`/
+/// `version` are the GPU driver strings; `accelerated` reports whether the
+/// renderer is on real GPU or a software fallback.
 #[derive(Debug, Clone)]
 pub struct RendererInfo {
     pub backend: &'static str,
@@ -148,76 +141,74 @@ impl fmt::Display for RendererInfo {
     }
 }
 
-/// Compositor renderer backend. Implemented by `maverick-gl` and
-/// a future Vulkan backend. The WM core calls only this trait,
-/// so the rendering implementation can be swapped without
-/// touching the window manager.
+/// Compositor renderer backend: the entire GPU surface the compositor drives.
 ///
 /// # Ownership
 ///
-/// The caller owns the `Renderer` and must call `destroy` before
-/// dropping it to release GPU resources. All texture handles
-/// created by this renderer are invalidated by `destroy`.
+/// The caller owns the `Renderer` and must call [`Renderer::destroy`] before
+/// dropping it; `destroy` releases every GPU resource and invalidates every
+/// texture handle the renderer returned.
 ///
 /// # Thread safety
 ///
-/// `Renderer: Send` so the compositor can move the renderer
-/// across threads if needed. In practice the renderer lives
-/// on the main thread.
+/// `Renderer: Send` so a caller may move the renderer across threads; the trait
+/// requires nothing of the context beyond that.
 ///
 /// # Frame lifetime
 ///
 /// ```text
 /// begin_frame → draw* → end_frame
 /// ```
-/// `end_frame` is the only vsync synchroniser; it blocks until
-/// the frame is presented. All drawing must happen between
-/// `begin_frame` and `end_frame`.
 ///
 /// # Scissor
 ///
-/// `set_scissor` uses a bottom-left origin for `y` because
-/// that is what GL uses. The caller must pass the framebuffer
-/// `height` so the scissor can be flipped to GL's coordinate
-/// space.
+/// [`Renderer::set_scissor`] takes top-left screen coordinates plus the
+/// framebuffer `height`, because a backend whose scissor origin is bottom-left
+/// (GL) has to flip `y` against it.
 ///
 /// # Errors
 ///
-/// All fallible operations return `Err(String)`. The compositor
-/// logs the error and falls back to the non-composited
-/// `ConfigureWindow` path rather than crashing the WM.
+/// Fallible methods return `Err(String)`; the caller logs the error and falls
+/// back to the non-composited `ConfigureWindow` path.
 pub trait Renderer: Send {
     /// Start a frame. `full_clear` controls whether the screen is cleared to
     /// transparent black and scissor disabled before drawing.
     fn begin_frame(&mut self, width: u32, height: u32, full_clear: bool);
 
-    /// Set a scissor rectangle for partial redraw. `height` is the framebuffer
-    /// height because some backends (GL) use a bottom-left scissor origin.
+    /// Set a scissor rectangle for partial redraw, in top-left screen
+    /// coordinates. `height` is the framebuffer height, needed by a backend
+    /// that flips `y` into a bottom-left scissor origin.
     fn set_scissor(&mut self, x: i32, y: i32, w: u32, h: u32, height: u32);
 
     /// Clear the current scissor rectangle.
     fn clear_scissor(&mut self);
 
-    /// Draw one textured quad. `tex` is an opaque texture bound for this draw;
-    /// the renderer may consume it if needed.
+    /// Draw one textured quad. The backend binds `tex` itself, so the caller
+    /// only has to keep the texture alive for the duration of the call.
     fn draw(&mut self, tex: &mut dyn Texture, quad: &DrawQuad);
 
-    /// Draw a shader-based wallpaper quad (if this backend supports it).
+    /// Draw a shader-based wallpaper quad. Backends without a shader pipeline
+    /// ignore the call — the signature has no way to report that.
     fn draw_shader(&mut self, shader: u32, out: Rect, time: f32, dt: f32);
 
-    /// Finish the frame and present. This is the only vsync synchroniser.
+    /// Finish the frame and present it. The only vsync synchroniser: it blocks
+    /// until the frame has reached the screen.
     fn end_frame(&mut self);
 
-    /// Identity of the drawable used as the compositor framebuffer.
+    /// Identity of the drawable the compositor renders into, for diagnostics.
     fn debug_drawable(&self) -> u64;
 
     /// Whether the renderer can read back buffer age for partial redraw.
     fn has_buffer_age(&self) -> bool;
 
-    /// Number of back-buffer ages observed. Returns 0 when unavailable.
+    /// How many frames the back buffer's contents are stale
+    /// (`GLX_EXT_buffer_age` semantics), read after a frame has been
+    /// presented. `0` means the contents are undefined or the query is
+    /// unavailable, and the caller must repaint the whole surface.
     fn back_buffer_age(&self) -> u32;
 
-    /// Wrap an X pixmap as a GPU texture.
+    /// Wrap an X pixmap as a GPU texture. `visual` must describe the visual
+    /// the pixmap was created with; a mismatch shows up as wrong colours.
     fn texture_from_pixmap(
         &mut self,
         pixmap: u32,
@@ -226,7 +217,8 @@ pub trait Renderer: Send {
         height: u16,
     ) -> Result<TextureHandle, String>;
 
-    /// Upload CPU RGBA8 pixels as a new texture.
+    /// Upload `width * height * 4` bytes of RGBA8 (row-major, top-left
+    /// origin) as a new texture.
     fn upload_rgba(&mut self, img: &[u8], width: u32, height: u32)
         -> Result<TextureHandle, String>;
 
@@ -236,7 +228,8 @@ pub trait Renderer: Send {
     /// Destroy a texture previously returned by `upload_rgba`/`texture_from_pixmap`.
     fn destroy_texture(&mut self, handle: TextureHandle);
 
-    /// Destroy all renderer resources and make the context current-free.
+    /// Release every GPU resource this renderer created and unbind its
+    /// context. Invalidates all handles it returned.
     fn destroy(&mut self);
 
     /// Startup info for logging.
@@ -245,12 +238,10 @@ pub trait Renderer: Send {
 
 /// Texture object the renderer can draw. Backend-private.
 ///
-/// Implementors must ensure that `handle()` returns the
-/// same value for the lifetime of the texture, and that
-/// `is_bound()` accurately reflects whether the texture
-/// is currently bound to the GL context. A texture that
-/// has been `destroy_texture`d must return `false` from
-/// `is_bound`.
+/// [`handle`](Texture::handle) must stay stable for the texture's lifetime —
+/// the compositor keys its texture bookkeeping on it — and
+/// [`is_bound`](Texture::is_bound) must report the backend's real binding
+/// state, since a stale `true` lets a backend skip a bind it still needs.
 pub trait Texture: Send {
     fn handle(&self) -> TextureHandle;
     fn is_bound(&self) -> bool;
