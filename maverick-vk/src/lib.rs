@@ -16,11 +16,14 @@
 //!
 //! # Ownership
 //!
-//! Field declaration order is drop order. [`Vulkan::drop`] explicitly destroys
-//! semaphores, fence, and command pool before fields unwind, then
-//! `swapchain → device → surface → instance` unwind in that order, so
-//! `instance` is declared last. [`instance::Instance`] destroys its debug
-//! messenger before `VkInstance`. The fence is created signaled so the first
+//! Field declaration order is drop order. [`Vulkan::drop`] first waits for the
+//! device to become idle, then explicitly destroys semaphores, fence, and
+//! command pool before fields unwind, then `swapchain → device → surface →
+//! instance` unwind in that order, so `instance` is declared last. The idle
+//! wait is part of teardown because [`Vulkan::acquire_and_present`] returns
+//! as soon as a frame is submitted, and the destroys above require that work
+//! to have completed. [`instance::Instance`] destroys its debug messenger
+//! before `VkInstance`. The fence is created signaled so the first
 //! `wait_for_fences` does not block. `recreate_swapchain` waits on `in_flight`
 //! before replacing the swapchain handle.
 //!
@@ -37,7 +40,9 @@
 //! Every Vulkan entry point is `unsafe` FFI through `ash`. The caller must keep
 //! the instance and device alive for every submission, must not use a queue
 //! after device destruction, and must supply a live `xcb_connection_t*` for the
-//! whole lifetime of the [`Vulkan`] value.
+//! whole lifetime of the [`Vulkan`] value — dropping the value counts, since
+//! teardown waits on presentation requests that Vulkan sends over that
+//! connection.
 
 mod device;
 mod error;
@@ -66,9 +71,14 @@ pub struct SurfaceTarget {
 /// Minimal Vulkan/X11 backend: instance → surface → device → swapchain plus the
 /// one-shot command buffer and synchronization objects used to clear and present
 /// a single frame.
-// Field order is the drop order: semaphores/fence/pool are freed explicitly in
-// `Drop` before the fields run, and then `swapchain → device → surface →
-// instance` must unwind in that order, so `instance` is declared LAST.
+///
+/// Dropping waits for outstanding GPU work to complete before destroying the
+/// objects submitted commands may still reference, so a caller may drop the
+/// backend with a frame in flight and add no synchronization of its own.
+// Field order is the drop order: after the device is idle, semaphores/fence/pool
+// are freed explicitly in `Drop` before the fields run, and then `swapchain →
+// device → surface → instance` must unwind in that order, so `instance` is
+// declared LAST.
 pub struct Vulkan {
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
@@ -147,6 +157,10 @@ impl Vulkan {
     }
 
     /// Acquire the next swapchain image, clear it to `clear`, and present it.
+    ///
+    /// Returns once the frame is submitted, not once it has completed: the
+    /// caller is given no completion signal, and the only wait is the one the
+    /// next call or the teardown performs.
     pub fn acquire_and_present(&mut self, clear: [f32; 4]) -> Result<(), VkError> {
         let dev = &self.device.handle;
 
@@ -338,8 +352,31 @@ impl Drop for Vulkan {
     fn drop(&mut self) {
         let dev = &self.device.handle;
         unsafe {
+            // `acquire_and_present` returns once the frame is submitted, not
+            // once it has run, yet every destroy below requires the submitted
+            // work referring to the object to have completed execution — the
+            // semaphore, fence, command-pool and swapchain preconditions all
+            // say so in their own terms.
+            //
+            // `device_wait_idle`, not `wait_for_fences` on `in_flight`: that
+            // fence is signalled by the `queue_submit` batch alone, so it
+            // cannot cover `queue_present` on the present queue — whose signal
+            // semaphore the presentation engine may still hold — nor
+            // `acquire_next_image`, which signals `image_available` and is
+            // given no fence at all.
+            //
+            // The result is ignored because `Drop` cannot report it, and that
+            // is sound: the wait succeeds, or the device is lost, and for a
+            // lost device the spec counts command buffers as not pending and
+            // objects as not in use, so the destroys are legal either way. A
+            // hung rather than lost device can stall this call, but no shorter
+            // wait makes the teardown legal.
+            let _ = dev.device_wait_idle();
+
             // Order matters: semaphores → fence → command pool → swapchain →
             // surface → device → (instance drops debug messenger + instance).
+            // The wait above is what makes the first four legal; the rest are
+            // released by their own `Drop` in the order the fields unwind.
             dev.destroy_semaphore(self.image_available, None);
             dev.destroy_semaphore(self.render_finished, None);
             dev.destroy_fence(self.in_flight, None);
@@ -347,6 +384,8 @@ impl Drop for Vulkan {
         }
         // `self.swapchain`, `self.surface`, `self.device` and `self.instance`
         // drop (in that field order) here, each cleaning up its own Vulkan
-        // object in the correct order.
+        // object in the correct order. The wait above already covers the
+        // images and presentation requests the swapchain's destruction
+        // releases.
     }
 }
