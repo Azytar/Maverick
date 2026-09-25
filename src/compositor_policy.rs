@@ -429,7 +429,7 @@ mod tests {
 #[cfg(test)]
 mod property_tests {
     use super::*;
-    use crate::types::{LayoutKind, Rect, WinFlags};
+    use crate::types::{FullscreenPolicy, LayoutKind, Rect, WinFlags};
     use proptest::prelude::*;
 
     /// Window types the occlusion predicate treats as needing to be composited
@@ -479,9 +479,15 @@ mod property_tests {
         hint: u32,
         /// Second client on this output.
         extra: Extra,
-        /// Add a maximized-but-not-fullscreen window (the ambiguous-candidate
-        /// case `presented_overlay_owner` reports and `is_fullscreen` rejects).
+        /// Add a maximized-but-not-fullscreen window. `presented_overlay_owner`
+        /// reports it as the overlay owner, and the independent `is_fullscreen`
+        /// guard is what rejects it.
         max_only: bool,
+        /// Add a `FullscreenPolicy::True` fullscreen overlay — the *other*
+        /// candidate source. Unlike the ribbon tile this one is invisible to
+        /// `fs_ctx`, so a scene carrying both produces two candidates and is the
+        /// only way to reach the ambiguity guard on its own.
+        true_overlay: bool,
         n_tags: usize,
     }
 
@@ -506,6 +512,7 @@ mod property_tests {
             hint: 0,
             extra: Extra::Absent,
             max_only: false,
+            true_overlay: false,
             n_tags: 1,
         }
     }
@@ -539,10 +546,11 @@ mod property_tests {
             0u32..=u32::MAX,
             arb_extra(),
             any::<bool>(),
+            any::<bool>(),
             1usize..=4,
         )
             .prop_map(
-                |(screen, cover, undersized, hidden, hint, extra, max_only, n_tags)| MonitorSpec {
+                |(
                     screen,
                     cover,
                     undersized,
@@ -550,6 +558,17 @@ mod property_tests {
                     hint,
                     extra,
                     max_only,
+                    true_overlay,
+                    n_tags,
+                )| MonitorSpec {
+                    screen,
+                    cover,
+                    undersized,
+                    hidden,
+                    hint,
+                    extra,
+                    max_only,
+                    true_overlay,
                     n_tags,
                 },
             )
@@ -601,6 +620,21 @@ mod property_tests {
                 mon.workspaces[0].add_tiled(w, 0.5);
                 mon.focus_stack.push(w);
                 mon.workspaces[0].presented_maximize = Some(w);
+            }
+
+            if spec.true_overlay {
+                // Policy `True` makes this the presented overlay, which is the
+                // candidate source `fs_ctx` deliberately excludes — so installing
+                // one alongside a ribbon tile yields two candidates.
+                let w = next;
+                next += 1;
+                let mut c = Client::new(w, mon_idx, 0);
+                c.geom = spec.screen;
+                c.flags.set(WinFlags::FULLSCREEN);
+                c.fullscreen_policy = FullscreenPolicy::True;
+                state.add_client(c);
+                mon.workspaces[0].add_tiled(w, 0.5);
+                mon.focus_stack.push(w);
             }
 
             let mut cover_id = None;
@@ -882,17 +916,38 @@ mod property_tests {
             prop_assert_eq!(mode_for(&cfg, &state, 0), CompositionMode::Compose);
         }
 
-        /// A covering fullscreen window plus a maximized owner is genuinely
-        /// ambiguous — two windows cannot both own the screen — so the output has
-        /// to keep compositing rather than let either one through.
+        /// A `FullscreenPolicy::True` overlay and a `Normal` ribbon tile both
+        /// cover the screen, and neither is visible to the other lookup, so the
+        /// policy sees two candidates where it would need one. Two windows cannot
+        /// both own the output, so the ambiguity guard has to refuse.
+        ///
+        /// This is the only scene that reaches that guard on its own: pairing a
+        /// ribbon tile with a *maximized* owner also produces two candidates, but
+        /// the independent `is_fullscreen` check rejects the maximize owner
+        /// anyway, so such a scene would pass even with the guard removed.
         #[test]
-        fn an_ambiguous_ownership_pair_never_bypasses(screen in arb_screen()) {
+        fn two_covering_fullscreen_windows_never_bypass(screen in arb_screen()) {
             let mut spec = covering(screen);
-            spec.max_only = true;
+            spec.true_overlay = true;
             let (state, _) = build(std::slice::from_ref(&spec));
             let cfg = policy_cfg(true, true);
             prop_assert_eq!(bypass_candidate(&cfg, &state, 0), None);
             prop_assert_eq!(mode_for(&cfg, &state, 0), CompositionMode::Compose);
+        }
+
+        /// A lone `FullscreenPolicy::True` overlay is unambiguous and does cover
+        /// the output, so it must still bypass. Pinning the guard from this side
+        /// matters: treating any overlay as ambiguous would quietly cost every
+        /// exclusive-fullscreen app the bypass.
+        #[test]
+        fn a_lone_true_policy_overlay_still_bypasses(screen in arb_screen()) {
+            let mut spec = covering(screen);
+            spec.cover = false;
+            spec.true_overlay = true;
+            let (state, _) = build(std::slice::from_ref(&spec));
+            let cfg = policy_cfg(true, true);
+            prop_assert!(bypass_candidate(&cfg, &state, 0).is_some());
+            prop_assert_eq!(mode_for(&cfg, &state, 0), CompositionMode::Bypass);
         }
 
         /// Bypass is decided per output, so whatever is happening on a
