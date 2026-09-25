@@ -526,6 +526,93 @@ mod unit_tests {
         );
     }
 
+    // `PublishIpcState` publishes "the state represented by all effects generated
+    // for this command", and the backend builds that snapshot from `State` at
+    // the moment it drains the effect (`WindowManager::publish_state`). So it has
+    // to be the LAST effect: a publish placed before the remaining effects hands
+    // every subscriber a picture of an intermediate focus or workspace state that
+    // the very same command is about to replace. Both state-changing halves are
+    // covered below — a focus the command itself requested, and a focus only the
+    // engine's post-command safety net installed.
+    #[test]
+    fn the_state_publish_is_the_last_effect_of_the_command_that_produced_it() {
+        use crate::core::effect::Effect;
+
+        // A focus the command requested itself: the monitor move arranges both
+        // monitors and asks the sink to focus the window on the new one.
+        let mut engine = setup_engine_multi();
+        for win in [1, 2] {
+            let mut c = Client::new(win, 0, 0);
+            c.border_w = 2;
+            engine.state.add_client(c);
+            engine.state.monitors[0].workspaces[0].add_tiled(win, 0.6);
+        }
+        t_focus(&mut engine, 1);
+        let effects = engine.execute(crate::core::commands::MoveWindowToMonitor(
+            1,
+            crate::types::Dir::Next,
+        ));
+        assert!(
+            matches!(effects.last(), Some(Effect::PublishIpcState)),
+            "the publish must follow the focus it publishes: {effects:?}"
+        );
+        let focus_at = effects
+            .iter()
+            .position(|e| matches!(e, Effect::FocusWindow(Some(1))))
+            .expect("the move requests the focus");
+        let publish_at = effects
+            .iter()
+            .position(|e| matches!(e, Effect::PublishIpcState))
+            .expect("a command with effects publishes");
+        assert!(
+            focus_at < publish_at,
+            "the published snapshot must already contain the new focus: {effects:?}"
+        );
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|e| matches!(e, Effect::PublishIpcState))
+                .count(),
+            1,
+            "exactly one publish per command: {effects:?}"
+        );
+
+        // A focus ONLY the safety net installs. The overlay is torn down outside
+        // `Command::execute` (the shape of the EWMH per-axis maximize path), and
+        // the command issued afterwards is absorbed outright, so the deferral
+        // resolution is the only thing the turn did. That resolution still
+        // installs a logical focus, and the contract says the publish carries it.
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
+        t_manage(&mut engine, 1);
+        t_set_fullscreen(&mut engine, 1, true);
+        assert!(
+            !t_manage(&mut engine, 2),
+            "window 2 is deferred behind the overlay"
+        );
+        t_set_fullscreen(&mut engine, 1, false);
+
+        let effects = engine.execute(crate::core::commands::FocusWindow(None));
+        assert_eq!(
+            effects.len(),
+            2,
+            "an absorbed command publishes only for the focus the safety net \
+             installed: {effects:?}"
+        );
+        assert!(
+            matches!(effects[0], Effect::FocusWindow(Some(2))),
+            "the resolved deferral's focus is the only other effect: {effects:?}"
+        );
+        assert!(
+            matches!(effects[1], Effect::PublishIpcState),
+            "and it is published: {effects:?}"
+        );
+        assert_eq!(engine.state.monitors[mi].focused, Some(2));
+        assert!(engine.state.pending_focus.is_none());
+    }
+
     #[test]
     fn test_quit_action_leads_with_shutdown_effect() {
         // `Mod4+Shift+Q` → `Action::Quit` must reach the backend's graceful
@@ -9636,6 +9723,23 @@ mod unit_tests {
                     out.restored_snapshot = target(*pick)
                         .and_then(|w| apply_fullscreen_geom_restore(&mut engine.state, w))
                         .is_some();
+                    // The restore is a presentation demotion, so it is applied
+                    // together with the reconciliation the transition that uses
+                    // it performs. `apply_fullscreen_geom_restore` restores the
+                    // pre-fullscreen `FullscreenPolicy`, and a window whose
+                    // `True` policy is restored is no longer an exclusive
+                    // overlay even with the `FULLSCREEN` bit still set, so the
+                    // restore alone really does take a queued deferral's owner
+                    // down — but it is a *geometry* restore with no focus or
+                    // effect of its own, and its only production caller
+                    // (`ToggleFullscreen`) clears the flag and consumes the
+                    // deferral in the same breath. Applying the restore with
+                    // neither half is a state no transition reaches (and one the
+                    // deferral's own creator can no longer produce:
+                    // `decide_manage_focus` only defers behind a `True`-policy
+                    // overlay), so the model applies the reconciliation the
+                    // transition performs and lets the property assert the pair.
+                    let _ = reconcile_pending_focus_after_transition(&mut engine.state);
                 }
             }
             out

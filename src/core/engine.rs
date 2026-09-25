@@ -92,6 +92,28 @@ impl Engine {
     /// domain event, and returns the effects for the backend. A single user
     /// gesture maps to one command, so one state publish here is correct.
     ///
+    /// The returned list is the complete, ordered script for this command, and
+    /// the backend drains it in sequence (`Backend::execute`). The order is part
+    /// of the contract, not an implementation detail:
+    ///
+    ///   * the command's own state-changing effects first, in the order its
+    ///     domain logic decided (e.g. `MarkRestack` before the `ArrangeMonitor`
+    ///     that consumes it);
+    ///   * then the safety net's `FocusWindow`, which is itself
+    ///     state-changing — the sink writes `sel_mon`, `mon.focused` and
+    ///     `presented_maximize` when it applies it;
+    ///   * then exactly one `PublishIpcState`, last.
+    ///
+    /// `PublishIpcState` publishes "the state represented by all effects
+    /// generated for this command": the backend reads `state_json(&state, &cfg)`
+    /// at the moment it drains the effect (`WindowManager::publish_state`), so a
+    /// publish placed before the remaining effects would hand every observer a
+    /// snapshot of an intermediate focus or workspace state that the very same
+    /// command is about to replace. It is emitted only when this command
+    /// generated at least one effect: a command that was absorbed outright
+    /// changed nothing there is to publish, and `publish_state` is in any case
+    /// opportunistic — it drops a snapshot identical to the last one it sent.
+    ///
     /// Safety net: before returning, resolves any `pending_focus` whose overlay
     /// owner is no longer presented via `reconcile_pending_focus_after_transition`
     /// (appending `FocusWindow` if no such effect already exists), then checks
@@ -102,10 +124,6 @@ impl Engine {
             self.bus.publish(ev);
         }
         let mut effects = report.effects;
-        // Ensure sync IPC subscribers get a fresh snapshot after a mutation.
-        if !effects.is_empty() && !effects.iter().any(|e| matches!(e, Effect::PublishIpcState)) {
-            effects.push(Effect::PublishIpcState);
-        }
         // Centralized safety net: resolve any `pending_focus` whose overlay owner
         // is no longer presented, right before the debug-only invariant check,
         // so no transition can leave a transient violation behind.
@@ -123,6 +141,12 @@ impl Engine {
                 effects.push(Effect::FocusWindow(Some(w)));
             }
         }
+        // Ensure sync IPC subscribers get a fresh snapshot of the state this
+        // command's effects just produced. Appended last, and only for a command
+        // that actually produced something — see the contract above.
+        if !effects.is_empty() && !effects.iter().any(|e| matches!(e, Effect::PublishIpcState)) {
+            effects.push(Effect::PublishIpcState);
+        }
         #[cfg(debug_assertions)]
         self.state.assert_invariants();
         effects
@@ -131,6 +155,11 @@ impl Engine {
     /// Execute a batch of commands as ONE transaction. This is the answer to
     /// "macro publishes 50 times": N commands here coalesce into a single
     /// state publish, no matter how many mutate state or fire events.
+    ///
+    /// The effect ordering is the one [`Self::execute`] documents: every
+    /// command's effects in order, then the safety net's `FocusWindow`, then
+    /// exactly one `PublishIpcState` last. A transaction that mutated nothing —
+    /// no effects, no events, no deferral resolved — publishes nothing at all.
     ///
     /// Safety net: same `pending_focus` reconciliation as `execute` — after all
     /// commands have run and events have been published, any orphaned
@@ -159,9 +188,6 @@ impl Engine {
         for ev in &events {
             self.bus.publish(ev);
         }
-        if dirty && !all.iter().any(|e| matches!(e, Effect::PublishIpcState)) {
-            all.push(Effect::PublishIpcState);
-        }
         // Same centralized safety net as `execute`, run once for the whole
         // transaction: an intermediate step of the batch may legitimately have
         // left the overlay owner unpresented, so only the end state matters.
@@ -174,7 +200,19 @@ impl Engine {
                 .any(|e| matches!(e, Effect::FocusWindow(Some(_))))
             {
                 all.push(Effect::FocusWindow(Some(w)));
+                // The safety net installed a focus that no other effect in this
+                // transaction carries, so it is what "something changed" now
+                // means: a transaction that fired no event and emitted no effects
+                // of its own is still dirty, and its publish is what carries that
+                // focus to observers.
+                dirty = true;
             }
+        }
+        // A transaction that changed nothing publishes nothing; otherwise the
+        // single publish is appended last, so it carries the state of every
+        // effect above.
+        if dirty && !all.iter().any(|e| matches!(e, Effect::PublishIpcState)) {
+            all.push(Effect::PublishIpcState);
         }
         #[cfg(debug_assertions)]
         self.state.assert_invariants();
