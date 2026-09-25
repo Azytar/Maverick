@@ -8128,12 +8128,12 @@ mod unit_tests {
         use crate::core::action::{name as action_name, parse as parse_action};
         use crate::core::commands::{
             apply_fullscreen_geom_restore, apply_fullscreen_topology, apply_maximize,
-            decide_manage_focus, focus_logical_on, CollapseColumn, Command, CycleLayout,
-            FocusDirection, FocusMonitor, FocusWindow, GapKind, GrowColumn, KillWindow,
-            ManageFocusIntent, MoveResize, MoveToWorkspace, MoveWindow, NewColumn, OverviewEnter,
-            OverviewNav, PageSnap, Quit, Restart, SetBorderWidth, SetGaps, SetLayout, SetWallpaper,
-            Spawn, ToggleFloat, ToggleFullscreen, ToggleMaximize, ToggleOverview, ViewWorkspace,
-            ViewportZoom,
+            decide_manage_focus, focus_logical_on, reconcile_pending_focus_after_transition,
+            CollapseColumn, Command, CycleLayout, FocusDirection, FocusMonitor, FocusWindow,
+            GapKind, GrowColumn, KillWindow, ManageFocusIntent, MoveResize, MoveToWorkspace,
+            MoveWindow, NewColumn, OverviewEnter, OverviewNav, PageSnap, Quit, Restart,
+            SetBorderWidth, SetGaps, SetLayout, SetWallpaper, Spawn, ToggleFloat, ToggleFullscreen,
+            ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
         };
         use crate::core::effect::Effect;
         use crate::core::event::CommandReport;
@@ -8498,6 +8498,19 @@ mod unit_tests {
                 }
                 ManageFocusIntent::Focus(_) => {
                     focus_logical_on(&mut engine.state, mi, win);
+                    // Mirror the reconciliation `manage()` performs on this same
+                    // intent (`src/backend/x11/manage.rs`). Focusing a window
+                    // owned by the presented overlay takes that overlay off the
+                    // focus, and a maximize overlay is presented only while it
+                    // holds the focus — so a deferral queued behind it is left
+                    // behind an overlay that can no longer return. The two paths
+                    // have to agree, or this harness would be modelling a map
+                    // path the backend does not have.
+                    if let Some(resolved) =
+                        reconcile_pending_focus_after_transition(&mut engine.state)
+                    {
+                        focus_logical_on(&mut engine.state, mi, resolved);
+                    }
                 }
             }
         }
@@ -9085,14 +9098,11 @@ mod unit_tests {
 
         /// Contract: a placement index only ever names live clients.
         ///
-        /// The teardown path purges the focus bookkeeping of the monitor the
-        /// window was *placed* on, so a focus slot on another monitor can still
-        /// name a window that is gone. Toggling float on such a slot pushed the
-        /// dead id into `floats` — an index naming a window that does not exist.
-        ///
-        /// The stale slot itself is a separate defect (the teardown only purges
-        /// one monitor's focus bookkeeping), so this asserts the contract of the
-        /// toggle alone: it must not compound the stale slot into a placement
+        /// The teardown purges the focus bookkeeping of every monitor, so no slot
+        /// survives it now — the stale-slot hazard this originally leaned on is
+        /// fixed at the source. The slot is therefore installed deliberately
+        /// below, to keep pinning the contract this test is actually about:
+        /// `ToggleFloat` must not compound a stale logical focus into a placement
         /// index. The command is invoked directly because the debug invariant
         /// check `Engine::execute` runs would trip on that pre-existing stale
         /// slot before this contract could be observed.
@@ -9112,8 +9122,11 @@ mod unit_tests {
             for op in &sc.ops {
                 run_op(&mut engine, op);
             }
-            // The focus slot survived the teardown: that is the precondition this
-            // pins the toggle against, so prove it is really there.
+            // Re-install the stale slot the teardown now clears: a monitor whose
+            // logical focus still names a window that no longer exists. That is
+            // the precondition this pins the toggle against, so prove it is
+            // really there.
+            engine.state.monitors[1].focused = Some(1);
             assert_eq!(engine.state.monitors[1].focused, Some(1));
             assert!(!engine.state.clients.contains_key(&1));
             ToggleFloat
@@ -9134,112 +9147,113 @@ mod unit_tests {
         }
 
         proptest! {
-            #![proptest_config(ProptestConfig {
-                cases: 64,
-                max_shrink_iters: 4096,
-                ..ProptestConfig::default()
-            })]
+                    #![proptest_config(ProptestConfig {
+                        cases: 64,
+                        max_shrink_iters: 4096,
+                        ..ProptestConfig::default()
+                    })]
 
-            /// Contract: `Engine::execute` and `Engine::execute_batch` preserve
-            /// every structural invariant of `State` (A–F) after *any* legal
-            /// command sequence, including map/unmap in the middle of it.
-            ///
-            /// This is the end-to-end statement of the contract the two entry
-            /// points advertise: every mutation funnels through them, and
-            /// whatever the user pressed, the model must stay consistent.
-            #[test]
-            #[ignore = "blocked on defects outside src/core: State::remove_client purges \
-                        the focus bookkeeping of the monitor a client was *placed* on, so \
-                        an unmap can leave another monitor's focus_stack naming a dead \
-                        window (maverick-core/src/types.rs); the map path in \
-                        src/backend/x11/manage.rs takes the focus for a newly mapped \
-                        dialog without resolving a pending_focus whose owner that \
-                        focus move unpresents; and State::apply_move_dir halves a \
-                        column weight without re-clamping it out of the legal band."]
-            fn prop_invariants_preserved_under_command_sequences(sc in arb_scenario()) {
-                let mut engine = seed_engine(&sc);
-                prop_assert!(
-                    engine.state.check_invariants().is_ok(),
-                    "generated seed state must itself be legal: {:?}",
-                    engine.state.check_invariants().err()
-                );
-                for (i, op) in sc.ops.iter().enumerate() {
-                    // Alternate the two documented entry points: `execute` for a
-                    // single gesture, `execute_batch` for the coalesced
-                    // transaction, which runs the same post-conditions.
-                    let effects = if i % 2 == 0 {
-                        run_op(&mut engine, op)
-                    } else {
-                        match op {
-                            Op::Cmd(g) => match g.build(&engine.state) {
-                                Some(cmd) => engine.execute_batch(vec![cmd]),
-                                None => Vec::new(),
-                            },
-                            // `dispatch` and the pure helpers are single-command
-                            // paths; the batch arm is covered by `Op::Cmd`.
-                            _ => run_op(&mut engine, op),
+                    /// Contract: `Engine::execute` and `Engine::execute_batch` preserve
+                    /// every structural invariant of `State` (A–F) after *any* legal
+                    /// command sequence, including map/unmap in the middle of it.
+                    ///
+                    /// This is the end-to-end statement of the contract the two entry
+                    /// points advertise: every mutation funnels through them, and
+                    /// whatever the user pressed, the model must stay consistent.
+                    #[test]
+        #[ignore = "residual: the remove_client focus sweep, the apply_move_dir weight \
+                                clamp and the manage() map-path reconciliation are all fixed, \
+                                but a deferral can still be left queued behind an owner that \
+                                is no longer presented by a focus move that only the X sink \
+                                applies (Effect::FocusWindow) rather than one a Command \
+                                performs. The engine's safety net runs before the sink applies \
+                                that effect, so the orphan only becomes visible afterwards."]
+                    fn prop_invariants_preserved_under_command_sequences(sc in arb_scenario()) {
+                        let mut engine = seed_engine(&sc);
+                        prop_assert!(
+                            engine.state.check_invariants().is_ok(),
+                            "generated seed state must itself be legal: {:?}",
+                            engine.state.check_invariants().err()
+                        );
+                        for (i, op) in sc.ops.iter().enumerate() {
+                            // Alternate the two documented entry points: `execute` for a
+                            // single gesture, `execute_batch` for the coalesced
+                            // transaction, which runs the same post-conditions.
+                            let effects = if i % 2 == 0 {
+                                run_op(&mut engine, op)
+                            } else {
+                                match op {
+                                    Op::Cmd(g) => match g.build(&engine.state) {
+                                        Some(cmd) => engine.execute_batch(vec![cmd]),
+                                        None => Vec::new(),
+                                    },
+                                    // `dispatch` and the pure helpers are single-command
+                                    // paths; the batch arm is covered by `Op::Cmd`.
+                                    _ => run_op(&mut engine, op),
+                                }
+                            };
+                            // Map/unmap produce no effects; every command that produced
+                            // some must have asked for a state publish.
+                            if !effects.is_empty() {
+                                prop_assert!(
+                                    effects.iter().any(|e| matches!(e, Effect::PublishIpcState)),
+                                    "step {i} ({op:?}) returned effects without a state publish"
+                                );
+                            }
+                            if let Err(v) = engine.state.check_invariants() {
+                                prop_assert!(
+                                    false,
+                                    "step {i} ({op:?}) broke the state contract:\n  - {}\nSTATE:\n{}",
+                                    v.join("\n  - "),
+                                    logical_dump(&engine)
+                                );
+                            }
                         }
-                    };
-                    // Map/unmap produce no effects; every command that produced
-                    // some must have asked for a state publish.
-                    if !effects.is_empty() {
-                        prop_assert!(
-                            effects.iter().any(|e| matches!(e, Effect::PublishIpcState)),
-                            "step {i} ({op:?}) returned effects without a state publish"
-                        );
-                    }
-                    if let Err(v) = engine.state.check_invariants() {
-                        prop_assert!(
-                            false,
-                            "step {i} ({op:?}) broke the state contract:\n  - {}\nSTATE:\n{}",
-                            v.join("\n  - "),
-                            logical_dump(&engine)
-                        );
                     }
                 }
-            }
-        }
 
         proptest! {
-            #![proptest_config(ProptestConfig {
-                cases: 64,
-                max_shrink_iters: 4096,
-                ..ProptestConfig::default()
-            })]
+                    #![proptest_config(ProptestConfig {
+                        cases: 64,
+                        max_shrink_iters: 4096,
+                        ..ProptestConfig::default()
+                    })]
 
-            /// Contract: after any command, `pending_focus` is either empty or
-            /// still owned by a *presented* overlay.
-            ///
-            /// `Engine::execute`/`execute_batch` advertise exactly this as their
-            /// safety net (`reconcile_pending_focus_after_transition`, run right
-            /// before the invariant check). Without it a deferral survives its
-            /// own overlay and the input focus is handed to a window nobody can
-            /// see.
-            #[test]
-            #[ignore = "blocked on the map path: src/backend/x11/manage.rs focuses a \
-                        newly mapped dialog of the presented overlay without resolving \
-                        the pending_focus that overlay owns, so the deferral survives \
-                        aimed at an owner that is no longer presented. See also \
-                        State::pending_focus_owner_presented (maverick-core/src/types.rs), \
-                        which does not use the canonical presented_overlay_owner_in \
-                        helper, so it accepts an owner that helper refuses to name."]
-            fn prop_pending_focus_postcondition_holds_after_every_command(
-                sc in arb_scenario()
-            ) {
-                let mut engine = seed_engine(&sc);
-                for (i, op) in sc.ops.iter().enumerate() {
-                    run_op(&mut engine, op);
-                    if engine.state.pending_focus.is_some() {
-                        prop_assert!(
-                            engine.state.pending_focus_owner_presented(),
-                            "step {i} ({op:?}) left a deferral whose overlay is gone: {:?}\nSTATE:\n{}",
-                            engine.state.pending_focus,
-                            logical_dump(&engine)
-                        );
+                    /// Contract: after any command, `pending_focus` is either empty or
+                    /// still owned by a *presented* overlay.
+                    ///
+                    /// `Engine::execute`/`execute_batch` advertise exactly this as their
+                    /// safety net (`reconcile_pending_focus_after_transition`, run right
+                    /// before the invariant check). Without it a deferral survives its
+                    /// own overlay and the input focus is handed to a window nobody can
+                    /// see.
+                    #[test]
+        #[ignore = "residual: manage()'s map path now resolves the deferral it orphans, \
+                                but the deferral lifecycle is still incoherent further up: a \
+                                Wire(MoveMon(..)) focus move that unfocuses a maximize overlay \
+                                on the monitor being left keeps a deferral queued behind a \
+                                presentation that will not return, and the existing regression \
+                                orphan_defer_not_lost_when_ws_switch_then_dismiss_on_other_ws \
+                                requires that deferral to survive a workspace switch, so the \
+                                guard that would drop it cannot be added for monitors alone \
+                                without a design decision about which rule wins."]
+                    fn prop_pending_focus_postcondition_holds_after_every_command(
+                        sc in arb_scenario()
+                    ) {
+                        let mut engine = seed_engine(&sc);
+                        for (i, op) in sc.ops.iter().enumerate() {
+                            run_op(&mut engine, op);
+                            if engine.state.pending_focus.is_some() {
+                                prop_assert!(
+                                    engine.state.pending_focus_owner_presented(),
+                                    "step {i} ({op:?}) left a deferral whose overlay is gone: {:?}\nSTATE:\n{}",
+                                    engine.state.pending_focus,
+                                    logical_dump(&engine)
+                                );
+                            }
+                        }
                     }
                 }
-            }
-        }
 
         proptest! {
             #![proptest_config(ProptestConfig {
@@ -9259,10 +9273,6 @@ mod unit_tests {
             /// what makes the ownership graph safe to walk (and stops a recycled
             /// XID from inheriting a dead window's popups).
             #[test]
-            #[ignore = "blocked on State::remove_client (maverick-core/src/types.rs): it \
-                        clears presented_maximize on every monitor but the focus \
-                        bookkeeping only on c.monitor, so an unmap can leave another \
-                        monitor's focus_stack referencing a window that is gone."]
             fn prop_unmap_leaves_no_dangling_reference(sc in arb_scenario()) {
                 let mut engine = seed_engine(&sc);
                 for (i, op) in sc.ops.iter().enumerate() {
@@ -9453,207 +9463,205 @@ mod unit_tests {
         }
 
         proptest! {
-            #![proptest_config(ProptestConfig {
-                cases: 64,
-                max_shrink_iters: 4096,
-                ..ProptestConfig::default()
-            })]
+                    #![proptest_config(ProptestConfig {
+                        cases: 64,
+                        max_shrink_iters: 4096,
+                        ..ProptestConfig::default()
+                    })]
 
-            /// Contract: the commands documented as idempotent reach a fixpoint.
-            ///
-            /// `apply_fullscreen_topology` ("running it twice for the same
-            /// transition is a no-op… returns true when the topology actually
-            /// changed"), `apply_fullscreen_geom_restore` ("returns `None` when
-            /// there was nothing to restore"), and the view/move/wallpaper
-            /// commands that bail out on an already-satisfied target must all
-            /// leave the state *and* the effect list unchanged when repeated.
-            /// A second application that re-arranges, re-publishes or re-flips a
-            /// flag is a real bug: users repeat keybinds, and IPC replays.
-            #[test]
-            #[ignore = "blocked on the model, not on a transition: a per-axis maximize \
-                        (MAXIMIZED_V xor MAXIMIZED_H) is a legal EWMH state that \
-                        State::sync_presented_maximize and presented_overlay_owner_in \
-                        present as a maximize overlay ('either axis', and src/core/present.rs \
-                        stretches a half-maximized client accordingly), while the \
-                        presented_maximize half of check_invariants validates the derived \
-                        field with Client::is_maximized() ('both axes'). The two definitions \
-                        disagree in maverick-core/src/types.rs, so applying \
-                        Maximize {{ vert: false, horiz: true }} to the focused window is \
-                        reported as 'presented_maximize N is not maximized'."]
-            fn prop_absorbing_commands_reach_fixpoint(sc in arb_scenario(), op in arb_absorb()) {
-                let mut engine = seed_engine(&sc);
-                for (i, o) in sc.ops.iter().take(4).enumerate() {
-                    run_op(&mut engine, o);
-                    let _ = i;
+                    /// Contract: the commands documented as idempotent reach a fixpoint.
+                    ///
+                    /// `apply_fullscreen_topology` ("running it twice for the same
+                    /// transition is a no-op… returns true when the topology actually
+                    /// changed"), `apply_fullscreen_geom_restore` ("returns `None` when
+                    /// there was nothing to restore"), and the view/move/wallpaper
+                    /// commands that bail out on an already-satisfied target must all
+                    /// leave the state *and* the effect list unchanged when repeated.
+                    /// A second application that re-arranges, re-publishes or re-flips a
+                    /// flag is a real bug: users repeat keybinds, and IPC replays.
+                    #[test]
+        #[ignore = "residual: the apply_maximize call the EWMH per-axis path makes \
+                                directly (src/backend/x11/events.rs) bypasses Engine::execute, \
+                                so it never runs the pending-focus safety net. A no-op \
+                                Maximize { vert: false, horiz: false } therefore leaves a \
+                                pre-existing deferral exactly as it found it, and a deferral \
+                                whose owner lost presentation earlier in the same batch is \
+                                never resolved. Every production entry point that mutates \
+                                state outside Command::execute needs the reconciliation, not \
+                                just manage()."]
+                    fn prop_absorbing_commands_reach_fixpoint(sc in arb_scenario(), op in arb_absorb()) {
+                        let mut engine = seed_engine(&sc);
+                        for (i, o) in sc.ops.iter().take(4).enumerate() {
+                            run_op(&mut engine, o);
+                            let _ = i;
+                        }
+                        let first = apply_absorb(&mut engine, &op);
+                        let after_first = logical_dump(&engine);
+                        prop_assert!(
+                            engine.state.check_invariants().is_ok(),
+                            "first application of {op:?} broke the contract:\n  - {}",
+                            engine
+                                .state
+                                .check_invariants()
+                                .err()
+                                .unwrap_or_default()
+                                .join("\n  - ")
+                        );
+                        let second = apply_absorb(&mut engine, &op);
+                        let after_second = logical_dump(&engine);
+                        prop_assert_eq!(
+                            after_first,
+                            after_second,
+                            "repeating {:?} was not a no-op (first reported {:?}, second {:?})",
+                            op,
+                            first,
+                            second
+                        );
+                        if let Some(true) = second.changed {
+                            prop_assert!(
+                                false,
+                                "{:?} reported a topology change on a repeat",
+                                op
+                            );
+                        }
+                        if second.restored_snapshot {
+                            prop_assert!(false, "{op:?} restored a geometry snapshot twice");
+                        }
+                        // A target that is already satisfied must be absorbed outright:
+                        // no arrange, no focus, not even an IPC publish.
+                        if matches!(
+                            op,
+                            Absorb::ViewCurrent | Absorb::MoveToCurrent | Absorb::Wallpaper(_)
+                        ) {
+                            prop_assert!(
+                                second.effects.is_empty(),
+                                "{op:?} on an already-satisfied target still emitted {:?}",
+                                second.effects
+                            );
+                        }
+                        prop_assert!(
+                            engine.state.check_invariants().is_ok(),
+                            "repeating {op:?} broke the contract:\n  - {}",
+                            engine
+                                .state
+                                .check_invariants()
+                                .err()
+                                .unwrap_or_default()
+                                .join("\n  - ")
+                        );
+                    }
                 }
-                let first = apply_absorb(&mut engine, &op);
-                let after_first = logical_dump(&engine);
-                prop_assert!(
-                    engine.state.check_invariants().is_ok(),
-                    "first application of {op:?} broke the contract:\n  - {}",
-                    engine
-                        .state
-                        .check_invariants()
-                        .err()
-                        .unwrap_or_default()
-                        .join("\n  - ")
-                );
-                let second = apply_absorb(&mut engine, &op);
-                let after_second = logical_dump(&engine);
-                prop_assert_eq!(
-                    after_first,
-                    after_second,
-                    "repeating {:?} was not a no-op (first reported {:?}, second {:?})",
-                    op,
-                    first,
-                    second
-                );
-                if let Some(true) = second.changed {
-                    prop_assert!(
-                        false,
-                        "{:?} reported a topology change on a repeat",
-                        op
-                    );
-                }
-                if second.restored_snapshot {
-                    prop_assert!(false, "{op:?} restored a geometry snapshot twice");
-                }
-                // A target that is already satisfied must be absorbed outright:
-                // no arrange, no focus, not even an IPC publish.
-                if matches!(
-                    op,
-                    Absorb::ViewCurrent | Absorb::MoveToCurrent | Absorb::Wallpaper(_)
-                ) {
-                    prop_assert!(
-                        second.effects.is_empty(),
-                        "{op:?} on an already-satisfied target still emitted {:?}",
-                        second.effects
-                    );
-                }
-                prop_assert!(
-                    engine.state.check_invariants().is_ok(),
-                    "repeating {op:?} broke the contract:\n  - {}",
-                    engine
-                        .state
-                        .check_invariants()
-                        .err()
-                        .unwrap_or_default()
-                        .join("\n  - ")
-                );
-            }
-        }
 
         proptest! {
-            #![proptest_config(ProptestConfig {
-                cases: 64,
-                max_shrink_iters: 4096,
-                ..ProptestConfig::default()
-            })]
+                    #![proptest_config(ProptestConfig {
+                        cases: 64,
+                        max_shrink_iters: 4096,
+                        ..ProptestConfig::default()
+                    })]
 
-            /// Contract: every command produces a well-formed effect list.
-            ///
-            /// Three rules the backend depends on: exactly one `PublishIpcState`
-            /// and always last, so a synchronous IPC subscriber sees the
-            /// post-command snapshot; `MarkRestack` before the `ArrangeMonitor`
-            /// that consumes it ("emit before `ArrangeMonitor` when stacking
-            /// changed"); and every window an effect names is a client the WM
-            /// still manages — the backend turns a stale id straight into an X
-            /// error.
-            #[test]
-            #[ignore = "blocked on two defects outside src/core: Engine::execute \
-                        (src/core/engine.rs) appends the pending-focus safety net's \
-                        Effect::FocusWindow *after* the PublishIpcState it just pushed, so \
-                        the publish is not last and is skipped entirely when the command \
-                        itself produced no effects; and the effect-list / weight violations \
-                        the other three properties still reach through the command side."]
-            fn prop_effects_are_well_formed(sc in arb_scenario()) {
-                let mut engine = seed_engine(&sc);
-                for (i, op) in sc.ops.iter().enumerate() {
-                    let effects = if i % 3 == 0 {
-                        match op {
-                            Op::Cmd(g) => match g.build(&engine.state) {
-                                Some(cmd) => {
-                                    let e = engine.execute_batch(vec![cmd]);
-                                    mirror_focus(&mut engine, &e);
-                                    e
+                    /// Contract: every command produces a well-formed effect list.
+                    ///
+                    /// Three rules the backend depends on: exactly one `PublishIpcState`
+                    /// and always last, so a synchronous IPC subscriber sees the
+                    /// post-command snapshot; `MarkRestack` before the `ArrangeMonitor`
+                    /// that consumes it ("emit before `ArrangeMonitor` when stacking
+                    /// changed"); and every window an effect names is a client the WM
+                    /// still manages — the backend turns a stale id straight into an X
+                    /// error.
+                    #[test]
+        #[ignore = "residual: Engine::execute appends the pending-focus safety net's \
+                                Effect::FocusWindow *after* the PublishIpcState it just pushed, \
+                                so the publish is not last, and the publish is skipped entirely \
+                                when the command itself produced no effects (src/core/engine.rs). \
+                                Unrelated to the command-side fixes in this campaign."]
+                    fn prop_effects_are_well_formed(sc in arb_scenario()) {
+                        let mut engine = seed_engine(&sc);
+                        for (i, op) in sc.ops.iter().enumerate() {
+                            let effects = if i % 3 == 0 {
+                                match op {
+                                    Op::Cmd(g) => match g.build(&engine.state) {
+                                        Some(cmd) => {
+                                            let e = engine.execute_batch(vec![cmd]);
+                                            mirror_focus(&mut engine, &e);
+                                            e
+                                        }
+                                        None => Vec::new(),
+                                    },
+                                    _ => run_op(&mut engine, op),
                                 }
-                                None => Vec::new(),
-                            },
-                            _ => run_op(&mut engine, op),
-                        }
-                    } else {
-                        run_op(&mut engine, op)
-                    };
-                    let publishes: Vec<usize> = effects
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, e)| matches!(e, Effect::PublishIpcState))
-                        .map(|(k, _)| k)
-                        .collect();
-                    if !effects.is_empty() {
-                        prop_assert_eq!(
-                            publishes.len(),
-                            1,
-                            "step {} ({:?}) emitted {} state publishes",
-                            i,
-                            op,
-                            publishes.len()
-                        );
-                        prop_assert_eq!(
-                            *publishes.last().unwrap(),
-                            effects.len() - 1,
-                            "step {} ({:?}) put the state publish before other effects: {:?}",
-                            i,
-                            op,
-                            effects
-                        );
-                    }
-                    // "Emit before `ArrangeMonitor` when stacking changed": for
-                    // each monitor, the restack request must precede the arrange
-                    // that consumes it.
-                    for mi in 0..engine.state.monitors.len() {
-                        let first_mark = effects
-                            .iter()
-                            .position(|e| matches!(e, Effect::MarkRestack(x) if *x == mi));
-                        let first_arrange = effects
-                            .iter()
-                            .position(|e| matches!(e, Effect::ArrangeMonitor(x) if *x == mi));
-                        if let (Some(mark), Some(arrange)) = (first_mark, first_arrange) {
-                            prop_assert!(
-                                mark < arrange,
-                                "step {} ({:?}) emitted MarkRestack after ArrangeMonitor for monitor {}: {:?}",
-                                i,
-                                op,
-                                mi,
-                                effects
-                            );
-                        }
-                    }
-                    for e in &effects {
-                        let named: Option<WindowId> = match e {
-                            Effect::FocusWindow(Some(w))
-                            | Effect::Unfocus(w)
-                            | Effect::KillWindow(w)
-                            | Effect::SyncWindowPrefs(w)
-                            | Effect::SetFullscreen { win: w, .. }
-                            | Effect::ConfigureWindow { win: w, .. }
-                            | Effect::SetMaximized { win: w, .. }
-                            | Effect::SetWindowDesktop { win: w, .. } => Some(*w),
-                            _ => None,
-                        };
-                        if let Some(w) = named {
-                            prop_assert!(
-                                engine.state.clients.contains_key(&w),
-                                "step {} ({:?}) emitted {:?} for a window that is not a client",
-                                i,
-                                op,
-                                e
-                            );
+                            } else {
+                                run_op(&mut engine, op)
+                            };
+                            let publishes: Vec<usize> = effects
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, e)| matches!(e, Effect::PublishIpcState))
+                                .map(|(k, _)| k)
+                                .collect();
+                            if !effects.is_empty() {
+                                prop_assert_eq!(
+                                    publishes.len(),
+                                    1,
+                                    "step {} ({:?}) emitted {} state publishes",
+                                    i,
+                                    op,
+                                    publishes.len()
+                                );
+                                prop_assert_eq!(
+                                    *publishes.last().unwrap(),
+                                    effects.len() - 1,
+                                    "step {} ({:?}) put the state publish before other effects: {:?}",
+                                    i,
+                                    op,
+                                    effects
+                                );
+                            }
+                            // "Emit before `ArrangeMonitor` when stacking changed": for
+                            // each monitor, the restack request must precede the arrange
+                            // that consumes it.
+                            for mi in 0..engine.state.monitors.len() {
+                                let first_mark = effects
+                                    .iter()
+                                    .position(|e| matches!(e, Effect::MarkRestack(x) if *x == mi));
+                                let first_arrange = effects
+                                    .iter()
+                                    .position(|e| matches!(e, Effect::ArrangeMonitor(x) if *x == mi));
+                                if let (Some(mark), Some(arrange)) = (first_mark, first_arrange) {
+                                    prop_assert!(
+                                        mark < arrange,
+                                        "step {} ({:?}) emitted MarkRestack after ArrangeMonitor for monitor {}: {:?}",
+                                        i,
+                                        op,
+                                        mi,
+                                        effects
+                                    );
+                                }
+                            }
+                            for e in &effects {
+                                let named: Option<WindowId> = match e {
+                                    Effect::FocusWindow(Some(w))
+                                    | Effect::Unfocus(w)
+                                    | Effect::KillWindow(w)
+                                    | Effect::SyncWindowPrefs(w)
+                                    | Effect::SetFullscreen { win: w, .. }
+                                    | Effect::ConfigureWindow { win: w, .. }
+                                    | Effect::SetMaximized { win: w, .. }
+                                    | Effect::SetWindowDesktop { win: w, .. } => Some(*w),
+                                    _ => None,
+                                };
+                                if let Some(w) = named {
+                                    prop_assert!(
+                                        engine.state.clients.contains_key(&w),
+                                        "step {} ({:?}) emitted {:?} for a window that is not a client",
+                                        i,
+                                        op,
+                                        e
+                                    );
+                                }
+                            }
                         }
                     }
                 }
-            }
-        }
 
         proptest! {
             #![proptest_config(ProptestConfig {
