@@ -19,7 +19,8 @@
 //! thread** (non-blocking `UnixListener` + 50 ms poll). Each accepted
 //! connection is handed to its own **per-connection thread** that blocks on
 //! `BufReader::read_line` with a 500 ms read timeout. `subscribe` hijacks its
-//! connection thread into [`stream_events`], which blocks on `hub.subscribe()`.
+//! connection thread into [`stream_events`], which blocks on the hub
+//! subscription for as long as the client stays connected.
 //!
 //! The server never touches WM state directly: it talks to a [`crate::hub::ControlHub`]
 //! that queues [`crate::hub::ControlCommand`]s for the WM thread and caches the
@@ -27,7 +28,10 @@
 //! iteration.
 //!
 //! Back-pressure is enforced via an `AtomicUsize` counter capped at 32 concurrent
-//! handlers; excess accepts sleep 100 ms before retrying.
+//! handlers; excess accepts sleep 100 ms before retrying. Because a subscriber
+//! occupies its handler slot until it disconnects, `subscribe` additionally
+//! admits at most [`MAX_SUBSCRIBERS`] streams and rejects the rest, keeping
+//! slots free for short commands.
 //!
 //! # Ownership and lifecycle
 //!
@@ -63,12 +67,16 @@ const ORD: Ordering = Ordering::SeqCst;
 const READ_TIMEOUT: Duration = Duration::from_millis(500);
 /// Maximum concurrent connection handler threads (short commands + subscribers).
 const MAX_CONCURRENT: usize = 32;
-/// Maximum concurrent `subscribe` streams. Subscribers hold their handler
-/// thread forever (by design — it's a stream), so without a separate cap 32
-/// subscribers would starve all short commands (`ping`/`dispatch`/`quit`).
-/// The subscribe path enforces this and rejects beyond it, always leaving
-/// command slots free. Same-UID local only, but a wedged bar must not be
-/// able to wedge WM control.
+/// Maximum concurrent `subscribe` streams, enforced atomically at registration
+/// by [`crate::hub::ControlHub::try_subscribe`].
+///
+/// Subscribers hold their handler thread forever (by design — it's a stream),
+/// so without a separate cap [`MAX_CONCURRENT`] subscribers would starve all
+/// short commands (`ping`/`dispatch`/`quit`): the accept loop stops accepting
+/// once every handler slot is taken. A `subscribe` beyond the cap is rejected
+/// with `error subscribe: too many subscribers`, always leaving half the
+/// handler slots free for commands. Same-UID local only, but a wedged bar must
+/// not be able to wedge WM control.
 pub const MAX_SUBSCRIBERS: usize = 16;
 /// Maximum accepted protocol line (64 KiB). Prevents a single client from
 /// OOMing the per-connection thread with a 1 GiB `read_line`.
@@ -239,14 +247,20 @@ fn handle_conn(
 
         // `subscribe` hijacks the connection into a streaming loop.
         if cmd == SUBSCRIBE_CMD {
-            // Subscriber cap (see `MAX_SUBSCRIBERS`): reject instead of
-            // holding one of the 32 handler slots forever.
-            if hub.subscriber_count() >= MAX_SUBSCRIBERS {
-                let _ = writer.write_all(b"error subscribe: too many subscribers\n");
-                break;
+            // Registering IS the capacity decision: a subscriber parks its
+            // handler thread until it disconnects, so the count and the
+            // registration share one critical section. Reading the count first
+            // and registering afterwards would let concurrent connections each
+            // pass a stale check and take more than the cap allows.
+            match hub.try_subscribe(MAX_SUBSCRIBERS) {
+                Some(rx) => {
+                    let _ = writer.write_all(b"ok subscribe\n");
+                    stream_events(&mut writer, rx, stop);
+                }
+                None => {
+                    let _ = writer.write_all(b"error subscribe: too many subscribers\n");
+                }
             }
-            let _ = writer.write_all(b"ok subscribe\n");
-            stream_events(&mut writer, hub, stop);
             break;
         }
 
@@ -352,8 +366,11 @@ fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -
 /// stops. Blocks on this connection's thread only.
 /// Enforces single-line framing and a write timeout so one slow client
 /// cannot wedge its thread forever.
-fn stream_events(writer: &mut UnixStream, hub: &ControlHub, stop: &Arc<AtomicBool>) {
-    let rx = hub.subscribe();
+fn stream_events(
+    writer: &mut UnixStream,
+    rx: std::sync::mpsc::Receiver<String>,
+    stop: &Arc<AtomicBool>,
+) {
     let _ = writer.set_write_timeout(Some(Duration::from_secs(2)));
     loop {
         if stop.load(ORD) {
@@ -628,6 +645,122 @@ mod tests {
         assert!(events[0].contains("\"event\":\"focus\""));
 
         server.shutdown();
+    }
+
+    // Simultaneous `subscribe` attempts per round of the cap-race test:
+    // several times the cap, so many attempts are inside the registration
+    // path at the same time.
+    const RACE_ATTEMPTS: usize = MAX_CONCURRENT * 2;
+    // Rounds of simultaneous attempts; the cap must hold in every one.
+    const RACE_ROUNDS: usize = 8;
+
+    #[test]
+    fn subscribe_cap_holds_under_concurrent_registration() {
+        for round in 0..RACE_ROUNDS {
+            let hub = ControlHub::new();
+            let barrier = Arc::new(std::sync::Barrier::new(RACE_ATTEMPTS));
+            // A busy WM thread publishing events keeps the subscriber list hot,
+            // which is when a stale capacity check is most likely to slip
+            // through: connections arriving while events are being emitted.
+            let emitting = Arc::new(AtomicBool::new(false));
+            let emitter = {
+                let hub = hub.clone();
+                let emitting = emitting.clone();
+                std::thread::spawn(move || {
+                    while !emitting.load(ORD) {
+                        hub.emit("{\"event\":\"focus\"}");
+                    }
+                })
+            };
+            let mut attempts = Vec::with_capacity(RACE_ATTEMPTS);
+            for _ in 0..RACE_ATTEMPTS {
+                let hub = hub.clone();
+                let barrier = barrier.clone();
+                attempts.push(std::thread::spawn(move || {
+                    // Release every attempt at once: attempts arriving one
+                    // after the other would never observe a stale count.
+                    barrier.wait();
+                    hub.try_subscribe(MAX_SUBSCRIBERS)
+                }));
+            }
+            // Receivers are held for the whole round, so nothing is pruned and
+            // the count reflects every admitted sink.
+            let admitted: Vec<_> = attempts
+                .into_iter()
+                .filter_map(|a| a.join().expect("attempt thread"))
+                .collect();
+            assert_eq!(
+                admitted.len(),
+                MAX_SUBSCRIBERS,
+                "round {round}: exactly the cap must be admitted"
+            );
+            assert_eq!(
+                hub.subscriber_count(),
+                MAX_SUBSCRIBERS,
+                "round {round}: registered sinks must never exceed the cap"
+            );
+            emitting.store(true, ORD);
+            emitter.join().expect("emitter thread");
+        }
+    }
+
+    #[test]
+    fn subscribe_cap_rejects_extras_from_concurrent_connections() {
+        let name = "testsubrace";
+        let hub = ControlHub::new();
+        let server = ControlServer::spawn(name, "{}\n".into(), hub.clone()).expect("server binds");
+
+        // Connect every client first so the handler threads are all parked in
+        // `read_line` when the commands are released.
+        let barrier = Arc::new(std::sync::Barrier::new(MAX_CONCURRENT));
+        let mut clients = Vec::with_capacity(MAX_CONCURRENT);
+        for _ in 0..MAX_CONCURRENT {
+            let s = UnixStream::connect(identity::try_sock_path(name).expect("sock path"))
+                .expect("connect");
+            s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            s.set_write_timeout(Some(Duration::from_secs(5))).ok();
+            clients.push((s, barrier.clone()));
+        }
+        let mut replies = Vec::with_capacity(MAX_CONCURRENT);
+        let mut attempts = Vec::with_capacity(MAX_CONCURRENT);
+        for (s, barrier) in clients {
+            attempts.push(std::thread::spawn(move || {
+                let mut s = s;
+                barrier.wait();
+                s.write_all(b"subscribe\n").expect("write subscribe");
+                let mut first = String::new();
+                BufReader::new(&s)
+                    .read_line(&mut first)
+                    .expect("first reply line");
+                (s, first.trim_end_matches('\n').to_string())
+            }));
+        }
+        for attempt in attempts {
+            replies.push(attempt.join().expect("client thread"));
+        }
+
+        let ok = replies
+            .iter()
+            .filter(|(_, line)| line == "ok subscribe")
+            .count();
+        let refused = replies
+            .iter()
+            .filter(|(_, line)| line == "error subscribe: too many subscribers")
+            .count();
+        assert_eq!(ok, MAX_SUBSCRIBERS, "only the cap may be admitted");
+        assert_eq!(
+            ok + refused,
+            MAX_CONCURRENT,
+            "every over-cap subscribe must be refused, not left hanging"
+        );
+        assert_eq!(hub.subscriber_count(), MAX_SUBSCRIBERS);
+
+        // The subscribers must not have eaten every handler slot: short
+        // commands still answer.
+        assert!(ping(name).is_ok(), "commands must survive full subs");
+
+        server.shutdown();
+        drop(replies);
     }
 
     #[test]

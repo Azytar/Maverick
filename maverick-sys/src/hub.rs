@@ -194,17 +194,40 @@ impl ControlHub {
             .unwrap_or_else(|_| String::from("{}"))
     }
 
-    /// Register a new subscriber. Returns the receiving end; the server thread
-    /// forwards every line it gets to the connected client until the client
-    /// disconnects (at which point the sender fails and gets pruned).
+    /// Register a new subscriber without any capacity check. The server thread
+    /// forwards every line the receiver gets to the connected client until the
+    /// client disconnects (at which point the sender fails and gets pruned).
     /// Each subscriber gets a bounded (`SUB_CAP`) queue so a slow client can
     /// never grow memory without bound — see `emit`.
+    ///
+    /// Uncapped: callers that must respect a subscriber budget have to use
+    /// [`ControlHub::try_subscribe`], which decides and registers atomically.
     pub fn subscribe(&self) -> Receiver<String> {
         let (tx, rx) = sync_channel(SUB_CAP);
         if let Ok(mut subs) = self.inner.subscribers.lock() {
             subs.push(tx);
         }
         rx
+    }
+
+    /// Register a new subscriber only while fewer than `max` sinks are
+    /// registered, returning the receiving end (see [`ControlHub::subscribe`]).
+    ///
+    /// Returns `None` when the cap is already reached so the caller can reject
+    /// the client instead of parking it on a stream nobody feeds. Registering
+    /// through this method can never push `subscriber_count()` past `max`:
+    /// the budget check and the registration share one critical section, so
+    /// concurrent callers cannot each pass a stale check and overshoot the cap.
+    /// A poisoned list counts as full — it never admits an unbounded number of
+    /// sinks.
+    pub fn try_subscribe(&self, max: usize) -> Option<Receiver<String>> {
+        let (tx, rx) = sync_channel(SUB_CAP);
+        let mut subs = self.inner.subscribers.lock().ok()?;
+        if subs.len() >= max {
+            return None;
+        }
+        subs.push(tx);
+        Some(rx)
     }
 
     /// Drain all pending commands. Called once per event-loop iteration on the
