@@ -32,12 +32,14 @@ use crate::types::{Column, LayoutKind, Monitor, Rect, State, WindowId, Workspace
 
 /// Schema version of the persisted session format.
 ///
-/// Bump when the on-disk shape changes. The loader accepts exactly the
-/// current version; anything else is reported as a *schema* error (old
-/// versions are never silently "migrated" — see `docs/architecture/
-/// session-lifecycle.md`).
+/// Bump when the on-disk shape changes. The loader accepts exactly the current
+/// version and never silently migrates: an older or newer file is reported as a
+/// *schema* error so the user can restore a backup or start fresh.
 pub const SESSION_SCHEMA_VERSION: u32 = 1;
 
+/// Mirror of `WinFlags::FLOAT` (`1 << 0`), written as a raw bit so a restore can
+/// patch a `Client` without reconstructing a `WinFlags` value. Must stay in sync
+/// with `WinFlags::FLOAT` or restored floats get the wrong flag.
 const WINFLAG_FLOAT: u16 = 1 << 0;
 
 /// The stage at which a session operation failed. Kept on every
@@ -118,8 +120,6 @@ impl fmt::Display for SessionError {
 
 impl Error for SessionError {}
 
-// ─── The persisted model ─────────────────────────────────────────────────────
-
 /// What a Maverick session persists: the logical workspace topology of every
 /// monitor, plus the monitor that was selected and the per-monitor active
 /// workspace / focus. No screen geometry, no client geometry, no animation
@@ -170,16 +170,14 @@ pub struct PersistedColumn {
 
 /// `PersistedSession` that passed `validate()`.
 ///
-/// Carrying the validated value as its own type keeps the "archivo → State"
-/// path non-existent: callers must pass through validation before they can
-/// even hold a `ValidatedSession`, and the type system stops a validated
-/// session from being confused with a raw (possibly corrupt) `PersistedSession`.
+/// Carrying the validated value as its own type makes an unvalidated "file →
+/// `State`" path non-existent: callers cannot even hold a `ValidatedSession`
+/// without passing validation, and the type system stops a validated session
+/// from being confused with a raw (possibly corrupt) `PersistedSession`.
 #[derive(Debug, Clone)]
 pub struct ValidatedSession {
     inner: PersistedSession,
 }
-
-// ─── Snapshotting: State → PersistedSession ──────────────────────────────────
 
 impl PersistedSession {
     /// Build a versioned snapshot of the *logical* topology of `state`.
@@ -248,7 +246,8 @@ impl PersistedSession {
     pub fn validate(&self) -> Result<ValidatedSession, SessionError> {
         let fail = |msg: String| SessionError::validate(msg);
 
-        // ── schema ──
+        // Schema: two distinct errors, because "newer than this build" and
+        // "older than this build" call for different operator action.
         if self.version == 0 || self.version > SESSION_SCHEMA_VERSION {
             return Err(SessionError::schema(format!(
                 "unknown session schema version {} (this build only understands ≤{})",
@@ -263,7 +262,6 @@ impl PersistedSession {
             )));
         }
 
-        // ── monitors ──
         if self.sel_mon >= self.monitors.len() && !self.monitors.is_empty() {
             return Err(fail(format!(
                 "sel_mon {} out of range for {} monitor(s)",
@@ -294,7 +292,7 @@ impl PersistedSession {
                     mon.workspaces.len()
                 )));
             }
-            // Collect the ids on this monitor (for the focus checks).
+            // Ids on this monitor, for the focus / focus_stack checks below.
             let mut mon_set: HashSet<WindowId> = HashSet::new();
             let mut mon_dup: Option<WindowId> = None;
             for (wi, ws) in mon.workspaces.iter().enumerate() {
@@ -307,7 +305,7 @@ impl PersistedSession {
                     )));
                 }
                 if ws.columns.is_empty() && !ws.floats.is_empty() {
-                    // fine — floats-only workspace
+                    // Legal: a workspace may hold floats and no tiled column.
                 }
                 for (ci, col) in ws.columns.iter().enumerate() {
                     if col.windows.is_empty() {
@@ -365,7 +363,8 @@ impl PersistedSession {
                     )));
                 }
             }
-            // Focus stack must be a permutation without itself duplicates.
+            // The focus stack is an MRU list, so a repeat entry is corruption
+            // rather than a harmless duplicate.
             let mut stack_seen: HashSet<WindowId> = HashSet::new();
             for &w in &mon.focus_stack {
                 if !stack_seen.insert(w) {
@@ -435,7 +434,9 @@ impl ValidatedSession {
             );
         }
 
-        // ── build the id → (mon, ws, float) placement table ──
+        // Placement table: where each surviving window id ends up. Two passes
+        // fill it — persisted-and-live first, then live-and-never-persisted —
+        // so the rebuild below never has to consult the raw file vectors again.
         let mut placements: HashMap<WindowId, Placement> = HashMap::new();
         for (mi, pmon) in persisted.monitors.iter().enumerate().take(n_mon) {
             for (wi, pws) in pmon.workspaces.iter().enumerate().take(n_tags) {
@@ -483,10 +484,13 @@ impl ValidatedSession {
             }
         }
 
-        // ── rebuild every monitor's workspace tree from the placements ──
+        // Rebuild each monitor from scratch: the old tree is dropped, never
+        // patched, so a stale window cannot survive by omission.
         let mut new_monitors: Vec<Monitor> = Vec::with_capacity(n_mon);
         for mi in 0..n_mon {
             let pmon = persisted.monitors.get(mi);
+            // Screen geometry is X11-derived runtime state and is carried over,
+            // never restored from the file.
             let screen = state.monitors[mi].screen;
             let reserved_regions = state.monitors[mi].reserved_regions.clone();
             let reserved = state.monitors[mi].reserved;
@@ -496,7 +500,8 @@ impl ValidatedSession {
                 let mut ws = Workspace::new(wi as u32);
                 if let Some(pws) = pmon.and_then(|p| p.workspaces.get(wi)) {
                     ws.layout = pws.layout;
-                    // Persisted columns → live-filtered columns.
+                    // Persisted columns → live-filtered columns; one that lost
+                    // every window disappears rather than becoming an empty slot.
                     let cols: Vec<Column> = pws
                         .columns
                         .iter()
@@ -556,10 +561,11 @@ impl ValidatedSession {
                 workspaces.push(ws);
             }
 
-            // Default-homed windows that fell outside any persisted workspace
-            // get tiled/floated onto their recorded (mi, wi). Sorted by id:
-            // `HashMap` order is random and `add_tiled` moves the workspace
-            // focus, so unsorted iteration restored a nondeterministic focus.
+            // Windows whose placement names a workspace this monitor does not
+            // have (tag count shrank since the file was written) get homed onto
+            // their recorded (mi, wi). Sorted by id: `HashMap` iteration order is
+            // random and `add_tiled` moves the workspace focus, so unsorted
+            // iteration would restore a nondeterministic focus.
             let mut homed: Vec<WindowId> = placements.keys().copied().collect();
             homed.sort_unstable();
             for id in homed {
@@ -588,11 +594,14 @@ impl ValidatedSession {
                 }
             }
 
-            // active workspace: persisted when present & in range, else 0.
+            // The persisted index is clamped into the rebuilt range, which can be
+            // shorter than the file's if the tag count shrank; a monitor with no
+            // persisted twin starts on workspace 0.
             let active_ws = pmon
                 .map(|p| p.active_ws.min(workspaces.len().saturating_sub(1)))
                 .unwrap_or(0);
-            // focused / focus stack: persisted, live, and on this monitor.
+            // focused / focus_stack: kept only when the id is still live *and*
+            // landed on this monitor's rebuilt tree.
             let mon_set: HashSet<WindowId> = workspaces
                 .iter()
                 .flat_map(|ws| {
@@ -630,13 +639,14 @@ impl ValidatedSession {
             new_monitors.push(mon);
         }
 
-        // ── single commit point: swap the whole monitor list ──
+        // Single commit point for the topology: one swap, so a failure anywhere
+        // above leaves the caller's visible `State` untouched.
         state.monitors = new_monitors;
         state.sel_mon = persisted.sel_mon.min(state.monitors.len().saturating_sub(1));
 
-        // ── rewrite every client's placement to match the restored topology ──
-        // (Does not touch geometry, flags except FLOAT, or presentation state —
-        // those stay the live window's own.)
+        // Bring every client's own placement record in line with the rebuilt
+        // tree. Geometry, presentation state and all other flags are left alone:
+        // those belong to the live window, not to the file.
         for (&id, p) in placements.iter() {
             let Some(c) = state.clients.get_mut(&id) else {
                 continue;
@@ -653,11 +663,12 @@ impl ValidatedSession {
             }
         }
 
-        // ── derived state that must stay in lock-step ──
-        // A pre-restore `pending_focus` deferral names an overlay owner from
-        // the OLD topology: resolving it against the new tree would focus a
-        // window on the wrong workspace (#8c). Drop it; focus is authoritative
-        // from the restored `mon.focused` above.
+        // Derived state that must stay in lock-step with the new topology.
+        // A pre-restore `pending_focus` deferral names an overlay owner from the
+        // OLD tree: resolving it against the new one would focus a window on
+        // the wrong workspace, and the owner may not even be an overlay any
+        // more. Drop it; focus is authoritative from the restored `mon.focused`
+        // above.
         state.pending_focus = None;
         for mi in 0..state.monitors.len() {
             state.sync_presented_maximize(mi);
@@ -712,12 +723,11 @@ where
     Ok(())
 }
 
-// ─── JSON (de)serialization ──────────────────────────────────────────────────
-//
-// Hand-rolled, deterministic, zero-dependency. The serializer writes a fixed
-// field order so files are cheap to diff; the parser is a small but real JSON
-// parser (objects, arrays, strings with escapes, numbers, true/false/null) with
-// strict syntax and lenient unknown-key handling for forward compatibility.
+// Hand-rolled JSON codec: deterministic and zero-dependency. The serializer
+// writes a fixed field order so files are cheap to diff; the parser is a small
+// but real JSON parser (objects, arrays, strings with escapes, numbers,
+// true/false/null) with strict syntax and lenient unknown-key handling, so a
+// file written by a newer Maverick still restores here.
 
 /// Minimal JSON value used only to decode session files.
 #[derive(Debug, Clone, PartialEq)]
@@ -910,9 +920,9 @@ impl PersistedSession {
     }
 }
 
-/// Validate the version before decoding the rest of the body, so an unknown
-/// future schema fails with a distinct, actionable message instead of a
-/// generic parse error.
+/// Post-decode schema gate, run by `parse_json` right after decoding so a file
+/// written by a newer Maverick reports "unknown session schema version" rather
+/// than a parse error or a half-restored topology.
 struct Session;
 
 impl Session {
@@ -1079,19 +1089,18 @@ fn decode_session(root: &Jv) -> Result<PersistedSession, SessionError> {
     })
 }
 
+/// Wire name of a layout kind. A function rather than an inline literal so a
+/// second `LayoutKind` variant gains its arm here instead of at every call site.
 fn layout_json_name(l: LayoutKind) -> &'static str {
-    // `LayoutKind` is currently `Column`-only; keep the function so a future
-    // `Grid` variant gains its arm here instead of at every call site.
     let _ = l;
     "column"
 }
 
-/// Append `"name":<float>` avoiding a trailing `.0` where possible.
+/// Append `"name":<float>`. `f32`'s `Display` drops the trailing `.0` for
+/// integral values, so `1.0` round-trips as `1` and the file stays compact.
 fn write_float(s: &mut String, name: &str, v: f32) {
     s.push_str(&format!("\"{name}\":{v}"));
 }
-
-// ─── Minimal JSON parser ─────────────────────────────────────────────────────
 
 struct Parser<'a> {
     bytes: &'a [u8],
@@ -1157,7 +1166,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_object(&mut self) -> Result<Jv, ParseErr> {
-        self.i += 1; // consume '{'
+        self.i += 1;
         let mut fields = Vec::new();
         self.ws();
         if self.bytes.get(self.i) == Some(&b'}') {
@@ -1203,7 +1212,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_array(&mut self) -> Result<Jv, ParseErr> {
-        self.i += 1; // consume '['
+        self.i += 1;
         let mut items = Vec::new();
         self.ws();
         if self.bytes.get(self.i) == Some(&b']') {
@@ -1240,7 +1249,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_string(&mut self) -> Result<String, ParseErr> {
-        self.i += 1; // consume opening quote
+        self.i += 1;
         let mut out = String::new();
         loop {
             let b = *self
@@ -1334,7 +1343,6 @@ impl<'a> Parser<'a> {
         if self.bytes.get(self.i) == Some(&b'-') {
             self.i += 1;
         }
-        // integer part
         match self.bytes.get(self.i) {
             Some(b'0') => {
                 self.i += 1;

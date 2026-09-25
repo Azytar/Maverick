@@ -1,29 +1,42 @@
-//! Sistema de comandos tipado para Maverick.
+//! Typed command surface for Maverick.
 //!
-//! What owns: `Command` trait (`execute(&mut State, &mut Cfg) → CommandReport`)
+//! What owns: the `Command` trait (`&mut State, &mut Cfg` → `CommandReport`)
 //! plus every typed command (`FocusDirection`, `MoveWindow`, `ToggleFullscreen`,
-//! `ToggleMaximize`, `GrowColumn`, `ViewportZoom`, `PageSnap`, …) and pure
-//! helpers (`apply_fullscreen_topology`, `apply_maximize`, `decide_manage_focus`,
-//! `reconcile_pending_focus_after_transition`).
+//! `ToggleMaximize`, `GrowColumn`, `ViewportZoom`, `PageSnap`, …) and the pure
+//! helpers they share (`apply_fullscreen_topology`, `apply_maximize`,
+//! `decide_manage_focus`, `reconcile_pending_focus_after_transition`).
 //!
-//! Exposes: `Command` (single mutation entry point for `Engine::execute`), each
-//! `Command` impl (pure `State`/`Cfg` → `Effect`s + `Event`), and the shared
-//! focus/overlay helpers used by both keyboard and EWMH paths.
+//! Exposes: `Command`, the single mutation entry point for `Engine::execute`,
+//! and the shared focus/overlay helpers used by both the keyboard and the EWMH
+//! paths.
 //!
-//! Leaves to others: X11/GL execution (backend drains `Effect`s), `layout::arrange`
-//! geometry, `present::present_into` overlay, and `EventBus` dispatch.
+//! Leaves to others: X11/GL execution (the backend drains the returned
+//! `Effect`s in order), `layout::arrange` geometry, `present::present_into`
+//! overlays, and `EventBus` dispatch.
 //!
-//! Invariants: commands are pure over `State`/`Cfg` — never touch X11/GPU;
-//! every command declares its own `Event` (never knows its consumers); the
-//! `pending_focus` safety net (`reconcile_pending_focus_after_transition`) is
-//! the centralized #8c fix called by `Engine::execute`/`execute_batch`.
+//! # The purity contract
 //!
-//! Cada comando es una transformación **pura** sobre `State`/`Cfg` que:
-//! - produce los `Effect` que el backend debe ejecutar, y
-//! - declara el **evento de dominio** que representa (ver `core::event`).
+//! Every command is a pure transformation over `State`/`Cfg`:
 //!
-//! El comando conoce SU evento, no a sus consumidores. Quien quiera reaccionar
-//! (renderer, IPC, barras, hooks, tests) se suscribe al `EventBus` del Engine.
+//! - It performs no I/O, makes no X11 round trip, and never reads the wall
+//!   clock. Anything that must happen outside the process is *returned* as an
+//!   ordered `Vec<Effect>` for the backend to apply, never performed inline.
+//! - It returns at most one `Event` naming the domain fact it represents (see
+//!   `core::event`). A command knows its own event, never its consumers; the
+//!   renderer, IPC hub, bars, hooks and tests all subscribe to the `Engine`'s
+//!   `EventBus`.
+//!
+//! This is what makes the reducer testable at all: tests assert on the returned
+//! `Effect` list with no X server, no compositor and no timing. It also means
+//! the returned order *is* the contract — the backend applies effects in
+//! sequence, so `MarkRestack` before `ArrangeMonitor` when stacking changed and
+//! `SetFullscreen`/`SetMaximized` after the arrange that the new presentation
+//! state implies.
+//!
+//! The `pending_focus` safety net (`reconcile_pending_focus_after_transition`)
+//! is the centralized post-condition check that `Engine::execute` and
+//! `execute_batch` run after every command, before the debug-only
+//! `assert_invariants`.
 
 use crate::config::Cfg;
 use crate::core::effect::Effect;
@@ -41,9 +54,10 @@ pub struct ToggleMaximize(pub Option<WindowId>);
 
 /// Recenter the scroll camera of `mon_idx`/`ws_i` on its focused column. Every
 /// mutator that adds/removes/splits columns (`MoveToWorkspace`, `ToggleFloat`,
-/// …) must call this instead of leaving a stale `camera.target` that could land
-/// past the new ribbon width (bug C8). Kept as a single helper so the invariant
-/// "after any column change the camera follows the focus" lives in one place.
+/// …) must call this: a `camera.target` left over from a longer ribbon can land
+/// past the new one, stranding the workspace scrolled off its own content. Kept
+/// as a single helper so the invariant "after any column change the camera
+/// follows the focus" lives in one place.
 fn scroll_to_focused(state: &mut State, cfg: &Cfg, mi: usize, ws_i: usize) {
     let Some(mon) = state.monitors.get(mi) else {
         return;
@@ -65,14 +79,12 @@ fn scroll_to_focused(state: &mut State, cfg: &Cfg, mi: usize, ws_i: usize) {
 /// the column `win` lives in comes to rest in view — the *logical* half of a
 /// pointer/EWMH focus change.
 ///
-/// This is the pure extraction of what the backend's `Backend::focus()` used to
-/// do inline: it moves `camera.target` (the settled rest viewport) and nothing
-/// else. It deliberately does **not** re-project: `client.geom` — the rect X11
-/// hit-tests clicks against and the pointer warp reads — is only refreshed by a
-/// settled `arrange` of the returned monitor. That is why the return value is
-/// `#[must_use]`: the `Some(mi)` is the monitor whose settled projection the
-/// caller still owes, and dropping it silently reintroduces the "camera moved
-/// but geometry didn't" bug (a click then lands on the neighbour's stale rect).
+/// Only `camera.target` moves; nothing is re-projected. `client.geom` — the rect
+/// X11 hit-tests clicks against and the pointer warp reads — is refreshed only
+/// by a settled `arrange` of the returned monitor. That is why the return value
+/// is `#[must_use]`: the `Some(mi)` names the monitor whose settled projection
+/// the caller still owes, and dropping it silently reintroduces "camera moved
+/// but geometry didn't" (a click then lands on the neighbour's stale rect).
 ///
 /// Returns `None` when `win` is unknown or its monitor/workspace indices are
 /// stale (e.g. after a hotplug), in which case nothing was mutated.
@@ -129,11 +141,9 @@ fn fs_of(state: &State, mi: usize, ws_i: usize) -> FsCtx {
 /// window never actually grows. `FS_WAS_FLOAT` remembers the promotion so
 /// leaving fullscreen puts the window back where the user had it.
 ///
-/// This is called once by `ToggleFullscreen`, which is the single funnel for
-/// both the `Mod4+F` keyboard path and the EWMH `_NET_WM_STATE_FULLSCREEN`
-/// client-message path. The backend's `set_fullscreen` no longer calls it
-/// (it is now X11-only), so there is no longer a second caller to disagree
-/// with — which is exactly why the float-collapse bug C1/A1 is gone.
+/// `ToggleFullscreen` is the single funnel for this transition, covering both
+/// the `Mod4+F` keyboard path and the EWMH `_NET_WM_STATE_FULLSCREEN` client
+/// message, so the two channels can never disagree about the topology.
 ///
 /// It is idempotent on purpose: entering only promotes an actual float, leaving
 /// only demotes a window carrying `FS_WAS_FLOAT`, so running it twice for the
@@ -160,8 +170,8 @@ pub fn apply_fullscreen_topology(
         if let Some(c) = state.clients.get_mut(&win) {
             // Snapshot the *float* rect here, while it is still the live
             // geometry. `arrange` overwrites `geom` with the tile rect as soon
-            // as it runs, so saving it later (in the backend's `set_fullscreen`)
-            // would remember the tile instead of where the user had the float.
+            // as it runs, so saving it any later would remember the tile instead
+            // of where the user had the float.
             c.saved_geom = c.geom;
             // Capture the fullscreen snapshot (prior mode + exact rect) so that
             // leaving fullscreen restores the float verbatim — robust against an
@@ -184,10 +194,10 @@ pub fn apply_fullscreen_topology(
             c.flags.set(WinFlags::FLOAT);
             c.flags.clear(WinFlags::FS_WAS_FLOAT);
         }
-        // Vuelve al workarea que moldeó su rect antes de promoverlo: si
-        // cambiaron struts/gaps mientras tanto, re-asentar aquí (una vez) evita
-        // que el primer arrange lo corrija con un salto visible. Helper único
-        // de "contexto nuevo" (ver `layout::settle_float_in_workarea`).
+        // Settle against the workarea that shaped the float's pre-promotion
+        // rect: if struts or gaps changed meanwhile, re-seating once here
+        // avoids a visible jump when the first `arrange` corrects it.
+        // Single "new context" helper, see `layout::settle_float_in_workarea`.
         crate::core::layout::settle_float_in_workarea(state, mi, win);
     }
     true
@@ -195,15 +205,16 @@ pub fn apply_fullscreen_topology(
 
 /// Restore a window's geometry from its `FullscreenSnapshot` after leaving
 /// fullscreen. Pure (no X11) — `ToggleFullscreen` calls this on leave, and the
-/// unit tests call it to simulate the Command's geometry restore exactly.
+/// unit tests call it to reproduce the command's geometry restore exactly.
 ///
-/// This captures the *exact* pre-fullscreen rect, so an intervening
-/// maximize/border change (which mutates the shared `saved_geom`) can no longer
-/// corrupt the restore (plan 1786564084575, Fase 3). Idempotent: returns the
-/// prior `WindowMode` when a snapshot was applied, `None` when there was
-/// nothing to restore. The pre-fullscreen `FullscreenPolicy` is restored too
-/// (entering promotes to `True`; without this a `Deny`/`True` rule would be
-/// clobbered by one toggle cycle).
+/// Captures the *exact* pre-fullscreen rect, so an intervening maximize or
+/// border change (which mutates the shared `saved_geom`) can no longer corrupt
+/// the restore. The pre-fullscreen `FullscreenPolicy` is restored too (entering
+/// promotes to `True`; without this one toggle cycle would clobber a
+/// `Deny`/`True` rule).
+///
+/// Idempotent: returns the prior `WindowMode` when a snapshot was applied,
+/// `None` when there was nothing to restore.
 pub fn apply_fullscreen_geom_restore(
     state: &mut State,
     win: WindowId,
@@ -259,16 +270,17 @@ pub(crate) fn consume_pending_focus(
     focus_logical_on(state, mi, pf.window)
 }
 
-/// After ANY transition, if `pending_focus` exists but its owner is no longer a
-/// presented overlay (per the EXACT `#8c` condition, shared via
-/// `State::pending_focus_owner_presented`), resolve it immediately: if the
-/// deferred window is still alive, focus it (mirrors `consume_pending_focus`
-/// without needing a dismissing overlay); otherwise drop the deferral. This is a
-/// centralized safety net called from `Engine::execute`/`execute_batch` right
-/// before `assert_invariants`, guaranteeing invariant `#8c` holds right after
-/// every `Command::execute()`. Because it uses the identical `#8c` condition as
-/// the invariant and the existing `consume_pending_focus` calls, it can never
-/// double-resolve (those paths only fire when the owner was already dismissed).
+/// After ANY transition, resolve a `pending_focus` whose owner is no longer a
+/// presented overlay (exactly the `State::pending_focus_owner_presented` test
+/// that `consume_pending_focus` and the invariant check share): if the deferred
+/// window is still alive, focus it; otherwise drop the deferral.
+///
+/// Centralized safety net called from `Engine::execute`/`execute_batch` right
+/// before `assert_invariants`, so the `pending_focus` invariant holds right after
+/// every `Command::execute()`. Sharing the exact predicate with
+/// `consume_pending_focus` is what makes double resolution impossible: those
+/// paths only fire when the owner was already dismissed, and this one only fires
+/// when it is not presented.
 pub(crate) fn reconcile_pending_focus_after_transition(state: &mut State) -> Option<WindowId> {
     let pf = state.pending_focus?;
     if state.pending_focus_owner_presented() {
@@ -283,12 +295,14 @@ pub(crate) fn reconcile_pending_focus_after_transition(state: &mut State) -> Opt
 }
 
 /// Apply a *logical* focus (update `mon.focused` + `focus_stack` +
-/// `presented_maximize`) without touching the real X input focus. Backend
-/// handlers that must update the focus model for a non-selected monitor — or for
-/// any path that is not the single real-X sink `Backend::focus()` — use this so
-/// that `mon.focused`/`focus_stack`/`x11_input_focus` are only ever written by
-/// `focus()` (and this logical helper, which mirrors `focus()`'s state mutation
-/// minus the X call). Returns `Some(win)` on success.
+/// `presented_maximize`) without touching the real X input focus.
+///
+/// The single-writer rule: `mon.focused`/`focus_stack`/`x11_input_focus` are
+/// written by the real-X sink `Backend::focus()` and by this helper, which
+/// mirrors that sink's state mutation minus the X call. Backend handlers that
+/// must update the focus model for a non-selected monitor use it instead.
+///
+/// Returns `Some(win)` on success.
 pub fn focus_logical_on(state: &mut State, mi: usize, win: WindowId) -> Option<WindowId> {
     if mi >= state.monitors.len() || !state.clients.contains_key(&win) {
         return None;
@@ -366,9 +380,10 @@ pub(crate) fn decide_active_window(state: &State, win: WindowId) -> ActiveWindow
     ActiveWindowIntent::Focus(win)
 }
 
-/// The single logical owner of maximize state (mirrors `apply_fullscreen_topology`).
-/// Decides and mutates `MAXIMIZED_V/H`, `saved_geom`, geom, `geometry_dirty`,
-/// and `presented_maximize`. The backend `set_maximized` is now X11-only.
+/// The single logical owner of maximize state (mirrors `apply_fullscreen_topology`):
+/// decides and mutates `MAXIMIZED_V/H`, `saved_geom`, `geom`, `geometry_dirty`
+/// and `presented_maximize`. The backend's `SetMaximized` handler carries only
+/// the X11 half.
 pub fn apply_maximize(state: &mut State, win: WindowId, vert: Option<bool>, horiz: Option<bool>) {
     if let Some(c) = state.clients.get_mut(&win) {
         let was_max = c.is_maximized();
@@ -406,10 +421,10 @@ pub fn apply_maximize(state: &mut State, win: WindowId, vert: Option<bool>, hori
 const VIEWPORT_ZOOM_MIN: f32 = 1.0;
 const VIEWPORT_ZOOM_MAX: f32 = 4.0;
 
-/// Zoom the workspace viewport in/out. Positive `0`th field zooms in, negative
-/// zooms out; enters `ViewportMode::Zoomed` and animates the `page_zoom` spring
-/// (Fase 9). Keeps the focused column centered while zooming by retargeting the
-/// scroll camera, so the enlargement grows around what the user is looking at.
+/// Zoom the workspace viewport in/out: a positive field zooms in, a negative one
+/// zooms out. Enters `ViewportMode::Zoomed` and animates the `page_zoom` spring.
+/// Keeps the focused column centered by retargeting the scroll camera, so the
+/// enlargement grows around what the user is looking at.
 #[derive(Debug, Clone, Copy)]
 pub struct ViewportZoom(pub f32);
 
@@ -437,8 +452,8 @@ impl Command for ViewportZoom {
         }
         let factor = 1.0 + delta;
         let new = (ws.page_zoom_target * factor).clamp(VIEWPORT_ZOOM_MIN, VIEWPORT_ZOOM_MAX);
-        // `clamp` can still yield NaN if the stored target was already NaN
-        // (pre-fix state / restored session): repair to 1.0 instead of
+        // `clamp` still yields NaN if the stored target was already NaN (a
+        // session restored from a poisoned file): repair to 1.0 rather than
         // persisting the poison.
         let new = if new.is_finite() { new } else { 1.0 };
         if new <= VIEWPORT_ZOOM_MIN + 1e-3 {
@@ -446,18 +461,18 @@ impl Command for ViewportZoom {
             // factor (and the camera) back home.
             ws.viewport_mode = ViewportMode::Normal;
             ws.page_zoom_target = 1.0;
-            // Mutually exclusive with Overview (bug B1): leaving viewport zoom
-            // must also clear any Overview state, otherwise the live `zoom`
-            // spring would keep easing toward `overview_zoom_min` and surface as
-            // a phantom zoom-out once we hand `alpha` back to `zoom`.
+            // Mutually exclusive with Overview: leaving viewport zoom must also
+            // clear any Overview state, otherwise the live `zoom` spring would
+            // keep easing toward `overview_zoom_min` and surface as a phantom
+            // zoom-out once `alpha` is handed back to `zoom`.
             ws.overview = false;
             ws.zoom_target = 1.0;
         } else {
             ws.viewport_mode = ViewportMode::Zoomed;
             ws.page_zoom_target = new;
-            // Mutually exclusive with Overview (bug B1): entering viewport zoom
-            // clears Overview so its zoom-out factor can't corrupt the `zoom`
-            // spring while `alpha` is driven by `page_zoom` instead.
+            // Same mutual exclusion on the way in: clearing Overview stops its
+            // zoom-out factor from corrupting the `zoom` spring while `alpha` is
+            // driven by `page_zoom`.
             ws.overview = false;
             ws.zoom_target = 1.0;
         }
@@ -530,8 +545,6 @@ impl Command for PageSnap {
     }
 }
 
-// ─── Trait Command ───────────────────────────────────────────────────────────
-
 /// Pure mutation of `State`/`Cfg` into `Effect`s and an optional `Event`.
 ///
 /// The single entry point `Engine::execute`/`execute_batch` call. Implementors
@@ -541,8 +554,6 @@ impl Command for PageSnap {
 pub trait Command {
     fn execute(&mut self, state: &mut State, cfg: &mut Cfg) -> CommandReport;
 }
-
-// ─── Focus ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 pub struct FocusWindow(pub Option<WindowId>);
@@ -594,8 +605,8 @@ impl Command for FocusDirection {
                     return CommandReport::new(cmds);
                 }
                 let ci = ws.focus.column_idx.min(n - 1);
-                // P2: horizontal navigation keeps the row you were on. Vertical
-                // navigation tracks the row by writing `col.focused`, but the
+                // Horizontal navigation carries the current row over. Vertical
+                // navigation tracks it by writing `col.focused`, but the
                 // destination column carries its own stale `focused` (usually 0),
                 // so without carrying the row over, `focus-right` jumps to an
                 // unrelated window instead of the neighbouring one.
@@ -687,9 +698,9 @@ impl Command for FocusDirection {
                 if let Some(ci) = ci {
                     let ws = &mut state.monitors[mi].workspaces[ws_i];
                     ws.focus.column_idx = ci;
-                    // Keep the column's focused row in sync with `target`
-                    // (bug B2). Up/Down and MoveWindow read `columns[ci].focused`,
-                    // so leaving it stale (usually 0) would later move focus from
+                    // Keep the column's focused row in sync with `target`.
+                    // Up/Down and MoveWindow read `columns[ci].focused`, so
+                    // leaving it stale (usually 0) would later move focus from
                     // the wrong row and desync `ws.focus` from `mon.focused`.
                     if let Some(ri) = ws.columns[ci].windows.iter().position(|&w| w == target) {
                         ws.columns[ci].focused = ri;
@@ -753,8 +764,6 @@ impl Command for FocusDirection {
     }
 }
 
-// ─── Move ────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy)]
 pub struct MoveWindow(pub WindowId, pub Dir);
 
@@ -795,8 +804,6 @@ impl Command for KillWindow {
     }
 }
 
-// ─── Float / Fullscreen ──────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy)]
 pub struct ToggleFloat;
 
@@ -816,8 +823,8 @@ impl Command for ToggleFloat {
         // window tiled in a different workspace than the one currently shown, and
         // toggling float against `active_ws` would remove from (and push to) the
         // wrong tree — leaving the window tiled in its home workspace *and*
-        // floating in the active one (cross-workspace duplication, caught by the
-        // Fase 5 property harness). `NewColumn` already applies the same guard.
+        // floating in the active one (cross-workspace duplication).
+        // `NewColumn` applies the same guard.
         let ws_i = state
             .clients
             .get(&win)
@@ -826,8 +833,8 @@ impl Command for ToggleFloat {
             .clients
             .get(&win)
             .is_some_and(crate::types::Client::is_float);
-        // P1-B: guard against cross-monitor focus corruption. If the focused
-        // window does not actually belong to the selected monitor, mutating the
+        // Guard against cross-monitor focus corruption. If the focused window
+        // does not actually belong to the selected monitor, mutating the
         // selected monitor's trees would remove it from tree A and insert it
         // into floating B — an inconsistent split state. Bailing out is safe:
         // nothing is mutated and the caller's focus anomaly is left to the
@@ -854,11 +861,10 @@ impl Command for ToggleFloat {
             if let Some(c) = state.clients.get_mut(&win) {
                 c.flags.set(WinFlags::FLOAT);
             }
-            // El tile proyectado puede traer un rect fuera de grid/hints; al
-            // nacer como flotante se re-asienta (idempotente) contra su
-            // workarea para que el primer arrange no lo desplace (salto al
-            // flotar). Helper unico de "contexto nuevo" (ver
-            // `layout::settle_float_in_workarea`).
+            // The projected tile rect can fall outside grid/hints; a window born
+            // floating is re-settled (idempotently) against its workarea so the
+            // first arrange does not displace it. Single "new context" helper,
+            // see `layout::settle_float_in_workarea`.
             crate::core::layout::settle_float_in_workarea(state, mi, win);
         }
         scroll_to_focused(state, cfg, mi, ws_i);
@@ -869,6 +875,12 @@ impl Command for ToggleFloat {
     }
 }
 
+/// Toggle fullscreen for `Some(win)`, or for the selected monitor's focused
+/// window when `None`.
+///
+/// The single funnel for both the `Mod4+F` keybinding and the EWMH
+/// `_NET_WM_STATE_FULLSCREEN` client message, so the two channels cannot drift
+/// apart in topology, border, snapshot, policy or camera handling.
 #[derive(Debug, Clone, Copy)]
 pub struct ToggleFullscreen(pub Option<WindowId>);
 
@@ -881,23 +893,20 @@ impl Command for ToggleFullscreen {
         }
         let ws_i = state.monitors[mi].active_ws;
         if let Some(win) = self.0.or(state.monitors.get(mi).and_then(|m| m.focused)) {
-            // The Command owns ALL fullscreen logical state. The backend's
-            // `SetFullscreen` effect handler is reduced to the X11-only half
-            // (EWMH atom + compositor bypass hint) and must not decide topology,
-            // border, snapshot, flags or camera — those belong to the core.
+            // This command owns ALL fullscreen logical state. The backend's
+            // `SetFullscreen` handler is the X11-only half (EWMH atom +
+            // compositor bypass hint) and must not decide topology, border,
+            // snapshot, flags or camera — those belong to the core.
             let on = !state
                 .clients
                 .get(&win)
                 .is_some_and(crate::types::Client::is_fullscreen);
 
-            // 1) Topology (float<->tiled membership + `FS_WAS_FLOAT`). Single
-            //    shared pure helper; idempotent, so the old double-call from the
-            //    effect handler is gone.
+            // Topology: float⇄tiled membership plus `FS_WAS_FLOAT`.
             apply_fullscreen_topology(state, cfg, win, on);
 
-            // 2) Border + 3) `FULLSCREEN` flag + force-reconfigure mark. A
-            // fullscreen tile has no border; the flag is owned here now (the
-            // effect handler no longer sets it).
+            // Border, the `FULLSCREEN` flag, and a forced reconfigure. A
+            // fullscreen tile has no border.
             if let Some(c) = state.clients.get_mut(&win) {
                 if on {
                     c.old_border_w = c.border_w;
@@ -910,15 +919,14 @@ impl Command for ToggleFullscreen {
                 } else {
                     c.flags.clear(WinFlags::FULLSCREEN);
                 }
-                // Force a reconfigure even when the rect is unchanged (border /
-                // state changed without moving — exactly what the old
-                // `geometry_dirty` sentinel was for).
+                // Force a reconfigure even when the rect is unchanged: the border
+                // and the state changed without the window moving.
                 c.geometry_dirty = true;
             }
 
-            // 4) Snapshot the pre-fullscreen rect on enter (tiled/maximized case;
-            //    the float case was already snapshotted by
-            //    `apply_fullscreen_topology`), or restore it on leave.
+            // Snapshot the pre-fullscreen rect on enter (tiled/maximized case;
+            // the float case was already snapshotted by
+            // `apply_fullscreen_topology`), or restore it on leave.
             if on {
                 if let Some(c) = state.clients.get_mut(&win) {
                     if !c.flags.has(WinFlags::FS_WAS_FLOAT) {
@@ -937,21 +945,21 @@ impl Command for ToggleFullscreen {
                 apply_fullscreen_geom_restore(state, win);
             }
 
-            // 5) Exclusive-overlay promotion (Column-only design, 9dbce98).
-            // Entering fullscreen promotes to `True` so `present` pins it over
-            // the screen, `decide_manage_focus` defers later windows behind it,
-            // and the bypass policy can step aside. Runs AFTER the snapshot
-            // above (which must record the pre-promotion policy) and is undone
-            // by the restore on leave, so rules are never clobbered.
+            // Exclusive-overlay promotion. Entering fullscreen promotes to
+            // `True` so `present` pins it over the screen, `decide_manage_focus`
+            // defers later windows behind it, and the bypass policy can step
+            // aside. Must run AFTER the snapshot above (which has to record the
+            // pre-promotion policy) and is undone by the restore on leave, so a
+            // user rule is never clobbered.
             if on {
                 if let Some(c) = state.clients.get_mut(&win) {
                     c.fullscreen_policy = crate::types::FullscreenPolicy::True;
                 }
             }
 
-            // 6) Camera recenter (logical state). `scroll_to_focused` folds the
-            //    newly-set `FULLSCREEN` flag through `fs_ctx`, so it reproduces
-            //    exactly the `ideal_scroll` the old backend recenter computed.
+            // Recenter the camera. `scroll_to_focused` folds the newly-set
+            // `FULLSCREEN` flag through `fs_ctx`, so the ribbon scrolls the same
+            // way the fullscreen column will be projected.
             scroll_to_focused(state, cfg, mi, ws_i);
 
             if !on {
@@ -1007,13 +1015,12 @@ impl Command for ToggleMaximize {
 
 /// Drag/resize a window to an explicit rectangle.
 ///
-/// The backend's pointer path computes the target rect from pointer motion +
+/// The backend's pointer path computes the target rect from pointer motion plus
 /// `WM_SIZE_HINTS` and hands it here, so ALL float-geometry state mutation
-/// stays inside the `Command` funnel (Fase: close the secondary mutation
-/// paths). It emits a single `Effect::ConfigureWindow`, which the backend
-/// carries out through the reconciler's `apply_geom` — so `configure_window`
-/// keeps exactly one owner, and the window's logical `geom` is updated in the
-/// same place as every other state transition.
+/// stays inside the `Command` funnel. Emits a single `Effect::ConfigureWindow`,
+/// which the backend carries out through the reconciler's `apply_geom` — so
+/// `configure_window` keeps exactly one owner and the window's logical `geom`
+/// is written in the same place as every other state transition.
 #[derive(Debug, Clone, Copy)]
 pub struct MoveResize(pub WindowId, pub Rect);
 
@@ -1022,18 +1029,18 @@ impl Command for MoveResize {
         let mut cmds = Vec::new();
         let win = self.0;
         let mut rect = self.1;
-        // Sanea la geometria hostil antes de normalizar: 0x0 / u32::MAX no
-        // deben llegar al clamp de flotantes (el tiled ya lo hacia, este no).
+        // Sanitize hostile geometry before normalizing: a 0x0 or u32::MAX rect
+        // must never reach the float clamp (the tiled path already does this).
         rect.w = rect.w.clamp(1, 16_384);
         rect.h = rect.h.clamp(1, 16_384);
         rect.x = rect.x.clamp(-16_384, 16_384);
         rect.y = rect.y.clamp(-16_384, 16_384);
-        // Normalizacion unica de flotantes (ver `layout::normalize_float_geom`):
-        // el drag entrega aqui el rect ya normalizado, pero normalizar de nuevo
-        // lo deja bit a bit igual (idempotente) y protege a los emisores que
-        // llaman con rects crudos. Sin esto, `MoveResize` instalaba tamanos
-        // fuera de grid/hints que el siguiente arrange corregia -> el flotante
-        // "saltaba" un frame despues de cada movimiento.
+        // Single float normalization point (see `layout::normalize_float_geom`):
+        // the drag already delivers a normalized rect, and re-normalizing leaves
+        // it bit-for-bit identical, so it costs nothing while protecting the
+        // callers that pass raw rects. Without it `MoveResize` installed sizes
+        // outside grid/hints that the next arrange corrected — the float visibly
+        // jumped a frame after every move.
         let (hints, wa, bw) = match state.clients.get(&win) {
             Some(c) => {
                 let wa = state
@@ -1056,8 +1063,6 @@ impl Command for MoveResize {
         CommandReport::new(cmds)
     }
 }
-
-// ─── Layout ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 pub struct CycleLayout;
@@ -1105,9 +1110,9 @@ impl Command for SetLayout {
                 return CommandReport::new(cmds);
             }
             state.monitors[mi].workspaces[ws_i].layout = self.0;
-            // Deterministic scroll after a layout switch (scenario 11): re-center
-            // the camera on the focused column in the new layout so the focused
-            // window is visible at rest even when the camera was displaced.
+            // Deterministic scroll after a layout switch: re-center the camera
+            // on the focused column in the new layout so the focused window is
+            // visible at rest even when the camera was displaced.
             if self.0 == LayoutKind::Column {
                 let wa = state.monitors[mi].workarea;
                 let fs = fs_of(state, mi, ws_i);
@@ -1127,8 +1132,6 @@ impl Command for SetLayout {
     }
 }
 
-// ─── Workspace ───────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy)]
 pub struct ViewWorkspace(pub usize);
 
@@ -1146,20 +1149,20 @@ impl Command for ViewWorkspace {
             return CommandReport::new(cmds);
         }
         state.monitors[mi].active_ws = ws_idx;
-        // P1-A: resolve the post-switch focus *inside* the command (the same
+        // Resolve the post-switch focus *inside* the command (the same
         // resolution the `FocusWindow` effect applies below), so the logical
         // state is coherent immediately and never depends on the effect being
         // applied: `focused == best_focus(active_ws)` — a window of the new
-        // workspace (or its presented overlay owner), or `None`. This mirrors
-        // what `MoveToWorkspace` already does. An alive `pending_focus`
-        // deferral is untouched: `best_focus` never returns the deferred
-        // window, so the ping-pong restore keeps handing input to the overlay
-        // owner, never to the deferred window.
+        // workspace (or its presented overlay owner), or `None`. An alive
+        // `pending_focus` deferral is untouched: `best_focus` never returns the
+        // deferred window, so the ping-pong restore keeps handing input to the
+        // overlay owner, never to the deferred window.
         let focus = state.best_focus(mi);
         state.monitors[mi].focused = focus;
         // The presented maximize overlay follows `mon.focused`; leaving the
         // source workspace's overlay recorded while focus moved would dangle
-        // the overlay/pending_focus bookkeeping (invariant #9).
+        // the overlay/`pending_focus` bookkeeping (`presented_maximize` must
+        // name a maximized client on the *active* workspace).
         state.sync_presented_maximize(mi);
         let wa = state.monitors[mi].workarea;
         let scroll = ideal_scroll(
@@ -1222,9 +1225,9 @@ impl Command for MoveToWorkspace {
         }
         if is_float {
             state.monitors[mi].workspaces[ws_idx].floats.push(win);
-            // El workarea no cambió (mismo monitor), pero el sello de autoridad
-            // del cliente se limpia: la ventana es movida por el WM (el usuario
-            // la mandó a otro workspace), no por el cliente.
+            // The workarea is unchanged (same monitor), but the client's
+            // authority seal is cleared: the window is moved by the WM (the user
+            // sent it to another workspace), not by the client.
             crate::core::layout::settle_float_in_workarea(state, mi, win);
         } else {
             state.monitors[mi].workspaces[ws_idx].remove_window(win);
@@ -1234,19 +1237,19 @@ impl Command for MoveToWorkspace {
             c.workspace = ws_idx;
         }
         // The source workspace just lost a column: recenter its camera so it
-        // doesn't stay scrolled past the new (shorter) ribbon (bug C8).
+        // doesn't stay scrolled past the new (shorter) ribbon.
         scroll_to_focused(state, cfg, mi, src_ws);
         // The moved window may have owned the source workspace's maximize
-        // overlay; clear any now-dangling `presented_maximize` (invariant #9).
+        // overlay; clear the now-dangling `presented_maximize` (it must name a
+        // maximized client on the active workspace).
         if state.monitors[mi].workspaces[src_ws].presented_maximize == Some(win) {
             state.monitors[mi].workspaces[src_ws].presented_maximize = None;
         }
-        // Resolve the post-move focus the same way the `FocusWindow` effect will
-        // (and `run_cmd` applies it to `mon.focused`). `sync_presented_maximize`
-        // reads `mon.focused`, so we must point it at the *final* focus BEFORE
-        // syncing — otherwise the maximize-overlay owner is computed against the
-        // stale post-`retain` focus and desyncs from `presented_overlay_owner`
-        // (invariant #9b).
+        // Resolve the post-move focus the same way the `FocusWindow` effect will.
+        // `sync_presented_maximize` reads `mon.focused`, so it must be pointed at
+        // the *final* focus BEFORE syncing — otherwise the maximize-overlay owner
+        // is computed against the stale post-`retain` focus and desyncs from
+        // `presented_overlay_owner`.
         let new_focus = state.best_focus(mi);
         state.monitors[mi].focused = new_focus;
         state.sync_presented_maximize(mi);
@@ -1279,9 +1282,8 @@ impl Command for GrowColumn {
 
         // Scrolling layout: each column has an *independent* width (a fraction of
         // the workarea), and growing/shrinking one column never resizes its
-        // neighbours — the ribbon just gets longer/shorter and the camera scrolls.
-        // Stealing width from siblings (the old fit-to-screen behaviour) is wrong
-        // here (bug C7).
+        // neighbours — the ribbon just gets longer/shorter and the camera
+        // scrolls. Stealing width from siblings (fit-to-screen) is wrong here.
         let col_count = ws.columns.len();
         // Clamp config gaps: `gaps_inner: u32` is user-controlled and
         // `as i32` wraps at u32::MAX (== -1). Bound it to the same ceiling
@@ -1296,14 +1298,17 @@ impl Command for GrowColumn {
             return CommandReport::new(cmds);
         }
 
+        // Convert the pixel delta into a weight delta against the space the
+        // columns can actually use, so a drag of N px widens the column by N px
+        // of usable width.
         let delta_weight = self.0 as f32 / usable_w as f32;
         let old_weight = ws.columns[ci].weight;
-        // Diseño: una columna debe poder ocupar toda la pantalla (weight=1.0)
-        // como máximo, sin importar cuántas haya. El límite anterior
-        // `1.0 -0.05*(n-1)` era herencia fit-to-screen (reservar 5% de peek por
-        // vecino) y bloqueaba el segundo mosaico a 0.95 con n=2 mientras el
-        // primero —creado solo con weight=1.0— sí llenaba. Con ribbon scrolleable
-        // no hace falta reservar: el vecino simplemente scrollea fuera.
+        // A column may fill the whole workarea (`weight == 1.0`) regardless of how
+        // many columns exist. A lower ceiling (e.g. `1.0 - 0.05*(n-1)`, reserving
+        // 5% of peek per neighbour) is a fit-to-screen leftover: it blocks the
+        // second column at 0.95 while a first column created at 1.0 does fill the
+        // screen. In a scrollable ribbon nothing has to be reserved — the
+        // neighbour simply scrolls out of view.
         let max_w = 1.0;
         ws.columns[ci].weight = (old_weight + delta_weight).clamp(0.05, max_w);
 
@@ -1332,8 +1337,7 @@ impl Command for NewColumn {
         // The focused window may live on a workspace other than `active_ws`
         // (left pointed there by `ViewWorkspace`/`MoveToWorkspace`), so operate
         // on its own workspace — otherwise we would splice it into the wrong
-        // tree while it is still tiled on its own (cross-workspace duplication,
-        // caught by the Fase 5 property harness).
+        // tree while it is still tiled on its own (cross-workspace duplication).
         let ws_i = state.clients.get(&win).map_or(ws_i, |c| c.workspace);
         if state
             .clients
@@ -1348,11 +1352,10 @@ impl Command for NewColumn {
         let fs = fs_of(state, mi, ws_i);
         let ws = &mut state.monitors[mi].workspaces[ws_i];
 
-        // Remove from current column
+        // Splice the window out of its column. If that emptied the column, the
+        // column index shifts, so the insertion point has to be recomputed.
         ws.remove_window(win);
 
-        // If removing the window emptied the column, the column is gone.
-        // We need to determine the new column index and weight.
         let new_ci = ci.min(ws.columns.len().saturating_sub(1));
         let survivor_w = if new_ci < ws.columns.len() {
             Some(ws.columns[new_ci].weight)
@@ -1362,13 +1365,13 @@ impl Command for NewColumn {
             None
         };
 
-        // Unified "new column" policy (bug C14): the split-out window becomes a
-        // sibling column at the configured `column_width` (a fraction of the
-        // workarea), independent of how many columns already exist. The
-        // surviving column keeps its own width — no stealing, no 70/30
-        // fit-to-screen split. If pulling the window out emptied the only
-        // column, the new column is the sole one and fills the whole workarea
-        // (weight 1.0) instead of a sub-0.1 sliver of the default width (N3).
+        // New-column policy: the split-out window becomes a sibling column at
+        // the configured `column_width` (a fraction of the workarea),
+        // independent of how many columns already exist. The surviving column
+        // keeps its own width — no stealing, no 70/30 fit-to-screen split. If
+        // pulling the window out emptied the only column, the new column is the
+        // sole one and fills the whole workarea (weight 1.0) instead of a
+        // sub-0.1 sliver of the default width.
         let new_w = match survivor_w {
             Some(_) => cfg.column_width,
             None => 1.0,
@@ -1417,12 +1420,12 @@ impl Command for CollapseColumn {
         let target = ci - 1;
         {
             let ws = &mut state.monitors[mi].workspaces[ws_i];
-            // P1: the collapsed column's width must be absorbed by the
-            // target, not discarded. `retain` below drops column `ci`, and
+            // The collapsed column's width must be absorbed by the target, not
+            // discarded. The `retain` below drops column `ci`, and
             // `rebalance_weights` only repairs weights <= 0 — it never
-            // re-normalizes — so without this transfer the total column
-            // weight drops by `columns[ci].weight` and the ribbon leaves a
-            // permanent empty gap on the right of the workarea.
+            // re-normalizes — so without this transfer the total column weight
+            // drops by `columns[ci].weight` and the ribbon leaves a permanent
+            // empty gap on the right of the workarea.
             // Capped at 1.0 (a full workarea width) so a merged column can
             // never end up wider than the visible area, mirroring the
             // focused-column clamp in `layout::ribbon_geom`.
@@ -1445,8 +1448,6 @@ impl Command for CollapseColumn {
         CommandReport::new(cmds)
     }
 }
-
-// ─── Monitor ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
 pub struct FocusMonitor(pub Dir);
@@ -1502,8 +1503,9 @@ impl Command for MoveWindowToMonitor {
             _ => (mi + 1) % n,
         };
         // The window must actually live on the source monitor: otherwise
-        // `remove_window` on `mi` is a no-op while the `push` below
-        // duplicates it onto the destination (invariant A violation).
+        // `remove_window` on `mi` is a no-op while the `push` below duplicates
+        // it onto the destination, so the client would appear in two workspace
+        // slots at once.
         let (src_mon, src_ws) = match state.clients.get(&win) {
             Some(c) => (c.monitor, c.workspace),
             None => return CommandReport::new(cmds),
@@ -1520,9 +1522,10 @@ impl Command for MoveWindowToMonitor {
         if n_src == 0 || n_dst == 0 || src_ws >= n_src {
             return CommandReport::new(cmds);
         }
-        // Use the real source workspace index for removal from origin monitor.
+        // The real source index drives removal on the origin monitor; only the
+        // insertion index on the destination is clamped, so a monitor with
+        // fewer workspaces lands the window on its last one.
         let src_ws_real = src_ws;
-        // Use the clamped index only for insertion on the destination monitor.
         let dst_ws = src_ws.min(n_dst.saturating_sub(1));
         // `remove_window` is a no-op if the tree didn't contain `win`
         // (stale client record): bail instead of duplicating below.
@@ -1539,11 +1542,10 @@ impl Command for MoveWindowToMonitor {
         state.monitors[mi].workspaces[src_ws_real].remove_window(win);
         if is_float {
             state.monitors[new_mi].workspaces[dst_ws].floats.push(win);
-            // Workarea NUEVO (otro monitor): el rect flotante dejó de ser punto
-            // fijo de la proyección. Re-asentarlo aquí (una vez) evita el salto
-            // del primer arrange del monitor destino — la mitad del bug del
-            // "flotante que salta al moverlo de monitor". Helper único (ver
-            // `layout::settle_float_in_workarea`).
+            // New workarea (a different monitor): the float rect is no longer a
+            // fixed point of the destination projection. Re-settling it once here
+            // avoids the visible jump on the destination's first arrange.
+            // Single helper, see `layout::settle_float_in_workarea`.
             crate::core::layout::settle_float_in_workarea(state, new_mi, win);
         } else {
             state.monitors[new_mi].workspaces[dst_ws].add_tiled(win, cfg.column_width);
@@ -1553,10 +1555,10 @@ impl Command for MoveWindowToMonitor {
             state.monitors[mi].focused = state.monitors[mi].focus_stack.last().copied();
         }
         // The window may have owned the source workspace's maximize overlay;
-        // clear any now-dangling `presented_maximize` (invariant #9). This must
-        // cover the source workspace even when it is *not* the monitor's active
-        // one, since the stale entry would otherwise trip the invariant later
-        // when that workspace becomes active.
+        // clear the now-dangling `presented_maximize` (it must name a maximized
+        // client on the active workspace). This must cover the source workspace
+        // even when it is *not* the monitor's active one, since the stale entry
+        // would otherwise trip the invariant later when it becomes active.
         if state.monitors[mi].workspaces[src_ws_real].presented_maximize == Some(win) {
             state.monitors[mi].workspaces[src_ws_real].presented_maximize = None;
         }
@@ -1567,7 +1569,7 @@ impl Command for MoveWindowToMonitor {
         }
         // Refresh the maximize-overlay owner on both the source (which just lost
         // the window) and destination (which just gained it) monitors so neither
-        // keeps a stale `presented_maximize` reference (invariant #9).
+        // keeps a stale `presented_maximize` reference.
         state.sync_presented_maximize(mi);
         state.sync_presented_maximize(new_mi);
         // Recenter the scroll camera on both the origin (which just lost a window)
@@ -1600,8 +1602,6 @@ impl Command for MoveWindowToMonitor {
         CommandReport::with_event(cmds, Event::WindowMoved(win))
     }
 }
-
-// ─── Config ──────────────────────────────────────────────────────────────────
 
 /// Which set of gaps a `SetGaps` command targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1649,8 +1649,6 @@ impl Command for SetBorderWidth {
     }
 }
 
-// ─── System ──────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct Spawn(pub Vec<String>);
 
@@ -1677,8 +1675,6 @@ impl Command for Restart {
         CommandReport::with_event(vec![Effect::Restart], Event::SessionRestart)
     }
 }
-
-// ─── Wallpaper ───────────────────────────────────────────────────────────────
 
 /// Apply a `WallpaperCmd` to `state.wallpaper` (pure State mutation) and emit
 /// `Effect::SetWallpaper` so the backend uploads/draws the GPU texture, plus a
@@ -1725,8 +1721,6 @@ impl Command for SetWallpaper {
     }
 }
 
-// ─── Overview (semantic-zoom film-strip) ──────────────────────────────────────
-
 /// Toggle the Overview mode on the active workspace: zooms the whole ribbon out
 /// (animated) so every column is visible, and back in.
 #[derive(Debug, Clone, Copy)]
@@ -1750,10 +1744,10 @@ impl Command for ToggleOverview {
         } else {
             1.0
         };
-        // Mutually exclusive with Viewport Zoom (bug B1): toggling Overview must
-        // reset the page-zoom state, or a lingering `Zoomed` mode would keep
-        // `alpha` on `page_zoom` (and leave `overview` ignored) — making Overview
-        // a silent no-op or corrupting the live `zoom` spring.
+        // Mutually exclusive with Viewport Zoom: toggling Overview must reset
+        // the page-zoom state, or a lingering `Zoomed` mode would keep `alpha` on
+        // `page_zoom` (and leave `overview` ignored) — making Overview a silent
+        // no-op or corrupting the live `zoom` spring.
         ws.viewport_mode = ViewportMode::Normal;
         ws.page_zoom_target = 1.0;
         let scroll = if layout == LayoutKind::Column {
@@ -1801,11 +1795,11 @@ impl Command for OverviewNav {
             _ => cur,
         };
         ws.focus.column_idx = new;
-        // Ensure we're in Overview so the strip is visible.
+        // Force Overview on: `OverviewNav` doubles as "show the strip".
         ws.overview = true;
         ws.zoom_target = cfg.overview_zoom_min;
-        // Mutually exclusive with Viewport Zoom (bug B1): entering Overview must
-        // reset the page-zoom state or the zoom-out won't take effect.
+        // Mutually exclusive with Viewport Zoom: entering Overview must reset
+        // the page-zoom state or the zoom-out won't take effect.
         ws.viewport_mode = ViewportMode::Normal;
         ws.page_zoom_target = 1.0;
         let scroll = if layout == LayoutKind::Column {
@@ -1817,7 +1811,7 @@ impl Command for OverviewNav {
         cmds.push(Effect::ArrangeMonitor(mi));
         // Overview navigation must also move the real input focus to the window
         // we just selected, otherwise the keyboard keeps going to the previous
-        // window and `ws.focus.column_idx` desyncs from `mon.focused` (bug C4).
+        // window and `ws.focus.column_idx` desyncs from `mon.focused`.
         if let Some(w) = ws.columns.get(new).and_then(Column::focused_win) {
             cmds.push(Effect::FocusWindow(Some(w)));
         }
@@ -1850,8 +1844,8 @@ impl Command for OverviewEnter {
         let ws = &mut state.monitors[mi].workspaces[ws_i];
         ws.overview = false;
         ws.zoom_target = 1.0;
-        // Mutually exclusive with Viewport Zoom (bug B1): leaving Overview must
-        // also drop any pending viewport zoom so the state stays consistent.
+        // Mutually exclusive with Viewport Zoom: leaving Overview must also
+        // drop any pending viewport zoom so the state stays consistent.
         ws.viewport_mode = ViewportMode::Normal;
         ws.page_zoom_target = 1.0;
         let scroll = if layout == LayoutKind::Column {
@@ -1862,7 +1856,7 @@ impl Command for OverviewEnter {
         ws.camera.retarget(scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
         // "Enter" drops into the selected column: move the real focus there too,
-        // so the key window matches `ws.focus.column_idx` (bug C4).
+        // so the key window matches `ws.focus.column_idx`.
         if let Some(w) = ws
             .columns
             .get(ws.focus.column_idx)

@@ -3,22 +3,23 @@
 //! and the IPC/`maverickctl` channels delegate to.
 //!
 //! Keeping the vocabulary in one place (and deriving `name()` via an exhaustive
-//! `match` over `Action`) is what prevents the two channels from drifting apart
-//! again: if a new `Action` variant is added without a name here, this module
-//! stops compiling (B2/B8 guard).
+//! `match` over `Action`) is what keeps the two channels from drifting: a new
+//! `Action` variant without a name here is a compile error, not a silently
+//! unreachable action.
 //!
 //! # Parser contract
 //!
 //! `parse` accepts both the canonical `verb:arg` form and legacy
 //! dash-separated forms (`focus-left`). The `ArgKind` table defines the
-//! machine-checkable contract for every verb. Round-trip tests verify
-//! every `Action` variant has a name entry and every `ArgKind` is parsed.
+//! machine-checkable contract for every verb; the round-trip test in `tests`
+//! walks the table so no entry can be added without being parseable.
 //!
 //! # Invariants
 //!
-//! Every `Action` variant must have a `name()` entry — compile error if
-//! missing. `ws_from` rejects workspace index 0 (workspaces are 1-indexed
-//! in the config/protocol vocabulary).
+//! Every `Action` variant must have a `name()` entry. `ws_from` rejects
+//! workspace index 0 (workspaces are 1-indexed in the config/protocol
+//! vocabulary). Unknown or malformed input yields `None` — the caller logs and
+//! ignores it rather than guessing.
 
 use crate::core::wallpaper::WallpaperMode;
 use crate::types::{Action, Dir, LayoutKind, WallpaperCmd};
@@ -47,8 +48,8 @@ pub enum ArgKind {
 }
 
 /// The canonical action vocabulary. Every entry's name must also be returned by
-/// `name()` for its variant — this table is the human-readable contract; `name`
-/// (the exhaustive `match`) is the compile-time guard.
+/// `name()` for its variant — this table is the human-readable contract, and
+/// `name()` (the exhaustive `match`) is the compile-time guard.
 pub static ACTIONS: &[(&str, ArgKind)] = &[
     ("spawn", ArgKind::Cmd),
     ("kill", ArgKind::None),
@@ -76,8 +77,7 @@ pub static ACTIONS: &[(&str, ArgKind)] = &[
 ];
 
 /// Canonical `snake_case` name of an `Action` (no argument). Exhaustive over
-/// `Action`: adding a variant without a name here is a compile error, which is
-/// exactly the mechanism that stops B2/B8 from recurring.
+/// `Action`: adding a variant without a name here is a compile error.
 pub fn name(a: &Action) -> &'static str {
     match a {
         Action::Spawn(_) => "spawn",
@@ -160,8 +160,10 @@ pub fn parse(input: &str) -> Option<Action> {
     }
 
     // Legacy fused IPC verbs: `focus-left`, `move-down`, `shrink-col N`. These
-    // predate the colon-separated TOML grammar and must keep working so old
-    // `maverickctl` invocations and scripts don't break.
+    // predate the colon-separated TOML grammar and must keep parsing, so old
+    // `maverickctl` invocations and user scripts do not break. Each is
+    // equivalent to the canonical form below (`focus-left` == `focus:left`,
+    // `shrink-col N` == `grow_col:-N`).
     if let Some(rest) = input.strip_prefix("focus-") {
         return dir_from(rest).map(Action::FocusDir);
     }
@@ -280,7 +282,9 @@ pub fn parse(input: &str) -> Option<Action> {
     }
 }
 
-/// Helper: an argumentless action accepts only when no argument was supplied.
+/// An argumentless verb rejects a stray argument instead of silently ignoring
+/// it, so a typo in a user's keymap surfaces as "unknown action" rather than as
+/// a command that quietly does something else.
 #[inline]
 fn none_if_arg(has_arg: bool, action: Action) -> Option<Action> {
     if has_arg {
@@ -373,7 +377,7 @@ mod tests {
 
     #[test]
     fn toml_and_ipc_yeargent_same_results() {
-        // A sampling that the two channels agree everywhere they overlap.
+        // A sample of the overlap between the two channels.
         assert_eq!(parse("view 3"), parse("view:3"));
         assert_eq!(parse("grow-col 40"), parse("grow_col:40"));
         assert_eq!(parse("spawn alacritty"), parse("spawn:alacritty"));
@@ -409,17 +413,14 @@ mod tests {
             }
             other => panic!("wallpaper:set failed: {other:?}"),
         }
-        // clear.
         assert_eq!(
             parse("wallpaper clear"),
             Some(Action::Wallpaper(WallpaperCmd::Clear))
         );
-        // mode.
         assert_eq!(
             parse("wallpaper mode fit"),
             Some(Action::Wallpaper(WallpaperCmd::Mode(WallpaperMode::Fit)))
         );
-        // malformed.
         assert!(parse("wallpaper").is_none());
         assert!(parse("wallpaper bogus").is_none());
         assert!(parse("wallpaper set").is_none());

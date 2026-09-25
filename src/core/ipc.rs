@@ -1,13 +1,11 @@
-// maverick/src/core/ipc.rs
 // Pure IPC helpers: serialize WM state to JSON for the control socket, and
-// parse action names sent via `dispatch`. No X11, no side effects — this is
+// parse the action names sent via `dispatch`. No X11, no side effects — this is
 // the vocabulary the outside world (maverickctl, bars, scripts) speaks.
-
-// This is a small hand-rolled JSON serializer; `write!` onto the buffer avoids
-// serde and the per-field `String` temporaries that `format!` would allocate,
-// consistent with the project's zero-extra-deps stance. Writing to a `String`
-// is infallible (the `Write` impl for `String` never errors), so `.unwrap()`
-// here is safe and is suppressed with `clippy::unwrap_used`.
+//
+// Hand-rolled JSON serializer: `write!` onto the buffer avoids serde and the
+// per-field `String` temporaries `format!` would allocate, consistent with the
+// project's zero-extra-deps stance. Writing to a `String` is infallible (its
+// `Write` impl never errors), so the `.unwrap()` calls below are safe.
 #![allow(clippy::unwrap_used, clippy::map_unwrap_or)]
 
 use crate::config::Cfg;
@@ -33,7 +31,6 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
     )
     .unwrap();
 
-    // monitors
     s.push_str("\"monitors\":[");
     for (mi, mon) in state.monitors.iter().enumerate() {
         if mi > 0 {
@@ -43,7 +40,6 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
         write!(s, "\"index\":{mi},").unwrap();
         write!(s, "\"active_ws\":{},", mon.active_ws).unwrap();
 
-        // focused window + its title/class
         match mon.focused {
             Some(w) => {
                 write!(s, "\"focused\":{w},").unwrap();
@@ -67,7 +63,6 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
             None => s.push_str("\"focused\":null,\"focused_title\":\"\",\"focused_class\":\"\","),
         }
 
-        // workspaces
         s.push_str("\"workspaces\":[");
         for (wi, ws) in mon.workspaces.iter().enumerate() {
             if wi > 0 {
@@ -90,8 +85,8 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
     }
     s.push(']');
 
-    // Native wallpaper (source + mode) — pure `State` data the compositor reads;
-    // exposing it lets bars/status tools and tests observe the active wallpaper.
+    // Native wallpaper (source + mode) so bars and status tools can observe the
+    // active wallpaper without walking the compositor.
     s.push_str(",\"wallpaper\":{");
     let (kind, wpath) = match &state.wallpaper.source {
         WallpaperSource::None => ("none", String::new()),
@@ -231,14 +226,14 @@ fn window_obj(s: &mut String, id: WindowId, state: &State) {
             c.geom.x, c.geom.y, c.geom.w, c.geom.h
         )
         .unwrap();
-        // ── Fase 8 observability fields (non-semantic) ────────────────────────
+        // Observability-only block: none of these fields feeds back into layout.
         // `desired` = the last *desired* rect the core arranged this window to.
         // `applied` = `c.geom`, the WM-applied rect. `real` = the last rect the
         // client actually reported back via ConfigureNotify (X11 Real).
         // `focus` = logical focus (any monitor's `focused`). `x11_focus` = the
         // last X input focus the WM observed. `overlay` = this window is the
         // presented fullscreen/maximized overlay owner. `pending` = a deferred
-        // focus request is outstanding for it. None of these drive layout.
+        // focus request is outstanding for it.
         let rect_json = |r: Option<Rect>| match r {
             Some(r) => format!("[{},{},{},{}]", r.x, r.y, r.w, r.h),
             None => "null".to_string(),
@@ -287,8 +282,9 @@ fn tree_json(state: &State) -> String {
             s.push('{');
             write!(s, "\"index\":{wi},").unwrap();
             write!(s, "\"layout\":\"{}\",", layout_name(ws.layout)).unwrap();
-            // `camera.position` can be NaN from a pre-fix session: emit 0
-            // instead of the `NaN` literal (invalid JSON for consumers).
+            // A poisoned camera can hold a non-finite `position`. Emit 0 rather
+            // than a bare `NaN`, which is not valid JSON and would break every
+            // consumer parsing this snapshot.
             let scroll = if ws.camera.position.is_finite() {
                 ws.camera.position as i32
             } else {
@@ -301,6 +297,8 @@ fn tree_json(state: &State) -> String {
                     s.push(',');
                 }
                 s.push('{');
+                // Weight × workarea width, i.e. the on-screen column width. Same
+                // non-finite guard as the scroll above.
                 let width = if col.weight.is_finite() {
                     col.weight * (mon.workarea.w as f32)
                 } else {
@@ -384,10 +382,9 @@ fn focused_json(state: &State) -> String {
 /// Parse an action name from `dispatch <action>` into an `Action`.
 ///
 /// Delegates to the single shared vocabulary in `core::action` (the same one
-/// the TOML config uses), so the IPC and config channels can never drift
-/// apart again. See `core::action::parse` for the full grammar and the
-/// accepted spellings (`focus-left` / `focus:left`, `grow-col 40` /
-/// `grow_col:40`, …).
+/// the TOML config uses), so the IPC and config channels cannot drift apart.
+/// See `core::action::parse` for the full grammar and the accepted spellings
+/// (`focus-left` / `focus:left`, `grow-col 40` / `grow_col:40`, …).
 pub fn parse_action(input: &str) -> Option<Action> {
     crate::core::action::parse(input)
 }

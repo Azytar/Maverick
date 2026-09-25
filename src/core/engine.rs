@@ -53,8 +53,8 @@ impl Engine {
     /// monitor/workspace set: startup, config reload, and `RandR` hotplug.
     pub fn apply_camera_cfg(&mut self) {
         // Every spring value coming from config is sanitized against the
-        // real stability region of the integrator (see `sanitize_spring`) —
-        // a NaN/inf or zero/negative stiffness from a config file can never
+        // real stability region of the integrator (see `sanitize_spring`), so a
+        // NaN/inf or zero/negative stiffness from a config file can never
         // reach the physics.
         let (stiffness, damping) =
             sanitize_spring(self.cfg.animations.stiffness, self.cfg.animations.damping);
@@ -74,11 +74,10 @@ impl Engine {
     }
 
     /// Publish a domain event that did NOT originate from a `Command` — e.g. a
-    /// pointer-driven focus change, or a window entering/leaving the managed
-    /// set from the backend's own X11 handling. Subscribers then see exactly
-    /// one event stream no matter who caused the transition: commands announce
-    /// their own events through `execute`, and the backend announces the rest
-    /// here.
+    /// pointer-driven focus change, or a window entering/leaving the managed set
+    /// from the backend's own X11 handling. Subscribers then see exactly one
+    /// event stream no matter who caused the transition: commands announce
+    /// their own events through `execute`, the backend announces the rest here.
     pub fn notify(&mut self, ev: Event) {
         self.bus.publish(&ev);
     }
@@ -93,10 +92,10 @@ impl Engine {
     /// domain event, and returns the effects for the backend. A single user
     /// gesture maps to one command, so one state publish here is correct.
     ///
-    /// Safety net: before returning, reconciles any `pending_focus` whose overlay
-    /// owner is no longer presented (invariant #8c) via
-    /// `reconcile_pending_focus_after_transition`, appending `FocusWindow` if no
-    /// such effect already exists, then checks `assert_invariants` in debug.
+    /// Safety net: before returning, resolves any `pending_focus` whose overlay
+    /// owner is no longer presented via `reconcile_pending_focus_after_transition`
+    /// (appending `FocusWindow` if no such effect already exists), then checks
+    /// `assert_invariants` in debug.
     pub fn execute(&mut self, mut cmd: impl Command) -> Vec<Effect> {
         let report = cmd.execute(&mut self.state, &mut self.cfg);
         if let Some(ev) = &report.event {
@@ -108,8 +107,8 @@ impl Engine {
             effects.push(Effect::PublishIpcState);
         }
         // Centralized safety net: resolve any `pending_focus` whose overlay owner
-        // is no longer presented (per #8c) right before the debug-only invariant
-        // check, so no transition can leave a transient #8c violation.
+        // is no longer presented, right before the debug-only invariant check,
+        // so no transition can leave a transient violation behind.
         if let Some(w) =
             crate::core::commands::reconcile_pending_focus_after_transition(&mut self.state)
         {
@@ -163,9 +162,9 @@ impl Engine {
         if dirty && !all.iter().any(|e| matches!(e, Effect::PublishIpcState)) {
             all.push(Effect::PublishIpcState);
         }
-        // Centralized safety net: resolve any `pending_focus` whose overlay owner
-        // is no longer presented (per #8c) right before the debug-only invariant
-        // check, so no transition can leave a transient #8c violation.
+        // Same centralized safety net as `execute`, run once for the whole
+        // transaction: an intermediate step of the batch may legitimately have
+        // left the overlay owner unpresented, so only the end state matters.
         if let Some(w) =
             crate::core::commands::reconcile_pending_focus_after_transition(&mut self.state)
         {
