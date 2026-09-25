@@ -1,0 +1,6 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+cc ab20810afebe43cfd59ad72c7475f428d500d1c386cc1e5bfd8b78a987372f05 # shrinks to width = 0.05, windows = 2, splits = 1
+cc ed1988ada1bb8bc5a2456d2e2b72ce0ee7b6b246a9f483a3d90744c1990f3cfe # shrinks to spec = Spec { monitors: 1, tags: 1, tiled: 1, floats: 0, merges: 0, features: 16 }, victim = 0
