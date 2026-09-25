@@ -249,3 +249,66 @@ pub fn open_x() -> Result<(XDisplay, XConn, usize), String> {
         Ok((XDisplay::from_raw(dpy), conn, screen))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// The core X error codes: `BadRequest` (1) through `BadImplementation`
+    /// (17), as defined by the protocol. Anything outside that range is an
+    /// extension's own code, which this crate has no name for.
+    const FIRST_CORE: u8 = 1;
+    const LAST_CORE: u8 = 17;
+
+    proptest! {
+        /// Totality: the recorded code is an opaque byte from the server, and
+        /// this is the only place it becomes human-readable, so every one of the
+        /// 256 values must get a name — including 0 (the "no error" sentinel
+        /// `take_x_error` filters out) and the extension codes no core table
+        /// covers. An unnamed code would have to be printed as a bare number in
+        /// the log line that explains why a request was dropped.
+        #[test]
+        fn every_error_byte_has_a_name(code in any::<u8>()) {
+            prop_assert!(
+                !x_error_name(code).is_empty(),
+                "X error code {code} has no name to log"
+            );
+        }
+
+        /// Distinctness: a log that prints `BadWindow` for a `BadPixmap` sends
+        /// whoever reads it after the wrong problem, and a core code that shares
+        /// the extension bucket hides that the failure was a *known* one. So each
+        /// core code must be distinguishable from all 255 other byte values.
+        #[test]
+        fn each_core_error_code_has_a_name_of_its_own(code in FIRST_CORE..=LAST_CORE) {
+            let name = x_error_name(code);
+            for other in 0u8..=u8::MAX {
+                if other != code {
+                    prop_assert_ne!(
+                        x_error_name(other),
+                        name,
+                        "error codes {} and {} share the name {:?}",
+                        code,
+                        other,
+                        name
+                    );
+                }
+            }
+        }
+
+        /// The error observer must never invent a failure. `take_x_error` is the
+        /// only signal the X sinks branch on — it is what turns a request into
+        /// "the client died" or "retry" — so a fabricated code would make the WM
+        /// discard a perfectly good request, and taking twice must not report the
+        /// same failure twice.
+        #[test]
+        fn taking_an_x_error_never_invents_one(rounds in 0usize..8) {
+            for _ in 0..rounds {
+                clear_x_error();
+                prop_assert_eq!(take_x_error(), None, "no error was recorded since the clear");
+                prop_assert_eq!(take_x_error(), None, "take must clear what it reported");
+            }
+        }
+    }
+}

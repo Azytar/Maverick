@@ -809,3 +809,172 @@ mod tests {
         }
     }
 }
+
+/// Properties of the reply path, over the pure function that turns one request
+/// line into one reply.
+#[cfg(test)]
+mod reply_props {
+    use super::*;
+    use crate::prop_support::{config, text};
+    use proptest::prelude::*;
+
+    /// A payload long enough to cross the protocol's line bound, with the
+    /// character that lands on the truncation index generated freely — so the
+    /// cut is exercised both on a character boundary and in the middle of a
+    /// multi-byte one.
+    fn oversized_payload() -> impl Strategy<Value = String> {
+        (MAX_LINE_LEN - 2..=MAX_LINE_LEN + 2, any::<char>(), text()).prop_map(
+            |(pad_len, boundary, tail)| {
+                let mut s = "x".repeat(pad_len);
+                s.push(boundary);
+                s.push_str(&tail);
+                s
+            },
+        )
+    }
+
+    // Every verb the server answers, plus the shapes only a malformed client
+    // sends. `query <topic>` is the one request that is not a pure function of
+    // its input — it blocks on the WM thread — so only its argument-less form
+    // appears here.
+    const VERBS: [&str; 12] = [
+        PING_CMD,
+        IDENTIFY_CMD,
+        STATE_CMD,
+        QUIT_CMD,
+        RESTART_CMD,
+        RELOAD_CMD,
+        "dispatch kill",
+        "dispatch",
+        "query",
+        "query ",
+        "no-such-command",
+        "dispatchfoo",
+    ];
+
+    // The client reads each reply with a single `read_line`, so one request must
+    // produce exactly one frame: a second newline, a stray CR or an over-long
+    // reply would desync every following command on the connection. The
+    // instance name, the identity ficha and the state snapshot are all
+    // attacker-influenced text the server has to flatten. Every verb is held to
+    // the same frame with the same hostile inputs, so a hole in one branch
+    // cannot hide behind the odds of the generator picking that branch.
+    proptest! {
+        #![proptest_config(config())]
+        #[test]
+        fn every_reply_is_exactly_one_bounded_frame(
+            name in text(),
+            identity in text(),
+            snapshot in text(),
+        ) {
+            let hub = ControlHub::new();
+            hub.publish_state(snapshot);
+            for cmd in VERBS {
+                assert_one_frame(cmd, &dispatch_line(cmd, &name, &identity, &hub))?;
+            }
+        }
+    }
+
+    // `MAX_LINE_LEN` exists so a single oversized payload cannot make the server
+    // answer with a frame the client will mis-read: the reply has to be cut
+    // back to one line whatever the payload holds, and cutting it must never
+    // fail — including where the cut lands inside a multi-byte character.
+    proptest! {
+        #![proptest_config(config())]
+        #[test]
+        #[ignore = "known defect: single_line truncates with String::truncate at a byte \
+                    offset, which panics when MAX_LINE_LEN lands inside a multi-byte \
+                    character. Reachable from maverick-msg identify/state. Reported, \
+                    not fixed."]
+        fn an_oversized_payload_is_still_answered_in_one_bounded_line(
+            verb in prop_oneof![Just(IDENTIFY_CMD), Just(STATE_CMD)],
+            name in text(),
+            identity in oversized_payload(),
+            snapshot in oversized_payload(),
+        ) {
+            let hub = ControlHub::new();
+            hub.publish_state(snapshot);
+            assert_one_frame(verb, &dispatch_line(verb, &name, &identity, &hub))?;
+        }
+    }
+
+    /// A reply is one frame: a single trailing newline, no CR anywhere, and at
+    /// most `MAX_LINE_LEN` bytes of payload in front of it.
+    fn assert_one_frame(cmd: &str, reply: &str) -> Result<(), TestCaseError> {
+        prop_assert!(
+            reply.ends_with('\n'),
+            "{:?} reply is not newline terminated: {:?}",
+            cmd,
+            reply
+        );
+        prop_assert_eq!(
+            reply.matches('\n').count(),
+            1,
+            "{:?} reply carries more than one frame: {:?}",
+            cmd,
+            reply
+        );
+        prop_assert!(
+            !reply.contains('\r'),
+            "{cmd:?} reply carries a CR: {reply:?}"
+        );
+        prop_assert!(
+            reply.len() <= MAX_LINE_LEN + 1,
+            "{:?} reply is {} bytes, past the {} byte line bound",
+            cmd,
+            reply.len(),
+            MAX_LINE_LEN
+        );
+        Ok(())
+    }
+
+    // Raw input is never echoed back: a client could otherwise inject control
+    // sequences into a terminal or log that prints the error, and an unbounded
+    // echo would turn the reply into an amplifier. The echoed token keeps the
+    // printable part of what was sent, nothing more.
+    proptest! {
+        #![proptest_config(config())]
+        #[test]
+        fn unknown_command_replies_echo_nothing_but_its_printable_prefix(
+            suffix in prop_oneof![3 => text(), 1 => "[ -~]{0,300}"],
+        ) {
+            // A glued-on non-blank suffix keeps `dispatch`/`query` from being a
+            // verb with a delimiter, which is the refusal under test.
+            prop_assume!(!suffix.is_empty() && !suffix.starts_with(char::is_whitespace));
+            let hub = ControlHub::new();
+            for cmd in [format!("dispatch{suffix}"), format!("query{suffix}")] {
+                let reply = dispatch_line(&cmd, "testctl", "{}", &hub);
+                let echoed = reply
+                    .strip_prefix("error unknown-command: ")
+                    .expect("a glued protocol word must be an unknown command")
+                    .strip_suffix('\n')
+                    .expect("reply is newline terminated");
+                prop_assert!(
+                    echoed.chars().count() <= 64,
+                    "echo of {} chars is past the bound: {echoed:?}",
+                    echoed.chars().count()
+                );
+                prop_assert!(
+                    echoed.chars().all(|c| !c.is_control()),
+                    "echo smuggles a control character: {echoed:?}"
+                );
+                prop_assert!(
+                    is_subsequence(
+                        echoed.chars(),
+                        cmd.chars().filter(|c| !c.is_control())
+                    ),
+                    "echo invented characters that were never sent: {echoed:?} from {cmd:?}"
+                );
+            }
+        }
+    }
+
+    /// True when every character of `needle` appears in `haystack` in order.
+    fn is_subsequence(
+        mut needle: impl Iterator<Item = char>,
+        haystack: impl Iterator<Item = char>,
+    ) -> bool {
+        let mut haystack = haystack.peekable();
+        needle.all(|c| haystack.by_ref().find(|&h| h == c).is_some())
+    }
+}

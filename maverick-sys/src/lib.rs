@@ -308,3 +308,62 @@ pub mod json;
 pub use control::ControlServer;
 pub use hub::{ControlCommand, ControlHub};
 pub use identity::{self_info, InstanceInfo, DEFAULT_NAME};
+
+/// Shared pieces for the property tests that are compiled into the library
+/// because the functions they cover are private.
+#[cfg(test)]
+pub(crate) mod prop_support {
+    use proptest::prelude::*;
+    use proptest::string::string_regex;
+
+    /// Where a failing property persists its counterexample.
+    ///
+    /// `proptest!` always stamps the config with `file!()`, so a property
+    /// compiled into the library would drop its regression file under the crate
+    /// root next to the module it covers. The persistence root is redirected
+    /// into `tests/` instead, keeping every counterexample in this crate under
+    /// the same tree as the integration property suites.
+    pub fn config() -> proptest::test_runner::Config {
+        proptest::test_runner::Config {
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::SourceParallel(
+                    "tests/proptest-regressions",
+                ),
+            )),
+            ..proptest::test_runner::Config::default()
+        }
+    }
+
+    /// Free-form text a user, a client or a window can put into a field:
+    /// instance names, window titles, executable paths, CLI words. Quotes,
+    /// backslashes, separators, control bytes and non-ASCII are
+    /// over-represented, because those are the characters that decide whether a
+    /// payload survives the JSON escaper, the line framing of the control
+    /// protocol and the hand-rolled ficha reader.
+    pub fn text() -> impl Strategy<Value = String> {
+        prop_oneof![
+            3 => proptest::collection::vec(
+                    prop_oneof![
+                        any::<char>(),
+                        Just('"'),
+                        Just('\\'),
+                        Just('/'),
+                        Just('\n'),
+                        Just('\r'),
+                        Just('\t'),
+                        Just('\u{0000}'),
+                        Just('\u{000c}'),
+                        Just('\u{001f}'),
+                        Just('\u{007f}'),
+                        Just('\u{00e9}'),
+                        Just('\u{1f600}'),
+                    ],
+                    0..24,
+                )
+                .prop_map(|cs| cs.into_iter().collect()),
+            2 => string_regex("[\"\\\\,{}: \x00-\x1f]{0,16}").expect("static pattern"),
+            1 => string_regex("[^\x00-\x7f]{0,12}").expect("static pattern"),
+            1 => string_regex(".").expect("static pattern"),
+        ]
+    }
+}

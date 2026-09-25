@@ -661,3 +661,181 @@ mod tests {
         );
     }
 }
+
+/// Properties of the ficha format, over the two functions that are not part of
+/// the public surface: the writer and the reader that discovery trusts.
+#[cfg(test)]
+mod ficha_props {
+    use super::*;
+    use crate::prop_support::{config, text};
+    use proptest::prelude::*;
+
+    /// A byte-level disturbance, the kind a half-written file, a stale version
+    /// left behind by an older build, or a hostile writer produces.
+    #[derive(Debug, Clone)]
+    enum Edit {
+        Insert(usize, char),
+        Delete(usize),
+        Replace(usize, char),
+        Truncate(usize),
+    }
+
+    fn edit() -> impl Strategy<Value = Edit> {
+        let at = 0usize..24;
+        prop_oneof![
+            2 => (at.clone(), any::<char>()).prop_map(|(i, c)| Edit::Insert(i, c)),
+            1 => at.clone().prop_map(Edit::Delete),
+            2 => (at.clone(), any::<char>()).prop_map(|(i, c)| Edit::Replace(i, c)),
+            1 => at.prop_map(Edit::Truncate),
+        ]
+    }
+
+    /// Apply one disturbance in place. Positions are taken modulo the current
+    /// length so the strategy can be plain integers; the edit operates on
+    /// characters, so it can never split a multi-byte one.
+    fn apply_edit(doc: &mut String, e: &Edit) {
+        let mut chars: Vec<char> = doc.chars().collect();
+        if chars.is_empty() {
+            if let Edit::Insert(_, c) = e {
+                chars.insert(0, *c);
+            }
+            *doc = chars.into_iter().collect();
+            return;
+        }
+        let len = chars.len();
+        match e {
+            Edit::Insert(i, c) => chars.insert(i % len, *c),
+            Edit::Delete(i) => {
+                chars.remove(i % len);
+            }
+            Edit::Replace(i, c) => chars[i % len] = *c,
+            Edit::Truncate(i) => chars.truncate(i % len),
+        }
+        *doc = chars.into_iter().collect();
+    }
+
+    /// A well-formed ficha: what the WM actually writes.
+    fn written_ficha() -> impl Strategy<Value = String> {
+        (
+            "[A-Za-z0-9_-]{1,64}",
+            text(),
+            text(),
+            text(),
+            text(),
+            any::<u32>(),
+            any::<u64>(),
+            any::<u64>(),
+            any::<u64>(),
+            any::<bool>(),
+        )
+            .prop_map(
+                |(
+                    session_id,
+                    name,
+                    display,
+                    x_server_identity,
+                    exe,
+                    pid,
+                    tty_nr,
+                    start_time,
+                    started_at,
+                    alive,
+                )| {
+                    serde_free_json(&InstanceInfo {
+                        name,
+                        session_id,
+                        pid,
+                        display,
+                        tty_nr,
+                        x_server_identity,
+                        start_time,
+                        exe,
+                        started_at,
+                        alive,
+                    })
+                    .expect("serialization does not fail")
+                },
+            )
+    }
+
+    /// Documents a hostile or half-written ficha can look like: a real one, a
+    /// prefix of one (cut mid-string or mid-escape), free-form soup, and any of
+    /// those with a few characters edited out from under it.
+    fn hostile_ficha() -> impl Strategy<Value = String> {
+        (
+            prop_oneof![2 => written_ficha(), 1 => text()],
+            0usize..48,
+            proptest::collection::vec(edit(), 0..4),
+        )
+            .prop_map(|(mut doc, cut, edits)| {
+                doc = doc
+                    .char_indices()
+                    .nth(cut)
+                    .map_or_else(String::new, |(i, _)| doc[..i].to_string());
+                for e in edits {
+                    apply_edit(&mut doc, &e);
+                }
+                doc
+            })
+    }
+
+    // A discovered instance is believed on the strength of its ficha alone, so
+    // every field the WM wrote has to come back exactly: a name or executable
+    // path holding a quote, a backslash, a comma or a control byte is exactly
+    // where a naive reader would truncate the value or re-frame the object.
+    proptest! {
+        #![proptest_config(config())]
+        #[test]
+        #[ignore = "known defect: parse_meta neither unescapes JSON string escapes nor \
+                    preserves whitespace-only values, so a name holding a quote or a \
+                    backslash comes back corrupted and a display of \" \" comes back \
+                    empty. Reported, not fixed."]
+        fn a_written_ficha_reads_back_identically(
+            session_id in "[A-Za-z0-9_-]{1,64}",
+            name in text(),
+            display in text(),
+            x_server_identity in text(),
+            exe in text(),
+            pid in any::<u32>(),
+            tty_nr in any::<u64>(),
+            start_time in any::<u64>(),
+            started_at in any::<u64>(),
+            alive in any::<bool>(),
+        ) {
+            let info = InstanceInfo {
+                name,
+                session_id,
+                pid,
+                display,
+                tty_nr,
+                x_server_identity,
+                start_time,
+                exe,
+                started_at,
+                alive,
+            };
+            let json = serde_free_json(&info).expect("serialization does not fail");
+            let back = parse_meta(&json).expect("the WM's own ficha must parse back");
+            prop_assert_eq!(back, info);
+        }
+    }
+
+    // The reader is fed whatever sits in the runtime dir, which is not only the
+    // WM's own output. It must always terminate, never slice a multi-byte
+    // character and never hand back an entry whose session id discovery would
+    // then use to build paths.
+    proptest! {
+        #![proptest_config(config())]
+        #[test]
+        fn reading_a_hostile_ficha_never_panics_and_never_invents_a_session(doc in hostile_ficha()) {
+            if let Some(info) = parse_meta(&doc) {
+                prop_assert!(
+                    is_valid_sid(&info.session_id),
+                    "ficha yielded a session id that must not be trusted: {:?} from {:?}",
+                    info.session_id,
+                    doc
+                );
+            }
+        }
+    }
+}

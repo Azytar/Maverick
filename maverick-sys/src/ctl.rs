@@ -548,3 +548,195 @@ fn which(bin: &str) -> bool {
     }
     false
 }
+
+/// Properties of the shared argument parser.
+///
+/// The parsed `positional` words are what a tool forwards to the WM verbatim
+/// and what `--name`/`--session` select an instance with, so the parser is the
+/// boundary where a typo, a shell surprise or a hostile argument stops being
+/// the caller's problem and starts being the WM's. It has to be total, it has
+/// to be a pure function of argv, and it must not invent a token the caller
+/// never typed.
+#[cfg(test)]
+mod opts_props {
+    use super::*;
+    use crate::prop_support::{config, text};
+    use proptest::prelude::*;
+
+    /// The compatibility flags `cmd_state` hands to [`parse_opts`].
+    const KEEP: &[&str] = &["-j", "--json", "-b", "--bare"];
+
+    /// A word that is never one of the recognised flags, so a parser that
+    /// treated it as one would be caught. Near misses such as `--json` and a
+    /// bare `-` are included on purpose: they are not flags, so they have to
+    /// survive as positionals.
+    fn loose_word() -> impl Strategy<Value = String> {
+        prop_oneof![
+            3 => "[A-Za-z0-9_.:=]{0,12}",
+            1 => prop::sample::select(vec![
+                "", "-", "--", "-x", "-j", "--json", "-b", "--bare", "focus-left", "view 3",
+                "query state", "focus-left --session",
+            ])
+            .prop_map(String::from),
+        ]
+    }
+
+    /// A token that follows a flag. A flag value is taken verbatim, so it may
+    /// itself look exactly like another flag.
+    fn flag_value() -> impl Strategy<Value = String> {
+        prop_oneof![
+            4 => "[A-Za-z0-9_.:-]{0,12}",
+            1 => prop::sample::select(vec!["-y", "-n", "--name", "--yes", "--session", ""])
+                .prop_map(String::from),
+        ]
+    }
+
+    /// One argv entry, described together with what the parser owes for it.
+    #[derive(Debug, Clone)]
+    enum Item {
+        Positional(String),
+        /// `--name`/`-n` with the token that follows it, if any.
+        Name(Option<String>),
+        Session(Option<String>),
+        Confirm,
+        Yes,
+        /// A compatibility flag: accepted, and not forwarded.
+        Kept(String),
+    }
+
+    fn item() -> impl Strategy<Value = Item> {
+        prop_oneof![
+            4 => loose_word().prop_map(Item::Positional),
+            2 => prop::option::of(flag_value()).prop_map(Item::Name),
+            2 => prop::option::of(flag_value()).prop_map(Item::Session),
+            1 => Just(Item::Confirm),
+            1 => Just(Item::Yes),
+            1 => loose_word().prop_map(Item::Kept),
+        ]
+    }
+
+    // A well-formed invocation, described independently of the parser, so the
+    // expectations below are an oracle rather than a restatement: every flag
+    // is listed with the value it should take, and the last occurrence of a
+    // value-taking flag is the one that counts.
+    proptest! {
+        #![proptest_config(config())]
+        #[test]
+        fn parse_opts_recovers_every_flag_and_positional(
+            items in proptest::collection::vec(item(), 0..10),
+        ) {
+            let mut items = items;
+            // A value-taking flag swallows the next token whatever it is, so a
+            // flag with no value of its own is only possible at the end of argv.
+            if let Some(cut) = items
+                .iter()
+                .position(|i| matches!(i, Item::Name(None) | Item::Session(None)))
+            {
+                items.truncate(cut + 1);
+            }
+            let mut args: Vec<String> = Vec::new();
+            // Every word that is not a flag, in argv order; the `keep_flags`
+            // parse is the same list with the compatibility flags taken out.
+            let mut want_positional: Vec<String> = Vec::new();
+            let mut want_name = None;
+            let mut want_session = None;
+            let mut want_confirm = false;
+            let mut want_yes = false;
+            for item in &items {
+                match item {
+                    Item::Positional(w) => {
+                        args.push(w.clone());
+                        want_positional.push(w.clone());
+                    }
+                    Item::Kept(w) => {
+                        args.push(w.clone());
+                        want_positional.push(w.clone());
+                    }
+                    Item::Name(v) => {
+                        args.push("--name".to_string());
+                        want_name = v.clone();
+                        args.extend(v.clone());
+                    }
+                    Item::Session(v) => {
+                        args.push("--session".to_string());
+                        want_session = v.clone();
+                        args.extend(v.clone());
+                    }
+                    Item::Confirm => {
+                        args.push("--confirm".to_string());
+                        want_confirm = true;
+                    }
+                    Item::Yes => {
+                        args.push("--yes".to_string());
+                        want_yes = true;
+                    }
+                }
+            }
+
+            let o = parse_opts(&args, &[]);
+            prop_assert_eq!(&o.positional, &want_positional, "argv {:?}", args);
+            prop_assert_eq!(&o.name, &want_name, "argv {:?}", args);
+            prop_assert_eq!(&o.session, &want_session, "argv {:?}", args);
+            prop_assert_eq!(o.confirm, want_confirm, "argv {:?}", args);
+            prop_assert_eq!(o.yes, want_yes, "argv {:?}", args);
+
+            // `keep_flags` decides what is dropped, and nothing else: the same
+            // argv must yield the same instance selection either way.
+            let filtered = parse_opts(&args, KEEP);
+            let forwarded: Vec<String> = want_positional
+                .iter()
+                .filter(|w| !KEEP.contains(&w.as_str()))
+                .cloned()
+                .collect();
+            prop_assert_eq!(&filtered.positional, &forwarded, "argv {:?}", args);
+            prop_assert_eq!(&filtered.name, &o.name);
+            prop_assert_eq!(&filtered.session, &o.session);
+            prop_assert_eq!(filtered.confirm, o.confirm);
+            prop_assert_eq!(filtered.yes, o.yes);
+        }
+    }
+
+    // Whatever argv looks like — flagless, repeated, truncated, quoting a
+    // control character, empty — nothing may come out of the parser that was
+    // not in it, and the same argv must always parse the same way.
+    proptest! {
+        #![proptest_config(config())]
+        #[test]
+        fn parse_opts_invents_nothing_and_never_panics(
+            args in proptest::collection::vec(text(), 0..12),
+            keep in proptest::collection::vec(loose_word(), 0..3),
+        ) {
+            let keep: Vec<&str> = keep.iter().map(|s| s.as_str()).collect();
+            let o = parse_opts(&args, &keep);
+            let again = parse_opts(&args, &keep);
+            prop_assert_eq!(&o.positional, &again.positional, "argv {:?}", args);
+            prop_assert_eq!(&o.name, &again.name, "argv {:?}", args);
+            prop_assert_eq!(&o.session, &again.session, "argv {:?}", args);
+            prop_assert_eq!(o.confirm, again.confirm, "argv {:?}", args);
+            prop_assert_eq!(o.yes, again.yes, "argv {:?}", args);
+
+            for value in [&o.name, &o.session].into_iter().flatten() {
+                prop_assert!(
+                    args.contains(value),
+                    "captured value {:?} is not a token of argv {:?}",
+                    value,
+                    args
+                );
+            }
+            for word in &o.positional {
+                prop_assert!(
+                    args.contains(word),
+                    "positional {:?} is not a token of argv {:?}",
+                    word,
+                    args
+                );
+                prop_assert!(
+                    !keep.contains(&word.as_str()),
+                    "dropped flag {:?} was forwarded to the WM: argv {:?}",
+                    word,
+                    args
+                );
+            }
+        }
+    }
+}
