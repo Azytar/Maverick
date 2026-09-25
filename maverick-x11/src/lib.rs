@@ -198,9 +198,19 @@ impl XDisplay {
 
 /// Open the X display and return `(display, connection, screen_number)`.
 ///
-/// The `XCBConnection` borrows the display's connection (`should_drop =
-/// false`), so the `Display*` stays the owner; see the crate docs for the
-/// lifetime rules that follow from that.
+/// # Error semantics
+///
+/// Every `Err` return leaves no `Display*` behind: once `XOpenDisplay` has
+/// succeeded, each remaining failure point closes the display before
+/// returning, so a failed call owns no socket, no server connection and no
+/// Xlib buffers. A caller that retries `open_x` never accumulates fds.
+///
+/// # Ownership
+///
+/// On success the `XCBConnection` borrows the display's connection
+/// (`should_drop = false`), so the `Display*` stays the owner and the caller
+/// must keep **both** alive for as long as either is used; see the crate docs
+/// for the lifetime rules that follow from that.
 pub fn open_x() -> Result<(XDisplay, XConn, usize), String> {
     unsafe {
         // First Xlib call in the process (see `Send` docs above).
@@ -217,11 +227,24 @@ pub fn open_x() -> Result<(XDisplay, XConn, usize), String> {
         let screen = XDefaultScreen(dpy) as usize;
         let raw = XGetXCBConnection(dpy);
         if raw.is_null() {
+            // SAFETY: `XGetXCBConnection` never produced a connection, so no
+            // `XCBConnection` can be borrowing this display and `close`'s
+            // precondition holds vacuously. Keeping the display open here would
+            // buy nothing: the process-lifetime leak policy exists to protect a
+            // live borrower, and this path has none.
+            XDisplay::from_raw(dpy).close();
             return Err("XGetXCBConnection returned NULL (libX11 built without XCB?)".into());
         }
 
-        let conn = XCBConnection::from_raw_xcb_connection(raw, false)
-            .map_err(|e| format!("x11rb could not wrap the xcb connection: {e}"))?;
+        let conn = XCBConnection::from_raw_xcb_connection(raw, false).map_err(|e| {
+            // SAFETY: the wrap failed, so there is no `XCBConnection` outliving
+            // this call. x11rb received `should_drop = false`, so its failure
+            // path drops the wrapper *without* `xcb_disconnect` — the
+            // `xcb_connection_t*` is still the display's to release, which makes
+            // this close the only remaining way to free the socket.
+            XDisplay::from_raw(dpy).close();
+            format!("x11rb could not wrap the xcb connection: {e}")
+        })?;
 
         Ok((XDisplay::from_raw(dpy), conn, screen))
     }
