@@ -578,6 +578,22 @@ impl WindowManager {
             crate::core::commands::ManageFocusIntent::Focus(_) => {
                 // Unmanaged-by-overlay window: focus it through the sole X sink.
                 self.focus(Some(win))?;
+                // A maximize overlay is presented exactly while it holds the
+                // focus, so focusing a window owned by the presented overlay
+                // takes that overlay off the focus and with it the presentation
+                // a previously queued `pending_focus` was waiting behind. The
+                // engine runs this reconciliation after every `Command`, but
+                // this path reaches X through the sink rather than through a
+                // command, so the deferral has to be resolved here or it is left
+                // queued behind an overlay that can no longer come back — the
+                // input focus would then land on a window nobody can see.
+                if let Some(resolved) =
+                    crate::core::commands::reconcile_pending_focus_after_transition(
+                        &mut self.engine.state,
+                    )
+                {
+                    self.focus(Some(resolved))?;
+                }
                 #[cfg(feature = "window-trace")]
                 wtrace!(
                     "manage() -> FOCUS win={:#x} mon={} ws={} (transient_parent={:?})",
