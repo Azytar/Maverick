@@ -8234,9 +8234,9 @@ mod unit_tests {
             decide_manage_focus, focus_logical_on, reconcile_pending_focus_after_transition,
             CollapseColumn, Command, CycleLayout, FocusDirection, FocusMonitor, FocusWindow,
             GapKind, GrowColumn, KillWindow, ManageFocusIntent, MoveResize, MoveToWorkspace,
-            MoveWindow, NewColumn, OverviewEnter, OverviewNav, PageSnap, Quit, Restart,
-            SetBorderWidth, SetGaps, SetLayout, SetWallpaper, Spawn, ToggleFloat, ToggleFullscreen,
-            ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
+            MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav, PageSnap, Quit,
+            Restart, SetBorderWidth, SetGaps, SetLayout, SetWallpaper, Spawn, ToggleFloat,
+            ToggleFullscreen, ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
         };
         use crate::core::effect::Effect;
         use crate::core::event::CommandReport;
@@ -8251,7 +8251,7 @@ mod unit_tests {
         use std::fmt::Write as _;
         use std::path::PathBuf;
 
-        use super::{setup_engine, setup_engine_multi};
+        use super::{setup_engine, setup_engine_multi, t_focus, t_manage};
 
         /// `Engine::execute` takes `impl Command` while the generated vocabulary
         /// is only available as the `Box<dyn Command>` the trait object erases
@@ -9063,6 +9063,82 @@ mod unit_tests {
                 "window 1 must stay in one placement, got {placements:?}\nSTATE:\n{}",
                 logical_dump(&engine)
             );
+        }
+
+        /// Contract: a command that only *requests* an input-focus change
+        /// resolves the deferral that change orphans.
+        ///
+        /// `Engine::execute` runs its `pending_focus` safety net before the sink
+        /// applies the `FocusWindow` effect, so at net time the overlay that owns
+        /// the deferral still looks presented and the deferral survives — while
+        /// the pending effect is about to take the focus (and with it the
+        /// overlay's presentation) away from that owner. The queued window would
+        /// then get the input focus behind an overlay nobody can see.
+        ///
+        /// Moving a window across monitors is the case where this bites hardest:
+        /// the sink resolves the moved window's own monitor, so the request
+        /// *selects* the monitor the deferral lives on and lands the focus on a
+        /// window that is not its overlay owner. A maximize overlay there is
+        /// presented exactly while it holds the focus, so the request takes the
+        /// presentation down and the deferral is the orphan `check_invariants`
+        /// #8c rejects.
+        #[test]
+        fn a_monitor_move_resolves_the_deferral_its_focus_request_orphans() {
+            let mut engine = setup_engine_multi();
+            let mon0 = 0;
+            engine.state.monitors[mon0].workspaces[0].layout = LayoutKind::Column;
+            // Window 1 maximizes on mon0 and holds its focus, so it is the
+            // presented overlay; window 2 is deferred behind it.
+            t_manage(&mut engine, 1);
+            t_focus(&mut engine, 1);
+            crate::core::commands::apply_maximize(&mut engine.state, 1, Some(true), Some(true));
+            assert!(
+                !t_manage(&mut engine, 2),
+                "window 2 is deferred behind the maximize overlay"
+            );
+            // Window 3 is mapped on the other monitor and focused there, which is
+            // what the move below will carry back across.
+            let mut c3 = Client::new(3, 1, 0);
+            c3.border_w = engine.cfg.border_w;
+            c3.geom = Rect::new(0, 0, 800, 600);
+            c3.saved_geom = c3.geom;
+            engine.state.monitors[1].workspaces[0].add_tiled(3, engine.cfg.column_width);
+            engine.state.add_client(c3);
+            t_focus(&mut engine, 3);
+            assert_eq!(engine.state.sel_mon, 1);
+
+            let effects = engine.execute(MoveWindowToMonitor(3, Dir::Prev));
+
+            assert_eq!(
+                engine.state.sel_mon, 0,
+                "the selection follows the moved window"
+            );
+            assert!(
+                effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::FocusWindow(Some(3)))),
+                "the move requests the focus on the destination monitor: {effects:?}"
+            );
+            assert!(
+                engine.state.pending_focus.is_none(),
+                "the requested focus supersedes the queued one, exactly once"
+            );
+            engine
+                .state
+                .check_invariants()
+                .expect("the core half of the move must leave a valid state");
+            // The presentation half is the sink's: it writes the destination's
+            // focus slot, which takes the focus off the maximize owner, and the
+            // overlay goes down with the focus.
+            t_focus(&mut engine, 3);
+            assert_eq!(
+                engine.state.monitors[0].workspaces[0].presented_maximize, None,
+                "the focus request took the maximize overlay down"
+            );
+            engine
+                .state
+                .check_invariants()
+                .expect("the monitor move must preserve invariants");
         }
 
         /// Contract: a command that only *requests* an input-focus change

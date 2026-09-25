@@ -1754,6 +1754,16 @@ impl Command for MoveWindowToMonitor {
         cmds.push(Effect::ArrangeMonitor(mi));
         cmds.push(Effect::ArrangeMonitor(new_mi));
         state.sel_mon = new_mi;
+        // The focus is *requested*, not applied: the sink resolves the moved
+        // window's own monitor — which is the monitor the user is now looking at
+        // — and writes that monitor's focus slot. When the destination is the
+        // deferral's monitor this takes the focus off a maximize owner, and a
+        // maximize overlay is presented exactly while it holds the focus, so the
+        // deferral queued behind it is the orphan `check_invariants` #8c
+        // rejects. The engine's safety net necessarily runs before the sink
+        // applies the request, so the command that requests the move resolves it
+        // here. See the helper.
+        drop_deferral_yielded_by_focus_move(state, Some(win));
         cmds.push(Effect::FocusWindow(Some(win)));
         CommandReport::with_event(cmds, Event::WindowMoved(win))
     }
