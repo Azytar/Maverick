@@ -286,6 +286,11 @@ fn packed_sample(row: &[u8], bit_depth: u8, i: usize) -> u8 {
 /// Unpack `count` samples out of one reconstructed row, per the PNG
 /// bit-depth rules: a 16-bit sample keeps its high byte, an 8-bit sample is
 /// used as is, and a sub-byte sample is rescaled to 0..=255 round-half-up.
+///
+/// The rescale is the *greyscale* rule, for the colour types whose sub-byte
+/// field is a shade. A colour type 3 field is a palette position and the
+/// format defines no rescaling for it, so a caller mapping those to pixels has
+/// to read the field with [`packed_sample`] instead.
 fn unpack_row(row: &[u8], bit_depth: u8, count: usize) -> Vec<u8> {
     match bit_depth {
         16 => (0..count)
@@ -402,7 +407,11 @@ fn build_png(spec: &PngSpec<'_>) -> PngCase {
                     255,
                 ],
                 3 => {
-                    let idx = row_samples[base] as usize;
+                    // A colour type 3 field is a PLTE position, not a shade, so
+                    // it is read out of the packed row verbatim: the rescale
+                    // inside `unpack_row` is the greyscale rule and would turn
+                    // an index into something else entirely.
+                    let idx = packed_sample(&recon, depth, base) as usize;
                     let rgb = palette
                         .and_then(|pl| pl.get(idx * 3..idx * 3 + 3))
                         .map_or([0, 0, 0], |s| [s[0], s[1], s[2]]);
@@ -1294,19 +1303,19 @@ proptest! {
     }
 
     /// Colour type 3 samples are palette indices and the format does not
-    /// rescale them: a 4-bit sample of 1 means palette entry 1. This property
-    /// fails against the current decoder, which expands every sub-byte sample
-    /// into 0..=255 before using it as an index, so an index of 1 becomes
-    /// 255, lands outside the palette and decodes to black.
+    /// rescale them: a 4-bit sample of 1 means palette entry 1. The decoder
+    /// used to expand every sub-byte sample into 0..=255 before using it as an
+    /// index, so an index of 1 became 255, landed outside the palette and
+    /// decoded to black.
     ///
     /// Minimized counterexample: 2x1, bit depth 4, colour type 3, palette
     /// [10,20,30, 200,150,160, 170,180], samples [0, 1]. The second pixel
-    /// decodes to `00 00 00 ff` where the palette says `96 a0 aa ff`.
+    /// decoded to `00 00 00 ff` where the palette says `96 a0 aa ff`.
     ///
-    /// Quarantined so the rest of the suite stays runnable; `--ignored` shows
-    /// the failure.
+    /// The expected pixels are derived from the packed bytes rather than from
+    /// `build_png`'s own `expected`, so the reference side of this property is
+    /// the format's MSB-first bit layout and nothing else.
     #[test]
-    #[ignore = "known deviation: sub-byte palette indices are rescaled before the lookup"]
     fn png_palette_indices_are_used_verbatim(
         w in 1usize..6,
         h in 1usize..3,
@@ -1545,6 +1554,263 @@ fn every_truncation_of_a_valid_file_is_safe() {
                     ),
                 }
             }
+        }
+    }
+}
+
+// ----------------------------------------------------- packed palette indices
+
+/// A palette whose entry `i` is `(i, 255 - i, 128)`. The red channel alone
+/// identifies the entry, so an index that arrives shifted, rescaled, or out of
+/// range cannot decode to the colour a test is looking for - and neither can
+/// the black the decoder substitutes for an index past the end of the palette,
+/// because no entry here is black.
+fn ramp_palette(entries: usize) -> Vec<u8> {
+    (0..entries)
+        .flat_map(|i| [i as u8, (255 - i) as u8, 128])
+        .collect()
+}
+
+/// The RGBA an indexed image owes its caller: palette entry `i` verbatim,
+/// opaque.
+fn indexed_rgba(palette: &[u8], indices: &[u16]) -> Vec<u8> {
+    indices
+        .iter()
+        .flat_map(|&i| {
+            let k = i as usize * 3;
+            [palette[k], palette[k + 1], palette[k + 2], 255]
+        })
+        .collect()
+}
+
+/// Eight one-bit indices share a single byte, so each bit of it is a different
+/// pixel. Bit depth 1 leaves the least room for a mistake: a field rescaled
+/// into the byte range sends index 1 to 255, which is nowhere near entry 1 of
+/// a two-entry palette.
+#[test]
+fn one_bit_indices_share_one_byte() {
+    let palette = ramp_palette(2);
+    let indices = [0u16, 1, 1, 0, 1, 0, 0, 1];
+    assert_eq!(pack_row(&indices, 1), vec![0b0110_1001u8]);
+    let case = build_png(&PngSpec {
+        w: 8,
+        h: 1,
+        bit_depth: 1,
+        color_type: 3,
+        samples: &indices,
+        filters: &[0],
+        palette: Some(&palette),
+        trns: None,
+    });
+    let img = decode_png_bytes(&case.bytes).expect("well-formed PNG");
+    assert_eq!((img.w, img.h), (8, 1));
+    assert!(img.is_valid());
+    assert_eq!(img.data, indexed_rgba(&palette, &indices));
+}
+
+/// Four two-bit indices share a byte. The row walks all four entries and then
+/// walks them back, so a lookup that is off by a single index shows up as a
+/// wrong colour on a specific pixel instead of as a uniform shift of the row.
+#[test]
+fn two_bit_indices_share_one_byte() {
+    let palette = ramp_palette(4);
+    let indices = [0u16, 1, 2, 3, 0, 3, 2, 1];
+    assert_eq!(pack_row(&indices, 2), vec![0b0001_1011u8, 0b0011_1001u8]);
+    let case = build_png(&PngSpec {
+        w: 8,
+        h: 1,
+        bit_depth: 2,
+        color_type: 3,
+        samples: &indices,
+        filters: &[0],
+        palette: Some(&palette),
+        trns: None,
+    });
+    let img = decode_png_bytes(&case.bytes).expect("well-formed PNG");
+    assert_eq!((img.w, img.h), (8, 1));
+    assert!(img.is_valid());
+    assert_eq!(img.data, indexed_rgba(&palette, &indices));
+}
+
+/// The minimized counterexample behind `png_palette_indices_are_used_verbatim`:
+/// 2x1 at bit depth 4, so both pixels live in the one byte `0x01`. Entry 0 is
+/// `[10, 20, 30]` and entry 1 is `[200, 150, 160]`; rescaling the field first
+/// sent index 1 past the end of an eight-entry palette and it decoded to
+/// `00 00 00 ff`.
+#[test]
+fn four_bit_indices_in_one_byte_are_not_rescaled() {
+    let palette = [10u8, 20, 30, 200, 150, 160, 170, 180];
+    let indices = [0u16, 1];
+    assert_eq!(pack_row(&indices, 4), vec![0x01u8]);
+    let case = build_png(&PngSpec {
+        w: 2,
+        h: 1,
+        bit_depth: 4,
+        color_type: 3,
+        samples: &indices,
+        filters: &[0],
+        palette: Some(&palette),
+        trns: None,
+    });
+    let img = decode_png_bytes(&case.bytes).expect("well-formed PNG");
+    assert_eq!((img.w, img.h), (2, 1));
+    assert_eq!(&img.data[0..4], &[10, 20, 30, 255]);
+    assert_eq!(&img.data[4..8], &[200, 150, 160, 255]);
+}
+
+/// At bit depth 8 the index *is* the byte, so this is the reference the
+/// sub-byte depths have to agree with rather than a rescaled fraction of it.
+#[test]
+fn eight_bit_indices_use_one_byte_per_index() {
+    let palette = ramp_palette(5);
+    let indices = [0u16, 4, 2, 1, 3];
+    let case = build_png(&PngSpec {
+        w: 5,
+        h: 1,
+        bit_depth: 8,
+        color_type: 3,
+        samples: &indices,
+        filters: &[0],
+        palette: Some(&palette),
+        trns: None,
+    });
+    let img = decode_png_bytes(&case.bytes).expect("well-formed PNG");
+    assert_eq!((img.w, img.h), (5, 1));
+    assert!(img.is_valid());
+    assert_eq!(img.data, indexed_rgba(&palette, &indices));
+}
+
+/// Every index a depth allows has to be reachable, at every depth. One row
+/// enumerates `0..2^bd` in order, so an index that is dropped or overshot
+/// leaves a wrong colour behind rather than shifting the whole row - which is
+/// what a uniform rescale or an off-by-one field would do. The row is padded to
+/// a whole number of bytes, so the two-entry case really is two pixels in one.
+#[test]
+fn every_index_of_every_depth_is_reachable() {
+    for bit_depth in [1u8, 2, 4, 8] {
+        let entries = 1usize << bit_depth;
+        let palette = ramp_palette(entries);
+        let indices: Vec<u16> = (0..entries).map(|i| i as u16).collect();
+        let padded = (entries * bit_depth as usize).div_ceil(8);
+        let case = build_png(&PngSpec {
+            w: entries,
+            h: 1,
+            bit_depth,
+            color_type: 3,
+            samples: &indices,
+            filters: &[0],
+            palette: Some(&palette),
+            trns: None,
+        });
+        let img = decode_png_bytes(&case.bytes).expect("well-formed PNG");
+        assert_eq!((img.w, img.h), (entries as u32, 1));
+        assert!(img.is_valid());
+        assert_eq!(
+            pack_row(&indices, bit_depth).len(),
+            padded,
+            "bit depth {bit_depth}: row does not fill a whole number of bytes"
+        );
+        assert_eq!(
+            img.data,
+            indexed_rgba(&palette, &indices),
+            "bit depth {bit_depth}: palette indices are not looked up verbatim"
+        );
+    }
+}
+
+/// A row is `ceil(w * bd / 8)` bytes, so an odd width ends part way through its
+/// last byte and the row below has to start on a byte boundary of its own.
+/// A bit cursor carried across rows, or a stride rounded the wrong way, slides
+/// every later pixel. The three rows use different filters so the reconstruction
+/// has to see the same stride the sample reading does.
+#[test]
+fn a_row_ending_mid_byte_does_not_carry_its_bits_into_the_next_row() {
+    for (bit_depth, w) in [
+        (1u8, 3usize),
+        (1, 5),
+        (1, 9),
+        (2, 3),
+        (2, 5),
+        (2, 7),
+        (4, 3),
+        (4, 5),
+        (4, 7),
+    ] {
+        let entries = 1usize << bit_depth;
+        let palette = ramp_palette(entries);
+        let indices: Vec<u16> = (0..w * 3)
+            .map(|i| (i as u16 * 3) % entries as u16)
+            .collect();
+        let case = build_png(&PngSpec {
+            w,
+            h: 3,
+            bit_depth,
+            color_type: 3,
+            samples: &indices,
+            filters: &[0, 1, 2],
+            palette: Some(&palette),
+            trns: None,
+        });
+        let img = decode_png_bytes(&case.bytes).expect("well-formed PNG");
+        assert_eq!((img.w, img.h), (w as u32, 3));
+        assert!(img.is_valid());
+        assert_eq!(
+            img.data,
+            indexed_rgba(&palette, &indices),
+            "png {w}x3 bd={bit_depth}: packed rows drifted across a row boundary"
+        );
+    }
+}
+
+/// Cutting an indexed file at every offset must stay a clean `Err` or a
+/// well-formed `Ok` - never a panic, never a short buffer. The sub-byte depths
+/// are the interesting ones because the decoder reads a whole packed row out of
+/// the inflated plane: a cut between two rows is where a missing byte could
+/// otherwise be read as a row of index 0.
+#[test]
+fn every_truncation_of_a_packed_indexed_file_is_safe() {
+    for bit_depth in [1u8, 2, 4, 8] {
+        let entries = 1usize << bit_depth;
+        let palette = ramp_palette(entries);
+        // An odd width, so the last byte of every row is partly padding, and
+        // rows that start on the opposite phase of the byte from the row above.
+        let w = 5usize;
+        let indices: Vec<u16> = (0..w * 3)
+            .map(|i| (i as u16 * 5) % entries as u16)
+            .collect();
+        let case = build_png(&PngSpec {
+            w,
+            h: 3,
+            bit_depth,
+            color_type: 3,
+            samples: &indices,
+            filters: &[0, 0, 0],
+            palette: Some(&palette),
+            trns: None,
+        });
+        for cut in 0..=case.bytes.len() {
+            match catch_panic(|| decode_png_bytes(&case.bytes[..cut])) {
+                Ok(Ok(img)) => {
+                    let verdict = well_formed(&img);
+                    assert!(
+                        verdict.is_ok(),
+                        "png bd={bit_depth}: {}",
+                        verdict.unwrap_err()
+                    );
+                }
+                Ok(Err(_)) => {}
+                Err(_) => panic!("png bd={bit_depth}: panicked on a {cut} byte prefix"),
+            }
+        }
+        // A cut that reaches into the compressed plane loses the tail of the
+        // deflate stream, and the pixels that did arrive must not be handed
+        // back as a shorter image.
+        for drop in 1..=4 {
+            let cut = case.end_of_idat_data - drop;
+            assert!(
+                decode_png_bytes(&case.bytes[..cut]).is_err(),
+                "png bd={bit_depth}: accepted a file {drop} bytes short of a whole plane"
+            );
         }
     }
 }

@@ -627,9 +627,22 @@ fn decode_png_bytes(bytes: &[u8]) -> Result<Rgba8, String> {
                 samples.push(*row.get(p).unwrap_or(&0));
             }
         } else {
-            // Packed bit depths (1/2/4): `bd` bits per sample, MSB first in the
-            // row, rescaled to 0..255 with round-half-up.
+            // Packed bit depths (1/2/4): `bd` bits per sample, packed MSB first,
+            // so sample `i` of the row occupies bits [i * bd, (i + 1) * bd) of
+            // the row's bit string. A row always starts on a byte boundary and
+            // spans `stride` bytes, which is what lets the cursor below restart
+            // at every row instead of running through the whole plane.
+            //
+            // Whether the field is then rescaled depends on the colour type.
+            // For the greyscale types the spec defines a sub-byte field as a
+            // shade spread over the full 8-bit range, so the round-half-up
+            // expansion below is required. A colour type 3 field is instead a
+            // PLTE position and the format defines no rescaling for it: the
+            // expansion maps every index 1..2^bd to a fixed 255, which is past
+            // the end of a 2^bd-entry palette, so only index 0 would still
+            // resolve. The field is therefore used as the index it already is.
             let max = (1u32 << bd) - 1;
+            let is_index = color_type == 3;
             let mut bit_pos = 0usize;
             for _ in 0..samples_per_row {
                 let mut v = 0u32;
@@ -639,7 +652,11 @@ fn decode_png_bytes(bytes: &[u8]) -> Result<Rgba8, String> {
                     v = (v << 1) | bit;
                     bit_pos += 1;
                 }
-                samples.push(((v * 255 + max / 2) / max) as u8);
+                samples.push(if is_index {
+                    v as u8
+                } else {
+                    ((v * 255 + max / 2) / max) as u8
+                });
             }
         }
         for p in 0..w {
