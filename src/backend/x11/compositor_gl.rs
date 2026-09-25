@@ -32,15 +32,17 @@
 //!   turns the redirected pixmap into a sampled `Texture` without a CPU readback.
 //!   The fbconfig is chosen per-window visual (looked up in `formats`), never
 //!   inferred from depth alone.
-//! - **Damage `CAP32` / `NON_EMPTY`**: per-window `Damage` with `ReportLevel`
-//!   tracking; `XDamageSubtract` re-arms after each bind. `DamageRegion::CAP`
+//! - **Damage (`ReportLevel::NON_EMPTY`)**: one `Damage` object per window.
+//!   Each `DamageNotify` is retired with `DamageSubtract` and its region fetched
+//!   through an `XFixes` region, so damage that arrives mid-request stays
+//!   accumulated in the server object for the next report. `DamageRegion::CAP`
 //!   is 32 rects; overflow forces a full repaint — bounded, allocation-free.
 //! - **Occlusion** (`occluder_rects`, `fully_covered_by`): top-to-bottom pass
 //!   marks windows fully covered by a single opaque, square-cornered occluder
 //!   as `occluded` so they are not drawn.
-//! - **`VSync` (`SwapBuffers`)**: `glXSwapIntervalEXT(1)` makes `swap` block on
-//!   the vertical retrace; the frame scheduler's 0 ms / 100 ms poll merely
-//!   decides *whether* to render, never synthesizes a vblank.
+//! - **`VSync` (swap interval)**: the renderer's configured swap interval makes
+//!   `end_frame` block on the vertical retrace; the frame scheduler's 0 ms /
+//!   100 ms poll merely decides *whether* to render, never synthesizes a vblank.
 //!
 //! # Safety
 //!
@@ -81,9 +83,9 @@ use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements, RibbonScra
 use crate::core::present::present_into;
 use crate::types::{Rect, State, WindowId};
 
-/// Soft upper bound on substep length (seconds). The camera now uses an
-/// analytical transition; short slices remain for the exponential presentation
-/// springs so their endpoint behavior stays conservative.
+/// Soft upper bound on substep length (seconds). The camera transition is
+/// analytic; short slices remain for the exponential presentation springs so
+/// their endpoint behavior stays conservative.
 const SUBSTEP_MS: f32 = 8.0;
 
 /// Projection signature for the compositor's live layout cache — mirrors
@@ -202,7 +204,7 @@ pub(crate) fn overlay_coverage(screen: Rect, holes: &[Rect]) -> Vec<Rect> {
 }
 
 fn subtract_rect(r: Rect, hole: Rect) -> Vec<Rect> {
-    // No overlap => keep r
+    // Degenerate input: there is nothing to cut, so `r` passes through whole.
     if hole.w == 0 || hole.h == 0 || r.w == 0 || r.h == 0 {
         return vec![r];
     }
@@ -221,15 +223,16 @@ fn subtract_rect(r: Rect, hole: Rect) -> Vec<Rect> {
     }
 
     let mut out = Vec::with_capacity(4);
-    // Left strip
+    // What is left of `r` around `hole` decomposes into at most four strips:
+    // full-height left and right, plus the band above and below the hole taken
+    // between their inner edges. `mid_x1`/`mid_x2` are those inner edges, so a
+    // hole that hangs off one side suppresses the corresponding top/bottom band.
     if h_x1 > r_x1 {
         out.push(Rect::new(r_x1, r_y1, (h_x1 - r_x1) as u32, r.h));
     }
-    // Right strip
     if h_x2 < r_x2 {
         out.push(Rect::new(h_x2, r_y1, (r_x2 - h_x2) as u32, r.h));
     }
-    // Top strip (between left/right, above hole)
     let mid_x1 = r_x1.max(h_x1);
     let mid_x2 = r_x2.min(h_x2);
     if h_y1 > r_y1 && mid_x2 > mid_x1 {
@@ -240,7 +243,6 @@ fn subtract_rect(r: Rect, hole: Rect) -> Vec<Rect> {
             (h_y1 - r_y1) as u32,
         ));
     }
-    // Bottom strip
     if h_y2 < r_y2 && mid_x2 > mid_x1 {
         out.push(Rect::new(
             mid_x1,
@@ -313,10 +315,10 @@ struct CompWin {
     mapped: bool,
     /// Hidden by the WM because it belongs to a non-active workspace (see
     /// `hide_offscreen` in render.rs). The compositor must never paint a hidden
-    /// window even if its cached `outer` rect is still on-screen — that is the
-    /// "a tile from workspace N covers workspace M" bug, caused by the off-screen
-    /// `ConfigureNotify` (which is what normally updates `outer`) arriving a
-    /// frame after the workspace switch.
+    /// window even if its cached `outer` rect is still on-screen: the
+    /// `ConfigureNotify` that moves it off-screen arrives a frame *after* the
+    /// switch, so for one frame a tile from another workspace would cover the
+    /// active one.
     hidden: bool,
     /// The window's own visual — *not* derived from its depth. Two visuals can
     /// share a depth (24-bit `TrueColor` and 24-bit `DirectColor`, or two
@@ -356,15 +358,14 @@ struct CompWin {
     /// window at the top of each frame.
     transform_gen: u64,
     /// The visual (drawn) rect this window had on the *previous* composited
-    /// frame. Used for Fase 7 animation damage: when a window moves we must
-    /// repaint both this rect and the new one, or the pixels it slid off of
-    /// (and into) linger as residue during scroll. `None` means it was not
-    /// drawn last frame (just appeared / was off-screen), so only the current
-    /// rect needs repainting.
+    /// frame. A window that moves must repaint both this rect and the new one,
+    /// or the pixels it slid off of (and into) linger as residue during scroll.
+    /// `None` means it was not drawn last frame (just appeared / was off-screen),
+    /// so only the current rect needs repainting.
     prev_visual: Option<Rect>,
     prev_visual_f: Option<VisualRect>,
     prev_visual_radius: u32,
-    /// Fase 12 — true when this window is fully hidden behind a single opaque,
+    /// True when this window is fully hidden behind a single opaque,
     /// square-cornered window above it this frame, so it need not be drawn.
     /// Recomputed every frame by `compute_scene`'s top→bottom occlusion pass.
     occluded: bool,
@@ -459,9 +460,9 @@ impl CompWin {
     /// trigger a rebind; a move-only change does not.
     ///
     /// Pure (no X/GL side effects) so it is unit-testable in isolation — the
-    /// actual resource invalidation/recreation is the caller's job and, after the
-    /// floating-freeze fix, happens once per frame in `compute_scene`, never
-    /// synchronously inside the event handler.
+    /// actual resource invalidation/recreation is the caller's job and happens
+    /// once per frame in `compute_scene`, never synchronously inside the event
+    /// handler.
     fn observe_configure(&mut self, x: i32, y: i32, w: u32, h: u32, bw: u32) -> bool {
         let frame = bw.saturating_mul(2);
         let new_outer = Rect::new(x, y, w.saturating_add(frame), h.saturating_add(frame));
@@ -514,13 +515,9 @@ impl CompWin {
             geom.h.saturating_add(bw.saturating_mul(2)),
         );
         self.transform_border_w = bw;
-        // Fullscreen/maximize presentation emits `bw = 0` and a rect that
-        // covers the monitor edge-to-edge (`present_into`). Rounding such
-        // an overlay just clips content under a curved corner with no
-        // desktop behind it to round into — the same niri-style policy the
-        // X11 Shape path enforces in `emit_geometry`. A window is square
-        // exactly when its presentation covers the screen union or any single
-        // monitor's screen rect (see `rounded_radius_for`).
+        // Fullscreen/maximize presentation emits `bw = 0` *and* a rect that
+        // covers the monitor edge-to-edge (`present_into`); either alone is not
+        // enough to square a window. See `rounded_radius_for` for the policy.
         self.transform_radius = rounded_radius_for(self.transform, radius, screen_union, screens);
         let live_x = visual_x
             .filter(|x| x.is_finite())
@@ -639,13 +636,14 @@ impl CompWin {
         }
     }
 
-    /// Whether `r` is entirely outside the `[0,0,w,h]` viewport (plus a small
-    /// margin so partially-visible windows — including ones with a shadow or a
+    /// Whether `r` is entirely outside `viewport` (plus a small margin so
+    /// partially-visible windows — including ones with a shadow or a
     /// translucent halo — are never clipped). Used to skip the GPU draw for the
     /// dozens of ribbon windows that are scrolled fully off either edge of the
     /// monitor; those still cost a `HashMap` lookup, but no `glDrawArrays`,
     /// texture bind or quad upload. Windows mid-scroll (camera animation) keep
-    /// being drawn the instant any part enters the margin.
+    /// being drawn the instant any part enters the margin. The viewport is a
+    /// root-space rect, so a negative-origin monitor layout works unchanged.
     fn offscreen(r: Rect, viewport: Rect) -> bool {
         const M: i32 = 64; // px of grace around the screen edge
         let right = viewport.x.saturating_add(viewport.w as i32);
@@ -739,9 +737,9 @@ impl DamageRegion {
         }
     }
 
-    /// Rectangles that need repainting. They are pairwise non-overlapping when
-    /// the region did not overflow its capacity; callers can use them as
-    /// independent scissor rectangles.
+    /// Rectangles that need repainting, pairwise non-overlapping unless the
+    /// region overflowed its capacity. The render path scissors their bounding
+    /// box (see `bounding_rect`); this list is what tests and traces read.
     fn rects(&self) -> &[Rect] {
         &self.rects[..self.count]
     }
@@ -788,9 +786,9 @@ pub(crate) enum FrameMode {
     Partial,
 }
 
-/// Why the compositor needs a frame (Fase 9). Bitflags so several reasons can
-/// coexist in a single frame and the `FrameScheduler` can report them. Pure, no
-/// GL/X: it is just an integer mask.
+/// Why the compositor needs a frame. Bitflags rather than an enum because
+/// several reasons routinely coexist in a single frame and the `FrameScheduler`
+/// reports them together. Pure, no GL/X: it is just an integer mask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DirtyReason(u8);
 impl DirtyReason {
@@ -804,8 +802,8 @@ impl DirtyReason {
     /// The stacking order changed (focus / raise / restack).
     pub const FOCUS: DirtyReason = DirtyReason(1 << 3);
     /// The native (or root) wallpaper changed — a full repaint of the whole
-    /// screen. Inserted exactly once per `SetWallpaper` (Fase 6): a static
-    /// wallpaper must not keep the loop awake.
+    /// screen. One-shot by construction: a static wallpaper must not keep the
+    /// loop awake.
     pub const WALLPAPER: DirtyReason = DirtyReason(1 << 4);
 
     #[inline]
@@ -872,8 +870,8 @@ fn visual_moved(previous: Option<VisualRect>, current: VisualRect) -> bool {
     previous != Some(current)
 }
 
-/// Fase 7: the screen rects that must be repainted when a window's drawn rect
-/// moves from `prev` (last frame) to `cur` (this frame). Both are emitted so
+/// The screen rects that must be repainted when a window's drawn rect moves
+/// from `prev` (last frame) to `cur` (this frame). Both are emitted so
 /// neither the pixels the window left behind nor the pixels it slid into linger
 /// as residue during scroll/animation. A window with no `prev` (just appeared,
 /// or was off-screen) only needs its current rect. Pure and allocation-free:
@@ -891,20 +889,19 @@ fn anim_damage_rects(prev: Option<Rect>, cur: Rect, out: &mut [Rect; 2]) -> usiz
     n + 1
 }
 
-/// Fase 12: true when `inner` is entirely contained by a single rect in
-/// `occluders`. A window behind one opaque, square-cornered window above it is
-/// fully hidden and can be skipped. Joint coverage by several smaller windows
-/// is a safe *miss* — we simply keep drawing the window rather than risk
-/// clipping something visible. Pure and allocation-free.
+/// True when `inner` is entirely contained by a *single* rect in `occluders`,
+/// i.e. the window behind one opaque, square-cornered window is fully hidden
+/// and can be skipped. Joint coverage by several smaller windows is a safe
+/// miss — the window keeps being drawn rather than risking a clip of something
+/// visible. Pure and allocation-free.
 pub(crate) fn fully_covered_by(inner: Rect, occluders: &[Rect]) -> bool {
     occluders.iter().any(|o| o.contains_rect(inner))
 }
 
 /// One window to draw this frame, fully resolved: where, at what opacity, with
 /// which texture, and whether the texture needs linear filtering. Built by
-/// `compute_scene` into a reused buffer so the per-frame path allocates nothing,
-/// and kept between frames so a later phase can diff successive scenes
-/// (occlusion / partial redraw) without rebuilding geometry from scratch.
+/// `compute_scene` into a reused buffer, so the per-frame path allocates
+/// nothing.
 ///
 /// This is the compositor's *own* view of what is visible — distinct from the
 /// WM's `Placements` (only the geometry source) and from `stack` (which still
@@ -1025,8 +1022,8 @@ pub struct Compositor {
     wallpaper_last_dt: f32,
     /// True while at least one frame is queued/needed.
     dirty: bool,
-    /// *Why* the compositor needs a frame (Fase 9). Bitflags so several reasons
-    /// can coincide in one frame and the `FrameScheduler` can report them; it is
+    /// *Why* the compositor needs a frame. Bitflags so several reasons can
+    /// coincide in one frame and the `FrameScheduler` can report them; it is
     /// cleared together with `dirty` at the end of `render`.
     dirty_reasons: DirtyReason,
     /// An incremental restack could not be applied (we saw a `ConfigureNotify`
@@ -1042,15 +1039,12 @@ pub struct Compositor {
     stack: Vec<Window>,
     /// The explicit scene: the list of draw items (one per on-screen window)
     /// produced for the most recent frame. Built by `compute_scene` into this
-    /// reused buffer so the per-frame path allocates nothing, and kept between
-    /// frames so a later phase can diff it (occlusion / partial redraw) without
-    /// rebuilding from scratch. This is the compositor's *own* view of what is
-    /// visible — distinct from the WM's `Placements` (which is only the geometry
-    /// source) and from `stack` (which still includes off-screen windows).
+    /// reused buffer so the per-frame path allocates nothing. See [`DrawItem`]
+    /// for how it differs from the WM's placements and from `stack`.
     scene: Vec<DrawItem>,
-    /// Fase 12 — persistent buffer of opaque on-screen occluder rects, rebuilt
-    /// (cleared, not reallocated) every frame by `compute_scene`'s top→bottom
-    /// pass. Reused so the per-frame path stays allocation-free.
+    /// Persistent buffer of opaque on-screen occluder rects, rebuilt (cleared,
+    /// not reallocated) every frame by `compute_scene`'s top→bottom pass.
+    /// Reused so the per-frame path stays allocation-free.
     occluder_rects: Vec<Rect>,
     /// Monotonic frame counter used to date `CompWin::transform`.
     frame_gen: u64,
@@ -1071,9 +1065,9 @@ pub struct Compositor {
     /// A change this frame cannot be expressed as a rectangle set (resize,
     /// reparent, restack, opacity, new/removed window). Set by `mark_full`.
     needs_full: bool,
-    /// Persistent damage accumulation across frames, used by the partial-redraw
-    /// path. Reset to empty on every full repaint (structural change, or when
-    /// buffer-age is unavailable so we always full-redraw).
+    /// Damage actually committed for the current frame, used by the
+    /// partial-redraw path. Rebuilt from scratch each frame and cleared after
+    /// every present, so it can never grow into a screen-sized scissor.
     damage_acc: DamageRegion,
     /// Damage history at the last actual swap boundary.
     damage_history: Vec<DamageRegion>,
@@ -1088,10 +1082,10 @@ pub struct Compositor {
     /// damage/destroy) carrying the current pixmap/`GLXPixmap`/texture ids and
     /// geometry, plus render/present begin-end markers. Off by default and a
     /// no-op when unset (only builds discarded format! strings), so it is safe
-    /// to leave compiled in permanently. Used to isolate compositor-lifecycle
-    /// regressions — e.g. the floating-window freeze, where GLXPixmap/texture
-    /// (re)creation happened in the *event* handler instead of once per frame
-    /// in `compute_scene`.
+    /// to leave compiled in permanently. The id trail exists because
+    /// pixmap/GLXPixmap/texture lifetime is the usual suspect when a window
+    /// stops compositing: those resources are (re)created once per frame in
+    /// `compute_scene`, never in an event handler.
     pub(crate) comp_trace: bool,
     /// OPT-IN DIAGNOSTIC: per-frame id incremented at the top of
     /// `set_transforms` so TRANSFORM/SCENE/RENDER/PRESENT logs share one id.
@@ -1131,8 +1125,8 @@ pub struct Compositor {
     /// Monotonic elapsed time for the current compositor frame. This is the
     /// same sample consumed by camera, layout and presentation springs.
     frame_dt: f32,
-    // ── Presentation caches — owned by the compositor so the WM core never
-    // hands GPU transforms (WindowManager does not import Renderer details).
+    // Presentation caches live here, not in the WM core, so the WM never hands
+    // GPU transforms across the backend boundary.
     live_cache: Vec<Vec<(Window, crate::types::Rect, u32)>>,
     /// Fractional left edge for the current live frame, keyed by window.
     /// Rebuilt from the current layout/camera projection; never accumulated.
@@ -1580,8 +1574,6 @@ impl Compositor {
         Some(comp)
     }
 
-    // ── window lifecycle ────────────────────────────────────────────────────
-
     /// Track a window the WM just created/managed. Called for `CreateNotify`
     /// and for every window already present at startup (`scan_existing`).
     fn track(&mut self, win: Window) {
@@ -1808,9 +1800,8 @@ impl Compositor {
         }
         if !stack_restack(&mut self.stack, win, above) {
             // The sibling is unknown to us — we cannot place `win` at the right
-            // depth, so repair the whole order from the server instead of
-            // guessing (guessing is what produces a window drawn under the one
-            // it should cover).
+            // depth, so repair the whole order from the server rather than guess:
+            // a wrong guess draws the window under the one it should cover.
             self.stack_dirty = true;
         }
         self.mark_full(DirtyReason::FOCUS);
@@ -1850,13 +1841,12 @@ impl Compositor {
     /// on the next frame.
     ///
     /// The GLXPixmap/texture is (re)created lazily in `compute_scene` (render
-    /// phase) via `needs_fixup`, **not** synchronously here. Creating it here
-    /// (inside the event-drain loop) for every map/unmap/remap is exactly the
-    /// synchronous-`glXCreatePixmap`+`glXBindTexImageEXT` storm that freezes the
-    /// floating compositor. Mapping does **not** restack in X — an unmapped window
-    /// keeps its place in the sibling order — so this deliberately does not touch
-    /// `stack`. It only asks for a resync when the window is missing entirely,
-    /// which means we never saw its `CreateNotify`.
+    /// phase) via `needs_fixup`, **not** synchronously here: binding is a
+    /// blocking X/GL round trip, and the event-drain loop can see many
+    /// map/unmap/remap events in one burst. Mapping does **not** restack in X —
+    /// an unmapped window keeps its place in the sibling order — so this
+    /// deliberately does not touch `stack`. It only asks for a resync when the
+    /// window is missing entirely, which means we never saw its `CreateNotify`.
     pub fn on_map(&mut self, win: Window) {
         if self.bypassed_set.contains(&win) {
             // The bypassed window itself re-mapped: it is presented directly, so
@@ -1903,7 +1893,7 @@ impl Compositor {
             }
         }
         // A previously-unknown window became visible while bypassing. Only
-        // disengage if it overlaps the bypassed output (P0 overlap check).
+        // disengage if it overlaps the bypassed output.
         if !self.bypassed_set.is_empty() {
             let new_geom = self.wins.get(&win).map(|c| c.outer);
             let should_disengage = match new_geom {
@@ -2009,9 +1999,9 @@ impl Compositor {
 
     /// Geometry change (`ConfigureNotify` for a tracked, non-root window).
     pub fn on_configure(&mut self, win: Window, x: i32, y: i32, w: u32, h: u32, bw: u32) {
-        // I6: bypassed window geometry must stay coherent (cached outer == actual)
-        // and the overlay hole must follow it. We still update outer and shape,
-        // but avoid churning released GL resources or flipping back to Compose.
+        // A bypassed window's cached `outer` must stay equal to its real X
+        // geometry, and the overlay hole must follow it — but churn on released
+        // GL resources and a flip back to Compose are both pointless here.
         if self.bypassed_set.contains(&win) {
             if let Some(cw) = self.wins.get_mut(&win) {
                 cw.observe_configure(x, y, w, h, bw);
@@ -2040,9 +2030,9 @@ impl Compositor {
         // a resize drag. `rename_and_bind` issues `composite_name_window_pixmap`
         // + `glXCreatePixmap` + `glXBindTexImageEXT` — all synchronous X/GL round
         // trips — so doing it here serialises N blocking calls per drain burst and
-        // starves frame advancement: the floating-window "freeze". `compute_scene`
-        // (render phase) already (re)binds exactly once per frame via
-        // `needs_fixup`, so the new texture is created when the frame is drawn.
+        // starves frame advancement. `compute_scene` (render phase) already
+        // (re)binds exactly once per frame via `needs_fixup`, so the new texture is
+        // created when the frame is drawn.
         if resized && mapped {
             let (tex, pix) = match self.wins.get_mut(&win) {
                 Some(cw) => (cw.tex.take(), cw.pixmap.take()),
@@ -2081,7 +2071,7 @@ impl Compositor {
     /// that would discard damage without giving the compositor a region to
     /// repair.
     pub fn on_damage(&mut self, win: Window, e: &DamageNotifyEvent) {
-        // I4: damage bookkeeping must happen for every DamageNotify, even while
+        // Damage bookkeeping must happen for every DamageNotify, even while
         // bypassed. Bypass only suppresses render scheduling, never XDamage.
         let Some(&dmg) = self.damages.get(&win) else {
             return;
@@ -2278,7 +2268,7 @@ impl Compositor {
             );
         }
         // No `mark_full` here: a pure animation/scroll only moves windows, which
-        // `compute_scene` records as `old ∪ new` animation damage (Fase 7) so the
+        // `compute_scene` records as `old ∪ new` animation damage so the
         // buffer-age Partial path can scissor just the swept region. Forcing a
         // full repaint every animation frame would defeat partial redraw during
         // scroll. Structural changes (resize/restack/opacity/map/unmap) already
@@ -2286,10 +2276,9 @@ impl Compositor {
         // while `animating` is true, so dropping this flag does not skip frames.
     }
 
-    /// Build presentation transforms for this frame (moved from `WindowManager` so
-    /// the WM core never handles GPU presentation state). Populates the
-    /// compositor's internal caches and installs the transforms via
-    /// `set_transforms`.
+    /// Build presentation transforms for this frame and install them via
+    /// `set_transforms`. GPU presentation state is owned by the compositor, so
+    /// the WM core only ever hands over placements.
     pub fn prepare_frame(
         &mut self,
         state: &mut State,
@@ -2391,12 +2380,12 @@ impl Compositor {
             let sig = proj_signature(state.monitors[i].ws(), cfg);
             let layout_dirty = state.monitors[i].layout_dirty;
             let sig_changed = self.proj_cache[i].as_ref() != Some(&sig);
-            // Rebuild from the current camera value whenever it moved. The old
-            // fast path translated an integer cache by `round(dx)`, which
-            // discarded the fractional part of a subpixel camera motion and
-            // could turn a smooth visual state into one-pixel jumps. Caching is
-            // still useful while the monitor is idle; it must not be used as a
-            // second, rounded animation state.
+            // Rebuild from the current camera value whenever it moved. A cache
+            // translated by `round(dx)` is not a valid substitute: it discards
+            // the fractional part of a subpixel camera motion and turns a smooth
+            // visual state into one-pixel jumps. Caching is still useful while
+            // the monitor is idle; it must not become a second, rounded
+            // animation state.
             let camera_changed = (cam_now - self.cam_cache[i]).abs() > 1e-4;
             let recompute = live_projection_needs_rebuild(LiveProjectionInputs {
                 animating: anim_i,
@@ -2457,7 +2446,7 @@ impl Compositor {
     }
 
     /// Instrumentation-only vblank counter read (see `Renderer::wait_vblank`).
-    /// The frame loop no longer paces here — swap interval 1 is the sole
+    /// The frame loop does not pace here: the GLX swap interval is the sole
     /// synchroniser.
     #[allow(dead_code)]
     pub fn wait_vblank(&mut self) -> bool {
@@ -2487,20 +2476,18 @@ impl Compositor {
         self.dirty
     }
 
-    /// *Why* a frame is needed right now (Fase 9). The `FrameScheduler` reads
-    /// this to report the reasons behind a scheduled frame; it is empty exactly
-    /// when `needs_frame` is false.
+    /// *Why* a frame is needed right now. The `FrameScheduler` reads this to
+    /// report the reasons behind a scheduled frame; it is empty exactly when
+    /// `needs_frame` is false.
     pub fn dirty_reasons(&self) -> DirtyReason {
         self.dirty_reasons
     }
 
-    // ── native wallpaper (Parte 1 Fase 4 / Parte 2 Fases 7,8,9) ─────────────────
-
     /// Apply a new wallpaper spec: decode + upload (or compile shader) and request a
     /// single full repaint. Keyed on source + mode so an unchanged wallpaper reuses
-    /// the GPU texture without re-decoding per frame (criterio #5). Any
-    /// decode/compile failure logs once and leaves the wallpaper disabled — it never
-    /// panics or takes the WM down (riesgo: decode bloquea, conversor ausente).
+    /// the GPU texture without re-decoding. Any decode/compile failure logs once and
+    /// leaves the wallpaper disabled — decoding blocks and the converter may be
+    /// missing, so it must never panic or take the WM down.
     pub fn set_wallpaper(&mut self, spec: &WallpaperSpec) {
         if let Some(t) = self.wallpaper_native.take() {
             self.renderer.destroy_raw(TextureHandle(t.0));
@@ -2552,8 +2539,9 @@ impl Compositor {
     }
 
     /// Sync the wallpaper's output layout from the WM's monitors. Called at init and
-    /// on `RandR` change. Also refreshes `screen_w/h` from the union of outputs so the
-    /// wallpaper keeps covering the whole screen after a resize (`RandR` edge case).
+    /// on `RandR` change. Also refreshes `screen_w/h` from the union of outputs, so the
+    /// wallpaper keeps covering the whole screen after a resize shrinks or moves the
+    /// root dimensions.
     pub fn set_outputs(&mut self, outputs: &[Rect]) {
         self.wallpaper_outputs = outputs.to_vec();
         // The fullscreen-square policy reads per-monitor screens (not just the
@@ -2600,9 +2588,8 @@ impl Compositor {
     /// Advance the wallpaper animation clock by `dt` (the same clamped dt the WM
     /// uses for its own springs — no separate timer). Only a shader that actually
     /// depends on time animates; a static shader, a still image or `None` leaves
-    /// `wallpaper_animating` false so the loop goes idle (criterio #4). This is
-    /// what stops the compositor from presenting at vsync forever on a static
-    /// shader wallpaper.
+    /// `wallpaper_animating` false so the loop goes idle. This is what stops the
+    /// compositor from presenting at vsync forever on a static shader wallpaper.
     pub fn tick_wallpaper(&mut self, dt: f32) {
         if self.wallpaper_animated {
             self.wallpaper_clock += dt;
@@ -2668,8 +2655,9 @@ impl WallpaperGpu for Compositor {
 }
 
 impl Compositor {
-    /// Empty when the last frame had nothing to repaint. Next phases use this to
-    /// scissor the redraw (partial update) instead of clearing the whole screen.
+    /// The damage accumulated for the frame `compute_scene` just built. Empty
+    /// when nothing needs repainting; a non-empty region is what lets the
+    /// partial-redraw path scissor instead of clearing the whole screen.
     #[allow(dead_code)]
     pub fn damage_region(&self) -> &DamageRegion {
         &self.frame_dirty
@@ -2685,14 +2673,12 @@ impl Compositor {
         self.dirty_reasons.insert(reason);
     }
 
-    // ── fullscreen bypass (safe, recoverable XComposite un-redirect) ────────
-    //
-    // When the `CompositionPolicy` decides an output is in `Bypass`, Maverick
-    // stops *interposing* its compositor on the single eligible fullscreen
-    // window: it calls `composite_unredirect_window` so X presents that window
-    // directly (beneath the ARGB overlay), and simply never draws it into the
-    // overlay (the overlay stays transparent over it). Bypass is per-window, so
-    // the rest of the desktop keeps being composited normally.
+    // Fullscreen bypass. When the `CompositionPolicy` decides an output is in
+    // `Bypass`, Maverick stops *interposing* its compositor on the single
+    // eligible fullscreen window: it calls `composite_unredirect_window` so X
+    // presents that window directly (beneath the ARGB overlay), and simply never
+    // draws it into the overlay (the overlay stays transparent over it). Bypass
+    // is per-window, so the rest of the desktop keeps being composited normally.
     //
     // Recovery is the whole point: `disengage_bypass` re-redirects the window
     // (`composite_redirect_window`) and re-arms its texture on the very next
@@ -2825,7 +2811,7 @@ impl Compositor {
     /// Re-redirect `win` (undo `bypass_window`) and re-arm its compositor state
     /// so `compute_scene` rebinds its texture on the next frame. Recovery only
     /// marks the window for re-composition; it does not synchronously create GL
-    /// resources (that stays in the render phase, per the floating-freeze fix).
+    /// resources, which stay in the render phase like every other bind.
     fn resume_window(&mut self, win: Window) {
         if let Err(e) = checked_void!(self.conn.composite_redirect_window(win, Redirect::MANUAL)) {
             log::debug!("compositor: redirect {win:#x} failed while resuming: {e}");
@@ -2947,8 +2933,6 @@ impl Compositor {
         s
     }
 
-    // ── frame ───────────────────────────────────────────────────────────────
-
     /// Build the explicit scene for this frame into `self.scene` (reused buffer,
     /// no allocation): one `DrawItem` per window that is mapped, on screen and
     /// not hidden. Rebinds any texture whose client repainted, and culls
@@ -2965,16 +2949,15 @@ impl Compositor {
         self.frame_dirty.union(&self.pending_damage);
         self.pending_damage.clear();
 
-        // ── Fase 12, pass 1 (top→bottom): occlusion culling. A window fully
-        // hidden behind a single opaque, square-cornered, on-screen window above
-        // it need never be drawn, saving fragment processing. We walk the stack
-        // from the top so every occluder is known before the window it covers;
-        // `occluder_rects` (a reused buffer) accumulates the opaque rects seen so
-        // far, and a window is marked `occluded` when one of them entirely
-        // contains it. Windows with `opacity < 1` or a rounded corner are *not*
-        // occluders (their corners/translucency would wrongly clip what is
-        // behind), so they never hide another window — a correct, conservative
-        // miss.
+        // Pass 1 (top→bottom): occlusion culling. A window fully hidden behind a
+        // single opaque, square-cornered, on-screen window above it need never be
+        // drawn, saving fragment processing. We walk the stack from the top so
+        // every occluder is known before the window it covers; `occluder_rects`
+        // (a reused buffer) accumulates the opaque rects seen so far, and a window
+        // is marked `occluded` when one of them entirely contains it. Windows with
+        // `opacity < 1` or a rounded corner are *not* occluders (their
+        // corners/translucency would wrongly clip what is behind), so they never
+        // hide another window — a correct, conservative miss.
         self.occluder_rects.clear();
         for &win in self.stack.iter().rev() {
             let Some(cw) = self.wins.get_mut(&win) else {
@@ -3019,7 +3002,7 @@ impl Compositor {
             );
         }
 
-        // ── pass 2 (bottom→top): build the scene, skipping occluded windows.
+        // Pass 2 (bottom→top): build the scene, skipping occluded windows.
         // Iterate by index to avoid per-frame Vec clone (allocation) while still
         // allowing mutable borrows of `self.wins` disjoint from `self.stack`.
         for i in 0..self.stack.len() {
@@ -3156,19 +3139,16 @@ impl Compositor {
                 }
                 continue;
             }
-            // Fase 7 — animation damage. A window whose drawn rect changed since
-            // the last frame must repaint both its previous and current screen
-            // rect, else the pixels it slid off of (and into) linger during
-            // scroll. Emitted into the same `DamageRegion` the XDamage path
-            // uses; `decide_redraw` only turns it into a scissored Partial when
-            // buffer-age is available, so without it the Full fallback still
-            // repaints everything. Done *before* the off-screen cull so a window
-            // scrolling out still damages the area it just vacated.
-            // Only windows that moved (their drawn rect differs from last
-            // frame's) or that the client repainted actually need a damage
-            // entry. A stationary, undamaged window contributes nothing, so the
-            // partial-redraw bounding box no longer balloons to the whole screen
-            // every frame (B5).
+            // Animation damage. A window whose drawn rect changed since the last
+            // frame must repaint both its previous and current screen rect, else
+            // the pixels it slid off of (and into) linger during scroll. Emitted
+            // into the same `DamageRegion` the XDamage path uses; `decide_redraw`
+            // only turns it into a scissored Partial when buffer-age is
+            // available, so without it the Full fallback still repaints
+            // everything. Done *before* the off-screen cull so a window scrolling
+            // out still damages the area it just vacated. A stationary,
+            // undamaged window contributes nothing, so the partial-redraw
+            // bounding box does not balloon to the whole screen every frame.
             let moved = cw.prev_visual != Some(outer)
                 || visual_moved(cw.prev_visual_f, visual)
                 || cw.prev_visual_radius != radius;
@@ -3465,8 +3445,8 @@ impl Compositor {
         for item in &self.scene {
             // The texture is owned by `wins`; `draw_raw` takes the handle and the
             // quad's filter, and elides the `glBindTexture` when it matches
-            // `last_tex` — exactly the bind-cache the `&Texture` path
-            // kept on the texture, reconstructed from the scene.
+            // `last_tex`. That bind cache is reconstructed from the scene order
+            // here rather than carried on the texture itself.
             crate::backend::x11::trace::trace!(
                 "submitted_geometry",
                 "win={} dst={:?} radius={} opacity={}",
@@ -3514,7 +3494,7 @@ impl Compositor {
         // The just-presented frame is now the committed back buffer, so the
         // accumulated damage describes only what changed since this present.
         // Clearing it each frame bounds the partial-redraw work and stops the
-        // region from growing until it covers the whole screen (B4).
+        // region from growing until it covers the whole screen.
         // Commit history only after `end_frame` has successfully submitted the
         // frame boundary. A full repaint is recorded as a full marker so a
         // later multi-buffer age still requests a full repair when necessary.
@@ -3544,10 +3524,10 @@ impl Compositor {
             self.needs_full = true;
             self.dirty_reasons.insert(DirtyReason::SURFACE);
         }
-        // A transition that is still mid-flight (or a newly triggered one whose
-        // first interpolated frame was just produced) keeps the loop awake the
-        // same way an ongoing camera animation does — through the one-shot
-        // GEOMETRY dirty bit that survives `clear_dirty` as FrameReason::Geometry.
+        // A transition that was already in flight when this frame was built keeps
+        // the loop awake through the caller's animation reason; the one-shot
+        // GEOMETRY bit below additionally buys one more frame for a transition
+        // that only started *during* this render.
         if presenting {
             self.dirty = true;
             self.dirty_reasons.insert(DirtyReason::GEOMETRY);
@@ -3825,9 +3805,9 @@ impl Compositor {
                 // compositor finished scanning — never receive a `MapNotify`, so
                 // routing them through `track` alone leaves `mapped=false` and
                 // `tex=None`. The renderer skips any window without a GPU texture
-                // (render pass 2: `let Some(tex) = cw.tex … else continue`), so the
-                // tiles would vanish. Mark them mapped and bind their texture now.
-                // Non-viewable windows keep the lazy `track` path (they bind on
+                // (`compute_scene` pass 2: `let Some(tex) = cw.tex … else continue`),
+                // so the tiles would vanish. Mark them mapped and bind their texture
+                // now. Non-viewable windows keep the lazy `track` path (they bind on
                 // their own MapNotify).
                 let viewable = self
                     .conn
@@ -3963,12 +3943,11 @@ impl Drop for Compositor {
     }
 }
 
-// ── stacking order (pure) ─────────────────────────────────────────────────────
-//
-// The draw order is the X sibling order, and X only ever reports it as
-// "`win` is now immediately above `above`". These three helpers are the whole
-// of that bookkeeping, kept free of `self` so the ordering rules can be tested
-// against a plain `Vec` with no server, no GL and no window manager.
+// Stacking order. The draw order is the X sibling order, and X only ever
+// reports it as "`win` is now immediately above `above`". These three helpers
+// are the whole of that bookkeeping, kept free of `self` so the ordering rules
+// can be tested against a plain `Vec` with no server, no GL and no window
+// manager.
 
 /// Apply one X restack to a bottom→top order.
 ///
@@ -4062,10 +4041,15 @@ fn screen_visuals(screen: &Screen) -> Vec<VisualFormat> {
     out
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-
 /// Translate a drawable-local `XDamage` rectangle into the compositor's root
 /// coordinate system, including the current presentation transform.
+///
+/// `XDamage` reports rects in the drawable's own space, and its `geometry` is
+/// the *border-inclusive* top-left, so the content origin is `x + bw` while the
+/// content extent is the border-free interior of `outer`. The scaling onto the
+/// drawn rect rounds out (floor/ceil) rather than to nearest: the result is
+/// damage, and a rounded-in edge would leave the outermost row or column of a
+/// damaged area unrepainted.
 fn map_damage_rect(cw: &CompWin, local: Rect, geometry_x: i32, geometry_y: i32) -> Rect {
     let source = Rect::new(
         geometry_x.saturating_add(cw.border_w as i32),
@@ -4097,8 +4081,8 @@ fn map_damage_rect(cw: &CompWin, local: Rect, geometry_x: i32, geometry_y: i32) 
 }
 
 fn set_empty_input_region(conn: &XConn, win: Window) -> Result<(), String> {
-    // XFIXES: set the window's input region to the empty region. We create an
-    // empty region (no rectangles) and assign it as the window's input shape.
+    // An XFixes region with no rectangles is the empty region; assigning it as
+    // the window's INPUT shape makes the overlay transparent to the pointer.
     let region = conn.generate_id().map_err(|e| e.to_string())?;
     checked_void!(conn.xfixes_create_region(region, &[]))?;
     if let Err(e) =
@@ -4254,13 +4238,10 @@ mod stack_tests {
         ));
     }
 
-    /// The regression this whole commit exists for.
-    ///
-    /// Two windows, A below B... then the WM raises B. Before this change the
-    /// compositor never learned about it: `raise()` is a bare
-    /// `ConfigureWindow(stack_mode: ABOVE)`, which sets no `stack_dirty` flag,
-    /// so the frame kept being drawn with A on top until some unrelated
-    /// map/unmap forced a `QueryTree`.
+    /// `raise()` is a bare `ConfigureWindow(stack_mode: ABOVE)`, so it produces
+    /// no incremental restack input of its own; the draw order must still move
+    /// `win` above the sibling the server reported, or it stays under the window
+    /// it should cover until an unrelated map/unmap forces a `QueryTree`.
     #[test]
     fn raising_b_draws_b_above_a() {
         let mut stack = vec![B, A]; // bottom→top: B at the bottom, A on top
@@ -4363,9 +4344,9 @@ mod stack_tests {
     }
 }
 
-/// Pure tests for the damage-region accumulator that drives partial redraw.
-/// No X/GL: `DamageRegion` is a fixed-capacity, zero-alloc structure, so it can
-/// be exercised entirely in CI.
+/// Pure tests for the damage-region accumulator that drives partial redraw:
+/// `DamageRegion` is a fixed-capacity, zero-alloc structure, so the whole
+/// policy is exercisable without X or GL.
 #[cfg(test)]
 mod damage_tests {
     use super::{
@@ -4456,7 +4437,8 @@ mod damage_tests {
         assert_eq!(damage, Rect::new(10, 20, 1, 1));
     }
 
-    /// damage that would force a larger (or full) redraw.
+    /// A stationary window contributes no old-rect entry, so it cannot force a
+    /// larger (or full) redraw.
     #[test]
     fn stationary_window_damages_only_current() {
         let cur = Rect::new(50, 50, 100, 100);
@@ -4498,9 +4480,9 @@ mod damage_tests {
         assert_eq!(bbox, Rect::new(0, 0, 600, 100), "union must span 0..600");
     }
 
-    /// Fase 12: a window is occluded only when a *single* opaque rect above it
-    /// contains it entirely. Joint coverage by two side-by-side windows (neither
-    /// of which alone contains it) must NOT report occlusion — that is the
+    /// A window is occluded only when a *single* opaque rect above it contains
+    /// it entirely. Joint coverage by two side-by-side windows (neither of
+    /// which alone contains it) must NOT report occlusion — that is the
     /// conservative miss the helper is allowed to make.
     #[test]
     fn fully_covered_by_single_occluder_only() {
@@ -4580,10 +4562,10 @@ mod damage_tests {
         assert_eq!(b, Rect::new(100, 50, 210, 210), "bbox must span every rect");
     }
 
-    // ── I4/I5: DamageSubtract must happen even while bypassed ──────────────
-    // Pure model of on_damage bookkeeping split: subtract always, mark dirty
-    // only when not bypassed. This is the minimal extraction that mirrors the
-    // fixed on_damage without needing a real XConn.
+    // Invariant mirrored from `on_damage`: the `DamageSubtract` cut happens for
+    // every `DamageNotify`, including while bypassed; only render scheduling is
+    // suppressed by bypass. Extracted as a pure model because the real path
+    // needs a live `XConn`.
     fn damage_bookkeeping(bypassed: bool) -> (bool, bool) {
         // (do_subtract, do_mark_dirty)
         (true, !bypassed)
@@ -4820,8 +4802,8 @@ mod coverage_tests {
     }
 }
 
-/// Pure tests for the full/partial/idle frame decision. No X/GL: `decide_redraw`
-/// is a free function of three booleans, so the policy is fully covered in CI.
+/// Full/partial/idle frame planning is a pure function of three booleans plus
+/// the damage journal, so the whole policy is coverable without X or GL.
 #[cfg(test)]
 mod frameplan_tests {
     use super::{decide_redraw, plan_aged_damage, DamageRegion, FrameMode};
@@ -4881,14 +4863,12 @@ mod frameplan_tests {
     }
 }
 
-///
-/// This is the *measure* half of the "idle must be near-free / 0 allocs per
-/// frame" rule from the compositor plan. It does not touch X or GL (the path
-/// under test — `live_placements` = `layout::arrange` → `present_into` — is a
-/// pure function of `State`), so it runs in CI and on a laptop alike, and it
-/// catches two regressions the unit tests would miss: a per-frame allocation
-/// sneaking back in, and the projection cost drifting past a single frame
-/// budget at realistic window counts.
+/// The *measure* half of the "idle must be near-free / 0 allocs per frame"
+/// rule. The path under test — `live_placements` = `layout::arrange` →
+/// `present_into` — is a pure function of `State`, so it needs neither X nor GL
+/// and runs in CI unchanged. It catches the two things unit tests miss: a
+/// per-frame allocation sneaking back in, and projection cost drifting past a
+/// single frame budget at realistic window counts.
 #[cfg(test)]
 mod bench {
     use super::{
@@ -4901,7 +4881,8 @@ mod bench {
     use crate::types::{Client, Column, Focus, Monitor, Rect, State, WindowId};
 
     /// Build a one-monitor state with `n` single-window columns on a 1920x1080
-    /// monitor, camera mid-animation (the only state in which this path runs).
+    /// monitor and a camera mid-animation, the state that forces a full
+    /// projection rebuild every frame.
     fn ribbon(n: u32) -> State {
         let mut state = State::new();
         state
@@ -5075,7 +5056,8 @@ mod bench {
     /// box, and the `decide_redraw` policy — is pure arithmetic over fixed-size
     /// arrays, so it must cost nothing in allocations and a negligible amount of
     /// time per frame. This guards against a per-frame heap allocation sneaking
-    /// into the damage path (which would defeat the whole point of Fase 6..8).
+    /// into the damage path, which would defeat the point of buffering damage
+    /// as rects at all.
     #[test]
     fn damage_region_and_plan_is_allocation_free_and_cheap() {
         let iters: u64 = 20_000;
@@ -5106,12 +5088,12 @@ mod bench {
         assert_eq!(decide_redraw(true, false, true), FrameMode::Partial);
     }
 
-    /// Fase 12: the occlusion pass (top→bottom `fully_covered_by` over the
-    /// opacquer rect set) is pure arithmetic over a reused buffer, so per frame
-    /// it must cost no allocations and a negligible amount of time even at high
-    /// window counts. This guards against a per-frame heap allocation sneaking
-    /// into the new pass (which would defeat the "0 allocs/frame" rule the rest
-    /// of the plan fought for).
+    /// The occlusion pass (top→bottom `fully_covered_by` over the occluder rect
+    /// set) is pure arithmetic over a reused buffer, so per frame it must cost no
+    /// allocations and a negligible amount of time even at high window counts.
+    /// This guards against a per-frame heap allocation sneaking into the pass,
+    /// which would defeat the "0 allocs/frame" rule the rest of the frame path
+    /// depends on.
     #[test]
     fn occlusion_pass_is_cheap_and_allocation_free() {
         use super::fully_covered_by;
@@ -5315,7 +5297,7 @@ mod lifecycle_tests {
     /// ribbon rect moves *out* under the camera while the presentation spring
     /// interpolates, so the live x endpoint is the moving one; the test drives
     /// the live side exactly like the loop does and requires the first frames
-    /// to stay strictly inside the from→endpoint envelope (B4/c999c27).
+    /// to stay strictly inside the from→endpoint envelope.
     #[test]
     fn navigation_away_from_fullscreen_glides_back_to_the_ribbon() {
         let mut cw = transitioning_window();
@@ -5359,9 +5341,7 @@ mod lifecycle_tests {
     /// Navigation *into* a fullscreen window from an off-screen ribbon position
     /// must animate from where the window actually *is* when the retarget
     /// lands — mid-scroll that is off-screen — not from the old settled goal
-    /// and not a snap to the screen rect. Mirrors the traced
-    /// fullscreen→fullscreen entry (x 796→0 over ~219 intermediate frames,
-    /// progress 0→1, exact endpoint).
+    /// and not a snap to the screen rect.
     #[test]
     fn navigation_into_fullscreen_starts_from_the_presented_geometry() {
         let mut cw = transitioning_window();
@@ -5421,17 +5401,15 @@ mod lifecycle_tests {
         assert!(cw.presentation.is_none());
     }
 
-    /// The core invariant the floating-freeze fix relies on: `observe_configure`
-    /// is *pure* — it never touches X11 or GL — and it reports a size change
-    /// exactly when the window was resized (so the caller invalidates + defers the
-    /// GLXPixmap/texture recreation to the once-per-frame render phase) and
-    /// reports no change (a move-only `ConfigureNotify`) so no GL work is queued.
-    ///
-    /// Regression guard: before the fix, `on_configure` created the new
-    /// GLXPixmap/texture *synchronously inside the event handler* — every
-    /// `ConfigureNotify` a client-driven floating resize emitted paid a blocking
-    /// `glXCreatePixmap`+`glXBindTexImageEXT`, which froze the frame. The
-    /// decision itself must stay a cheap, side-effect-free mapping.
+    /// The core invariant of deferred binding: `observe_configure` is *pure* —
+    /// it never touches X11 or GL — and it reports a size change exactly when the
+    /// window was resized (so the caller invalidates the GLXPixmap/texture and
+    /// lets the once-per-frame render phase recreate it) and reports no change
+    /// (a move-only `ConfigureNotify`) so no GL work is queued at all. The
+    /// decision must stay a cheap, side-effect-free mapping: every
+    /// `ConfigureNotify` a client-driven floating resize emits would otherwise
+    /// pay a blocking `glXCreatePixmap`+`glXBindTexImageEXT` inside the event
+    /// handler, and the frame would not advance.
     #[test]
     fn observe_configure_is_pure_and_reports_resize_only() {
         let vf = VisualFormat {
@@ -5454,8 +5432,7 @@ mod lifecycle_tests {
         assert_eq!(cw.outer, Rect::new(10, 20, 104, 54));
 
         // Move-only (same w/h, different position): must NOT be reported as a
-        // resize, or the (deferred) bind would be needlessly re-armed for a pure
-        // move — the path that, done synchronously, froze move/resize drags.
+        // resize, or the deferred bind would be re-armed for a pure move.
         let moved = cw.observe_configure(40, 60, 100, 50, 2);
         assert!(
             !moved,
@@ -5470,13 +5447,10 @@ mod lifecycle_tests {
     }
 
     /// Border width is folded into `outer` so the compositor's drawn rect matches
-    /// the window's frame geometry. A border change with no size change is a move
-    /// for this decision (the bind decision uses `resized` only).
-    /// `outer` includes the border, so a border-width change expands `outer` and is
-    /// therefore reported as a resize (matches `on_configure`'s original decision,
-    /// which compared `outer.w`/`outer.h`). This guards that the resize flag is
-    /// driven by the drawn rect — including the border — so a focused-window
-    /// border change still re-invalidates the GL texture correctly.
+    /// the window's frame geometry, and because `outer` includes the border a
+    /// border-width change expands `outer` and is therefore reported as a
+    /// resize. The resize flag is driven by the drawn rect — border included — so
+    /// a focused-window border change still re-invalidates the GL texture.
     #[test]
     fn observe_configure_expands_by_border() {
         let vf = VisualFormat {
@@ -5501,9 +5475,9 @@ mod lifecycle_tests {
     /// GL transform = the placement's outer frame *as emitted*: X11
     /// `ConfigureWindow` x/y already mark the border-inclusive top-left
     /// (layout.rs subtracts 2·bw from content width; `emit_geometry` wires
-    /// x/y through verbatim). The compositor must therefore NOT shift the
-    /// quad by (-bw,-bw) — that displaced every GL frame one border up-left
-    /// of the native frame. w/h still grow by 2·bw (content-only measures).
+    /// x/y through verbatim), so the quad must NOT be shifted by (-bw,-bw) —
+    /// that would displace every GL frame one border up-left of the native
+    /// frame. w/h still grow by 2·bw (content-only measures).
     #[test]
     fn set_transform_keeps_outer_origin_without_bw_shift() {
         let vf = VisualFormat {
@@ -5578,13 +5552,13 @@ mod lifecycle_tests {
         assert_eq!(cw.transform_radius, 12);
     }
 
-    /// Fase 6 regression: the fullscreen-square policy must hold per monitor,
-    /// not just against the outputs' union. A fullscreen window on either
-    /// monitor of a two-monitor layout covers that monitor edge-to-edge, so
-    /// it must be square — the old union-only check kept it rounded, which is
-    /// exactly "rounded corners where the fullscreen contract demands a full
-    /// surface" (and incoherent with the X11 Shape path, which keys on
-    /// `is_fullscreen`, and with bypass, which presents directly).
+    /// The fullscreen-square policy holds *per monitor*, not just against the
+    /// outputs' union. A fullscreen window on either monitor of a two-monitor
+    /// layout covers that monitor edge-to-edge, so it must be square; a
+    /// union-only check leaves it rounded, which is exactly "rounded corners
+    /// where the fullscreen contract demands a full surface" (and incoherent
+    /// with the X11 Shape path, which keys on `is_fullscreen`, and with bypass,
+    /// which presents directly).
     #[test]
     fn set_transform_squares_fullscreen_on_each_monitor() {
         let vf = VisualFormat {
