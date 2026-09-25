@@ -394,6 +394,13 @@ impl Default for Column {
 /// - `stiffness`/`damping` are sanitized at integration time; damping is also
 ///   bounded relative to `sqrt(stiffness)` so a slow overdamped pole cannot keep
 ///   a pixel-settled camera active indefinitely.
+/// - Every frame is integrated from the f64 continuation of the state (see the
+///   private `x`/`v` fields), never from the rounded `position`. The published
+///   `position` is that continuation rounded to f32, which is what every caller
+///   reads; rounding is therefore a publication step and never an input to the
+///   next one, so the settle envelope is reachable at *any* offset instead of
+///   only where `ulp(position)` happens to be small enough for the per-frame
+///   rounding error to stay under `CAMERA_SETTLE_VELOCITY`.
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
     /// Current scroll offset in px.
@@ -407,6 +414,27 @@ pub struct Camera {
     /// Damper (`30.0` default, bounded by `MIN_DAMPING` and the stability
     /// ratio derived from stiffness).
     pub damping: f32,
+    // `position` and `velocity` as the f64 the integrator actually carries.
+    //
+    // `step` solves the oscillator over `dt` in f64 and rounds the result into
+    // the two public fields. Were those rounded values fed back as the next
+    // step's initial condition — which is what integrating an f32 state does —
+    // the trajectory would be re-quantised once per frame, and the error that
+    // injects is not a constant offset: the spring feeds it back through both
+    // the restoring and the damping term, so it settles at a steady-state speed
+    // of roughly `k/c · ½ · ulp(position)`. That floor grows with the scroll
+    // offset, and once it passes `CAMERA_SETTLE_VELOCITY` the animation can
+    // never satisfy the settle predicate at all: the stored state stops moving
+    // (the residual is a couple of ULPs, so no representable step exists) while
+    // the velocity sits just above the threshold, forever. At 12 000 px — three
+    // full-width columns on a 4K workarea — that floor is ~0.013 px/s, an order
+    // of magnitude above the threshold, which is why the camera parked up to
+    // ~8 000 px and never beyond. Carrying the state in f64 removes the
+    // injection altogether: the analytic solution then converges geometrically
+    // for every sanitised spring, and the published f32 follows it to the target
+    // within a fraction of an ULP.
+    x: f64,
+    v: f64,
 }
 
 /// Upper bound for a user-supplied spring constant. `Camera::step` evaluates
@@ -448,6 +476,8 @@ impl Camera {
             velocity: 0.0,
             stiffness: 220.0,
             damping: 30.0,
+            x: pos as f64,
+            v: 0.0,
         }
     }
 
@@ -460,7 +490,13 @@ impl Camera {
             // Repeated focus/arrange notifications for the same endpoint must
             // not continuously cancel an in-flight spring.
             if (self.target - target).abs() > 1e-4 {
+                // The analytic velocity has to be zeroed alongside the published
+                // one, or the continuation check in `analytic_state` would see a
+                // published velocity that is not its rounding and drop back to
+                // the f32 position — losing the f64 carry on every retarget,
+                // which is exactly the case a scroll retargets on every step.
                 self.velocity = 0.0;
+                self.v = 0.0;
             }
             self.target = target;
         }
@@ -515,8 +551,13 @@ impl Camera {
 
         let stiffness = self.stiffness.clamp(MIN_STIFFNESS, MAX_SPRING) as f64;
         let damping = bounded_damping(stiffness as f32, self.damping) as f64;
-        let x0 = self.position as f64;
-        let v0 = self.velocity as f64;
+        // Integrate the analytic state, not the pair of f32 fields the caller
+        // can see: those are this step's *output*. Rounding them and seeding the
+        // next step with the result is what gave the trajectory a per-frame
+        // quantisation floor proportional to `ulp(position)`, which is a speed
+        // floor the settle predicate cannot be below once the scroll offset is
+        // large — the camera then parks nowhere, however long it is stepped.
+        let (x0, v0) = self.analytic_state();
         let target = self.target as f64;
         let y0 = x0 - target;
         let t = dt as f64;
@@ -551,8 +592,13 @@ impl Camera {
             (y, v)
         };
 
-        self.position = (target + y1) as f32;
-        self.velocity = v1 as f32;
+        // Keep the f64 continuation and publish its rounding: the pair the
+        // caller reads is `self.x`/`self.v` narrowed to f32, so `analytic_state`
+        // keeps accepting the continuation on the next step.
+        self.x = target + y1;
+        self.v = v1;
+        self.position = self.x as f32;
+        self.velocity = self.v as f32;
         if !self.position.is_finite() || !self.velocity.is_finite() {
             self.snap(self.target);
             return false;
@@ -572,6 +618,32 @@ impl Camera {
         self.position = pos;
         self.target = pos;
         self.velocity = 0.0;
+        self.x = pos as f64;
+        self.v = 0.0;
+    }
+
+    /// The state to integrate from: the f64 continuation while the published f32
+    /// pair still is its rounding, the published pair itself otherwise.
+    ///
+    /// The public fields stay authoritative. A caller that overwrites `position`
+    /// or `velocity` — a test fixture, a manual nudge, a `Camera` built before
+    /// this state existed — makes the pair disagree with the continuation, and
+    /// the step is then taken from exactly what the caller wrote. Accepting the
+    /// continuation when the pair matches is safe rather than merely convenient:
+    /// it is the same f32 state, and the f64 is the more precise copy of the
+    /// trajectory the camera has been following.
+    ///
+    /// The comparison is exact on purpose: "is the published pair still the
+    /// rounding of this state" has no tolerance to speak of, and a margin would
+    /// quietly keep a stale continuation alive after a caller nudged the camera.
+    #[inline]
+    #[allow(clippy::float_cmp)]
+    fn analytic_state(&self) -> (f64, f64) {
+        if self.position == self.x as f32 && self.velocity == self.v as f32 {
+            (self.x, self.v)
+        } else {
+            (self.position as f64, self.velocity as f64)
+        }
     }
 }
 
@@ -2737,7 +2809,7 @@ mod column_weight_tests {
 
 #[cfg(test)]
 mod spring_hardening_tests {
-    use super::{sanitize_spring, spring_smooth, Camera};
+    use super::{sanitize_spring, spring_smooth, Camera, MIN_DAMPING};
 
     #[test]
     fn stiffness_zero_negative_and_non_finite_fall_back_to_default() {
@@ -2846,6 +2918,120 @@ mod spring_hardening_tests {
             cam.step(dt);
             elapsed += dt;
         }
+    }
+
+    /// Frames until the camera parks, or the step cap if it never does.
+    fn frames_to_park(cam: &mut Camera, dt: f32, cap: u32) -> Option<u32> {
+        let mut frames = 0;
+        while cam.step(dt) {
+            frames += 1;
+            if frames >= cap {
+                return None;
+            }
+        }
+        Some(frames)
+    }
+
+    /// The settle contract has to hold at *any* offset, not just where the f32
+    /// resolution of the position happens to be fine enough. Past ~12 000 px the
+    /// residual used to freeze one or two ULPs short of the target with the
+    /// velocity sitting just above `CAMERA_SETTLE_VELOCITY`, and the frame loop
+    /// kept asking for frames for as long as it was left running.
+    // The exact-endpoint assertions are bit comparisons on purpose: parking
+    // installs `target` itself, which is the contract, not an approximation of it.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn camera_parks_at_the_offsets_where_the_old_rounding_could_not() {
+        for target in [
+            8_192.0_f32,
+            12_000.0,
+            13_811.895_5,
+            16_384.0,
+            100_000.0,
+            -16_384.0,
+            1.0e6,
+        ] {
+            let mut cam = Camera::new(0.0);
+            cam.target = target;
+            let frames = frames_to_park(&mut cam, 1.0 / 60.0, 20_000)
+                .unwrap_or_else(|| panic!("{target} px never parked"));
+            // A park, not a stall: the exact endpoint is installed, so the camera
+            // is no longer scheduling frames.
+            assert_eq!(
+                cam.position, target,
+                "{target} px parked at {}",
+                cam.position
+            );
+            assert_eq!(cam.velocity, 0.0, "{target} px kept its momentum");
+            assert!(!cam.needs_update(), "{target} px still asks for frames");
+            assert!(frames > 0, "{target} px snapped without animating");
+        }
+    }
+
+    /// The offset alone is not the whole story: a *slow* spring reaches the
+    /// frozen state while still a pixel or two outside the envelope, so a fix
+    /// that only addressed the velocity clause would leave these running. Both
+    /// extreme damping sanitizers get pinned, since they are what `arb_raw_spring`
+    /// reaches for most hostile inputs.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn camera_parks_through_the_slowest_sanitized_springs() {
+        for (stiffness, damping) in [(1.0, 10.0), (220.0, MIN_DAMPING), (220.0, 30.0)] {
+            let (stiffness, damping) = sanitize_spring(stiffness, damping);
+            let mut cam = Camera::new(0.0);
+            cam.target = 50_000.0;
+            cam.stiffness = stiffness;
+            cam.damping = damping;
+            let frames = frames_to_park(&mut cam, 1.0 / 60.0, 40_000)
+                .unwrap_or_else(|| panic!("k={stiffness} c={damping} never parked"));
+            assert_eq!(
+                cam.position, 50_000.0,
+                "k={stiffness} c={damping} parked short"
+            );
+            assert!(
+                !cam.needs_update(),
+                "k={stiffness} c={damping} still animates"
+            );
+            assert!(frames > 0);
+        }
+    }
+
+    /// Near equilibrium the camera must *not* be cut short: a state already
+    /// inside the envelope still animates while it is visibly moving, and a
+    /// caller that overwrites the published state is integrated from exactly
+    /// what it wrote rather than from a continuation the caller never saw.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn camera_near_equilibrium_is_neither_cut_short_nor_ignored() {
+        let mut cam = Camera::new(0.0);
+        cam.target = 100.0;
+        // 0.4 px out — inside the settle envelope — but travelling at 40 px/s, so
+        // parking here would be a visible jump.
+        cam.position = 99.6;
+        cam.velocity = 40.0;
+        assert!(cam.step(1.0 / 60.0), "a moving camera was declared settled");
+        assert_ne!(
+            cam.position, 100.0,
+            "the camera snapped instead of animating"
+        );
+        assert!(
+            (cam.position - 99.6).abs() > 1e-3,
+            "a moving camera inside the envelope was frozen at {}",
+            cam.position
+        );
+
+        // The published fields are the whole of what a caller may set, so a
+        // hand-placed position with no matching continuation is the initial
+        // condition of the step.
+        let mut cam = Camera::new(0.0);
+        cam.target = 0.0;
+        cam.position = 1.0;
+        assert!(cam.step(1.0 / 60.0));
+        assert!(
+            cam.position > 0.9,
+            "a hand-set position was not honoured: {}",
+            cam.position
+        );
     }
 
     #[test]

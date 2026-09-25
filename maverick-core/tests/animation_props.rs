@@ -318,25 +318,21 @@ proptest! {
 // relative to sqrt(stiffness) so a slow overdamped pole cannot keep a
 // pixel-settled camera active indefinitely". A camera that has arrived is
 // pixel-settled, so it must also stop asking the compositor's scheduler for
-// frames.
+// frames — at any offset, with any spring the sanitizers accept.
 //
-// It does not, once the offset is large enough. The position residual falls to
-// the f32 unit in the last place long before `CAMERA_SETTLE_POSITION` (0.5 px)
-// is in play, but the closed-form solution's *velocity* stalls at a small
-// non-zero floor — 0.0134 px/s against a `CAMERA_SETTLE_VELOCITY` of 0.01 — so
-// `needs_update` stays true forever and the frame loop never parks.
-//
-// Measured with the documented default spring (k=220, c=30, i.e.
-// `sanitize_spring`'s own fallbacks): parks in 64-81 frames for offsets up to
-// 8000 px, and never parks at 12000 px or beyond. That is about three
-// full-width columns on a 4K workarea, or twelve on a 1024 px one, so it is
-// reachable in ordinary sessions. Kept ignored: the defect is reported, not
-// fixed.
+// The offset is the reason this is interesting: the residual falls to the f32
+// unit in the last place long before `CAMERA_SETTLE_POSITION` (0.5 px) is in
+// play, so whether the camera can park at all is decided by a state whose
+// resolution is `ulp(position)`. Re-seeding each step from that rounded position
+// gave the trajectory a speed floor of roughly `k/c · ½ · ulp(position)`, which
+// passes `CAMERA_SETTLE_VELOCITY` (0.01 px/s) at around 12 000 px — three
+// full-width columns on a 4K workarea, or twelve on a 1024 px one, so it was
+// reachable in ordinary sessions. Integrating the f64 continuation instead makes
+// the envelope reachable everywhere, and the least-damped springs — whose floor
+// is the highest, and which were frozen *outside* the envelope, 1 to 2 px short
+// of the target — park too.
 proptest! {
     #[test]
-    #[ignore = "known defect: above ~2^14 px the residual reaches the f32 ULP, so the \
-                settle envelope never closes and the camera asks for frames forever \
-                after arriving. Reported, not fixed."]
     fn a_camera_parks_itself_however_far_it_travelled(
         position in arb_scroll(),
         target in arb_scroll(),
