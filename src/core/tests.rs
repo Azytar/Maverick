@@ -4030,6 +4030,109 @@ mod unit_tests {
             .expect("monitor switch must not break invariants");
     }
 
+    // The EWMH per-axis maximize path is a production entry point that mutates
+    // state *outside* `Command::execute`, so it never reaches the engine's
+    // post-command safety net and has to resolve a deferral it orphans itself.
+    // A maximize overlay is presented exactly while it holds the focus, so a
+    // client asking for one axis to be dropped takes its own overlay down — and
+    // the deferral queued behind it is exactly the orphan `check_invariants` #8c
+    // rejects. Without the reconciliation the queued window's focus would land
+    // behind a presentation that no longer exists.
+    #[test]
+    fn the_per_axis_ewmh_maximize_path_resolves_the_deferral_it_orphans() {
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
+        t_manage(&mut engine, 1);
+        t_focus(&mut engine, 1);
+        crate::core::commands::apply_maximize(&mut engine.state, 1, Some(true), Some(true));
+        assert_eq!(
+            engine.state.monitors[mi].workspaces[ws_i].presented_maximize,
+            Some(1),
+            "window 1 is the maximize overlay"
+        );
+        assert!(
+            !t_manage(&mut engine, 2),
+            "window 2 is deferred behind the overlay"
+        );
+
+        // Exactly what the `_NET_WM_STATE_MAXIMIZED_*` handler does: the core
+        // mutator on its own, with no `Engine::execute` around it.
+        crate::core::commands::apply_maximize(&mut engine.state, 1, Some(false), Some(false));
+
+        assert_eq!(
+            engine.state.monitors[mi].workspaces[ws_i].presented_maximize, None,
+            "un-maximizing the owner takes its overlay down"
+        );
+        assert_eq!(
+            engine.state.monitors[mi].focused,
+            Some(2),
+            "the deferred window takes the focus the moment the overlay goes away"
+        );
+        assert!(
+            engine.state.pending_focus.is_none(),
+            "the deferral is resolved exactly once"
+        );
+        engine
+            .state
+            .check_invariants()
+            .expect("the EWMH per-axis path must preserve invariants");
+    }
+
+    // The other half of the same contract: a request that changes nothing must
+    // change nothing. A per-axis message that asks for the state a window is
+    // already in (`None` on either axis, or the axis bits it already holds) is a
+    // no-op, and the early return that skips the flag mutation has to skip the
+    // reconciliation too — otherwise a client repeating the same message would
+    // silently cancel a live deferral that nothing dismissed.
+    #[test]
+    fn a_no_op_ewmh_maximize_request_leaves_a_live_deferral_alone() {
+        // `owner_fullscreen` picks which overlay owns the deferral: a fullscreen
+        // window is one the per-axis path never touches, so for it every axis
+        // request is a no-op by construction — which is the shape a maximized
+        // request for a window that is not maximized arrives in.
+        let case = |owner_fullscreen: bool, vert: Option<bool>, horiz: Option<bool>| {
+            let mut engine = setup_engine();
+            let mi = engine.state.sel_mon;
+            let ws_i = engine.state.monitors[mi].active_ws;
+            engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
+            t_manage(&mut engine, 1);
+            t_focus(&mut engine, 1);
+            if owner_fullscreen {
+                t_set_fullscreen(&mut engine, 1, true);
+            } else {
+                crate::core::commands::apply_maximize(&mut engine.state, 1, Some(true), Some(true));
+            }
+            assert!(
+                !t_manage(&mut engine, 2),
+                "window 2 is deferred behind the overlay"
+            );
+            let before = engine.state.pending_focus;
+
+            crate::core::commands::apply_maximize(&mut engine.state, 1, vert, horiz);
+
+            assert_eq!(
+                engine.state.pending_focus, before,
+                "a no-op maximize request (fullscreen owner: {owner_fullscreen}, \
+                 {vert:?}, {horiz:?}) must not resolve a live deferral"
+            );
+            assert_eq!(
+                engine.state.monitors[mi].focused,
+                Some(1),
+                "the overlay keeps the focus"
+            );
+            engine
+                .state
+                .check_invariants()
+                .expect("a no-op maximize request must preserve invariants");
+        };
+        case(false, None, None);
+        case(false, Some(true), Some(true));
+        case(true, Some(false), Some(false));
+        case(true, None, None);
+    }
+
     #[test]
     fn maximize_roundtrip_and_unmaximize() {
         let mut engine = setup_engine();

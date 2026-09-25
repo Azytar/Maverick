@@ -435,6 +435,20 @@ pub(crate) fn decide_active_window(state: &State, win: WindowId) -> ActiveWindow
 /// decides and mutates `MAXIMIZED_V/H`, `saved_geom`, `geom`, `geometry_dirty`
 /// and `presented_maximize`. The backend's `SetMaximized` handler carries only
 /// the X11 half.
+///
+/// Also the reconciliation point for a deferral this transition orphans, because
+/// the EWMH per-axis path (`_NET_WM_STATE_MAXIMIZED_VERT` / `..._HORZ` in
+/// `src/backend/x11/events.rs`) calls this *directly* instead of going through
+/// `Engine::execute`, so it never reaches the engine's post-command safety net.
+/// A maximize overlay is presented exactly while it holds the focus, so
+/// un-maximizing the owner — or the client asking for a single axis to be
+/// dropped — takes the overlay down, and a deferral left queued behind it is
+/// exactly the orphan `check_invariants` #8c rejects. Resolving it here is the
+/// same reconciliation `manage()` performs after focusing a window off an
+/// overlay. The focus reaches X through the ordinary path: this writes the
+/// logical focus, and the backend's `reconcile_focus` re-asserts a logical focus
+/// that diverges from the server's on the next focus event, which is the
+/// mechanism every state-only focus write already relies on.
 pub fn apply_maximize(state: &mut State, win: WindowId, vert: Option<bool>, horiz: Option<bool>) {
     if let Some(c) = state.clients.get_mut(&win) {
         let was_max = c.is_maximized();
@@ -463,6 +477,11 @@ pub fn apply_maximize(state: &mut State, win: WindowId, vert: Option<bool>, hori
         c.geometry_dirty = true;
     }
     sync_presented_maximize_everywhere(state, win);
+    // A no-op request returns above without touching presentation, so it must not
+    // resolve anything either: an early return here is the difference between
+    // "the EWMH path heals the deferral it orphans" and "the EWMH path orphans a
+    // deferral on every repeat of the same client message".
+    let _ = reconcile_pending_focus_after_transition(state);
 }
 
 /// Re-derive the maximize presentation on every monitor that can be showing `win`.
