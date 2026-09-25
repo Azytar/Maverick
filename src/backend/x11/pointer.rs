@@ -10,13 +10,12 @@
 //!
 //! # Grab lifecycle
 //!
-//! `on_button_press` grabs the pointer (`SYNC` mode) so
-//! all subsequent motion/release events are delivered to
-//! the WM. `on_motion` computes the delta and routes via
-//! `MoveResize` Command → `run_effects`. `on_button_release`
-//! ungrab and arranges. The `SyncGrabGuard` `Drop`
-//! guarantees `AllowEvents` on every exit path (freeze-risk
-//! log).
+//! A focused managed window carries a per-window `SYNC` button grab (see
+//! `input::grab_buttons`), so the server freezes the pointer on every
+//! `ButtonPress` until `on_button_press` calls `allow_events`. A drag adds an
+//! active `ASYNC` pointer grab on the root, released by `on_button_release`.
+//! `SyncGrabGuard` releases *either* grab on every exit path (see below), so a
+//! handler that returns early can never leave the server with a frozen device.
 //!
 //! # Focus-on-click
 //!
@@ -38,19 +37,12 @@
 //! The `snap_float_to_hints` + `clamp_float_to_workarea`
 //! normalisation keeps the float in-bounds after every
 //! motion event.
-//!
-//! # Safety
-//!
-//! `grab_pointer`/`ungrab_pointer` are X11 FFI calls.
-//! The `SyncGrabGuard` ensures `AllowEvents` is always
-//! sent on drop, even on panic.
 
 use super::render::clamp_float_to_workarea;
 use super::*;
 
-// ── input-trace instrumentation (feature `input-trace`) ───────────────────────
 // `itrace!` is a no-op unless the `input-trace` feature is on, so the call sites
-// below can stay in the code without any runtime cost in normal builds.
+// below cost nothing in normal builds.
 #[cfg(feature = "input-trace")]
 #[allow(unused_macros)]
 macro_rules! itrace {
@@ -64,7 +56,8 @@ macro_rules! itrace {
     ($($arg:tt)*) => {{}};
 }
 
-// ── window-trace instrumentation (feature `window-trace`) ─────────────────────
+// `wtrace!` is the window-level counterpart of `itrace!`: same no-op-unless-
+// enabled trick, different event stream.
 #[cfg(feature = "window-trace")]
 #[allow(unused_macros)]
 macro_rules! wtrace {
@@ -78,19 +71,20 @@ macro_rules! wtrace {
     ($($arg:tt)*) => {{}};
 }
 
-// Drop-guard that GUARANTEES the SYNC pointer grab is always released. The
-// per-window `grab_button(..., GrabMode::SYNC, ...)` freezes the pointer on every
-// ButtonPress until `allow_events` runs; an active drag grab freezes it until
-// `ungrab_pointer` runs. If the handler returns via `?` before reaching those
-// calls, the pointer stays frozen on the *server* side — a global input freeze
-// that survives workspace/window changes. The guard holds a clone of the X
-// connection and performs the release itself on *every* exit path (including
-// errors), so the freeze can never happen regardless of the focus logic above.
+/// How a pointer grab must be undone on exit: either release the frozen
+/// `ButtonPress` back to the client, or drop the active drag grab.
 enum GrabRelease {
     AllowReplay(u32),
     Ungrab,
 }
 
+/// Drop guard that guarantees the pointer grab is released on *every* exit
+/// path. The per-window `grab_button(..., GrabMode::SYNC, ...)` freezes the
+/// pointer on every `ButtonPress` until `allow_events` runs, and an active drag
+/// grab freezes it until `ungrab_pointer` runs. A handler that returns via `?`
+/// before reaching those calls leaves the device frozen on the *server* side —
+/// a global input freeze that survives workspace and window changes. Holding a
+/// clone of the connection, the guard performs the release itself.
 struct SyncGrabGuard {
     conn: Rc<XConn>,
     release: GrabRelease,
@@ -111,11 +105,9 @@ impl Drop for SyncGrabGuard {
                 let _ = self.conn.ungrab_pointer(x11rb::CURRENT_TIME);
             }
         }
-        // A code path returned before releasing the SYNC pointer/active grab,
-        // which would have frozen the pointer on the X server. We auto-released
-        // it to avoid a global input freeze. Log it (always — it indicates a
-        // focus/dispatch error worth surfacing) so the early-return site can be
-        // found and fixed.
+        // Only reached when the handler returned before releasing the grab, so
+        // the freeze is already undone — log it unconditionally to surface the
+        // early return.
         eprintln!(
             "[INPUT-TRACE] FREEZE-RISK: {} exited WITHOUT releasing the SYNC pointer grab — auto-released on drop (pointer was about to freeze)",
             self.tag
@@ -133,8 +125,9 @@ pub(super) struct DragState {
     pub(super) ptr_x: i32,
     pub(super) ptr_y: i32,
     pub(super) resize: bool,
-    /// Grip handed: which corner the resize grows toward. True means the
-    /// pointer grabbed the left/top edge, so width/height grow against it.
+    /// Grip handed: which corner the resize grows toward. True means the pointer
+    /// grabbed the left/top half, so that edge follows the pointer and the
+    /// opposite corner stays anchored.
     pub(super) resize_l: bool,
     pub(super) resize_t: bool,
     /// Whether the pointer actually travelled (≥4px) — distinguishes a click
@@ -158,9 +151,8 @@ impl WindowManager {
 
         // Scroll buttons (4=up,5=down,6=left,7=right). With no modifier they are
         // just delivered to the application (REPLAY_POINTER). With Mod4 held they
-        // scroll the camera of the scroll (niri-style) ribbon layout left/right
-        // (and, in Overview, also vertically) — the characteristic interaction of
-        // this WM that was previously unreachable (bug C9).
+        // scroll the ribbon camera left/right (and, in Overview, also
+        // vertically).
         if e.detail >= 4 {
             let sup: u16 = ModMask::M4.into();
             let clean = clean_mask(u16::from(e.state), self.numlock, self.scroll);
@@ -247,8 +239,8 @@ impl WindowManager {
         // A maximized (non-fullscreen) focused window is also presented as an
         // overlay (see `core::present`), so clicking a *different* window must
         // drop that overlay too. Unlike fullscreen, its flags must be explicitly
-        // cleared or the window stays announced as maximized while drawn as a
-        // normal tile (bug B3) — which also made `Mod4+M` toggle it back up.
+        // cleared or the window stays announced as maximized in `_NET_WM_STATE`
+        // while drawn as a normal tile.
         let focused_present = focused_fs
             || self
                 .engine
@@ -286,9 +278,9 @@ impl WindowManager {
                     // EXCEPTION: a window was silently added behind the overlay
                     // while it owned input (`pending_focus`, set in `manage`).
                     // That window is exactly what the user wants to reach, so the
-                    // click dismisses the overlay and focuses the pending window
-                    // — without this, B is unreachable by pointer while A stays
-                    // fullscreen (the reported pointer-loss bug).
+                    // click dismisses the overlay and focuses the deferred
+                    // window — otherwise it stays unreachable by pointer for as
+                    // long as the overlay is up.
                     let ws_i = self.engine.state.monitors[mi].active_ws;
                     // Only consume the global deferral when it is bound to THIS
                     // monitor/workspace, was created by the overlay (`fw`) we are
@@ -355,8 +347,7 @@ impl WindowManager {
                     //    fullscreen/maximize: the window itself never exits on
                     //    click unless it is part of another app). For a maximized
                     //    window this also clears its `MAXIMIZED_*` flags and
-                    //    rewrites `_NET_WM_STATE`, keeping EWMH state consistent
-                    //    (bug B3).
+                    //    rewrites `_NET_WM_STATE`, keeping EWMH state consistent.
                     if self.transient_of(cw, &[fw]) {
                         self.focus(Some(cw))?;
                     } else if self
@@ -438,9 +429,10 @@ impl WindowManager {
                             resize_t,
                             moved: false,
                         });
-                        // El WM reclama la geometria durante el drag: el sello
-                        // de autoridad del cliente muere aqui, no en el
-                        // siguiente request (el rect resultante ya no es suyo).
+                        // The WM claims geometry for the rest of the drag: the
+                        // client-authority seal dies here, not on the next
+                        // request, because the rect the motion handler computes
+                        // is no longer the client's to assert.
                         if let Some(c) = self.engine.state.clients.get_mut(&cw) {
                             c.float_client_authority = false;
                         }
@@ -450,20 +442,18 @@ impl WindowManager {
             }
         }
 
-        // El warp al centro tras cambiar foco vive únicamente en
-        // `render::focus()` y respeta `cfg.warp_cursor`. El bloque que
-        // estaba aquí duplicaba ese warp de forma incondicional (ignoraba
-        // la config) y competía con él: cada click en un mosaico vecino
-        // movía el puntero dos veces y desalineaba el hit-test del
-        // siguiente click — especialmente visible con flotantes.
+        // `prev_focused` / `drag_started` are consumed by the trace and
+        // allow_events branches below. The pointer warp after a focus change is
+        // deliberately *not* repeated here: `render::focus()` owns it and
+        // honours `cfg.warp_cursor`, and a second warp would fight it — each
+        // click on a neighbouring tile would move the pointer twice and desync
+        // the next click's hit-test, most visibly on floats.
         let _ = prev_focused;
         let _ = drag_started;
 
-        // REPLAY_POINTER: re-delivers the click to the application so popups,
-        //   context menus and dialogs open normally.
-        // ASYNC_POINTER (drag, or the overlay-dismiss path): releases the
-        //   passive-grab freeze and discards the event — used when the press was
-        //   consumed to tear down the overlay rather than delivered to a client.
+        // A drag (active grab) and the overlay-dismiss path consumed the press,
+        // so it must be discarded (ASYNC releases the freeze and drops the
+        // event); a normal click is replayed so the client receives it.
         #[cfg(feature = "input-trace")]
         {
             _guard.emitted = true;
@@ -498,9 +488,8 @@ impl WindowManager {
         &mut self,
         _e: ButtonReleaseEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Unconditional: guarantees the active drag grab is released on every exit
-        // path (see `SyncGrabGuard`), so a failed `focus`/`arrange` inside the
-        // drag-drop handler can never strand the pointer/keyboard grabbed.
+        // Unconditional: the drag grab must be released on every exit path,
+        // including non-trace builds (see `SyncGrabGuard`).
         let mut _guard = SyncGrabGuard {
             conn: self.conn.clone(),
             release: GrabRelease::Ungrab,
@@ -511,9 +500,8 @@ impl WindowManager {
         itrace!("BR-enter drag_active={}", self.drag.is_some());
 
         if let Some(drag) = self.drag.take() {
-            // Explicit ungrab below: mark emitted in ALL builds (the old
-            // cfg-gated mark double-ungrabbed + spammed FREEZE-RISK on every
-            // normal drag release).
+            // Explicit ungrab below: mark emitted in every build, or `Drop`
+            // double-ungrabs and logs a spurious FREEZE-RISK on each release.
             _guard.emitted = true;
             #[cfg(feature = "input-trace")]
             itrace!("BR-ungrab_pointer EMITTED (drag was active)");
@@ -588,15 +576,14 @@ impl WindowManager {
                 } else {
                     g.h = (start_geom.h as i32).saturating_add(dy).max(1) as u32;
                 }
-                // Respect `WM_SIZE_HINTS` (bug B5): clamp to the client's
-                // minimum/maximum size and snap to its size increments, so
-                // terminals / emacs can't be dragged below their hinted
-                // minimum. The hard `1px` floor above only guards against
-                // overflow; real limits come from the hints (shared with the
-                // client `ConfigureRequest` path via `snap_float_to_hints` so
-                // both agree). When the left/top edge is the grabbed
-                // one, the opposite (anchored) corner must stay put after the
-                // width/height snap.
+                // Respect `WM_SIZE_HINTS`: clamp to the client's minimum/maximum
+                // size and snap to its size increments, so terminals / emacs
+                // can't be dragged below their hinted minimum. The hard 1 px
+                // floor above only guards against overflow; the real limits come
+                // from the hints, shared with the client `ConfigureRequest` path
+                // through `snap_float_to_hints` so the two never disagree. With
+                // the left/top edge grabbed, the opposite (anchored) corner must
+                // stay put after the width/height snap.
                 let (mi, bw) = {
                     let c = self.engine.state.clients.get(&win);
                     (
@@ -622,13 +609,14 @@ impl WindowManager {
                     let bottom = start_geom.y + start_geom.h as i32;
                     g.y = bottom - g.h as i32;
                 }
-                // Normalizacion unica (ver `layout::normalize_float_geom`): el
-                // drag-resize comparte snap -> clamp con marco -> settle con el
-                // arrange y con `ConfigureRequest`, asi el rect arrastrado ya es
-                // punto fijo y el siguiente arrange no lo corrige (sin saltos).
-                // El re-anclaje de arriba se repite tras el settle porque este
-                // puede encoger `w/h` una linea de grid: la esquina agarrada
-                // sigue fija y la opuesta (anclada) no se mueve.
+                // Single normalization (see `layout::normalize_float_geom`):
+                // drag-resize shares snap → frame-aware clamp → settle with
+                // `arrange` and with `ConfigureRequest`, so the dragged rect is
+                // already a fixed point and the next arrange has nothing to
+                // correct (no jump). The grabbed-corner re-anchor above is
+                // repeated after the settle because settling can shrink `w`/`h`
+                // by one grid line: the grabbed corner stays put, the anchored
+                // one must not move.
                 let wa = self.engine.state.monitors[mi].workarea;
                 g = clamp_float_to_workarea(g, wa, bw);
                 g = crate::core::layout::settle_to_grid(g, hints);
@@ -674,11 +662,9 @@ impl WindowManager {
 
     /// Mod4 + scroll wheel: drive the column-ribbon camera. We don't free-scroll
     /// the raw camera (that would leave it between columns, breaking the
-    /// accordion target); instead we step the *focused
-    /// column* one slot per notch, which recenters the camera via `ideal_scroll`
-    /// — exactly like `OverviewNav`, just continuous. Mod4+wheel is the
-    /// characteristic interaction of a scroll WM that was previously unreachable
-    /// (bug C9).
+    /// accordion target); instead we step the *focused column* one slot per
+    /// notch, which recenters the camera via `ideal_scroll` — exactly like
+    /// `OverviewNav`, just continuous.
     fn scroll_camera_with_wheel(
         &mut self,
         detail: u8,

@@ -1,15 +1,11 @@
-//! Frame scheduler — pure pacing policy for the X11 render loop (Fase 9).
+//! Frame scheduler — pure pacing policy for the X11 render loop.
 //!
-//! Previously `WindowManager::run_once` interleaved "do I need a frame? why?
-//! when next wake?" with event draining, spring stepping and the vsync wait.
-//! This module extracts that *scheduling* decision into a small, allocation-free
-//! abstraction so the policy is unit-testable away from X11 and GL.
+//! One turn of the loop asks three questions, and this module answers all of
+//! them without touching X11 or GL so the policy stays unit-testable:
 //!
-//! It answers the three questions the loop asks each turn:
-//!
-//! - ¿necesito frame?    → [`FrameScheduler::needs_frame`]
-//! - ¿por qué?           → [`FrameScheduler::reasons`] / [`FrameReason`] bits
-//! - ¿cuándo producirlo? → [`FrameScheduler::timeout_ms`] poll window
+//! - is a frame needed?   → [`FrameScheduler::needs_frame`]
+//! - why?                → [`FrameScheduler::reasons`] / [`FrameReason`] bits
+//! - when may it wait?    → [`FrameScheduler::timeout_ms`] poll window
 //!
 //! # Ownership & lifecycle
 //!
@@ -32,9 +28,9 @@
 use crate::backend::x11::compositor::DirtyReason;
 
 /// Why the render loop must produce a frame this turn. Mirrors the compositor's
-/// `DirtyReason` plus the WM-side `Animation` (springs still moving). Not all
-/// variants are always distinguished by the source — the plan allows a coarser
-/// set — but naming them keeps the *why* legible in logs and tests.
+/// `DirtyReason` plus the WM-side `Animation` (springs still moving). Not every
+/// variant is distinguished at the source, but naming them keeps the *why*
+/// legible in logs and tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FrameReason {
     /// A camera/spring is still moving (scroll, zoom, accordion).
@@ -49,7 +45,7 @@ pub(crate) enum FrameReason {
     Focus,
     /// A wallpaper shader is still animating (its `wallpaper_clock` advances).
     /// Treated like `Animation` — it keeps requesting frames every turn until
-    /// the shader wallpaper is cleared (Fase 9).
+    /// the shader wallpaper is cleared.
     WallpaperAnimation,
 }
 
@@ -87,16 +83,16 @@ impl FrameReason {
     }
 }
 
-/// One nominal refresh period (seconds). Used to bound `dt` so a long idle gap
-/// never produces an absurd spring step on the first frame after activity.
+/// One nominal refresh period (seconds). Doubles as the seed for the
+/// idle→animating edge: a long idle gap must never become the first spring
+/// step after activity resumes.
 pub(crate) const ONE_REFRESH: f32 = 1.0 / 60.0;
 
-/// Clamp the raw time since the previous present into a bounded `dt` for the
-/// frame clock. An idle→animating edge is seeded to one refresh so a scroll that
-/// begins after a long sleep never applies the whole idle gap. Once animation is
-/// already active, the elapsed interval is preserved up to a generous one-second
-/// stall guard; this keeps 15/30/60/120 Hz and ordinary compositor stalls on the
-/// same monotonic timeline without allowing an unbounded catch-up loop.
+/// Upper bound (seconds) on the frame delta [`clamp_frame_dt`] keeps while a
+/// transition is already running. Ordinary stalls pass through untouched; only a
+/// pathological multi-second gap (a suspended process, a stopped compositor)
+/// hits this guard, which keeps 15/30/60/120 Hz on one monotonic timeline
+/// without an unbounded catch-up loop.
 pub(crate) const MAX_ANIMATION_DT: f32 = 1.0;
 
 /// Whether the event loop should add a software refresh wait after a present.
@@ -111,6 +107,9 @@ pub(crate) const fn needs_endpoint_frame(was_animating: bool, animating: bool) -
     was_animating && !animating
 }
 
+/// Bound the raw time since the previous present into a usable frame `dt`:
+/// [`ONE_REFRESH`] on the idle→animating edge, [`MAX_ANIMATION_DT`] while a
+/// transition is already running.
 pub(crate) fn clamp_frame_dt(raw_dt: f32, was_animating: bool) -> f32 {
     if was_animating {
         raw_dt.clamp(0.0, MAX_ANIMATION_DT)
@@ -119,9 +118,10 @@ pub(crate) fn clamp_frame_dt(raw_dt: f32, was_animating: bool) -> f32 {
     }
 }
 
-/// Pure scheduling decision for one turn of the render loop (Fase 9). Records
-/// the reasons a frame is needed and answers whether/why/when. No X, no GL, no
-/// heap: it is a single integer mask.
+/// Pure scheduling decision for one turn of the render loop. Records the
+/// reasons a frame is needed and answers whether/why/when. No X, no GL, no
+/// heap: it is a single integer mask, so the whole policy is unit-testable away
+/// from a display.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct FrameScheduler {
     reasons: u8,
@@ -252,46 +252,15 @@ impl FrameScheduler {
 
 #[cfg(test)]
 mod tests {
-    //! Frame scheduling — when to render the next frame.
-    //!
-    //! Extracted from `mod.rs::run_once` (Fase 9) to separate
-    //! the scheduling decision from the event loop. The
-    //! `FrameScheduler` decides whether a frame is needed
-    //! and how long to wait for the next event.
-    //!
-    //! # Frame reasons
-    //!
-    //! Multiple reasons are coalesced into a single pending
-    //! frame. The `DirtyReason` bitflags are:
-    //! - `DAMAGE` — `XDamage` reported a region change.
-    //! - `GEOMETRY` — a window moved/resized.
-    //! - `SURFACE` — a new surface (pixmap/texture) appeared.
-    //! - `FOCUS` — focus/raise changed stacking.
-    //! - `WALLPAPER` — wallpaper animation tick.
-    //!
-    //! # Animation pacing
-    //!
-    //! `clamp_frame_dt` bounds the idle edge to one refresh and active animation
-    //! to `MAX_ANIMATION_DT`, and includes `glXSwapBuffers` blocking time in the
-    //! measurement (B8 fix). The scheduler does NOT re-seed after present; the
-    //! blocking time is already accounted for.
-    //!
-    //! # Idle pacing
-    //!
-    //! When no frame is needed, `timeout_ms` returns `None`; the event loop
-    //! blocks on X11/control rather than waking periodically. A pending frame
-    //! returns `Some(0)` and is processed immediately.
-    //!
-    //! # Invariants
-    //!
-    //! - `Animation`/`WallpaperAnimation` reasons survive
-    //!   `clear_dirty` so the scheduler always wakes up for
-    //!   the next animation tick.
-    //! - A 0 ms timeout means "render now, then re-evaluate".
-    //! - `is_animating` is true whenever any animation
-    //!   reason is pending.
-
     use super::*;
+
+    // Invariants pinned by this module:
+    //  - reasons coalesce: N marks in a turn cost exactly one frame;
+    //  - `Animation`/`WallpaperAnimation` survive `clear_dirty`, the one-shot
+    //    reasons do not, so only ongoing work keeps the loop tight;
+    //  - `Some(0)` means "render now", `None` parks on X11 + the self-pipe;
+    //  - `clamp_frame_dt` bounds the idle edge to one refresh and an already
+    //    running transition to `MAX_ANIMATION_DT`.
 
     #[test]
     fn transition_started_during_frame_does_not_idle_before_next_frame() {
@@ -329,7 +298,6 @@ mod tests {
         s.mark(FrameReason::Animation);
         assert!(s.needs_frame());
         assert!(s.has(FrameReason::Animation));
-        // a frame is needed -> block on the socket only (0 ms).
         assert_eq!(s.timeout_ms(), Some(0));
     }
 
@@ -362,8 +330,6 @@ mod tests {
         let tags: Vec<&str> = s.reasons().map(super::FrameReason::as_str).collect();
         assert_eq!(tags, vec!["geometry", "surface"]);
     }
-
-    // ── Fase 9 consolidation ───────────────────────────────────────────────
 
     /// Damage, Damage, Configure, Animation, Damage before the next frame must
     /// collapse into a single pending request, not five.
@@ -483,16 +449,15 @@ mod tests {
         assert_eq!(idle.timeout_ms(), None);
     }
 
-    /// Regression for the idle-wallpaper-CPU-burn bug: a *static* shader
-    /// wallpaper must yield exactly one frame (driven by the WALLPAPER dirty
-    /// reason, mapped to `Geometry`) and then idle — it must never report
-    /// `wallpaper_animating` on its own. Only a shader that actually depends on
-    /// time (`wallpaper_animating == true`) is allowed to keep requesting frames.
+    /// A *static* shader wallpaper must yield exactly one frame (driven by the
+    /// `WALLPAPER` dirty reason, mapped to `Geometry`) and then idle: it must
+    /// never report `wallpaper_animating` on its own, or the loop spins at full
+    /// rate on a static desktop. Only a shader that actually depends on time
+    /// may keep requesting frames.
     #[test]
     fn static_wallpaper_shader_does_not_request_frames() {
-        // `wallpaper_animating == false` is exactly what the compositor now
-        // reports for a static shader (one that does not reference u_time /
-        // u_delta_time).
+        // `wallpaper_animating == false` is what the compositor reports for a
+        // static shader (one referencing neither u_time nor u_delta_time).
         let s = FrameScheduler::from_compositor(false, false, DirtyReason::NONE);
         assert!(
             !s.needs_frame(),
@@ -533,8 +498,8 @@ mod tests {
         assert!(!needs_endpoint_frame(true, true));
     }
 
-    /// The idle→animating edge must never hand the integrator an absurd `dt`.
-    // Exact, deterministic comparisons against known clamp outputs.
+    /// The idle→animating edge must never hand the integrator an absurd `dt`;
+    /// these pin the exact clamp outputs rather than a tolerance.
     #[allow(clippy::float_cmp)]
     #[test]
     fn idle_to_animating_produces_no_absurd_dt() {
@@ -549,15 +514,15 @@ mod tests {
         assert_eq!(clamp_frame_dt(1.0 / 120.0, false), 1.0 / 120.0);
     }
 
-    /// Regression canary for the animation *speed* (B8).
+    /// Regression canary for the animation *speed*.
     ///
     /// `clamp_frame_dt` only bounds `dt` from above; nothing here can catch a
-    /// caller that measures the wrong span. The render loop briefly re-seeded
-    /// `last_frame` *after* `comp.render()`, so the blocking `glXSwapBuffers` —
-    /// with swap interval 1, almost the whole frame — fell outside the delta and
-    /// the springs were advanced by the few hundred microseconds of loop
-    /// overhead instead of by the frame period. This pins the two magnitudes so
-    /// the difference is a failing test, not a "feels sluggish" bug report.
+    /// caller that measures the wrong span. Re-seeding `last_frame` *after*
+    /// `comp.render()` leaves the blocking `glXSwapBuffers` — with swap
+    /// interval 1, almost the whole frame — outside the delta, and the springs
+    /// are then advanced by the few hundred microseconds of loop overhead
+    /// instead of by the frame period. This pins the two magnitudes so the
+    /// difference is a failing test, not a "feels sluggish" bug report.
     #[test]
     fn springs_need_a_whole_frame_of_dt_not_the_loop_overhead() {
         use crate::types::Camera;

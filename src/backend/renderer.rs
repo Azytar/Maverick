@@ -1,20 +1,13 @@
-//! Neutral renderer shim — decouples core/backend from GPU implementations.
+//! Neutral renderer shim: the single seam between `core`/`backend::x11` and the
+//! GPU crates.
 //!
-//! Role: re-exports the `Renderer` trait and its associated types (`DrawQuad`,
-//! `Rect`, `Filter`, `Texture`, `TextureHandle`, `VisualDesc`, `RendererInfo`,
-//! `Acceleration`) from `maverick-render` so `core` and `backend::x11` never
-//! import `maverick-gl`/`maverick-vk` symbols directly. Swapping the compositor
-//! backend requires no changes outside the concrete renderer crate.
-//!
-//! Boundary: defines no logic, owns no GPU resources, no X types, and no
-//! `State`/`Cfg` handles. Presentation, context creation, and frame scheduling
-//! are owned by `backend::x11::compositor` and the concrete `Renderer` impl.
-//!
-//! # Ownership
-//!
-//! Stateless shim — only `pub use` re-exports. The concrete `Renderer` is
-//! created and owned by the X11 backend's compositor; the core holds only
-//! opaque `TextureHandle` values and `Rect`/`DrawQuad` descriptors.
+//! Everything below is a re-export of `maverick-render`, so no other module
+//! names `maverick-gl`/`maverick-vk` directly and the whole GPU backend can be
+//! swapped without touching a call site. Keep it a pure re-export — no helper
+//! types, no defaults, no state. Context creation, presentation and frame
+//! pacing belong to `backend::x11::compositor` and the concrete `Renderer`
+//! implementation; the core only ever holds opaque `TextureHandle` values and
+//! `Rect`/`DrawQuad` descriptors.
 
 #[allow(unused_imports)]
 pub use maverick_render::{

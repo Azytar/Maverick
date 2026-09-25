@@ -1,42 +1,25 @@
 //! Root-pixmap wallpaper — the no-compositor, feh-style path.
 //!
-//! The GL compositor draws the wallpaper itself; when it is not running
-//! (the WM built without a compositor backend, the user disabled it, or
-//! GL failed at runtime) this module keeps `[wallpaper]` working with
-//! plain X11:
+//! The GL compositor draws the wallpaper itself. When it is not running (the WM
+//! built without a compositor backend, the user disabled it, or GL failed at
+//! runtime) this module keeps `[wallpaper]` working with plain X11:
 //!
 //!   decode (`maverick-img`) → map onto every monitor
-//!     (`compute_wallpaper_rects`, same pure mapping the GL path uses)
-//!     → paint one root-sized pixmap → install with the ESETROOT
-//!     protocol (`_XROOTPMAP_ID` / `_XSETROOT_ID`), so `feh`/`xsetroot`
-//!     can still replace it later.
+//!     (`compute_wallpaper_rects`, the same pure mapping the GL path uses)
+//!     → paint one root-sized pixmap → install it with the ESETROOT protocol
+//!     (`_XROOTPMAP_ID` / `_XSETROOT_ID`), so `feh`/`xsetroot` can still find
+//!     and free the old background instead of leaking it.
 //!
-//! # Timing
-//!
-//! The WM calls this exactly when it knows the time is right — it owns
-//! the screen and its monitor list: after startup finished loading, on
-//! config reload, on monitor (re)configuration, and when the compositor
-//! falls back.
-//!
-//! # Leak fix
-//!
-//! `last_root_pixmap` tracks the previous pixmap so it can be
-//! `free_pixmap`ed before replacing it (old code leaked).
+//! The WM calls this only when it knows the screen and monitor list are the
+//! ones to paint: after startup finished loading, on config reload, on monitor
+//! (re)configuration, and when the compositor falls back.
 //!
 //! # Safety
 //!
-//! `put_image` is fire-and-forget; X11 errors are caught by the
-//! silent error handler. The pixmap is a valid X11 resource until
-//! `free_pixmap`.
+//! `put_image` is fire-and-forget; X11 errors are caught by the silent error
+//! handler. The pixmap is a valid X11 resource until `free_pixmap`.
 
 use x11rb::connection::Connection;
-//   pixmap → install it with the ESETROOT protocol (`_XROOTPMAP_ID` /
-//   `_XSETROOT_ID`), so `feh`/`xsetroot` can still replace it later.
-//
-// The WM calls this exactly when it *knows* the time is right — it owns the
-// screen and its monitor list: after startup finished loading, on config
-// reload, on monitor (re)configuration, and when the compositor falls back.
-
 use x11rb::protocol::xproto::{
     AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, CreateGCAux, ImageFormat, PropMode,
 };
@@ -91,8 +74,9 @@ impl super::WindowManager {
             }
         };
 
-        // One root-sized BGRX buffer; every monitor's region is filled with
-        // its share of the image (same mapping as the compositor's GL quads).
+        // One root-sized BGRX buffer; every monitor's region is filled with its
+        // share of the image, using the same rect mapping as the compositor's
+        // GL quads so the two paths agree on where the picture lands.
         let stride = root_w as usize * 4;
         let mut buf = vec![0u8; stride * root_h as usize];
         for (dst, src) in compute_wallpaper_rects(img.w, img.h, mode, &outputs) {
@@ -154,7 +138,7 @@ impl super::WindowManager {
         conn.clear_area(true, root, 0, 0, 0, 0)?;
 
         // ESETROOT protocol: publish the pixmap so a later `feh`/`xsetroot`
-        // can find (and free) it instead of leaking the old background.
+        // can find (and free) this background instead of leaking it.
         let pmap = conn.intern_atom(false, b"_XROOTPMAP_ID")?.reply()?.atom;
         let setroot = conn.intern_atom(false, b"_XSETROOT_ID")?.reply()?.atom;
         let _ = conn.change_property32(PropMode::REPLACE, root, pmap, AtomEnum::PIXMAP, &[pixmap]);
@@ -166,12 +150,11 @@ impl super::WindowManager {
             &[pixmap],
         );
 
-        // The root's `background_pixmap` attribute now points at the new
-        // pixmap, so our own previous one (if any) is no longer referenced by
-        // anything but our own creation of it — free it. Bug: this call was
-        // entirely missing before, so every `apply_root_wallpaper` (startup,
-        // reload, monitor reconfig, GL-fallback) leaked a full root-sized
-        // pixmap in the X server for the rest of the session.
+        // The root's `background_pixmap` now points at the new pixmap, so the
+        // previous one is unreferenced by anything the server keeps alive and
+        // must be freed here: the WM repaints the root on every startup, reload,
+        // monitor reconfiguration and GL fallback, and each skipped free leaked
+        // a full root-sized pixmap for the rest of the session.
         if let Some(old) = self.last_root_pixmap.replace(pixmap) {
             let _ = conn.free_pixmap(old);
         }

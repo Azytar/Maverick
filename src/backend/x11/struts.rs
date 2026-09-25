@@ -1,53 +1,52 @@
 //! Dock strut → workarea reservation.
 //!
-//! Reads `_NET_WM_STRUT_PARTIAL` (preferred, 12 CARDINAL)
-//! or `_NET_WM_STRUT` (fallback, 4 CARDINAL) from dock
-//! windows and reserves the corresponding screen regions.
-//! Reserved regions shrink the workarea used for tiled
-//! layout.
+//! Reads `_NET_WM_STRUT_PARTIAL` (preferred, 12 CARDINAL) or `_NET_WM_STRUT`
+//! (fallback, 4 CARDINAL) from dock windows and reserves the corresponding
+//! screen regions. Reserved regions shrink the workarea used for tiled layout.
 //!
 //! # Protocol semantics
 //!
-//! `_NET_WM_STRUT_PARTIAL` defines reserved edges per
-//! monitor: left/right/top/bottom in pixels, plus
-//! `left_start_y`/`left_end_y` etc. for partial struts.
-//! Maverick collapses all regions into a single
-//! `ReservedArea` (saturating add per edge).
+//! Both properties start with `[left, right, top, bottom]`; `_PARTIAL` appends a
+//! start/end span per edge along the perpendicular axis. One dock may reserve
+//! several edges at once, so every non-zero edge is read — collapsing them
+//! would drop a panel that reserves both `top` and `left`. All regions are
+//! summed into a single `ReservedArea` (saturating add per edge), so two docks
+//! on the same edge both take effect.
 //!
 //! # Monitor assignment
 //!
-//! `monitor_for_strut` uses the strut's perpendicular
-//! midpoint + window centre to assign the dock to a
-//! monitor, falling back to `mon_at` (window geometry
-//! centre) then monitor 0.
+//! `monitor_for_strut` attributes a dock by a point inside its reserved span
+//! (the strut's perpendicular midpoint combined with the window centre), which
+//! is what makes a partial-edge dock land on the monitor that actually shows
+//! it. Failing that it falls back to the window-geometry centre, then to
+//! monitor 0.
 //!
 //! # Camera retarget
 //!
-//! When a dock is added/removed, `retarget_cameras`
-//! recalculates `ideal_scroll` for every workspace on
-//! the affected monitor using the spring target
-//! (not a snap), so the scroll position animates
-//! smoothly into the new workarea.
+//! When a dock is added or removed the workarea changes, so `retarget_cameras`
+//! recomputes `ideal_scroll` for every workspace of the affected monitor and
+//! re-targets (does not snap) the camera: the scroll position eases into the
+//! new workarea instead of teleporting.
 //!
 //! # Invariants
 //!
-//! - A dock's previous reservation is cleared before
-//!   the new one is set (no accumulation).
-//! - `arrange` + `update_workarea` are called after
-//!   every strut change so the layout and EWMH
-//!   properties stay consistent.
+//! - A dock's previous reservation is replaced, never accumulated.
+//! - `retarget_cameras` runs *before* `arrange`, so the geometry `arrange`
+//!   writes comes from the new camera target and not the stale one.
+//! - `arrange` + `update_workarea` run after every strut change, so the layout
+//!   and the published EWMH properties stay consistent with the dock.
 
 use super::*;
 use crate::core::layout::fs_ctx;
 
 impl WindowManager {
-    /// Read a window's strut as a list of (edge, thickness). A single dock may
-    /// reserve space on more than one edge (e.g. a panel + a launcher reserving
-    /// `top` *and* `left`), so this returns every non-zero edge instead of a
-    /// single priority-picked one (bug B4). Returns `None` when the window has
-    /// neither strut property.
+    /// Read a window's strut as a list of (edge, thickness), preferring
+    /// `_NET_WM_STRUT_PARTIAL` and falling back to `_NET_WM_STRUT`. A single
+    /// dock may reserve space on more than one edge (a panel plus a launcher
+    /// reserving `top` *and* `left`), so this returns every non-zero edge
+    /// instead of a single priority-picked one. Returns `None` when the window
+    /// has neither strut property.
     pub(super) fn read_strut(&self, win: Window) -> Option<Vec<(Edge, u32)>> {
-        // Prefer _NET_WM_STRUT_PARTIAL; fall back to _NET_WM_STRUT.
         let partial = self
             .conn
             .get_property(
@@ -100,12 +99,12 @@ impl WindowManager {
 
     /// Pick the monitor a strut belongs to. Uses the dock's reserved-extent
     /// centre to find the containing monitor, falling back to the window
-    /// geometry centre and then the primary monitor.
+    /// geometry centre and then to monitor 0.
     ///
     /// The extent centre is taken from `_NET_WM_STRUT_PARTIAL`'s start/end
-    /// fields (bug B4): a dock that covers only part of an edge — or spans two
-    /// monitors — is attributed to the monitor actually containing its span,
-    /// not just its window centre.
+    /// fields: a dock that covers only part of an edge — or spans two monitors —
+    /// is attributed to the monitor actually containing its span, not just its
+    /// window centre.
     pub(super) fn monitor_for_strut(&self, win: Window, struts: &[(Edge, u32)]) -> usize {
         // Hostile CARDINALs can exceed i32::MAX: `as i32` would wrap them
         // negative and misattribute the dock. Saturate instead.
@@ -207,23 +206,21 @@ impl WindowManager {
     }
 
     /// Recompute each of `mon_idx`'s workspaces' camera target against the
-    /// current workarea. Called after a strut change resizes the workarea:
-    /// without this, `ws.camera.position` stays at its old pixel value while
-    /// the ribbon re-lays-out at the new width, so the focused column drifts
-    /// out of alignment and sits there — silently wrong — until some later
-    /// focus/grow command happens to call `ideal_scroll` itself and the
-    /// camera has to cover the whole accumulated gap in one animated jump
-    /// (bug: looks like a sudden bounce, is really a stale target).
-    /// Uses `target`, not `snap`, so the correction still eases in via the
-    /// normal spring instead of teleporting.
+    /// current workarea, using `target` (not `snap`) so the correction eases in
+    /// through the normal spring.
+    ///
+    /// Called after a strut change resizes the workarea. Without it the camera
+    /// keeps its old pixel target while the ribbon re-lays-out at the new width,
+    /// so the focused column drifts out of alignment and stays there until some
+    /// later focus/grow command happens to call `ideal_scroll` itself — at
+    /// which point the camera covers the whole accumulated gap in one animated
+    /// jump, which reads as a sudden bounce rather than a stale target.
     fn retarget_cameras(&mut self, mon_idx: usize) {
         if mon_idx >= self.engine.state.monitors.len() {
             return;
         }
-        // Destructure `State` into disjoint field borrows so we can read
-        // `clients` (for the fullscreen descriptor) and mutate `monitors`
-        // (the camera targets) at the same time without fighting the borrow
-        // checker.
+        // Split borrow of `State` so `clients` (for the fullscreen descriptor)
+        // and `monitors` (the camera targets) can be read and written together.
         let State {
             clients, monitors, ..
         } = &mut self.engine.state;
@@ -250,10 +247,10 @@ impl WindowManager {
                 let mi = self
                     .monitor_for_strut(win, &struts)
                     .min(self.engine.state.monitors.len() - 1);
-                // Register every reserved edge at once (bug B4): a single dock
-                // may reserve `top` *and* `left`, and `set_reserved_region`
-                // clears the owner's previous region — so all edges must go in
-                // one call or the second would erase the first.
+                // Register every reserved edge in one call: a single dock may
+                // reserve `top` *and* `left`, and `set_reserved_regions` drops
+                // the owner's previous regions — two calls would erase each
+                // other's edge.
                 self.engine.state.monitors[mi].set_reserved_regions(win, &struts);
                 if self.docks.insert(win, mi).is_none() {
                     // Newly tracked dock: watch for later strut / destroy changes.

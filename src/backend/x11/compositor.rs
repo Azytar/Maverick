@@ -1,30 +1,22 @@
 //! Compositor feature gate — selects the real GL compositor or a zero-cost stub.
 //!
-//! With `compositor-opengl` enabled, the full OpenGL/GLX implementation
-//! (`compositor_gl`) is compiled in and its public API is re-exported here.
-//! Without the feature, the WM core still compiles: it sees a placeholder so
-//! `Option<Compositor>` in `WindowManager` has a consistent type and every
-//! `.compositor.as_mut()` call site observes `None` / no-ops. The compositor
-//! never runs, never touches X extensions, and never spawns a render loop —
-//! pure X11 path with minimal CPU/RAM.
+//! # Why the stub exists
 //!
-//! # Ownership & lifecycle
-//!
-//! `WindowManager` holds `Option<Compositor>`; `Compositor::init` is the only
-//! constructor and returns `None` on any GL/compositor failure. The stub's
-//! `Compositor::init` always returns `None` so the type still exists.
-//!
-//! # Bypass
-//!
-//! `DirtyReason` bitflags and `FrameScheduler` stubs exist so the event loop
-//! compiles regardless of whether the compositor is enabled. The real versions
-//! live in `compositor_gl.rs`.
+//! The WM core is compiled and written against one `Compositor` type, with
+//! `Option<Compositor>` held by `WindowManager`. Without the feature the type
+//! still exists (so every `.as_mut()` call site keeps compiling and observes
+//! `None`/no-ops) and `Compositor::init` always returns `None`: no GL context,
+//! no X extension, no render loop, no CPU spent. `DirtyReason`,
+//! `substep_bounds` and the `FrameScheduler` placeholder exist for the same
+//! reason — every one of them must keep the same shape and the same numerical
+//! behaviour as the real implementation, because the event loop and the spring
+//! integrator are shared code.
 //!
 //! # Safety
 //!
-//! No `unsafe` in this gate; the GL module's `unsafe` is guarded by
-//! `maverick_x11::open_x` (`Display*` live while `Rc<XConn>` holds the
-//! `xcb_connection_t` with `should_drop=false`).
+//! No `unsafe` here. The GL module's `unsafe` is guarded by `maverick_x11::open_x`:
+//! the `Display*` lives as long as the `Rc<XConn>` that owns the
+//! `xcb_connection_t` with `should_drop = false`.
 
 #[cfg(feature = "compositor-opengl")]
 #[path = "compositor_gl.rs"]
@@ -32,8 +24,6 @@ mod compositor_gl;
 
 #[cfg(feature = "compositor-opengl")]
 pub(crate) use compositor_gl::*;
-
-// --- Placeholder API when no compositor backend is compiled in ---------------
 
 #[cfg(not(feature = "compositor-opengl"))]
 #[allow(dead_code, clippy::inline_always)]
@@ -44,8 +34,8 @@ mod placeholder {
     use maverick_x11::{XConn, XDisplay};
     use x11rb::protocol::xproto::Window;
 
-    /// Zero-field placeholder. All methods are no-ops so the WM core compiles
-    /// and runs identically; the compositor-related fields are never driven.
+    /// Zero-field placeholder: every method is a no-op, so the WM core compiles
+    /// and behaves identically with the compositor compiled out.
     #[derive(Default)]
     pub struct Compositor {
         pub float_trace: bool,
@@ -201,9 +191,9 @@ mod placeholder {
     }
 
     /// Substeps the animation delta for stable spring integration. Must match
-    /// the compositor-enabled implementation so animations still tick when the
-    /// compositor is disabled (placeholder bug fix: returning empty killed the
-    /// spring).
+    /// the compositor-enabled implementation exactly: the spring integrator is
+    /// shared code, so a different step count here would make animations tick
+    /// differently with the compositor compiled out.
     pub fn substep_bounds(dt: f32) -> Vec<f32> {
         if !dt.is_finite() || dt <= 0.0 {
             return Vec::new();
@@ -286,7 +276,7 @@ mod placeholder_substep_tests {
             mon.workspaces[0].camera.step(sub);
         }
         assert!((mon.workspaces[0].camera.position - pos_before).abs() > 1e-6);
-        // Empty dt must not move
+        // An empty step list must leave the spring untouched.
         let mut mon2 = Monitor::new(Rect::new(0, 0, 800, 600), 1);
         mon2.workspaces[0].camera.position = 0.0;
         mon2.workspaces[0].camera.target = 100.0;

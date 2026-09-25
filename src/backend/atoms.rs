@@ -1,26 +1,15 @@
-//! EWMH/ICCCM atom cache — pipelined `InternAtom` at startup.
+//! EWMH/ICCCM atom cache — one pipelined `InternAtom` batch per connection.
 //!
-//! Role: defines the `Atoms` struct (ICCCM `WM_*`, EWMH `_NET_*`, private
-//! `_MAVERICK_*`, and `UTF8_STRING`) and interns them all with one pipelined
-//! round-trip via `Atoms::new`. `supported_list` builds the exact
-//! `_NET_SUPPORTED` advertisement — only atoms the backend actually reads/writes
-//! are included.
+//! `Atoms` holds only `u32` ids: the X connection, the window properties and the
+//! client state stay with their owners, which look ids up here. It is `Copy`,
+//! built once in `WindowManager::new` and never re-interned — atom ids are
+//! stable for the lifetime of a connection, so re-interning per window or per
+//! config reload would be pure round-trip cost.
 //!
-//! Boundary: owns only the `u32` atom ids. Does not own the X connection,
-//! window properties, or client state — it is a lookup table for those owners.
-//! No atom beyond this set is interned or advertised.
-//!
-//! # Ownership
-//!
-//! `Atoms` is `Copy` and owned by `backend::x11::WindowManager` for the
-//! lifetime of the X connection. Created once via `Atoms::new(&conn)` during
-//! `WindowManager::new`; not re-interned on reload or per-window.
-//!
-//! # Lifecycle
-//!
-//! `new()` fires all `intern_atom` requests without awaiting replies, then
-//! collects replies in order (X11 pipelining — 1 RTT instead of N). The
-//! resulting ids are immutable for the session.
+//! `supported_list` advertises exactly the EWMH `_NET_*` atoms the backend reads
+//! or writes. Nothing else is interned, and nothing unused is advertised:
+//! claiming support for an atom that is never honoured invites clients to rely
+//! on behaviour that does not exist.
 
 use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
@@ -77,7 +66,8 @@ pub struct Atoms {
     pub maverick_float: u32,
     pub maverick_geom: u32,
 
-    // Misc
+    // Property type for `WM_NAME`/`_NET_WM_NAME` values, which ICCCM/EWMH
+    // require to be encoded in it.
     pub utf8_string: u32,
 }
 
@@ -88,15 +78,12 @@ impl Atoms {
     /// replies in order. This is 1 RTT instead of N (X11 request pipelining).
     /// The returned ids are immutable for the lifetime of the X connection.
     pub fn new<C: Connection>(conn: &C) -> Result<Self, ReplyError> {
-        // We intern all atoms in parallel, then collect
-        // This is faster than sequential because X11 pipelining
         macro_rules! intern {
             ($name:literal) => {
                 conn.intern_atom(false, $name.as_bytes())
             };
         }
 
-        // Fire all requests
         let r_wm_protocols = intern!("WM_PROTOCOLS")?;
         let r_wm_delete = intern!("WM_DELETE_WINDOW")?;
         let r_wm_state = intern!("WM_STATE")?;
@@ -141,7 +128,6 @@ impl Atoms {
 
         let r_utf8_string = intern!("UTF8_STRING")?;
 
-        // Now collect all replies (pipelined)
         Ok(Atoms {
             wm_protocols: r_wm_protocols.reply()?.atom,
             wm_delete_window: r_wm_delete.reply()?.atom,
@@ -186,7 +172,11 @@ impl Atoms {
         })
     }
 
-    /// All EWMH atoms we support (for _`NET_SUPPORTED` property)
+    /// The EWMH `_NET_*` atoms this backend honours, for the root's
+    /// `_NET_SUPPORTED` property. The ICCCM and `_MAVERICK_*` atoms are
+    /// deliberately absent: EWMH defines `_NET_SUPPORTED` as the list of
+    /// `_NET_*` atoms, and advertising an atom nobody implements makes clients
+    /// fall back to it.
     pub fn supported_list(&self) -> Vec<u32> {
         vec![
             self.net_supported,
