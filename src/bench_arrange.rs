@@ -2,10 +2,11 @@
 //!
 //! Run: `cargo run --release --offline -- --bench-arrange` (no X needed).
 //! Builds one-monitor ribbon states (`N` single-window columns, 1920x1080,
-//! mid-flight camera) and times `arrange(Phase::Live) + present_into` per
-//! call after warmup. Prints TSV to stdout for before/after comparison.
+//! mid-flight camera) and times `arrange(Phase::Live) + present_into` per call
+//! after warmup. Prints TSV to stdout for before/after comparison.
 //!
-//! Does not run the WM, touches no X connection, changes no runtime behavior.
+//! Measures the pure layout path only: no X connection, no WM startup, no
+//! runtime behaviour change.
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -15,10 +16,11 @@ use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements, RibbonScra
 use crate::core::present::present_into;
 use crate::types::{Client, Column, Focus, Monitor, Rect, State, WindowId};
 
-/// Window counts measured. Small enough to stay in L1/L2, large enough to
-/// show linear scaling of the per-window projection.
+/// Window counts measured: small enough to stay in L1/L2, large enough to
+/// expose the per-window projection as linear.
 const SIZES: &[u32] = &[1, 4, 8, 16, 32, 64];
-/// Warmup iterations so reusable buffers reach steady-state capacity.
+/// Warmup iterations, so the reused placement/scratch buffers reach their
+/// steady-state capacity and stop allocating inside the timed loop.
 const WARMUP: usize = 200;
 /// Timed iterations per size.
 const ITERS: usize = 2000;
@@ -41,13 +43,16 @@ fn ribbon(n: u32) -> State {
     }
     state.monitors[0].workspaces[0].focus = Focus { column_idx: 0 };
     state.monitors[0].focused = Some(1);
-    // Mid-flight camera: the Live path actually exercised during animation.
+    // Camera mid-flight (position != target): this is the `Phase::Live` case,
+    // where the scroll camera interpolates instead of snapping.
     state.monitors[0].workspaces[0].camera.position = 137.0;
     state.monitors[0].workspaces[0].camera.target = 900.0;
     state
 }
 
-/// Time one `arrange + present_into` call steady-state, in ns/op (Measured).
+/// Time one `arrange + present_into` call in steady state, in ns/op, and report
+/// how many placements the last warmup iteration produced (the pipeline may
+/// legitimately emit none).
 fn measure_nanos_per_op(n: u32) -> (f64, usize) {
     let state = ribbon(n);
     let cfg = Cfg::default();
@@ -90,7 +95,8 @@ fn measure_nanos_per_op(n: u32) -> (f64, usize) {
     (per_op, placed)
 }
 
-/// Entry point for `--bench-arrange`. Prints TSV; returns process exit code.
+/// Entry point for `--bench-arrange`. Prints TSV and returns the process exit
+/// code; it never fails, since a missing measurement is still a valid baseline.
 pub fn run() -> i32 {
     println!("n_windows\tns_per_op\tplacements");
     for &n in SIZES {

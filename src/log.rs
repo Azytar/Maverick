@@ -1,26 +1,16 @@
 //! Process-wide stderr logger — minimal replacement for `log` + `env_logger`.
 //!
-//! Role: level-filtered `eprintln!` macros (`error!`, `warn!`, `info!`, `debug!`)
-//! gated by a single `AtomicU8` `LEVEL`. `init()` reads `MAVERICK_LOG`
-//! (fallback `RUST_LOG`) once at startup; `enabled(level)` is the inline gate
-//! used by each macro.
+//! Level-filtered `eprintln!` macros (`error!`, `warn!`, `info!`, `debug!`)
+//! gated by a single `AtomicU8` `LEVEL`. `init()` reads `MAVERICK_LOG` (falling
+//! back to `RUST_LOG`) once at startup; `enabled(level)` is the inline gate each
+//! macro checks. No file rotation, timestamps, ANSI color, or regex filtering.
 //!
-//! Boundary: owns only the global `LEVEL` and the formatting in the macros.
-//! No file rotation, no timestamps, no ANSI colour, no regex filtering, and no
-//! dependency on external logging crates. Does not own config, X, or compositor
-//! state.
-//!
-//! # Ownership
-//!
-//! `LEVEL` is a process-wide `AtomicU8` (relaxed ordering) initialized to
-//! `INFO` and overwritten exactly once by `init()`. Macros capture
-//! `format!` output and write to stderr; no handle is retained.
-//!
-//! # Lifecycle
-//!
-//! Call `init()` once before any `log::info!` etc. (the binary does this first
-//! in `main`). Subsequent level changes are not supported — the value is
-//! fixed for the session.
+//! `LEVEL` is a process-wide `AtomicU8` written by `init()` and read by the
+//! macros on the event-loop hot path. Relaxed ordering is enough: the level is
+//! advisory — worst case a macro sees the previous level for one call — and no
+//! other memory is ordered against it. Call `init()` before the first log call;
+//! the value is fixed for the session, so a later `MAVERICK_LOG` change has no
+//! effect.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -31,8 +21,9 @@ pub(crate) const DEBUG: u8 = 4;
 
 static LEVEL: AtomicU8 = AtomicU8::new(INFO);
 
-/// Reads `MAVERICK_LOG` (falls back to `RUST_LOG` for muscle-memory compat).
-/// Anything unrecognized defaults to `info`, matching the old `env_logger` setup.
+/// Reads `MAVERICK_LOG` (falling back to `RUST_LOG` for muscle-memory compat).
+/// Anything unrecognized — including an empty value — means `info`, so a typo
+/// never silences the log.
 pub(crate) fn init() {
     let raw = std::env::var("MAVERICK_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))
@@ -86,14 +77,17 @@ macro_rules! debug {
 
 pub(crate) use {debug, error, info, warn_ as warn};
 
-/// Opt-in diagnostics only. May contain config paths and command arguments;
-/// do not enable on a session containing sensitive bindings/autostart entries.
+/// Opt-in config-pipeline trace (`MAVERICK_CONFIG_TRACE=1`), resolved once.
+/// It prints full config snapshots and file paths, so leave it off on a session
+/// whose bindings or autostart entries are sensitive.
 pub(crate) fn config_trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("MAVERICK_CONFIG_TRACE").is_some_and(|v| v == "1"))
 }
 
-/// Process-relative monotonic timestamp plus sequence; never used by WM policy.
+/// Emit one `CONFIG-TRACE` line: process-relative microseconds since the first
+/// trace event plus a monotonic sequence number, so concurrent traces can be
+/// ordered without a wall clock. Never used by WM policy.
 pub(crate) fn config_trace(event: &str, details: std::fmt::Arguments<'_>) {
     if !config_trace_enabled() {
         return;
@@ -108,14 +102,19 @@ pub(crate) fn config_trace(event: &str, details: std::fmt::Arguments<'_>) {
     eprintln!("CONFIG-TRACE seq={seq} t_us={us} event={event} {details}");
 }
 
-/// FNV-1a over a deterministic same-binary Debug representation (no maps or
-/// pointers in Cfg). Not a security hash or a cross-version serialization API.
+/// FNV-1a over a deterministic, same-binary `Debug` rendering of the config
+/// (`Cfg` contains no maps, pointers or addresses). It identifies "did the
+/// config change between two trace points" and nothing else: not a security
+/// hash, and not stable across builds or versions.
 pub(crate) fn config_fingerprint(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
     })
 }
 
+/// Trace one `Cfg` at a named pipeline stage, fingerprinted so two snapshots can
+/// be compared without diffing the whole rendering. A no-op unless
+/// `config_trace_enabled`.
 pub(crate) fn config_snapshot(stage: &str, cfg: &crate::config::Cfg) {
     if config_trace_enabled() {
         let snapshot = format!("{cfg:?}");

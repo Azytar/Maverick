@@ -1,3 +1,17 @@
+//! Fixed-size in-memory trace of one session, dumped as TSV on shutdown.
+//!
+//! Enabled at runtime with `MAVERICK_COMPOSITOR_TRACE=1` (path overridable with
+//! `MAVERICK_COMPOSITOR_TRACE_PATH`, default `$TMPDIR/maverick-compositor-<pid>.trace`),
+//! not by a cargo feature. This is a distinct mechanism from the compile-time
+//! `input-trace` / `window-trace` stderr macros in `render.rs`, `pointer.rs` and
+//! `reconciler.rs`: those cost nothing when the feature is off, while this ring
+//! buffer is always compiled in and only touches memory when the env var is set.
+//!
+//! The buffer is thread-local and owned by the WM thread, so `record` needs no
+//! locking on the event-loop hot path; a secondary thread simply gets its own
+//! empty buffer. `init()` installs it before the X connection is opened,
+//! `dump()` writes and releases it during `cleanup()`.
+
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
 use std::io::{self, Write as _};
@@ -6,10 +20,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
-// ~113 MiB worst case (records are 384-byte payload + ~48 header): sized so a
-// ~25 s continuous llvmpipe-rate animation burst (~20 records/turn at ~500
-// fps) still keeps its trailing input/action records. Grows lazily — short
-// sessions never touch the full allocation.
+// ~112 MiB resident at the cap: 448 bytes per record (384-byte payload + a
+// 64-byte header), so a continuous software-GL animation burst still keeps its
+// trailing input/action records. The `Vec` starts at 4096 entries and doubles,
+// so a short session never pays for the full cap.
 const CAPACITY: usize = 262_144;
 const PAYLOAD: usize = 384;
 
@@ -24,6 +38,9 @@ struct Record {
 
 impl fmt::Write for Record {
     fn write_str(&mut self, text: &str) -> fmt::Result {
+        // Fixed inline payload: no allocation on the hot path, and an
+        // overflowing write is truncated at a char boundary (never mid-UTF-8)
+        // and reported as an error so the caller can count it.
         let available = PAYLOAD - self.len;
         let mut count = text.len().min(available);
         while !text.is_char_boundary(count) {
@@ -77,6 +94,8 @@ pub(super) fn init() {
         });
     });
     ENABLED.store(true, Ordering::Relaxed);
+    // Anchor the trace's `Instant` clock against CLOCK_MONOTONIC, so a dump can
+    // be lined up with an X11 client-side log without trusting wall time.
     let mut timestamp = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -100,7 +119,11 @@ pub(super) fn enabled() -> bool {
 pub(super) fn record(event: &'static str, args: fmt::Arguments<'_>) {
     BUFFER.with(|slot| {
         let mut slot = slot.borrow_mut();
+        // A thread that never ran `init` (the control-socket thread) has no
+        // buffer and records nothing.
         let Some(buffer) = slot.as_mut() else { return };
+        // Past the cap, drop the record instead of overwriting: the tail is what
+        // explains the symptom the trace was collected for.
         if buffer.records.len() == buffer.capacity {
             buffer.dropped += 1;
             return;
@@ -133,6 +156,10 @@ pub(super) fn begin_turn() {
 
 pub(super) fn begin_frame() {
     if enabled() {
+        // The interval is measured between *begins*, not ends: it shows the GL
+        // attempt rate the scheduler actually asked for, which is the signal
+        // that distinguishes "no frame requested" from "frame requested too
+        // slowly". `None` on the first frame.
         let interval = BUFFER.with(|slot| {
             let mut slot = slot.borrow_mut();
             let buffer = slot.as_mut()?;
@@ -151,6 +178,11 @@ pub(super) fn begin_frame() {
     }
 }
 
+/// Write the buffer out and disable tracing for the rest of the process. The
+/// header line is the format contract: it pins the clock, the units and the two
+/// caveats every reader has to keep in mind — a `swap` that returned is not
+/// proof the frame was presented, and a window whose geometry was set to 0 for
+/// an off-screen tile is not evidence of a GL present.
 pub(super) fn dump() {
     if !ENABLED.swap(false, Ordering::Relaxed) {
         return;
@@ -185,6 +217,10 @@ pub(super) fn dump() {
     }
 }
 
+/// Record the X11 event that triggered this turn. `x_time_ms` is the server
+/// timestamp, which is *not* comparable with the trace's `ns` column: mixing the
+/// two is what makes an input/frame correlation look impossible when it is only
+/// skewed by clock domains.
 pub(super) fn input(event: &x11rb::protocol::Event) {
     use x11rb::protocol::Event;
     let (kind, time, window, detail, state) = match event {
@@ -221,6 +257,9 @@ pub(super) fn input(event: &x11rb::protocol::Event) {
     );
 }
 
+/// RAII boundary marker: emits `boundary=begin` on construction and
+/// `boundary=end duration_ns=…` on drop, so an early return inside a traced
+/// block still closes its span. Holds the start time only when tracing is on.
 pub(super) struct Span {
     event: &'static str,
     start: Option<Instant>,
@@ -247,6 +286,8 @@ impl Drop for Span {
     }
 }
 
+/// One-line trace at an arbitrary site, gated on `enabled()` so the argument
+/// formatting costs nothing when the trace is off.
 macro_rules! trace {
     ($event:expr, $($args:tt)*) => {
         if $crate::backend::x11::trace::enabled() {
@@ -287,6 +328,8 @@ mod tests {
     #[test]
     fn records_bounded_and_counted_when_full() {
         init_buffer_with_capacity(4);
+        // Past the cap the *earliest* records survive: a trace whose head is
+        // overwritten cannot explain why the burst started.
         for i in 0..7 {
             record("probe", format_args!("i={i}"));
         }
@@ -324,6 +367,8 @@ mod tests {
     #[test]
     fn payload_overflow_truncates_and_counts() {
         init_buffer_with_capacity(1);
+        // An over-long payload is truncated, never dropped: losing the record
+        // would hide the event that produced it.
         let long = "x".repeat(PAYLOAD + 32);
         record("probe", format_args!("data={long}"));
         let buffer = take();

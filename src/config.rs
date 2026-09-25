@@ -1,34 +1,23 @@
 //! Compiled configuration baseline and policy gates.
 //!
-//! Role: defines the pure `Cfg` family (`Cfg`, `CompositorCfg`, `AnimationsCfg`,
-//! `WallpaperCfg`, `Rule`, `CompositorBackend`, `VsyncMode`), the hardcoded
-//! `compiled_config()` baseline, and the predicates `compositor_enabled`,
-//! `animations_enabled`, `validate_compositor_backend`, and `theme_palette`.
-//! `load_config` is a thin delegating entry that forwards to `userconfig`
-//! (the real file-I/O + TOML overlay). This is the authority for "what the
-//! defaults are" and "which backend is allowed given compiled features."
+//! Authority for two questions: *what the defaults are* (`compiled_config`) and
+//! *which compositor backend this build may run* (`validate_compositor_backend`,
+//! `compositor_enabled`). `load_config` is a thin delegate to `userconfig`,
+//! which owns file I/O, TOML tokenization and diagnostics.
 //!
-//! Boundary: owns no I/O, no X connection, and no atom interning. File
-//! existence, TOML tokenization (`maverick-toml` event stream), keybind/range
-//! diagnostics, and XDG path resolution live in `userconfig`; X geometry and
-//! string interning live in `backend::atoms` and `maverick-x11`.
-//!
-//! # Ownership
-//!
-//! `Cfg` is a plain owned value cloned by the caller. `compiled_config()`
-//! returns a fresh baseline with zero `Rule`/`autostart` side-effects beyond
-//! the built-in keybinds/rules; `Default` is a minimal test baseline (no
-//! keybinds/rules). `load_config` borrows an optional `Path` and returns an
-//! owned `Cfg`; the caller (`main` → `Engine`) owns the result for the
-//! session.
+//! Boundary: owns no I/O, no X connection, and no atom interning. The
+//! `Cfg` type family (`Cfg`, `CompositorCfg`, `AnimationsCfg`, `WallpaperCfg`,
+//! `Rule`, `CompositorBackend`, `VsyncMode`) is a plain owned value that the
+//! caller clones; the WM owns it for the session.
 //!
 //! # Invariants
 //!
 //! `compositor_enabled` is gated on both `Cfg::compositor.enabled` and the
-//! absence of `MAVERICK_NO_COMPOSITOR`. `validate_compositor_backend` is a
-//! no-op when neither `compositor-opengl` nor `compositor-vulkan` is compiled
-//! and when the compositor is disabled, and otherwise rejects a requested
-//! backend that lacks its feature.
+//! absence of `MAVERICK_NO_COMPOSITOR`, so the env var can veto a config that
+//! asks for the compositor. `validate_compositor_backend` is a no-op when
+//! neither `compositor-opengl` nor `compositor-vulkan` is compiled and when the
+//! compositor is disabled, and otherwise rejects a requested backend that lacks
+//! its feature.
 
 use std::path::Path;
 
@@ -37,9 +26,13 @@ use crate::types::{Action, Dir, LayoutKind};
 /// Root window-manager configuration, built from [`compiled_config`] and an
 /// optional TOML overlay via [`load_config`].
 ///
-/// This is the owned value passed to `Engine::new` and mutated on reload via
-/// `Engine::apply_camera_cfg` (camera/compositor fields). All other consumers
-/// borrow it.
+/// This is the owned value passed to `Engine::new` and replaced wholesale on
+/// reload; every other consumer borrows it. The three list fields (`keybinds`,
+/// `rules`, `autostart`) are the exception to the field-level overlay: a user
+/// file that declares any of them replaces the compiled list outright, so a
+/// user keymap starts from scratch instead of layering on top of this one.
+/// Every scalar is a pixel count, a fraction of the workarea, or an enum-like
+/// flag, as documented per field.
 #[derive(Debug, Clone)]
 pub struct Cfg {
     pub border_w: u32,
@@ -54,18 +47,18 @@ pub struct Cfg {
     pub n_tags: usize,
     /// Width of a freshly created column, as a fraction (0.1–1.0) of the
     /// workarea. Replaces the old `default_col_w` (pixels) and `split_bias`
-    /// (fraction) keys, which are now deprecated aliases (B3, T5).
+    /// (fraction) keys, which are now deprecated aliases.
     pub column_width: f32,
     pub focus_mouse: bool,
     pub warp_cursor: bool,
     /// Accordion factor: extra fraction (0.0-0.9) the focused column expands
-    /// when dynamic focus expansion is active (Phase 4). 0.0 disables it, so
-    /// no column resizes just because focus moved — only `GrowColumn`/
-    /// `ShrinkColumn` change a column's width. Default is 0.0: the boost
-    /// made the *previously* focused neighbor visibly shrink back down on
-    /// every focus change, which reads as jitter more than polish.
+    /// when dynamic focus expansion is active. 0.0 disables it, so no column
+    /// resizes just because focus moved — only `GrowColumn`/`ShrinkColumn`
+    /// change a column's width. Default is 0.0: a non-zero boost makes the
+    /// previously focused neighbor visibly shrink on every focus change, which
+    /// reads as jitter rather than polish.
     pub accordion_boost: f32,
-    /// Minimum zoom factor for the Overview film-strip (Phase 2).
+    /// Minimum zoom factor for the Overview film-strip.
     pub overview_zoom_min: f32,
 
     /// Compositor configuration (OpenGL/GLX). The WM tries to bring up GL on
@@ -83,8 +76,9 @@ pub struct Cfg {
     /// at startup; the compositor decodes/uploads it when GL is available.
     pub wallpaper: WallpaperCfg,
 
-    // Catppuccin Mocha
-    pub col_normal: u32, // 0xRRGGBB
+    // Catppuccin Mocha; also the `Default` baseline below and the values
+    // `theme_palette` returns for the same preset. Stored as 0xRRGGBB.
+    pub col_normal: u32,
     pub col_focused: u32,
     pub col_urgent: u32,
 
@@ -140,13 +134,9 @@ impl Default for Cfg {
     }
 }
 
-/// Compositor (OpenGL/GLX) configuration, exposed as the `[compositor]` table
-/// in the TOML (a `[general].compositor_enabled` alias also maps here). Absent
-/// => compositor on with defaults. `enabled = false` (or the
-/// `MAVERICK_NO_COMPOSITOR` env var) => the compositor is never attempted and
-/// the WM stays on the plain `ConfigureWindow` path, which also keeps the
-/// legacy X11 `Shape` corner-radius rounding working for users who don't want
-/// GL.
+/// Swap-interval policy for the GL compositor. This is Maverick's own frame
+/// pacing only: `fullscreen_bypass` hands a window back to the client, and
+/// whatever vsync the application sets for itself is never touched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VsyncMode {
     /// `glXSwapInterval 1` – tear-free, blocks to vblank (default).
@@ -188,7 +178,12 @@ impl std::fmt::Display for CompositorBackend {
     }
 }
 
-/// Compositor sub-configuration (see [`Cfg::compositor`]).
+/// Compositor (OpenGL/GLX) configuration, exposed as the `[compositor]` table in
+/// the TOML (a deprecated `[general].compositor_enabled` alias also maps to
+/// `enabled`). An absent table means "on with these defaults". `enabled = false`
+/// — or the `MAVERICK_NO_COMPOSITOR` env var — means the compositor is never
+/// attempted and the WM stays on the plain `ConfigureWindow` path, which also
+/// keeps the X11 `Shape` corner-radius rounding available.
 #[derive(Debug, Clone)]
 pub struct CompositorCfg {
     /// Master switch. Default `true`: on by default, with automatic fallback.
@@ -220,10 +215,10 @@ impl Default for CompositorCfg {
     }
 }
 
-/// Animation configuration, exposed as `[animations]` in the TOML.
+/// Animation configuration, exposed as `[animations]` in the TOML (a deprecated
+/// `[general].camera_stiffness`/`camera_damping` pair still maps here).
 /// Independent from `[compositor]`: animations can be disabled while keeping
 /// vsync, and vice versa.
-/// Animation sub-configuration (see [`Cfg::animations`]).
 #[derive(Debug, Clone)]
 pub struct AnimationsCfg {
     /// Master switch for spring animations (scroll, zoom, accordion). Default `true`.
@@ -246,8 +241,8 @@ impl Default for AnimationsCfg {
 }
 
 /// Native wallpaper configuration, exposed as `[wallpaper]` in the TOML.
-/// `path = null` (default) ⇒ no native wallpaper is set.
-/// Wallpaper sub-configuration (see [`Cfg::wallpaper`]).
+/// `path = null` (the default) means no native wallpaper is set and the WM
+/// leaves the root pixmap alone.
 #[derive(Debug, Clone)]
 pub struct WallpaperCfg {
     /// Path to a wallpaper image or GLSL shader. `None` ⇒ disabled.
@@ -293,24 +288,24 @@ pub struct Rule {
     /// Apple/macOS-style: ignore whatever `_NET_WM_STATE_MAXIMIZED_*` /
     /// `_NET_WM_STATE_FULLSCREEN` the window requests at map time and force
     /// it to open as a normal tile instead. GTK apps (Firefox chief among
-    /// them) are the classic offender — they remember being maximized from
-    /// the last session and demand it back on every launch, which on a
-    /// tiling WM just means "fill the workarea, no gaps, no matter what
-    /// you tiled last." Apple's `WindowServer` never lets an app dictate its
-    /// own launch geometry like that; this rule does the same.
+    /// them) are the classic offender: they remember being maximized from the
+    /// last session and demand it back on every launch, which on a tiling WM
+    /// just means "fill the workarea, no gaps, no matter what you tiled last".
+    /// This rule is the per-window form of the global
+    /// [`Cfg::honor_initial_state`] policy and always wins over it.
     pub ignore_initial_state: bool,
-    /// Override the global default for this specific window. When `true`, the
-    /// window's map-time `_NET_WM_STATE_MAXIMIZED_*` / `_NET_WM_STATE_FULLSCREEN`
-    /// is honoured (the old per-app opt-back-in). When unset, the global
-    /// `honor_initial_state` config decides. This is the escape hatch for a
-    /// legitimate app that genuinely must launch fullscreen/maximized.
+    /// Override the global default for this specific window. `Some(true)`
+    /// honours the window's map-time `_NET_WM_STATE_MAXIMIZED_*` /
+    /// `_NET_WM_STATE_FULLSCREEN`; `Some(false)` normalizes it away; `None`
+    /// defers to `Cfg::honor_initial_state`. This is the escape hatch for an app
+    /// that genuinely must launch maximized/fullscreen.
     pub honor_initial_state: Option<bool>,
     /// Refuse this app's *own* fullscreen requests at runtime. An EWMH
     /// `_NET_WM_STATE_FULLSCREEN` client message — what a browser's F11 sends —
-    /// is dropped; the window stays tiled. `Mod4+F` is unaffected and still
-    /// gives a normal tiled fullscreen, because that is the user asking, not
-    /// the app. Where `ignore_initial_state` only fires once at map time, this
-    /// holds for the whole life of the window.
+    /// is dropped; the window stays tiled. The built-in `Mod4+Shift+F` is
+    /// unaffected and still gives a normal tiled fullscreen, because that is the
+    /// user asking, not the app. Where `ignore_initial_state` fires once at map
+    /// time, this holds for the whole life of the window.
     pub deny_fullscreen: bool,
     /// Give this app real, exclusive fullscreen: an overlay covering the whole
     /// screen in any layout, outside the scrolling ribbon, with
@@ -322,9 +317,11 @@ pub struct Rule {
 }
 
 impl Rule {
-    /// Everything-criteria match. Any `None` criterion is a wildcard; every
-    /// present one must be substring-occur in the client's data (all compared
-    /// case-insensitively, on both sides, like the original class/title rule).
+    /// True when every criterion matches. An absent criterion is a wildcard;
+    /// `class`, `instance` and `title` match as a case-insensitive substring
+    /// (in both directions, so `fire` matches `Firefox`), while `window_type`
+    /// must equal one of the window's reported `_NET_WM_WINDOW_TYPE` values,
+    /// case-insensitively.
     pub fn matches(&self, class: &str, instance: &str, types: &[String], title: &str) -> bool {
         let class_lower = class.to_lowercase();
         let instance_lower = instance.to_lowercase();
@@ -346,14 +343,15 @@ impl Rule {
                 .is_none_or(|t| title_lower.contains(&t.to_lowercase()))
     }
 }
-/// Build the compiled baseline configuration — the exact same values Maverick
-/// has always shipped with. This is the fallback whenever no user TOML exists
-/// or it fails to load, and the starting point that a valid TOML overrides.
+/// Build the compiled baseline: the values Maverick ships with, used as the
+/// starting point a user TOML overlays and as the fallback whenever no file
+/// exists or it fails to load. It carries the default keybind map, the built-in
+/// dialog/portal rules and the portal autostart entries, but no generated
+/// workspace binds (see `userconfig::default_config`).
 pub fn compiled_config() -> Cfg {
-    // Pure constants for ModMask bits — avoids pulling `x11rb` into `config`
-    // (which would make `maverick-core` depend on X11). Values match
-    // `x11rb::protocol::xproto::ModMask` (1<<6 = Mod4/Super, 1<<0 = Shift,
-    // 1<<2 = Control).
+    // X11 `ModMask` bit positions, spelled out so the table below reads without
+    // cross-referencing x11rb: Mod4/Super = 1<<6, Shift = 1<<0,
+    // Control = 1<<2.
     const MOD4: u16 = 1 << 6;
     const SHIFT: u16 = 1 << 0;
     const CONTROL: u16 = 1 << 2;
@@ -361,7 +359,7 @@ pub fn compiled_config() -> Cfg {
     let shs: u16 = MOD4 | SHIFT;
     let sct: u16 = MOD4 | CONTROL;
 
-    // XK_ keysym constants (X11 keysym values)
+    // X11 keysym values.
     const XK_RETURN: u32 = 0xff0d;
     const XK_SPACE: u32 = 0x0020;
     const XK_F5: u32 = 0xffc2;
@@ -370,7 +368,7 @@ pub fn compiled_config() -> Cfg {
     const XK_MINUS: u32 = 0x002d;
     const XK_BRACKETRIGHT: u32 = 0x005d;
     const XK_BRACKETLEFT: u32 = 0x005b;
-    // letter keysyms: lowercase ascii
+    // Printable keysyms are their own lowercase ASCII codepoint.
     macro_rules! k {
         ($c:literal) => {
             $c as u32
@@ -378,7 +376,7 @@ pub fn compiled_config() -> Cfg {
     }
 
     let keybinds: Vec<(u16, u32, Action)> = vec![
-        // ── spawn ──
+        // spawn
         (sup, XK_RETURN, Action::Spawn(vec!["alacritty".into()])),
         (
             shs,
@@ -390,29 +388,29 @@ pub fn compiled_config() -> Cfg {
             k!(b'p'),
             Action::Spawn(vec!["rofi".into(), "-show".into(), "drun".into()]),
         ),
-        // ── window ops ──
+        // window state
         (shs, k!(b'c'), Action::Kill), // Mod4+Shift+C — close focused window
         (shs, XK_SPACE, Action::ToggleFloat),
         (shs, k!(b'f'), Action::ToggleFullscreen),
         (shs, k!(b'm'), Action::ToggleMaximize),
-        // ── focus navigation ──
+        // focus navigation
         (sup, k!(b'h'), Action::FocusDir(Dir::Left)),
         (sup, k!(b'l'), Action::FocusDir(Dir::Right)),
         (sup, k!(b'j'), Action::FocusDir(Dir::Down)),
         (sup, k!(b'k'), Action::FocusDir(Dir::Up)),
-        // ── window movement ──
+        // window movement
         (shs, k!(b'h'), Action::MoveDir(Dir::Left)),
         (shs, k!(b'l'), Action::MoveDir(Dir::Right)),
         (shs, k!(b'j'), Action::MoveDir(Dir::Down)),
         (shs, k!(b'k'), Action::MoveDir(Dir::Up)),
-        // ── column ops ──
+        // column ops
         (shs, XK_RETURN, Action::NewColumn),
         (sct, k!(b'h'), Action::GrowCol(-50)),
         (sct, k!(b'l'), Action::GrowCol(50)),
         (sct, k!(b'j'), Action::CollapseColumn),
-        // ── layout ──
+        // layout
         (sup, k!(b't'), Action::SetLayout(LayoutKind::Column)),
-        // ── misc ──
+        // session, monitor and restart
         // Mod4+Shift+Q quits Maverick immediately without confirmation.
         // The shutdown path runs the normal teardown: ask clients to close,
         // wait up to SHUTDOWN_BUDGET, force-kill remaining, then cleanup.
@@ -421,12 +419,12 @@ pub fn compiled_config() -> Cfg {
         (sup, XK_F5, Action::Restart),
         (sup, XK_TAB, Action::FocusMon(Dir::Next)),
         (shs, XK_TAB, Action::MoveMon(Dir::Next)),
-        // ── Overview (semantic-zoom film-strip) ──
+        // overview (semantic-zoom film strip)
         (sup, k!(b'o'), Action::ToggleOverview),
         (sup, k!(b'n'), Action::OverviewNav(Dir::Right)),
         (shs, k!(b'o'), Action::OverviewNav(Dir::Left)),
         (sup, k!(b'e'), Action::OverviewEnter),
-        // ── Viewport (zoom-in inspection + page-snap scrolling) ──
+        // viewport (zoom-in inspection + page-snap scrolling)
         (sup, XK_EQUAL, Action::ViewportZoom(0.2)), // Mod4+=  zoom viewport in
         (sup, XK_MINUS, Action::ViewportZoom(-0.2)), // Mod4+-  zoom viewport out (back to Normal at 1.0)
         (sup, XK_BRACKETRIGHT, Action::PageSnap(Dir::Right)), // Mod4+]  scroll one page right
@@ -458,22 +456,17 @@ pub fn compiled_config() -> Cfg {
                 ws: None,
                 ..Default::default()
             },
-            // GTK's classic tantrum: Firefox (and most of the GTK stack)
-            // remembers being maximized/fullscreen from the last session and
-            // demands that state right back at map time — on a tiling WM
-            // that just means "fill the workarea, no gaps, whatever else is
-            // there." The WM now normalizes map-time `_NET_WM_STATE` for
+            // No per-`WM_CLASS` rule is needed for GTK's "remember I was
+            // maximized" tantrum: map-time `_NET_WM_STATE` is normalized for
             // *every* client by default (see `Cfg::honor_initial_state`), so
-            // a per-class rule is no longer needed: Firefox, Zen and any
-            // other fork all open as normal tiles. If you specifically want
-            // a client's launch fullscreen/maximize to stick, set
-            // `honor_initial_state = true` globally in `[general]`, or opt in
-            // a single app via `[[rules]] honor_initial_state = true`.
+            // Firefox and its forks open as normal tiles. To let a client's
+            // launch state stick, set `[general] honor_initial_state = true` or
+            // opt in one app with `[[rules]] honor_initial_state = true`.
             //
-            // Runtime fullscreen is likewise honoured by default; the old
-            // `deny_fullscreen` knob remains available as an explicit opt-in
-            // for apps whose own F11/EWMH fullscreen you want to refuse while
-            // keeping `Mod4+Shift+F` working.
+            // Runtime fullscreen is honoured by default too; `deny_fullscreen`
+            // remains available as an explicit opt-in for apps whose own
+            // F11/EWMH fullscreen you want refused while `Mod4+Shift+F` keeps
+            // working.
             Rule {
                 class: None,
                 title: Some("file upload".into()),
@@ -504,23 +497,22 @@ pub fn compiled_config() -> Cfg {
             },
         ],
 
-        // ── Autostart ─────────────────────────────────────────────────────────
-        // Programs launched once the WM is ready. Each entry is a command +
-        // args: vec!["binary", "arg1", "arg2", ...]. maverick doesn't treat
-        // any of these specially — compositor included — it just spawns them.
+        // Programs launched once the WM is ready. Each entry is a command plus
+        // its argv: vec!["binary", "arg1", "arg2", ...]. Nothing here is
+        // special-cased, the compositor included — they are all just spawned.
         autostart: vec![
-            // Not on $PATH by convention — Arch installs these under /usr/lib.
-            // Without them, GTK/portal-based file pickers (e.g. browser upload
-            // dialogs) silently fail to open.
+            // Absolute paths on purpose: these are not on $PATH by convention
+            // (Arch installs them under /usr/lib). Without them, GTK/portal
+            // file pickers (e.g. a browser upload dialog) fail to open.
             vec!["/usr/lib/xdg-desktop-portal-gtk".into()],
             vec!["/usr/lib/xdg-desktop-portal".into()],
-            // Compositor, e.g.:
+            // External compositor, e.g.:
             // vec!["picom".into(), "--vsync".into()],
-            // Launch an external status bar here. maverick reserves screen
-            // space for it automatically via _NET_WM_STRUT_PARTIAL (see
-            // backend/x11/struts.rs), so windows never overlap it. Example:
+            // Status bar: maverick reserves screen space for it automatically
+            // via _NET_WM_STRUT_PARTIAL (see backend/x11/struts.rs), so tiled
+            // windows never overlap it. E.g.:
             // vec!["polybar".into(), "main".into()],
-            // Set your own wallpaper here, e.g.:
+            // Wallpaper, e.g.:
             // vec!["feh".into(), "--bg-fill".into(), "/path/to/wallpaper.png".into()],
         ],
         ..Default::default()
@@ -595,8 +587,10 @@ pub fn load_config(path: Option<&Path>) -> Cfg {
 }
 
 /// Named color-theme presets for `[general].theme` in the TOML config.
-/// Returns `(normal, focused, urgent)` as `0xRRGGBB`.
-/// Returns `None` for an unknown theme name.
+/// Returns `(normal, focused, urgent)` as `0xRRGGBB`, or `None` for an unknown
+/// name (the caller then keeps the compiled colors and warns). The setup helper
+/// in `src/bin/maverick-setup.rs` hardcodes the same names, so both lists have to
+/// move together.
 pub fn theme_palette(name: &str) -> Option<(u32, u32, u32)> {
     Some(match name.to_ascii_lowercase().as_str() {
         "catppuccin-mocha" => (0x45475a, 0x89b4fa, 0xf38ba8),
@@ -696,10 +690,9 @@ mod rule_tests {
 
     #[test]
     fn compiled_config_normalizes_initial_state_for_all_clients() {
-        // A firefox/fork rule is no longer shipped; instead the compiled
-        // default treats map-time `_NET_WM_STATE` as something to normalize
-        // away for every client (see `Cfg::honor_initial_state` and
-        // `manage::apply_rules`). The invariant is global, not per-`WM_CLASS`.
+        // No per-`WM_CLASS` workaround may come back: normalizing map-time
+        // `_NET_WM_STATE` is a global invariant (`Cfg::honor_initial_state` +
+        // `manage::apply_rules`), not something a rule should patch per app.
         let has_firefox = super::compiled_config()
             .rules
             .into_iter()
@@ -717,11 +710,9 @@ mod rule_tests {
     #[test]
     fn compiled_config_binds_mod4_shift_q_to_quit() {
         // The built-in `Mod4+Shift+Q` must be a direct quit, not a shell-out to
-        // `maverickctl quit --confirm`. Verify the action is `Action::Quit` and
-        // that no `Spawn` action references `maverickctl`.
+        // `maverickctl quit --confirm`, which would put a prompt and a second
+        // process on the quit path.
         let cfg = compiled_config();
-        // Constants mirror those in `compiled_config()` — see the block-comment
-        // above that function for the numeric values.
         const SUPER: u16 = 1 << 6;
         const SHIFT: u16 = 1 << 0;
         let shs = SUPER | SHIFT;

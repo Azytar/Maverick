@@ -1,7 +1,8 @@
 //! Composition policy — the single, authoritative decision of *how* Maverick
-//! presents each monitor, kept strictly separate from window management
-//! (`State`/`Client`), rendering (`compositor::Compositor`) and frame pacing
-//! (vsync / swap interval).
+//! presents each monitor. One place so the WM, the X backend and the compositor
+//! agree: window management (`State`/`Client`), rendering
+//! (`compositor::Compositor`) and frame pacing (vsync / swap interval) all
+//! consume the mode produced here instead of deciding for themselves.
 //!
 //! The policy answers one pure question:
 //!
@@ -11,9 +12,9 @@
 //!     → CompositionMode { Disabled, Compose, Bypass }
 //! ```
 //!
-//! It MUST NOT touch X11, GLX, GL, `VSync` or the compositor's internal resources.
-//! Those concerns live in `backend/x11/compositor.rs`, which *consumes* the
-//! mode the policy produces.
+//! It MUST NOT touch X11, GLX, GL, `VSync` or the compositor's internal
+//! resources. Those concerns live in `backend/x11/compositor.rs`, which
+//! *consumes* the mode the policy produces.
 //!
 //! # Modes
 //!
@@ -25,9 +26,9 @@
 //!   windows, overlays, transparency. The default.
 //! * `Bypass` — the compositor is configured, but for *this output* it steps
 //!   aside and lets one eligible fullscreen window present itself directly
-//!   (see `compositor::Compositor::engage_bypass`). This reduces latency/overhead
-//!   for fullscreen games/video without Maverick touching the app's own frame
-//!   pacing (`VSync` is the application's concern, never the policy's).
+//!   (see `compositor::Compositor::engage_bypass`). This reduces latency and
+//!   overhead for fullscreen games/video without Maverick touching the app's own
+//!   frame pacing (`VSync` is the application's concern, never the policy's).
 //!
 //! # Eligibility
 //!
@@ -43,7 +44,8 @@
 //!
 //! Any other scene (maximized-only, multiple windows, a dialog over the game, a
 //! floating overlay) keeps `Compose`. This is deliberately conservative: a
-//! desktop that still needs the compositor must never be bypassed.
+//! desktop that still needs the compositor must never be bypassed, because
+//! bypass leaves a transparent hole that only compositing can fill.
 
 use crate::config::Cfg;
 use crate::types::{Client, Monitor, State, StateExt, WindowId};
@@ -93,15 +95,24 @@ pub fn mode_for(cfg: &Cfg, state: &State, mon_idx: usize) -> CompositionMode {
 ///  * exactly one screen-covering fullscreen window exists on the monitor
 ///    (`presented_overlay_owner` for Grid/True, or `covering_fullscreen_window`
 ///    for the Column ribbon tile);
-///  * it is mapped and not hidden;
+///  * the client does not demand the compositor via `_NET_WM_BYPASS_COMPOSITOR=1`;
+///  * it lives on this monitor and is shown;
 ///  * no other managed window on the monitor would be composited above it
-///    (floating, dialog-like, or a transient popup).
+///    (floating, dialog-like, or a transient popup);
+///  * its geometry actually spans the monitor's screen.
+///
+/// `_cfg` is unused: the config gates live in `mode_for`, and every test needs
+/// to call this predicate directly with bypass enabled to inspect the candidate.
 pub fn bypass_candidate(_cfg: &Cfg, state: &State, mon_idx: usize) -> Option<WindowId> {
     let mon: &Monitor = state.monitors.get(mon_idx)?;
 
-    // Collect every window that currently covers the whole monitor as a
-    // fullscreen. These two helpers are disjoint (see `State`), so the union is
-    // at most one window per monitor.
+    // Collect the windows this monitor presents over its whole screen. The two
+    // fullscreen sources are disjoint by construction — `fs_ctx` excludes
+    // `FullscreenPolicy::True` windows, which only
+    // `presented_overlay_owner` reports — so the union is at most one
+    // fullscreen window. It can still hold a second entry: the maximize branch
+    // of `presented_overlay_owner` names a merely maximized window, which
+    // `is_fullscreen` below rejects.
     let mut candidates: Vec<WindowId> = Vec::with_capacity(2);
     if let Some(w) = state.presented_overlay_owner(mon_idx) {
         candidates.push(w);
@@ -109,8 +120,8 @@ pub fn bypass_candidate(_cfg: &Cfg, state: &State, mon_idx: usize) -> Option<Win
     if let Some(w) = state.covering_fullscreen_window(mon_idx) {
         candidates.push(w);
     }
-    // Exactly one fullscreen may cover the screen; anything else is ambiguous
-    // and must stay composed.
+    // More than one candidate is ambiguous — two windows cannot both own the
+    // screen — so the monitor keeps compositing.
     if candidates.len() != 1 {
         return None;
     }
@@ -126,9 +137,9 @@ pub fn bypass_candidate(_cfg: &Cfg, state: &State, mon_idx: usize) -> Option<Win
     if client.monitor != mon_idx || client.wm_hidden {
         return None;
     }
-    // `presented_overlay_owner` / `covering_fullscreen_window` only name windows
-    // that are genuinely fullscreen, but be defensive: a window that lost its
-    // fullscreen flag between the helper call and here must not bypass.
+    // The two helpers only name genuine fullscreen windows, but a maximized
+    // overlay owner or a flag lost between the helper call and here must never
+    // bypass.
     if !client.is_fullscreen() {
         return None;
     }
@@ -137,9 +148,8 @@ pub fn bypass_candidate(_cfg: &Cfg, state: &State, mon_idx: usize) -> Option<Win
     if occluding_window_present(state, mon_idx, win) {
         return None;
     }
-    // Sanity: the covering window's own geometry must actually span the
-    // monitor's screen, or the compositor's transparent hole would be left
-    // uncovered.
+    // Last line of defence: the window's own geometry must span the monitor's
+    // screen, or the compositor's transparent hole would be left uncovered.
     if !covers_screen(client, mon) {
         return None;
     }
@@ -175,11 +185,11 @@ fn occluding_window_present(state: &State, mon_idx: usize, win: WindowId) -> boo
     false
 }
 
-/// Best-effort check that `client` actually fills the monitor's screen. We trust
-/// the presentation layer (`presented_overlay_owner` / `covering_fullscreen_window`)
-/// for *which* window covers the screen, but a window whose own `geom` does not
-/// span the screen is not a safe direct-presentation candidate (a partial
-/// window would leave the compositor's transparent hole uncovered).
+/// Whether `client`'s geometry (pixels) fully spans the monitor's screen. The
+/// presentation helpers decide *which* window covers the screen, but a window
+/// whose own `geom` does not span it is not a safe direct-presentation
+/// candidate: the compositor's transparent hole would be left uncovered.
+/// Over-sized is accepted (WM rounding, borders), zero-sized is not.
 fn covers_screen(client: &Client, mon: &Monitor) -> bool {
     let r = client.geom;
     r.x <= mon.screen.x
@@ -195,9 +205,9 @@ mod tests {
     use super::*;
     use crate::types::{LayoutKind, Rect, WinFlags};
 
-    /// Build a one-monitor state in `Grid` layout with `n` tiled clients added
-    /// to the active workspace, the first focused. Returns the state plus the
-    /// list of window ids created.
+    /// Build a one-monitor state in `Column` layout with `n` tiled clients on
+    /// the active workspace, the first focused. Returns the state plus the
+    /// window ids created.
     fn setup(n: usize) -> (State, Vec<WindowId>) {
         let mut state = State::new();
         let mut mon = Monitor::new(Rect::new(0, 0, 800, 600), 1);
@@ -218,12 +228,13 @@ mod tests {
         (state, wins)
     }
 
+    /// Put `w` into a real fullscreen state: fullscreen flag, screen-sized
+    /// geometry (the policy rejects partial windows) and top of the focus
+    /// stack, which is what `presented_overlay_owner` searches.
     fn make_fullscreen(state: &mut State, w: WindowId) {
         let s = state.monitors[0].screen;
         let c = state.clients.get_mut(&w).unwrap();
         c.flags.set(WinFlags::FULLSCREEN);
-        // A genuine fullscreen covers the whole monitor (the WM sets this when
-        // entering fullscreen); the policy rejects partial windows.
         c.geom = Rect::new(s.x, s.y, s.w, s.h);
         state.monitors[0].focused = Some(w);
         state.monitors[0].focus_stack.retain(|&x| x != w);
@@ -277,7 +288,8 @@ mod tests {
             mode_for(&cfg(true, false), &state, 0),
             CompositionMode::Compose
         );
-        // Candidate exists, but bypass is off, so the mode is Compose.
+        // A candidate exists; the `fullscreen_bypass = false` gate alone keeps
+        // the mode at Compose.
         assert!(bypass_candidate(&cfg(true, false), &state, 0).is_some());
     }
 
@@ -314,7 +326,8 @@ mod tests {
     #[test]
     fn maximized_non_fullscreen_is_compose() {
         let (mut state, wins) = setup(1);
-        // Maximized only — must NOT bypass (only fullscreen may).
+        // Maximized-only must not bypass: `presented_overlay_owner` can name a
+        // maximize owner, and only the `is_fullscreen` check rejects it.
         state
             .clients
             .get_mut(&wins[0])
@@ -344,8 +357,8 @@ mod tests {
     fn transient_popup_forbids_bypass() {
         let (mut state, wins) = setup(2);
         make_fullscreen(&mut state, wins[0]);
-        // wins[1] is a transient popup (e.g. a game launcher dialog) on the same
-        // monitor.
+        // wins[1] is a transient popup (e.g. a game launcher dialog) on the
+        // same monitor.
         state.clients.get_mut(&wins[1]).unwrap().transient_parent = Some(wins[0]);
         assert_eq!(
             mode_for(&cfg(true, true), &state, 0),
@@ -368,7 +381,8 @@ mod tests {
 
     #[test]
     fn per_monitor_independence() {
-        // Monitor 0: lone fullscreen game → Bypass. Monitor 1: Firefox → Compose.
+        // Bypass is decided per output: the fullscreen game on monitor 0 does
+        // not license bypassing the tiled window on monitor 1.
         let mut state = State::new();
         let mut mon0 = Monitor::new(Rect::new(0, 0, 800, 600), 1);
         mon0.workarea = Rect::new(0, 0, 800, 600);

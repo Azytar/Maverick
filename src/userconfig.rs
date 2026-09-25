@@ -1,60 +1,46 @@
 //! Optional TOML overlay on the compiled baseline — never fatal.
 //!
-//! Role: loads an optional TOML file via `maverick-toml`'s strict event stream
-//! and layers it over `config::compiled_config`. `parse_user` consumes the
-//! `Event` stream into a private `UserConfig` (`GeneralCfg`/`ColorsCfg`/
-//! `CompositorEntry`/`AnimationsEntry`/`WallpaperEntry`/`KeybindEntry`/`RuleEntry`
-//! /`AutostartCfg`); `merge_config` folds that into an owned `Cfg`. Syntax
-//! failure rejects the whole file; semantic failures are isolated to the
-//! offending value/entry and recorded in `Diagnostics`.
-//!
-//! `compiled_config()` is the pure baseline (no workspace keybinds); this
-//! crate's `default_config()` is `compiled_config()` plus auto-generated
-//! `Super+1..n`/`Super+Shift+1..n` binds so a missing/broken file still yields
-//! reachable workspaces. `load_from_path` is the fail-safe `→ (Cfg, Diagnostics)`
-//! primitive; `load_config` wraps it with XDG fallback and `dump_diagnostics`.
-//! `--check-config` consumes the returned `Diagnostics` directly.
-//!
-//! # Config pipeline
+//! # Pipeline
 //!
 //! ```text
-//! compiled_config()                          // pure baseline (config.rs)
-//!        │
-//!        ▼
-//! load_config(path?) ──► config_path() / XDG fallback
-//!        │
-//!        ▼
-//! load_from_path ──► read_to_string ──► parse_user(Event stream) ──► UserConfig
-//!        │                                              │
-//!        └────────► merge_config(baseline, UserConfig) ◄─┘
-//!                          │
-//!                          ▼
-//!                   Cfg ──► Engine::apply_camera_cfg / Engine::new
+//! compiled_config()                        // compiled baseline (config.rs)
+//!        │  ▲
+//!        │  └────────────── merge_config(baseline, UserConfig) → Cfg
+//!        ▼                                ▲
+//! load_from_path ── read_to_string ── parse_user(Event stream) ──► UserConfig
 //! ```
 //!
-//! `parse_user` rejects the whole file on syntax error; `merge_config` applies
-//! the overlay entry-by-entry with isolated diagnostics. The resulting [`crate::config::Cfg`]
-//! is handed to `Engine::new` at startup and to `Engine::apply_camera_cfg` on
-//! reload (camera/compositor fields only).
+//! `parse_user` turns `maverick-toml`'s strict event stream into a transient
+//! `UserConfig` whose every field is an `Option`; `merge_config` folds that
+//! overlay onto an owned `Cfg` and returns it together with `Diagnostics`.
+//! `load_config` wraps that with XDG path resolution and `dump_diagnostics`.
+//! The resulting `Cfg` reaches `Engine::new` at startup, and
+//! `Engine::apply_camera_cfg` after a reload.
 //!
-//! Boundary: owns file I/O, TOML tokenization, alias/deprecation handling,
-//! keybind `key`→`(mods, keysym)` and `action` parsing (delegated to
-//! `core::action::parse`), and range filtering. Does not own `Cfg`'s type
-//! definitions (`config.rs`), presentation, or X atom/connection state.
+//! # Precedence
 //!
-//! # Ownership
+//! The overlay is per *field*, not per table or file: a user entry overrides
+//! only the keys it actually sets, and everything else keeps the compiled
+//! value. The order-sensitive cases are:
 //!
-//! `UserConfig` is a transient parse artifact — not stored after `merge_config`
-//! returns. `Cfg` is owned by the caller (`main` → `Engine`); `Diagnostics`
-//! is an owned value-tuple alongside it so callers decide logging vs exit-code.
-//! `config_path()` derives the XDG path without creating files.
+//! * `[general].theme` is applied before `[colors]`, so an explicit color
+//!   always beats the palette the theme selected.
+//! * `[[keybindings]]`, `[[rules]]` and `[autostart].commands` *replace* the
+//!   compiled lists wholesale. A file with no `[[keybindings]]`/`[[rules]]`
+//!   keeps the compiled keymap/rules; a file that declares one of them drops
+//!   the compiled list entirely (there is no "append" or "clear" form).
+//! * Generated workspace binds are appended last within the keybind list, and
+//!   only into unclaimed slots (see `append_numeric_keybindings`).
 //!
-//! # Invariants
+//! # Failure policy
 //!
-//! Config is never fatal (B10): a missing file or syntax error returns the
-//! default baseline with diagnostics; an unknown key/type or out-of-range value
-//! drops only that entry and pushes a warning/error. Duplicate `(mods, keysym)`
-//! resolves first-wins.
+//! Config never aborts startup. A missing file is silent; a syntax error
+//! discards the whole file and returns the compiled baseline; a semantic fault
+//! (unknown key or action, wrong type, out-of-range value, duplicate bind,
+//! rule with no criteria) drops only the offending value or entry and is
+//! recorded in `Diagnostics`. Callers decide what a diagnostic means:
+//! `load_config` logs and continues, `--check-config` turns it into an exit
+//! code.
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -68,8 +54,8 @@ use crate::types::Action;
 
 /// Accumulated config diagnostics, separated from logging so a caller can
 /// decide what to do with them. The boot path and `reload_config` dump both
-/// lists via `log::warn` and carry on (nothing is fatal at runtime, B10), while
-/// `--check-config` inspects them to decide its exit code.
+/// lists via `log::warn` and carry on, while `--check-config` inspects them to
+/// decide its exit code.
 ///
 /// * `errors`   — a value that could not be applied at all: unknown keysym,
 ///   unknown action, binding conflict, workspace out of range, unknown
@@ -90,8 +76,8 @@ impl Diagnostics {
     }
 }
 
-/// Emit every diagnostic via `log::warn` (the fail-safe runtime path keeps
-/// going regardless — see B10).
+/// Emit every diagnostic via `log::warn`; the runtime path keeps going
+/// regardless, so a broken config costs a warning, never a session.
 pub fn dump_diagnostics(diag: &Diagnostics) {
     for w in &diag.warnings {
         log::warn!("config: {w}");
@@ -150,26 +136,30 @@ struct GeneralCfg {
     theme: Option<String>,
     n_tags: Option<usize>,
     /// New-style column width: fraction (0.1–1.0) of the workarea given to a
-    /// freshly created column (B3). Replaces the old `default_col_width` (px)
-    /// and `split_bias` (fraction) keys, which are kept as deprecated aliases.
+    /// freshly created column. Replaces the old `default_col_width` (px) and
+    /// `split_bias` (fraction) keys, which are kept as deprecated aliases.
     column_width: Option<f32>,
-    /// Legacy alias: pixel column width. Converted to `column_width` using a
-    /// 1920px workarea fallback; emits a deprecation warning (T5).
+    /// Legacy alias: pixel column width, converted to `column_width` against a
+    /// fixed 1920px workarea (no monitor is known at parse time); emits a
+    /// deprecation warning.
     default_col_width: Option<u32>,
     /// Legacy alias: fraction of the workarea for a new column. Maps directly
-    /// onto `column_width`; emits a deprecation warning (T5).
+    /// onto `column_width`; emits a deprecation warning.
     split_bias: Option<f32>,
     /// Accordion focus-expansion factor (0.0–0.9), see `Cfg::accordion_boost`.
     accordion_boost: Option<f32>,
     /// Overview film-strip minimum zoom (0.05–1.0), see `Cfg::overview_zoom_min`.
     overview_zoom_min: Option<f32>,
-    /// Compositor (OpenGL/GLX) master switch, `[compositor].enabled`.
+    /// Compositor (OpenGL/GLX) master switch, mirrored from
+    /// `[compositor].enabled` for pre-table configs.
     compositor_enabled: Option<bool>,
-    /// Scroll-camera spring stiffness, `[compositor].stiffness`.
+    /// Deprecated scroll-camera spring stiffness; superseded by
+    /// `[animations].stiffness`.
     camera_stiffness: Option<f32>,
-    /// Scroll-camera spring damping, `[compositor].damping`.
+    /// Deprecated scroll-camera spring damping; superseded by
+    /// `[animations].damping`.
     camera_damping: Option<f32>,
-    /// Auto-generate Super+1..n / Super+Shift+1..n workspace binds (T3).
+    /// Auto-generate `Super+1..n` / `Super+Shift+1..n` workspace binds.
     /// Defaults to `true`; when `false` no workspace binds are added.
     auto_workspace_binds: Option<bool>,
     focus_mouse: Option<bool>,
@@ -207,24 +197,23 @@ struct RuleEntry {
     size: Option<[u32; 2]>,
     /// `[x, y]` relative to the monitor workarea origin, for forced position.
     position: Option<[i32; 2]>,
-    /// 0.0-1.0. Out-of-range values are clamped by `manage::apply_rules` at
-    /// use time, not rejected here — an opacity typo shouldn't discard an
-    /// otherwise-valid rule.
+    /// 0.0-1.0, not validated here: `manage::apply_rules` clamps it when the
+    /// `_NET_WM_WINDOW_OPACITY` property is written, so a typo degrades the
+    /// window instead of discarding the whole rule.
     opacity: Option<f32>,
     border_width: Option<u32>,
-    /// Apple/macOS-style: ignore the window's own requested
-    /// maximized/fullscreen state at map time, forcing it to open as a
-    /// normal tile. See `config::Rule::ignore_initial_state`.
+    /// Forces the window's map-time `_NET_WM_STATE` to be normalized away.
+    /// See `config::Rule::ignore_initial_state`.
     ignore_initial_state: bool,
-    /// Per-rule override of the global `honor_initial_state` policy. `Some(true)`
-    /// honours this window's map-time state; `Some(false)` normalizes it away;
+    /// Per-rule override of the global `honor_initial_state` policy: `Some(true)`
+    /// honours this window's map-time state, `Some(false)` normalizes it away,
     /// `None` defers to the global config. See `config::Rule::honor_initial_state`.
     honor_initial_state: Option<bool>,
-    /// Refuse the app's own runtime fullscreen requests (F11 / EWMH).
-    /// `Mod4+F` is unaffected. See `config::Rule::deny_fullscreen`.
+    /// Drop the app's own runtime fullscreen requests (F11 / EWMH); `Mod4+Shift+F`
+    /// is unaffected. See `config::Rule::deny_fullscreen`.
     deny_fullscreen: bool,
-    /// Real exclusive fullscreen, outside the ribbon, for games.
-    /// See `config::Rule::true_fullscreen`.
+    /// Exclusive, ribbon-free fullscreen for games. Wins over
+    /// `deny_fullscreen`; see `config::Rule::true_fullscreen`.
     true_fullscreen: bool,
 }
 
@@ -242,7 +231,9 @@ enum Cur<'a> {
     Row(&'a str),
 }
 
-/// Return Maverick's XDG config path without requiring it to exist.
+/// Return Maverick's XDG config path without requiring it to exist: an empty
+/// `XDG_CONFIG_HOME` is treated as unset, and the `HOME` fallback only
+/// produces a path, never the directory or the file.
 pub fn config_path() -> Option<PathBuf> {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(xdg).join("maverick/config.toml"));
@@ -255,7 +246,7 @@ pub fn config_path() -> Option<PathBuf> {
 /// Load the user config from `path` (when `None`, falls back to the standard
 /// XDG path; if even that is missing, the compiled defaults are used). All
 /// diagnostics are logged and startup proceeds regardless — config is never
-/// fatal (B10).
+/// fatal.
 pub fn load_config(path: Option<&Path>) -> Cfg {
     let Some(path) = path.map(Path::to_path_buf).or_else(config_path) else {
         let cfg = default_config();
@@ -267,15 +258,14 @@ pub fn load_config(path: Option<&Path>) -> Cfg {
     cfg
 }
 
-/// The complete fail-safe default: the compiled baseline PLUS the auto-generated
+/// The complete fail-safe default: the compiled baseline plus the auto-generated
 /// numeric workspace keybindings (`Super+1..n` → view, `Super+Shift+1..n` → move).
 ///
-/// `compiled_config()` itself stays pure — unit tests build it directly as a
-/// baseline and expect no workspace binds. This helper exists so every fallback
-/// path in the loader (no config file, missing file, unreadable file, or broken
-/// TOML) still produces a WM whose workspaces are actually reachable. Previously
-/// those paths returned `compiled_config()` directly, which ships zero workspace
-/// binds, so the WM booted with `n_tags` workspaces it could never switch to.
+/// Every fallback path in the loader (no path, missing file, unreadable file,
+/// broken TOML) returns this, so a WM that never reads a config file still
+/// starts with a reachable workspace keymap. `compiled_config()` itself stays
+/// free of workspace binds: it is the unit-test baseline, not a configuration
+/// anyone runs.
 fn default_config() -> Cfg {
     let mut cfg = compiled_config();
     append_numeric_keybindings(&mut cfg.keybinds, cfg.n_tags);
@@ -284,9 +274,13 @@ fn default_config() -> Cfg {
 
 /// Parse `path` into a `Cfg`, returning the config together with the full
 /// `Diagnostics`. On a missing file the compiled defaults are returned with an
-/// empty diagnostic (fail-safe by design); on a syntax error the defaults are
-/// returned with the error recorded; on semantic issues the offending entries
-/// are dropped and reported. Never panics and never returns `None`.
+/// empty diagnostic; on a syntax error the defaults are returned with the error
+/// recorded; on semantic issues the offending entries are dropped and reported.
+/// Never panics and never returns `None`.
+///
+/// This is also the hot-reload entry point: `reload_config` re-reads the same
+/// path through it, so a file that stops parsing yields the compiled baseline
+/// again rather than the configuration that was live before the reload.
 pub fn load_from_path(path: &Path) -> (Cfg, Diagnostics) {
     log::config_trace("defaults_start", format_args!("path={}", path.display()));
     let baseline = default_config();
@@ -432,8 +426,8 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                         apply_rule_key(row, key, &value, diag);
                     }
                 }
-                // Unknown sections and rows are ignored entirely — future
-                // config keys must never break older WMs.
+                // Unknown sections and rows are ignored: a config written for
+                // a newer Maverick must still load on an older one.
                 _ => {}
             },
         }
@@ -441,10 +435,9 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
     Ok(user)
 }
 
-/// Map one `[general]` key onto the model. Aliases from the old serde schema
-/// are resolved here; a value of the wrong type is skipped with a warning
-/// (semantic isolation, like bad keybindings) instead of rejecting the file.
-/// Type mismatches are recorded in `diag`.
+/// Map one `[general]` key onto the model. Deprecated spellings (`border_w`,
+/// `default_col_w`, …) resolve to their canonical field here, and a
+/// wrong-typed value is skipped with a warning rather than rejecting the file.
 fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
         "border_width" | "border_w" => set_u32(&mut g.border_width, key, value, diag),
@@ -616,9 +609,8 @@ fn apply_keybind_key(row: &mut KeybindEntry, key: &str, value: &Value<'_>) {
 /// Map one `[[rules]]` key onto the current row.
 fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     // Rule bools are plain `bool` (not `Option`), so they need their own
-    // setter: warn on a wrong type instead of silently defaulting to false
-    // (`float = "yes"` used to become `false` with no diagnostic, unlike
-    // every neighbouring key).
+    // setter: warn on a wrong type instead of silently defaulting to false,
+    // which is what every neighbouring `Option` setter does.
     fn set_rule_bool(slot: &mut bool, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
         if let Some(v) = value.as_bool() {
             *slot = v;
@@ -663,7 +655,8 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
     }
 }
 
-// ── typed value helpers ────────────────────────────────────────────────────
+// Typed setters: a wrong-typed value leaves the slot at `None` and records a
+// warning, so a typo degrades one key instead of the whole file.
 
 /// Parse a two-element integer array, e.g. `size`/`position`.
 fn int_pair(value: &Value<'_>) -> Option<[i64; 2]> {
@@ -735,11 +728,9 @@ fn warn_bad(diag: &mut Diagnostics, key: &str) {
     ));
 }
 
-// ── merge ──────────────────────────────────────────────────────────────────
-
 /// Fold [`UserConfig`] into the baseline [`Cfg`], recording per-entry
-/// diagnostics. Part of the `compiled_config → parse_user → merge_config → Cfg`
-/// pipeline; the resulting `Cfg` is later applied via `Engine::apply_camera_cfg`.
+/// diagnostics. The resulting `Cfg` is what the WM runs on: it is handed to
+/// `Engine::new` at startup and replaces the live one on reload.
 fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
     let auto_ws = user
         .general
@@ -760,11 +751,13 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
     }
 
     if !user.keybindings.is_empty() {
+        // Any user keybinding discards the compiled keymap entirely; the
+        // generated workspace binds are re-added into the free slots.
         cfg.keybinds = parse_keybindings(&user.keybindings, cfg.n_tags, auto_ws, diag);
     } else if auto_ws {
-        // No user keybindings: still synthesize the workspace 1..n binds
-        // (Super+1..n view, Super+Shift+1..n move) so a config that only sets
-        // `[general]` options still gets a usable keymap (B1/T3).
+        // No user keybindings: keep the compiled binds and still synthesize the
+        // workspace 1..n binds, so a config that only sets `[general]` options
+        // does not lose the compiled keymap.
         append_numeric_keybindings(&mut cfg.keybinds, cfg.n_tags);
     }
     if !user.rules.is_empty() {
@@ -842,7 +835,6 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
             ));
         }
     }
-    // New-style column width (fraction of the workarea).
     if let Some(v) = general.column_width {
         if (0.1..=1.0).contains(&v) {
             cfg.column_width = v;
@@ -852,8 +844,9 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
             ));
         }
     }
-    // Legacy `default_col_width` / `default_col_w` (pixels) → fraction, using a
-    // 1920px workarea fallback (no monitor is available at parse time).
+    // Legacy `default_col_width` / `default_col_w` (pixels) → fraction. The
+    // conversion needs a workarea width that does not exist at parse time, so
+    // it assumes 1920px and then clamps into the valid fraction range.
     if let Some(px) = general.default_col_width {
         if px > 0 {
             cfg.column_width = (px as f32 / 1920.0).clamp(0.1, 1.0);
@@ -867,7 +860,9 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
                 .push("general.default_col_width must be greater than zero".into());
         }
     }
-    // Legacy `split_bias` (fraction) → column_width.
+    // Legacy `split_bias` (fraction) → column_width. A 0.0 `split_bias` is
+    // accepted here and clamped up to the 0.1 minimum, which is why this key
+    // validates over 0.0–1.0 but never stores 0.0.
     if let Some(v) = general.split_bias {
         if (0.0..=1.0).contains(&v) {
             cfg.column_width = v.clamp(0.1, 1.0);
@@ -976,8 +971,6 @@ fn expand_tilde(path: &str) -> String {
 /// Only validated values are written — a bad `mode` is reported and ignored.
 fn apply_wallpaper(cfg: &mut Cfg, wp: WallpaperEntry, diag: &mut Diagnostics) {
     if let Some(path) = wp.path {
-        // TOML strings are literal; expand a leading `~`/`~/` so
-        // `path = "~/img/wp.png"` resolves as users expect.
         cfg.wallpaper.path = Some(expand_tilde(&path));
     }
     if let Some(mode) = wp.mode {
@@ -990,6 +983,9 @@ fn apply_wallpaper(cfg: &mut Cfg, wp: WallpaperEntry, diag: &mut Diagnostics) {
     }
 }
 
+/// Force `tag_names` to be exactly `n_tags` long: surplus names are dropped and
+/// missing ones are auto-numbered, so the bar/IPC can index it by workspace
+/// without a range check.
 fn normalize_tag_names(cfg: &mut Cfg) {
     cfg.tag_names.truncate(cfg.n_tags);
     while cfg.tag_names.len() < cfg.n_tags {
@@ -1014,6 +1010,8 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
                 return None;
             }
             if let Some(wt) = entry.window_type.as_deref() {
+                // The EWMH atom names only; a typo would otherwise become a
+                // criterion that silently never matches.
                 const KNOWN_TYPES: [&str; 8] = [
                     "normal", "desktop", "dock", "toolbar", "menu", "utility", "splash", "dialog",
                 ];
@@ -1025,6 +1023,8 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
                     return None;
                 }
             }
+            // `workspace` is 1-based in the file, 0-based in `Rule::ws`; a
+            // reload that shrinks `n_tags` re-clamps it at manage time.
             let ws = match entry.workspace {
                 Some(ws) if ws == 0 || ws > n_tags => {
                     diag.errors.push(format!(
@@ -1063,10 +1063,12 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
 /// Parse `[[keybindings]]` rows into the `(mods, keysym, action)` list.
 ///
 /// Workspace binds (Super+1..n view, Super+Shift+1..n move) are auto-generated
-/// in the *free* slots whenever `[general].auto_workspace_binds` is true (the
-/// default) — they never clobber a user bind that already occupies that
-/// combination (B1). Duplicate `(mods, keysym)` pairs in the user's own list
-/// resolve first-wins, with the loser reported via `diag` (B7).
+/// whenever `[general].auto_workspace_binds` is true (the default) — in the
+/// *free* slots only, so they never clobber a combination the user already
+/// claimed. Duplicate `(mods, keysym)` pairs within the user's own list resolve
+/// first-wins, and the loser is reported via `diag`. A bind whose action targets
+/// a workspace beyond `n_tags` is dropped: `n_tags` is known here, so there is
+/// no reason to keep a shortcut that can only ever be a no-op.
 fn parse_keybindings(
     entries: &[KeybindEntry],
     n_tags: usize,
@@ -1097,7 +1099,7 @@ fn parse_keybindings(
             ));
             continue;
         }
-        // First-wins on duplicate combinations; later entries are dropped (B7).
+        // First-wins on duplicate combinations; later entries are dropped.
         if parsed.iter().any(|(m, k, _)| *m == mods && *k == keysym) {
             diag.errors.push(format!(
                 "keybinding '{}' (mods={mods:#x}, keysym={keysym:#x}) duplicates an earlier \
@@ -1133,6 +1135,9 @@ fn action_workspace_is_valid(action: &Action, n_tags: usize) -> bool {
     }
 }
 
+/// Add `Super+1..n` / `Super+Shift+1..n` for `n_tags`, capped at 9 because the
+/// digit row has no tenth key. Only unclaimed combinations are filled, so a
+/// user bind on e.g. `Super+1` wins and the generated `View(0)` is skipped.
 fn append_numeric_keybindings(keybinds: &mut Vec<(u16, u32, Action)>, n_tags: usize) {
     let sup = u16::from(ModMask::M4);
     let shift_sup = sup | u16::from(ModMask::SHIFT);
@@ -1140,8 +1145,6 @@ fn append_numeric_keybindings(keybinds: &mut Vec<(u16, u32, Action)>, n_tags: us
         let keysym = b'1' as u32 + ws as u32;
         let view = (sup, keysym);
         let move_to = (shift_sup, keysym);
-        // Only fill the slots the user hasn't already claimed; a user bind on
-        // e.g. Super+1 wins and the generated View(0) is skipped (B1).
         if !keybinds.iter().any(|(m, k, _)| (*m, *k) == view) {
             keybinds.push((view.0, view.1, Action::View(ws)));
         }
@@ -1151,17 +1154,17 @@ fn append_numeric_keybindings(keybinds: &mut Vec<(u16, u32, Action)>, n_tags: us
     }
 }
 
-/// Curated, layout-independent key name → X11 keysym table (B5). This is the
-/// vocabulary TOML keybindings may use by name; anything not listed here can
-/// still be expressed with the raw `0x<hex>` escape. Letters (`a`–`z`) and
-/// digits (`0`–`9`) are handled by computation, so they are not listed here.
+/// Curated, layout-independent key name → X11 keysym table: the vocabulary TOML
+/// keybindings may use by name. Anything not listed here can still be expressed
+/// with the raw `0x<hex>` escape. Letters (`a`–`z`) and digits (`0`–`9`) are
+/// handled by computation, so they are not listed here.
 ///
 /// Order is not significant (lookup is a linear scan, which is fine — this runs
 /// only at config load); the only requirement is that every keysym the compiled
 /// defaults rely on has a name here (see `keysym_name_exists` + the contract
 /// test).
 pub static KEYSYMS: &[(&str, u32)] = &[
-    // ── ASCII symbol keys ──
+    // ASCII symbols and named non-printing keys
     ("ampersand", 0x26),
     ("apostrophe", 0x27),
     ("asciicircum", 0x5e),
@@ -1212,7 +1215,7 @@ pub static KEYSYMS: &[(&str, u32)] = &[
     ("tab", 0xff09),
     ("underscore", 0x5f),
     ("up", 0xff52),
-    // ── function keys ──
+    // function keys
     ("f1", 0xffbe),
     ("f2", 0xffbf),
     ("f3", 0xffc0),
@@ -1225,13 +1228,12 @@ pub static KEYSYMS: &[(&str, u32)] = &[
     ("f10", 0xffc7),
     ("f11", 0xffc8),
     ("f12", 0xffc9),
-    // ── enter / aliases ──
+    // enter, and keys that need an alias because their X11 name differs
     ("return", 0xff0d),
     ("enter", 0xff0d),
-    // navigation aliases
     ("pageup", 0xff55),
     ("pagedown", 0xff56),
-    // ── keypad ──
+    // keypad
     ("kp_0", 0xffb0),
     ("kp_1", 0xffb1),
     ("kp_2", 0xffb2),
@@ -1248,7 +1250,7 @@ pub static KEYSYMS: &[(&str, u32)] = &[
     ("kp_multiply", 0xffaa),
     ("kp_divide", 0xffaf),
     ("kp_decimal", 0xffae),
-    // ── XF86 multimedia / brightness ──
+    // XF86 multimedia / brightness (with the unprefixed spellings users expect)
     ("xf86audioraisevolume", 0x1008ff13),
     ("audioraisevolume", 0x1008ff13),
     ("xf86audiolowervolume", 0x1008ff11),
@@ -1278,11 +1280,9 @@ pub fn keysym_from_name(name: &str) -> Option<u32> {
     if lower.is_empty() {
         return None;
     }
-    // Raw keysym escape.
     if let Some(hex) = lower.strip_prefix("0x") {
         return u32::from_str_radix(hex, 16).ok();
     }
-    // Single ASCII letter / digit key.
     if lower.len() == 1 {
         let byte = lower.as_bytes()[0];
         if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
@@ -1334,6 +1334,9 @@ pub fn mods_name(mask: u16) -> String {
     parts.join("+")
 }
 
+/// Parse a `Mod+Shift+key` binding into `(ModMask, keysym)`. A repeated
+/// modifier (`Super+Super+a`) is rejected rather than folded, so a typo cannot
+/// silently change which chord is grabbed.
 fn keybind_from_str(input: &str) -> Option<(u16, u32)> {
     let parts: Vec<_> = input
         .split('+')
@@ -1362,10 +1365,10 @@ fn keybind_from_str(input: &str) -> Option<(u16, u32)> {
 /// Parse the TOML action vocabulary (`spawn:...`, `focus:left`, `view:2`, …).
 ///
 /// Delegates to the single shared vocabulary in `core::action` (the same one
-/// the IPC channel uses), so a new action is automatically available in both
-/// places and can never diverge again (B2/B8). The TOML form is colon
-/// separated (`focus:left`); the IPC form is dash/space separated
-/// (`focus-left`) — both resolve to the same `Action`.
+/// the IPC channel uses), so a new action is available in both places and the
+/// two cannot diverge. The TOML form is colon separated (`focus:left`); the IPC
+/// form is dash/space separated (`focus-left`) — both resolve to the same
+/// `Action`.
 pub fn action_from_str(input: &str) -> Option<Action> {
     crate::core::action::parse(input)
 }
@@ -1375,8 +1378,8 @@ mod tests {
     use super::*;
     use crate::types::Dir;
 
-    /// Parse a TOML string straight into the user model (replaces the old
-    /// `toml::from_str` in tests — same fail-fast on syntax errors).
+    /// Parse TOML text straight into the user model, panicking on a syntax
+    /// error: these tests only ever feed well-formed input.
     fn parse_string(source: &str) -> UserConfig {
         let mut d = Diagnostics::default();
         parse_user(source, &mut d).expect("valid TOML")
@@ -1425,11 +1428,9 @@ mod tests {
 
     #[test]
     fn fallback_config_has_reachable_workspace_binds() {
-        // Regression: the fail-safe baseline (no config file / missing /
-        // unreadable / broken TOML) must still produce a WM whose workspaces
-        // are reachable. Previously it returned `compiled_config()`, which
-        // contains zero workspace keybindings, so the WM booted with
-        // `n_tags` workspaces it could never switch to.
+        // Every fail-safe path (no file / missing / unreadable / broken TOML)
+        // must still yield a WM whose workspaces are reachable: the baseline
+        // carries no workspace keybinding of its own.
         let path = std::env::temp_dir().join(format!(
             "maverick-config-missing-{}-{}.toml",
             std::process::id(),
@@ -1489,9 +1490,9 @@ action = "kill"
 
     #[test]
     fn user_numeric_bind_keeps_other_auto_binds() {
-        // B1/T3: a user binding on a digit slot only claims that slot; the other
-        // auto-generated workspace binds survive (no full suppression). The
-        // claimed slot keeps the user's action, not the generated `view:0`.
+        // A user binding on a digit slot claims only that slot; the other
+        // auto-generated workspace binds survive (there is no full
+        // suppression), and the claimed slot keeps the user's action.
         let user = parse_string(
             r#"
 [[keybindings]]
@@ -1601,7 +1602,7 @@ commands = [["example", "--flag"]]
     #[test]
     fn rule_fullscreen_policy_parses_and_all_aliases_agree() {
         // Deny — refuse the app's own runtime fullscreen (F11/EWMH), but leave
-        // `Mod4+F` working.
+        // the built-in `Mod4+Shift+F` working.
         for key in ["deny_fullscreen", "no_fullscreen"] {
             let user = parse_string(&format!("[[rules]]\nclass = \"firefox\"\n{key} = true\n"));
             let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
@@ -1635,20 +1636,18 @@ commands = [["example", "--flag"]]
 
     #[test]
     fn compositor_table_enables_and_disables_bypass() {
-        // `[compositor] enabled = false` turns the compositor off entirely.
+        // Each key of the table is applied independently: turning the
+        // compositor off must not reset the rest of it.
         let user = parse_string("[compositor]\nenabled = false\n");
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(!cfg.compositor.enabled);
         assert!(cfg.compositor.fullscreen_bypass); // default preserved
 
-        // `[compositor] enabled = true, fullscreen_bypass = false` keeps the
-        // compositor on but forbids bypass.
         let user = parse_string("[compositor]\nenabled = true\nfullscreen_bypass = false\n");
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(cfg.compositor.enabled);
         assert!(!cfg.compositor.fullscreen_bypass);
 
-        // `fullscreen_bypass = true` is honoured.
         let user = parse_string("[compositor]\nfullscreen_bypass = true\n");
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(cfg.compositor.fullscreen_bypass);
@@ -1656,8 +1655,8 @@ commands = [["example", "--flag"]]
 
     #[test]
     fn general_compositor_enabled_alias_still_works() {
-        // Backward-compatible `[general].compositor_enabled = false` must still
-        // disable the compositor.
+        // The pre-`[compositor]` spelling must keep working: configs in the wild
+        // still carry it.
         let user = parse_string("[general]\ncompositor_enabled = false\n");
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(!cfg.compositor.enabled);
@@ -1778,10 +1777,10 @@ border_width = 0
         // with deny/true fullscreen, autostart grid).
         let (cfg, _diag) = load_from_path(Path::new("config/config.toml"));
         assert!(!cfg.keybinds.is_empty(), "keybindings must parse");
-        // Normalization of client map-time state is now a global invariant, so
-        // the example neither ships a per-firefox `deny_fullscreen` rule nor a
-        // `firefox` rule at all; it must instead leave `honor_initial_state`
-        // at its default (false) and still carry the exclusive-fullscreen rule.
+        // The example must not reintroduce a per-`WM_CLASS` workaround for
+        // map-time state: normalization is a global invariant, so the example
+        // carries no `firefox` rule and leaves `honor_initial_state` at its
+        // `false` default, while still pinning Steam to exclusive fullscreen.
         assert!(
             !cfg.honor_initial_state,
             "default must normalize initial state"
@@ -1795,8 +1794,7 @@ border_width = 0
             .iter()
             .any(|r| r.class.as_deref() == Some("steam") && r.true_fullscreen));
         assert_eq!(cfg.col_focused, 0x89b4fa);
-        // The example must NOT autostart a second compositor alongside the
-        // built-in one (that combination breaks compositing).
+        // A second compositor alongside the built-in one breaks compositing.
         assert!(!cfg
             .autostart
             .iter()
@@ -1806,9 +1804,9 @@ border_width = 0
             .keybinds
             .iter()
             .any(|(_, k, a)| { *k == b'1' as u32 && matches!(a, crate::types::Action::View(0)) }));
-        // Quitting from the keyboard is an in-process action: the shipped sample
-        // must bind `Mod4+Shift+q` to `Action::Quit`, never to a `spawn:` of a
-        // helper that would put a prompt/second process on the quit path.
+        // Quitting is an in-process action: the sample must bind `Mod4+Shift+q`
+        // to `Action::Quit`, never to a `spawn:` of a helper that would put a
+        // prompt and a second process on the quit path.
         let sup_shift = u16::from(ModMask::M4) | u16::from(ModMask::SHIFT);
         let q = u32::from(b'q');
         assert_eq!(
@@ -1829,10 +1827,9 @@ border_width = 0
 
     #[test]
     fn every_compiled_default_keysym_is_named() {
-        // B5: every keysym the compiled config binds must be expressible by name
-        // (a letter/digit or a `KEYSYMS` entry) so it can actually be written in
-        // config.toml. A missing entry here means a default bind is literally
-        // unconfigurable — add it to `KEYSYMS`.
+        // Contract test for `KEYSYMS`: every keysym the compiled config binds
+        // must be expressible by name (a letter/digit or a `KEYSYMS` entry),
+        // or that default bind would be literally unconfigurable.
         let cfg = compiled_config();
         for (_mods, ksym, action) in &cfg.keybinds {
             assert!(

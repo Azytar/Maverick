@@ -1,38 +1,27 @@
 //! Binary entry — process lifecycle, CLI, and handover to the X backend.
 //!
-//! Role: parses `--name`/`--replace`/`--config`/`--check-config`/`-v`/`-h`,
-//! detaches from the terminal, installs signal handlers, writes the per-session
-//! identity ficha, spawns the control socket (`ControlHub`/`ControlServer`),
-//! loads `Cfg` via `config::load_config`, constructs `backend::x11::WindowManager`,
-//! spawns `autostart` commands, flips `state.running` and drives `run()` → `cleanup()`.
-//!
-//! Boundary: owns process-level resources only — argv, `MAVERICK_INSTANCE` env,
-//! terminal detachment, signal disposition, runtime-dir identity, and the control
-//! socket hub. Does not own logical state (`maverick-core` `Engine`/`State`),
-//! rendering/compositor decisions (`compositor_policy`, `backend::renderer`), or
-//! X11 protocol details (`maverick-x11`, `maverick-sys` signal/poll internals).
-//!
-//! # Ownership
-//!
-//! `main` owns the `ControlHub`/`ControlServer`/`InstanceInfo` handles and the
-//! `config_path`/`launch_args` used for reload/restart; they are handed to
-//! `WindowManager` via `set_session_id`/`set_hub`/`set_control`. The `Cfg` is
-//! moved into `WindowManager::new`, which owns the X connection (`Rc<XConn>`)
-//! and the event loop.
-//!
-//! # Invariants
-//!
-//! `--check-config` never starts the backend — it loads the TOML, dumps
-//! diagnostics, prints a summary, and exits 0/1. Signal handlers are installed
-//! after `detach_from_terminal` and before the X connection is opened, so
-//! `SIGTERM`/`SIGCONT`/`SIGPIPE` disposition is defined for the full session.
+//! Owns process-level resources only: argv, the `MAVERICK_INSTANCE` export,
+//! terminal detachment, signal disposition, the per-session identity record
+//! (`maverick-sys::identity`), and the control-socket hub. It then hands a
+//! `Cfg` to `backend::x11::WindowManager`, which owns the X connection
+//! (`Rc<XConn>`) and the event loop.
 //!
 //! # Lifecycle
 //!
-//! `init log` → `parse args` → `check-config?` → `detach+signals` →
-//! `write identity` → `spawn control` → `load Cfg` → `WindowManager::new` →
-//! `autostart` → `running=true` → `run()` → `cleanup()` on clean exit, or
-//! `cleanup_meta` + `exit(1)` on init failure.
+//! `log::init` → parse args → `--check-config`? (exits) → detach + signals →
+//! write identity + spawn control socket → `config::load_config` →
+//! `WindowManager::new` → autostart → `state.running = true` → `run()` →
+//! `cleanup()` on a clean exit, or `cleanup_meta` + `exit(1)` if init failed.
+//!
+//! # Invariants
+//!
+//! `--check-config` never starts the backend: it loads the TOML, dumps
+//! diagnostics, prints a summary, and exits 0/1. Signal handlers are installed
+//! after `detach_from_terminal` and before the X connection is opened, so
+//! `SIGTERM`/`SIGCONT`/`SIGPIPE` disposition is defined for the whole session.
+//! The original argv is captured verbatim (minus `argv[0]`) because `restart`
+//! re-execs with exactly those arguments, so a `--config` override can never be
+//! silently downgraded to the XDG default.
 // Opt into clippy's pedantic lint set for higher code quality, then allow the
 // handful of categories that are inherent to an X11 window manager and would
 // only add noise if "fixed":
@@ -93,7 +82,8 @@ fn main() {
     log::init();
     log::info!("maverick v{} starting", env!("CARGO_PKG_VERSION"));
 
-    // Parse args (any order). Only --name/--replace are added; -v/-h stay.
+    // Parse args in any order. Unknown arguments abort before any state is
+    // created, so a typo cannot leave a half-initialised session behind.
     let mut instance_name = maverick_sys::DEFAULT_NAME.to_string();
     let mut replace = false;
     let mut show_help = false;
@@ -123,9 +113,9 @@ fn main() {
                 }
             }
             "--check-config" => {
-                // Optional path: consume the next token only if it is not
-                // another flag. Both `--flag` and `-f` forms are flags —
-                // checking only `--` used to swallow `-v`/`-h` as a path.
+                // Optional path: consume the next token only if it is not a
+                // flag. Both `--flag` and `-f` count as flags, otherwise
+                // `--check-config -v` would validate a file named `-v`.
                 let path = match args.peek() {
                     Some(next) if !next.starts_with('-') => args.next(),
                     _ => None,
@@ -162,9 +152,9 @@ fn main() {
         process::exit(crate::bench_arrange::run());
     }
 
-    // `--check-config` validates a config file and exits with status 0 when it
-    // parses cleanly (no warnings or errors) and 1 otherwise. It never starts
-    // the WM (B10: config is never fatal, but a CI/lint gate can still fail).
+    // `--check-config` exits 0 when the file parses with no warnings and no
+    // errors, 1 otherwise. Config is never fatal at runtime, but a CI or lint
+    // gate still needs a non-zero status to act on it.
     if let Some(check) = check_config {
         let path: std::path::PathBuf = match check {
             Some(p) => std::path::PathBuf::from(p),
@@ -218,9 +208,10 @@ fn main() {
     log::info!("instance name: {}", instance_name);
 
     // Build this instance's identity. The `session_id` is a random, unique-per-
-    // process key used for the per-session runtime dir / socket / ficha; the
-    // human `--name` is kept separately as a label. Computed before detaching so
-    // the tty_nr/start_time metadata are captured reliably.
+    // process key naming the per-session runtime dir, control socket and
+    // identity record; the human `--name` is kept separately as a label.
+    // Computed before detaching so the tty_nr/start_time metadata are captured
+    // reliably.
     let info = maverick_sys::self_info(&instance_name);
     let sid = info.session_id.clone();
 
@@ -236,9 +227,9 @@ fn main() {
         .on_sigcont(libc::SIGCONT)
         .install();
 
-    // ── Identity + control socket ───────────────────────────────────────────
-    // Advertise this instance so an external tool can discover/close it,
-    // even when several Mavericks run on different TTYs/DISPLAYs.
+    // Advertise this instance so an external tool can discover or close it,
+    // even when several Mavericks run on different TTYs/DISPLAYs. Neither of
+    // these is fatal: a WM without a control socket still manages windows.
     if let Err(e) = maverick_sys::identity::write_meta(&info) {
         log::warn!("failed to write instance ficha: {e}");
     }
@@ -264,7 +255,6 @@ fn main() {
         cfg.autostart.len(),
     );
 
-    // ── Phase 1: WM init ──────────────────────────────────────────────────────
     match backend::x11::WindowManager::new(
         cfg,
         replace,
@@ -272,24 +262,24 @@ fn main() {
         launch_args,
     ) {
         Ok(mut manager) => {
-            // Hand over the control socket + session id so cleanup() can
-            // tear them down and remove the identity ficha on exit.
+            // Hand over the control socket + session id so cleanup() can tear
+            // them down and remove the identity record on exit.
             manager.set_session_id(sid.clone());
             manager.set_hub(hub);
             if let Some(server) = control {
                 manager.set_control(server);
             }
 
-            // ── Phase 2: autostart apps ───────────────────────────────────────
-            // Compositor, bar, wallpaper, portals, etc. all just go here —
-            // maverick doesn't orchestrate any of them specially. See the
-            // example entries in config.rs / config.toml.
+            // Autostart runs only after the WM owns the X connection: a bar or
+            // portal started earlier would race the EWMH setup it needs.
+            // Compositor, bar, wallpaper and portals are all just entries here;
+            // nothing is orchestrated specially. See the examples in
+            // config.rs / config.toml.
             for cmd in &manager.engine.cfg.autostart {
                 if let Some((bin, args)) = cmd.split_first() {
                     // Detach stdio fully: an autostart child inheriting our
-                    // stdin (or the X fd) keeps the terminal/session alive
-                    // and can block a clean reset. (`actions::spawn` already
-                    // nulls all three; this is the same rule.)
+                    // stdin keeps the terminal/session alive and can block a
+                    // clean reset. (`actions::spawn` follows the same rule.)
                     if let Err(e) = std::process::Command::new(bin)
                         .args(args)
                         .stdin(std::process::Stdio::null())
@@ -302,13 +292,13 @@ fn main() {
                 }
             }
 
-            // ── Phase 3: event loop ───────────────────────────────────────────
-            // Start the loop: `running` is initialised to `false` (State::new)
-            // so the WM would otherwise exit immediately without ever servicing
-            // a single X11 event. Flip it on before handing control to run().
+            // `running` starts out `false` (State::new), so the loop would
+            // otherwise exit before servicing a single X11 event.
             manager.engine.state.running = true;
             match manager.run() {
                 Ok(()) => {
+                    // A loop that returns with `running` still set means the X
+                    // connection died; there is nothing to clean up against.
                     let disconnected = manager.engine.state.running;
                     if disconnected {
                         log::warn!("maverick: X server disconnected — exiting");
@@ -328,14 +318,13 @@ fn main() {
         }
         Err(e) => {
             eprintln!("maverick: failed to initialise: {e}");
-            // Clean up the identity ficha written earlier so it doesn't
-            // linger and confuse tools that list instances.
+            // Remove the identity record written before init, so a failed
+            // start does not linger in the instance list.
             maverick_sys::identity::cleanup_meta(&sid);
             process::exit(1);
         }
     }
 }
 
-// Detach + signal setup now live in the `maverick-sys` crate, which is the
-// only place in the project that touches libc FFI. See `detach_from_terminal`
-// and `Signal` there.
+// Detaching and signal setup live in `maverick-sys`, the only place in the
+// project that touches libc FFI. See `detach_from_terminal` and `Signal` there.

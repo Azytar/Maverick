@@ -1,29 +1,13 @@
 //! Compatibility shim that re-exports the pure domain model and hosts the
 //! single layout-dependent helper that cannot live in `maverick-core`.
 //!
-//! `maverick-core` is the single source of truth for all pure types (`State`,
-//! `Client`, `Monitor`, `Workspace`, `Column`, `Camera`, `Rect`, …). This
-//! module exists only so existing import paths (`crate::types::State`) keep
-//! compiling and so code that depends on the real scrolling ribbon (`fs_ctx`,
-//! `LayoutKind::Column`, per-workspace `overview`) has a place to live without
-//! coupling the core to layout/config.
+//! `maverick-core` owns all pure types (`State`, `Client`, `Monitor`,
+//! `Workspace`, `Column`, `Camera`, `Rect`, …). This module exists so existing
+//! import paths (`crate::types::State`) keep compiling, and so the one
+//! layout-dependent predicate below has a home without coupling the core to
+//! layout or config.
 //!
-//! # Ownership
-//!
-//! This crate owns window management, layout, and presentation policy. The core
-//! owns the *logical* state; this shim owns the *composition* of that state
-//! with layout-specific predicates such as "which window covers the screen".
-//!
-//! # Why `StateExt` lives here and not in `maverick-core`
-//!
-//! `State::covering_fullscreen_window` delegates to `crate::core::layout::fs_ctx`,
-//! which is layout-specific: it inspects `Workspace::layout == LayoutKind::Column`,
-//! `Workspace::overview`, and the column tree to decide which columns/windows
-//! are fullscreen participants. Moving that predicate into `maverick-core` would
-//! force the core to depend on the ribbon/column implementation and on
-//! layout-specific config. Keeping it behind `StateExt` here preserves the
-//! core's purity (no layout/config coupling, testable without an X server) while
-//! retaining ergonomic method syntax at call sites.
+//! See [`StateExt`] for why the predicate lives here instead of in the core.
 
 #![allow(unused_imports)]
 
@@ -33,13 +17,12 @@ pub use maverick_core::types::{sanitize_spring, spring_smooth};
 /// Extension trait for the layout-dependent "covering fullscreen" predicate.
 ///
 /// Implemented for [`State`] but defined here (not in `maverick-core`) because
-/// the predicate depends on `crate::core::layout::fs_ctx`, which is layout-
-/// specific (needs `LayoutKind::Column` / `overview` / column fullscreen
-/// participation). Keeping it here preserves `maverick-core`'s purity — no
-/// layout or config coupling — while retaining ergonomic method syntax.
-///
-/// All call sites use `state.covering_fullscreen_window(idx)` and only need
-/// `use crate::types::StateExt`.
+/// the predicate delegates to `crate::core::layout::fs_ctx`, which is
+/// layout-specific: it reads `Workspace::layout`, `Workspace::overview` and the
+/// column tree. Moving it into the core would drag the ribbon/column
+/// implementation and layout-specific config into a crate that must stay pure
+/// and testable without an X server, while call sites still get method syntax
+/// through a single `use crate::types::StateExt`.
 pub trait StateExt {
     /// The single fullscreen window that *covers* `mon_idx`'s screen as a
     /// scrolling-ribbon tile, if any.
@@ -76,11 +59,11 @@ impl StateExt for State {
         if ws.overview {
             return None;
         }
-        // Column + Normal-policy: the fullscreen ribbon tile (fs_ctx owns this
-        // definition, gaps/camera included). `FullscreenPolicy::True` overlays
-        // are deliberately EXCLUDED here by `fs_ctx` — they are reported by
-        // `presented_overlay_owner` instead, keeping the two helpers disjoint
-        // as `compositor_policy::bypass_candidate` requires (union == 1).
+        // Column + Normal-policy: the fullscreen ribbon tile. `fs_ctx` owns that
+        // definition (gaps and camera included) and deliberately excludes
+        // `FullscreenPolicy::True` overlays, which `presented_overlay_owner`
+        // reports instead — the two helpers stay disjoint, which is what
+        // `compositor_policy::bypass_candidate` relies on.
         if ws.layout == LayoutKind::Column {
             let fs = crate::core::layout::fs_ctx(&self.clients, ws, mon.screen);
             if fs.win.is_some() {

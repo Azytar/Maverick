@@ -1,4 +1,16 @@
 //! Deterministic tests for the shared XKB resolver and its core fallback.
+//!
+//! The keymap is the one thing a window manager cannot get wrong by inspection:
+//! a grab that the planner emits but the dispatcher cannot resolve is a dead
+//! shortcut, and a modifier the resolver ignores is a shortcut that fires with
+//! the wrong chord. The tests therefore drive both halves against synthetic
+//! `XkbKeyboardMap`s and assert the property that actually matters — the planner
+//! and the dispatcher are inverses of each other
+//! (`assert_every_planned_grab_dispatches`) — rather than asserting individual
+//! table entries.
+//!
+//! Modifier and keysym constants below are raw X11 values, so a test reads the
+//! same numbers the server sends.
 
 use super::*;
 use x11rb::protocol::xkb::{KTMapEntry, KeySymMap, KeyType, ModDef};
@@ -181,6 +193,10 @@ fn resolved_for(map: &XkbKeyboardMap, code: u8, core: u16, group: u8) -> Resolve
         .expect("synthetic keymap must resolve")
 }
 
+/// The planner/dispatcher inverse property: every grab the planner emitted must
+/// resolve, through the same `ActiveLayout`, back to a binding in the keymap.
+/// A grab that fails this is a shortcut the user can press and nothing will
+/// happen, so this is the assertion that guards the whole module.
 fn assert_every_planned_grab_dispatches(
     plan: &KeyGrabPlan,
     layout: ActiveLayout<'_>,
@@ -249,6 +265,9 @@ fn resolver_handles_level_five_without_clamping() {
 
 #[test]
 fn a_level_missing_from_the_row_width_resolves_to_no_key() {
+    // A row narrower than the key type's level count has no keysym for the
+    // higher level; resolving must fail instead of returning the wrong level's
+    // keysym (which would dispatch Shift+A as plain `a`).
     let map = keyboard_map(9, vec![row(1, 1, 1, &[XK_A])], two_level_type());
     let layout = xkb_layout(&map, 0, 0, 0);
     assert!(layout
@@ -310,6 +329,9 @@ fn planner_dispatch_inverse_handles_multiple_configurable_selectors() {
 
 #[test]
 fn planner_rejects_a_final_grab_state_that_falls_outside_the_xkb_rules() {
+    // `k` lives at level 1 under Lock, so reaching it needs Lock+Shift, which no
+    // XKB type can select as a grab mask here. The planner must report the bind
+    // as missing instead of grabbing a state the server would never deliver.
     let key_type = key_type(
         SHIFT | LOCK,
         3,
@@ -614,6 +636,9 @@ fn planner_and_dispatch_follow_the_active_group_for_dvorak() {
 
 #[test]
 fn group_redirect_policy_is_applied_before_lookup() {
+    // `0x80` selects XKB's "redirect to a fixed group" policy and bits 4-5 hold
+    // the target group (1). The redirect must be resolved *before* the keysym
+    // lookup, otherwise an out-of-range group would read the wrong column.
     let mut redirected = row(1, 2, 0, &[XK_H, XK_J]);
     redirected.group_info |= 0x80 | (1 << 4);
     let map = keyboard_map(43, vec![redirected], one_level_type());
@@ -623,6 +648,9 @@ fn group_redirect_policy_is_applied_before_lookup() {
 
 #[test]
 fn core_fallback_preserves_level_zero_and_shift() {
+    // Without XKB the server only reports `kpk` (keysyms per keycode) columns
+    // per key, so the fallback may only ever use the first two. The four
+    // `dispatch_col` cases are that truth table: plain, Shift, Lock, both.
     let keysyms = [
         XK_A, XK_A_UPPER, XK_Z, XK_Z_UPPER, XK_Z, XK_Z_UPPER, XK_A, XK_A_UPPER, XK_A, XK_A_UPPER,
         XK_Z, XK_Z_UPPER, XK_A, XK_A_UPPER, XK_Z, XK_Z_UPPER,
@@ -679,6 +707,9 @@ fn core_fallback_plans_every_keymap_row() {
 
 #[test]
 fn num_and_scroll_lock_columns_use_full_protocol_keysyms() {
+    // The lock columns are matched by their real keysyms (0xff7f Num_Lock,
+    // 0xff14 Scroll_Lock), not by an assumed column index, because a server may
+    // order them differently.
     let mut keysyms = vec![0u32; 24];
     keysyms[16] = 0xff7f;
     keysyms[20] = 0xff14;
@@ -718,6 +749,8 @@ fn missing_keysym_is_reported_without_a_grab() {
 
 #[test]
 fn action_keys_are_normalized_for_dispatch() {
+    // Config may spell a key either way round (`0x41` or `0x61`); the keymap is
+    // built in canonical form, and on a collision the first bind wins.
     let cfg = Cfg {
         keybinds: vec![(0, 0x0041, Action::Kill)],
         ..Cfg::default()
@@ -736,6 +769,9 @@ fn action_keys_are_normalized_for_dispatch() {
 
 #[test]
 fn clean_mask_strips_groups_and_configured_locks() {
+    // Bits 13-14 of the keypress state carry the XKB group, which is resolved
+    // separately; the lock modifiers must be stripped only when the keymap
+    // says the key is actually lock-sensitive.
     let numlock = NUM;
     let mod3 = 0x0020;
     assert_eq!(clean_mask(SUPER | 0x2000 | 0x4000, numlock, 0), SUPER);
@@ -748,6 +784,8 @@ fn clean_mask_strips_groups_and_configured_locks() {
 
 #[test]
 fn core_dispatch_column_never_reads_past_level_one() {
+    // Column 1 is the last one the core fallback may select, and only if the
+    // server actually reports that many keysyms per keycode (kpk).
     for kpk in [1usize, 2, 4, 6] {
         for shift in [false, true] {
             for lock in [false, true] {
@@ -761,6 +799,8 @@ fn core_dispatch_column_never_reads_past_level_one() {
 
 #[test]
 fn bind_names_round_trip_into_config_syntax() {
+    // Diagnostics print binds with `bind_name`; the result has to be valid
+    // config syntax, including the `0x<hex>` fallback for unnamed keysyms.
     assert_eq!(bind_name(SUPER | SHIFT, XK_A), "Super+Shift+a");
     assert_eq!(bind_name(SUPER, XK_BRACKETLEFT), "Super+bracketleft");
     assert_eq!(bind_name(SUPER, 0x1008_ff30), "Super+0x1008ff30");
@@ -769,6 +809,8 @@ fn bind_names_round_trip_into_config_syntax() {
 
 #[test]
 fn keypress_state_separates_group_from_core_modifiers() {
+    // A keypress packs the XKB group into bits 13-14 of the modifier state;
+    // leaving them in `core` would make every binding look modified.
     assert_eq!(
         KeyLookupState::from_x11_with_group(SUPER | SHIFT | M5, 0),
         KeyLookupState {
