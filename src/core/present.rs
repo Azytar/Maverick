@@ -435,3 +435,605 @@ mod tests {
         assert_eq!(p, snapshot);
     }
 }
+
+/// Property-based coverage of the presentation overlay.
+///
+/// `present_into` is the only place that rewrites `layout::arrange`'s tile
+/// rects into the rects the reconciler writes to X11, so its contract is small
+/// and sharp:
+///
+/// * it rewrites *in place* — the placement set itself never changes, and the
+///   raise list is a duplicate-free selection from it with the focused window
+///   last;
+/// * `fullscreen > maximized`, and a presented window is always configured
+///   with border 0 so the overlay it covers cannot overflow;
+/// * EWMH's two maximize axes are independent: a vertical maximize stretches
+///   y/h and leaves x/w at whatever the tile had, and vice versa;
+/// * only the workspace's *presented* maximize is an overlay — an unfocused
+///   maximized window returns to its tile slot;
+/// * in `LayoutKind::Column` a normal-policy fullscreen is a ribbon
+///   participant, not a pinned overlay.
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::config::Cfg;
+    use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements, RibbonScratch};
+    use crate::types::{
+        Client, Column, Edge, Focus, FullscreenPolicy, Monitor, Rect, SizeHints, State, WinFlags,
+    };
+    use proptest::prelude::*;
+
+    /// One window's presentation policy: what the overlay layer branches on,
+    /// plus the float inputs `arrange` normalizes with.
+    #[derive(Debug, Clone, Copy)]
+    struct WindowSpec {
+        fullscreen: bool,
+        exclusive: bool,
+        max_v: bool,
+        max_h: bool,
+        border_w: u32,
+        floating: bool,
+        /// The WM adopted the client's own rect: `float_client_authority`.
+        sealed: bool,
+        geom: Rect,
+        hints: SizeHints,
+    }
+
+    /// A generated scene: one monitor, a ribbon of columns and a few floats.
+    #[derive(Debug, Clone)]
+    struct Scene {
+        screen: Rect,
+        reserved: Vec<(Edge, u32)>,
+        gaps_inner: u32,
+        gaps_outer: u32,
+        border_w: u32,
+        /// `(weight, rows)` for the tiled columns.
+        columns: Vec<(f32, usize)>,
+        /// One spec per client, in window-id order from 1.
+        windows: Vec<WindowSpec>,
+        /// Index into `windows` the monitor focuses.
+        focus: usize,
+        /// Make that window the workspace's presented maximize.
+        present_maximize: bool,
+    }
+
+    fn screen_rect() -> impl Strategy<Value = Rect> {
+        (
+            -1920i32..=1920,
+            -1080i32..=1080,
+            prop_oneof![0u32..=1, 1u32..=64, 320u32..=3840],
+            prop_oneof![0u32..=1, 1u32..=64, 240u32..=2160],
+        )
+            .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
+    }
+
+    /// `WM_NORMAL_HINTS` a client can declare, including the unsatisfiable
+    /// combinations the float projection has to survive.
+    fn size_hints() -> impl Strategy<Value = SizeHints> {
+        (
+            any::<bool>(),
+            0i32..=64,
+            0i32..=64,
+            0i32..=256,
+            0i32..=256,
+            0i32..=16,
+            0i32..=16,
+            0i32..=64,
+        )
+            .prop_map(|(valid, min_w, min_h, max_w, max_h, inc_w, inc_h, base)| {
+                SizeHints {
+                    valid,
+                    min_w,
+                    min_h,
+                    max_w,
+                    max_h,
+                    inc_w,
+                    inc_h,
+                    base_w: base,
+                    base_h: base,
+                    min_aspect: 0.0,
+                    max_aspect: 0.0,
+                    flags: 0,
+                }
+            })
+    }
+
+    fn scene() -> impl Strategy<Value = Scene> {
+        let window = (
+            any::<bool>(),
+            any::<bool>(),
+            any::<bool>(),
+            any::<bool>(),
+            0u32..=8,
+            any::<bool>(),
+            any::<bool>(),
+            screen_rect(),
+            size_hints(),
+        )
+            .prop_map(
+                |(fullscreen, exclusive, max_v, max_h, border_w, floating, sealed, geom, hints)| {
+                    WindowSpec {
+                        fullscreen,
+                        exclusive,
+                        max_v,
+                        max_h,
+                        border_w,
+                        floating,
+                        sealed,
+                        geom,
+                        hints,
+                    }
+                },
+            );
+        (
+            screen_rect(),
+            prop::collection::vec(
+                (
+                    prop_oneof![
+                        Just(Edge::Top),
+                        Just(Edge::Bottom),
+                        Just(Edge::Left),
+                        Just(Edge::Right)
+                    ],
+                    0u32..=120,
+                ),
+                0..=2,
+            ),
+            0u32..=16,
+            0u32..=16,
+            0u32..=8,
+            prop::collection::vec((0.05f32..=1.0, 0usize..=4), 1..=3),
+            prop::collection::vec(window, 1..=6),
+            0usize..=5,
+            any::<bool>(),
+        )
+            .prop_map(
+                |(
+                    screen,
+                    reserved,
+                    gaps_inner,
+                    gaps_outer,
+                    border_w,
+                    columns,
+                    windows,
+                    focus,
+                    present_maximize,
+                )| {
+                    let focus = if windows.is_empty() {
+                        0
+                    } else {
+                        focus % windows.len()
+                    };
+                    Scene {
+                        screen,
+                        reserved,
+                        gaps_inner,
+                        gaps_outer,
+                        border_w,
+                        columns,
+                        windows,
+                        focus,
+                        present_maximize,
+                    }
+                },
+            )
+    }
+
+    impl Scene {
+        /// Build the state the overlay layer reads. Windows are assigned
+        /// round-robin to the columns, so a scene has both tiled clients and
+        /// (for the floating specs) floats, and every client is registered.
+        fn state(&self) -> State {
+            let mut state = State::new();
+            state.monitors.push(Monitor::new(self.screen, 2));
+            for &(edge, thickness) in &self.reserved {
+                state.monitors[0].set_reserved_region(0xD0C, edge, thickness);
+            }
+            let mut tiled: Vec<WindowId> = Vec::new();
+            for (i, spec) in self.windows.iter().enumerate() {
+                let win = (i + 1) as WindowId;
+                let mut c = Client::new(win, 0, 0);
+                c.geom = spec.geom;
+                c.hints = spec.hints;
+                c.border_w = spec.border_w;
+                c.float_client_authority = spec.sealed;
+                c.fullscreen_policy = if spec.exclusive {
+                    FullscreenPolicy::True
+                } else {
+                    FullscreenPolicy::Normal
+                };
+                if spec.fullscreen {
+                    c.flags.set(WinFlags::FULLSCREEN);
+                }
+                if spec.max_v {
+                    c.flags.set(WinFlags::MAXIMIZED_V);
+                }
+                if spec.max_h {
+                    c.flags.set(WinFlags::MAXIMIZED_H);
+                }
+                if spec.floating {
+                    c.flags.set(WinFlags::FLOAT);
+                }
+                state.add_client(c);
+                if spec.floating {
+                    state.monitors[0].workspaces[0].floats.push(win);
+                } else {
+                    tiled.push(win);
+                }
+            }
+            // Fill the generated `(weight, rows)` columns from the tiled
+            // clients in order, so a scene exercises both one-row and stacked
+            // columns; leftover tiled clients fall into a fresh column so no
+            // client is ever dropped from the tree.
+            if !tiled.is_empty() {
+                let ws = &mut state.monitors[0].workspaces[0];
+                let mut next = 0usize;
+                for &(weight, rows) in &self.columns {
+                    let end = (next + rows).min(tiled.len());
+                    ws.columns.push(Column {
+                        windows: tiled[next..end].to_vec(),
+                        focused: 0,
+                        weight,
+                        boost: 0.0,
+                    });
+                    next = end;
+                }
+                for &win in &tiled[next..] {
+                    ws.columns.push(Column {
+                        windows: vec![win],
+                        focused: 0,
+                        weight: 1.0,
+                        boost: 0.0,
+                    });
+                }
+                ws.focus = Focus { column_idx: 0 };
+            }
+            if !self.windows.is_empty() {
+                state.monitors[0].focused = Some((self.focus + 1) as WindowId);
+            }
+            let focus = state.monitors[0].focused.unwrap_or(0);
+            if self.present_maximize {
+                let presented = state
+                    .clients
+                    .get(&focus)
+                    .is_some_and(maverick_core::Client::is_maximized);
+                if presented {
+                    state.monitors[0].workspaces[0].presented_maximize = Some(focus);
+                }
+            }
+            state
+        }
+
+        fn cfg(&self) -> Cfg {
+            Cfg {
+                gaps_inner: self.gaps_inner,
+                gaps_outer: self.gaps_outer,
+                border_w: self.border_w,
+                ..Cfg::default()
+            }
+        }
+    }
+
+    /// Arrange and then present, returning the tile rects alongside the
+    /// presented ones so a test can tell which entries the overlay rewrote.
+    fn project(state: &State, cfg: &Cfg) -> (Placements, Placements, Vec<WindowId>) {
+        let registry = LayoutRegistry::new();
+        let mut out = Placements::new();
+        arrange(
+            state,
+            0,
+            cfg,
+            &registry,
+            Phase::Settled,
+            &mut out,
+            &mut RibbonScratch::default(),
+        );
+        let tiles = out.clone();
+        let mut raise: Vec<WindowId> = Vec::new();
+        present_into(state, &state.monitors[0], &mut out, &mut raise);
+        (tiles, out, raise)
+    }
+
+    /// `present_into` rewrites rects *in place* and collects the raise order in
+    /// the very buffer the caller reuses every frame, so the placement set has
+    /// to survive it untouched — every window `arrange` produced is still there,
+    /// in the same order — while the raise list stays a duplicate-free
+    /// selection from that set with the focused window moved last. A duplicate
+    /// or a lost entry here becomes a restack the caller cannot interpret.
+    #[test]
+    fn presenting_preserves_the_placement_set_and_orders_the_raise_list() {
+        proptest!(|(s in scene())| {
+            let state = s.state();
+            let cfg = s.cfg();
+            let (tiles, presented, raise) = project(&state, &cfg);
+
+            let tile_windows: Vec<WindowId> = tiles.iter().map(|e| e.0).collect();
+            let presented_windows: Vec<WindowId> = presented.iter().map(|e| e.0).collect();
+            prop_assert_eq!(
+                &presented_windows[..],
+                &tile_windows[..],
+                "the overlay must not add, drop or reorder placements"
+            );
+
+            let mut seen: Vec<WindowId> = Vec::new();
+            for &win in &raise {
+                prop_assert!(
+                    presented_windows.contains(&win),
+                    "window {} was raised but never placed: {:?}",
+                    win,
+                    presented_windows
+                );
+                prop_assert!(
+                    !seen.contains(&win),
+                    "window {} appears twice in the raise list: {:?}",
+                    win,
+                    raise
+                );
+                seen.push(win);
+            }
+
+            // The raise order follows the placement order, with the focused
+            // window pulled to the end.
+            let focused = state.monitors[0].focused;
+            let tail: Vec<WindowId> = raise
+                .iter()
+                .copied()
+                .filter(|&w| Some(w) != focused)
+                .collect();
+            let head: Vec<WindowId> = presented_windows
+                .iter()
+                .copied()
+                .filter(|w| seen.contains(w) && Some(*w) != focused)
+                .collect();
+            prop_assert_eq!(
+                tail, head,
+                "the raise list must keep the placement order apart from the focused window"
+            );
+            if let Some(f) = focused {
+                if seen.contains(&f) {
+                    prop_assert_eq!(
+                        *raise.last().unwrap(),
+                        f,
+                        "the focused presented window must be raised last: {:?}",
+                        raise
+                    );
+                }
+            }
+
+            // Every presented window is configured with border 0: a fullscreen
+            // overlay covers the screen and a maximize fills the workarea, and
+            // either one that kept its border would overflow the area it covers.
+            for &(win, _, bw) in &presented {
+                if seen.contains(&win) {
+                    prop_assert_eq!(bw, 0, "presented window {} kept a border", win);
+                }
+            }
+        });
+    }
+
+    /// The overlay is a projection, not a state transition: presenting an
+    /// already-presented placement must be a no-op, so the reconciler's diff
+    /// against `AppliedState` is empty and no `ConfigureWindow` is emitted for
+    /// a window that did not change.
+    #[test]
+    fn presenting_an_already_presented_placement_changes_nothing() {
+        proptest!(|(s in scene())| {
+            let state = s.state();
+            let cfg = s.cfg();
+            let (_, once, raise_once) = project(&state, &cfg);
+            let mut twice_placements = once.clone();
+            let mut twice_raise: Vec<WindowId> = Vec::new();
+            present_into(
+                &state,
+                &state.monitors[0],
+                &mut twice_placements,
+                &mut twice_raise,
+            );
+            prop_assert_eq!(
+                twice_placements, once,
+                "presenting twice moved a window that was already presented"
+            );
+            prop_assert_eq!(
+                twice_raise, raise_once,
+                "presenting twice changed the raise order"
+            );
+        });
+    }
+
+    /// EWMH models vertical and horizontal maximization as two independent
+    /// states, and clients do request only one of them, so a per-axis maximize
+    /// stretches exactly the axis it owns: the vertical one takes y/h from the
+    /// workarea and leaves x/w at whatever the tile had, the horizontal one
+    /// takes x/w and leaves y/h. Collapsing both into "fill the workarea" is
+    /// the bug this split exists to prevent.
+    #[test]
+    fn a_maximize_presentation_stretches_only_the_axis_it_owns() {
+        proptest!(|(s in scene())| {
+            let mut s = s;
+            // Exactly one presented maximize, so the assertion is about the
+            // axes and not about which window won the overlay, and no other
+            // window is fullscreen (a fullscreen column hides its siblings, so
+            // the focused window would have no tile to stretch).
+            s.present_maximize = true;
+            for w in &mut s.windows {
+                w.fullscreen = false;
+                w.exclusive = false;
+            }
+            let f = s.focus;
+            s.windows[f].floating = false;
+            let state = s.state();
+            let cfg = s.cfg();
+            let mon_focus = state.monitors[0].focused;
+            prop_assume!(mon_focus.is_some());
+            let focus = mon_focus.unwrap();
+            let presented_max = state.monitors[0].ws().presented_maximize;
+            prop_assume!(presented_max == Some(focus));
+            let client = state.clients.get(&focus).unwrap();
+            prop_assume!(!client.is_fullscreen_overlay());
+            let (v, h) = (client.is_maximized_v(), client.is_maximized_h());
+
+            let (tiles, out, raise) = project(&state, &cfg);
+            prop_assert!(raise.contains(&focus));
+            let tile = tiles.iter().find(|e| e.0 == focus).unwrap().1;
+            let got = out.iter().find(|e| e.0 == focus).unwrap().1;
+            let wa = state.monitors[0].workarea;
+            if v {
+                prop_assert_eq!(
+                    (got.y, got.h),
+                    (wa.y, wa.h),
+                    "a vertical maximize must fill the workarea height: {:?} wa={:?}",
+                    got,
+                    wa
+                );
+            } else {
+                prop_assert_eq!(
+                    (got.y, got.h),
+                    (tile.y, tile.h),
+                    "a non-vertical maximize must not touch y/h: {:?} vs {:?}",
+                    got,
+                    tile
+                );
+            }
+            if h {
+                prop_assert_eq!(
+                    (got.x, got.w),
+                    (wa.x, wa.w),
+                    "a horizontal maximize must fill the workarea width: {:?} wa={:?}",
+                    got,
+                    wa
+                );
+            } else {
+                prop_assert_eq!(
+                    (got.x, got.w),
+                    (tile.x, tile.w),
+                    "a non-horizontal maximize must not touch x/w: {:?} vs {:?}",
+                    got,
+                    tile
+                );
+            }
+        });
+    }
+
+    /// `fullscreen > maximized` is the overlay's precedence rule: a window
+    /// that carries both flags must still be presented as covering
+    /// `mon.screen` — the screen, not the strut-inset workarea — with border 0,
+    /// so nothing shows through the reserved region.
+    #[test]
+    fn fullscreen_wins_over_maximized_and_covers_the_screen() {
+        proptest!(|(s in scene())| {
+            let mut s = s;
+            s.present_maximize = true;
+            // Make the focused window both fullscreen (exclusively) and
+            // maximized on both axes, and leave every other window out of the
+            // overlay entirely so the assertion is about the precedence rule.
+            for w in &mut s.windows {
+                w.fullscreen = false;
+                w.exclusive = false;
+                w.max_v = false;
+                w.max_h = false;
+            }
+            let f = s.focus;
+            s.windows[f].floating = false;
+            s.windows[f].fullscreen = true;
+            s.windows[f].exclusive = true;
+            s.windows[f].max_v = true;
+            s.windows[f].max_h = true;
+            let state = s.state();
+            let cfg = s.cfg();
+            let focus = state.monitors[0].focused.unwrap();
+            prop_assume!(state.monitors[0].ws().presented_maximize == Some(focus));
+
+            let (_, out, raise) = project(&state, &cfg);
+            prop_assert!(raise.contains(&focus));
+            let entry = out.iter().find(|e| e.0 == focus).unwrap();
+            prop_assert_eq!(
+                entry.1,
+                state.monitors[0].screen,
+                "fullscreen must beat maximized and cover the screen"
+            );
+            prop_assert_eq!(entry.2, 0, "a fullscreen overlay carries no border");
+        });
+    }
+
+    /// Only the workspace's *presented* maximize is an overlay. A maximized
+    /// window that does not own the presentation — an unfocused one, or one the
+    /// workspace has not adopted — must keep its tile slot, or every
+    /// background window that ever asked to be maximized would cover the
+    /// focused one.
+    #[test]
+    fn only_the_presented_maximize_becomes_an_overlay() {
+        proptest!(|(s in scene())| {
+            let mut s = s;
+            s.present_maximize = false;
+            let state = s.state();
+            let cfg = s.cfg();
+            let (tiles, out, raise) = project(&state, &cfg);
+            prop_assume!(state.monitors[0].ws().presented_maximize.is_none());
+            for &(win, _, _) in &out {
+                let client = state.clients.get(&win).unwrap();
+                if client.is_maximized() && !client.is_fullscreen_overlay() {
+                    prop_assert!(
+                        !raise.contains(&win),
+                        "window {} is maximized but owns no presentation, so it must not \
+                         be raised: {:?}",
+                        win,
+                        raise
+                    );
+                    let tile = tiles.iter().find(|e| e.0 == win).unwrap();
+                    let kept = out.iter().find(|e| e.0 == win).unwrap();
+                    prop_assert_eq!(
+                        (kept.1, kept.2),
+                        (tile.1, tile.2),
+                        "window {} returned to its tile slot, not to the workarea",
+                        win
+                    );
+                }
+            }
+        });
+    }
+
+    /// In `LayoutKind::Column` a normal-policy fullscreen is a *ribbon
+    /// participant* — one screen-filling tile that scrolls with the camera —
+    /// not a pinned overlay. Only `FullscreenPolicy::True` is exclusive, and
+    /// only that kind reaches the overlay path. Letting a normal-policy
+    /// fullscreen through would pin it over the workspace and break the
+    /// documented h/l scroll between fullscreen columns.
+    #[test]
+    fn a_column_fullscreen_is_a_ribbon_participant_not_an_overlay() {
+        proptest!(|(s in scene())| {
+            let mut s = s;
+            // The focused window is the workspace's only fullscreen, so it is
+            // also the fullscreen window of its column and therefore the tile
+            // that survives the column's sibling hiding.
+            for w in &mut s.windows {
+                w.fullscreen = false;
+                w.exclusive = false;
+            }
+            let f = s.focus;
+            s.windows[f].fullscreen = true;
+            s.windows[f].exclusive = false;
+            s.windows[f].max_v = false;
+            s.windows[f].max_h = false;
+            let state = s.state();
+            let cfg = s.cfg();
+            let focus = state.monitors[0].focused.unwrap();
+            let client = state.clients.get(&focus).unwrap();
+            prop_assert!(!client.is_fullscreen_overlay());
+            prop_assert!(state.monitors[0].ws().presented_maximize.is_none());
+
+            let (tiles, out, raise) = project(&state, &cfg);
+            prop_assert!(
+                !raise.contains(&focus),
+                "a ribbon fullscreen must not be raised as an overlay: {:?}",
+                raise
+            );
+            let tile = tiles.iter().find(|e| e.0 == focus).unwrap();
+            let kept = out.iter().find(|e| e.0 == focus).unwrap();
+            prop_assert_eq!(
+                (kept.1, kept.2),
+                (tile.1, tile.2),
+                "a ribbon fullscreen must keep the tile the layout computed for it"
+            );
+        });
+    }
+}
