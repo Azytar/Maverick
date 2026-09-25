@@ -772,13 +772,24 @@ mod tests {
         );
 
         // 0.3 ms is the order of magnitude `dt` collapses to when the present is
-        // excluded from the delta: ~55x too small. The scroll then crawls, and
-        // the f32 integrator cannot even reach its settle threshold — so
-        // `animating` would latch on and the loop would never go idle again.
-        let small = frames_to_settle(0.0003, 200_000);
+        // excluded from the delta: ~55x too small. The scroll then needs far more
+        // steps, but it must still retire in the same *simulated* time — the
+        // spring governs convergence, not how often it is sampled. That is what
+        // keeps a loop fed a loop-overhead delta from spinning indefinitely, and
+        // it is the property this half of the test is really about.
+        //
+        // An earlier version asserted the opposite: that the f32 integrator could
+        // never reach its settle threshold at this `dt`. That pinned the
+        // integrator's rounding error rather than the contract, so it went red
+        // once `Camera` carried its analytic state in f64 — even though the
+        // behaviour it forbade (a loop that never goes idle) had been fixed.
+        let small = frames_to_settle(0.0003, 200_000)
+            .expect("a loop-overhead-sized dt must still converge, just in more steps");
+        let small_secs = small as f32 * 0.0003;
         assert!(
-            small.is_none(),
-            "a loop-overhead-sized dt must not be mistaken for a frame period"
+            (0.5..2.5).contains(&small_secs),
+            "settling must be measured in simulated seconds, not steps: took \
+             {small_secs:.2} s over {small} steps"
         );
     }
 }
