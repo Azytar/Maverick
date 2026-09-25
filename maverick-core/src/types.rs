@@ -1766,11 +1766,26 @@ impl State {
         self.presented_overlay_owner_in(mon_idx, ws_idx)
     }
 
-    /// The canonical overlay owner on an EXPLICIT workspace `ws_idx` of
+    /// The canonical overlay *owner* on an EXPLICIT workspace `ws_idx` of
     /// `mon_idx`. Shared by [`State::presented_overlay_owner`] (which passes the
     /// monitor's active workspace) and the core EWMH `_NET_ACTIVE_WINDOW` policy
     /// (which must test the *requesting* window's own (monitor, workspace), not
     /// necessarily the active one).
+    ///
+    /// Ownership is deliberately *monitor*-scoped: both candidate sources,
+    /// `Monitor::focus_stack` and `Workspace::presented_maximize`, belong to
+    /// `mon_idx`, so neither (nor this helper) consults `Client::monitor`. A
+    /// monitor's focus slot is a logical pointer the X sink writes on the monitor
+    /// the user is looking at, so it can legitimately name a window placed
+    /// elsewhere; the commands that would splice such a window into the wrong
+    /// tree guard on that case individually (`NewColumn`, `ToggleFloat`,
+    /// `MoveToWorkspace`), and `remove_client` sweeps every monitor's slots.
+    ///
+    /// Naming the owner is deliberately *narrower* than asking whether an overlay
+    /// is still painted (see [`State::pending_focus_owner_presented`]): a
+    /// fullscreen window that is not the monitor's most recent focus is still
+    /// presented by `core::present` but does not own focus or stacking. The two
+    /// questions differ, so the two predicates differ.
     pub fn presented_overlay_owner_in(&self, mon_idx: usize, ws_idx: usize) -> Option<WindowId> {
         let mon = self.monitors.get(mon_idx)?;
         let ws = mon.workspaces.get(ws_idx)?;
@@ -1804,28 +1819,78 @@ impl State {
         None
     }
 
-    /// True iff `self.pending_focus` (if set) names an owner that is still a
-    /// currently presented overlay on the deferral's (monitor, workspace). Single
-    /// shared definition, used by both `check_invariants` and the post-command
-    /// reconciliation hook (`reconcile_pending_focus_after_transition`) so the
-    /// two can never disagree.
+    /// True iff `win` is presented as an overlay on `mon_idx`'s EXPLICIT
+    /// workspace `ws_idx` — the single definition of "an overlay is still up in
+    /// this context".
+    ///
+    /// Three conditions, one per coordinate space:
+    ///   1. `win` is placed in that monitor (`Client::monitor`) and on that
+    ///      workspace (`Client::workspace`). `core::present` only paints windows
+    ///      in the placements it is handed, which are one monitor's workspace, so
+    ///      an owner that has been moved to another monitor is no longer painted
+    ///      there — and the context a deferred focus request is keyed on is the
+    ///      overlay's presentation context, so leaving it dismisses the overlay.
+    ///   2. `win` is an *exclusive* fullscreen window
+    ///      ([`Client::is_fullscreen_overlay`]). A `FullscreenPolicy::Normal`
+    ///      fullscreen window is an ordinary ribbon tile and is never an overlay.
+    ///   3. OR `win` is maximized on some axis and holds the monitor's focus. A
+    ///      maximize overlay is presented exactly while it is the focused window
+    ///      (see [`State::sync_presented_maximize`]), so a focus move off a
+    ///      maximized window takes its overlay down with it.
+    ///
+    /// A window that is BOTH fullscreen and maximized is deliberately accepted
+    /// through condition 2 rather than routed exclusively through the maximize
+    /// branch the way [`State::presented_overlay_owner_in`] does. The two
+    /// predicates answer different questions and are meant to differ: naming the
+    /// overlay *owner* must yield exactly one window and must agree with
+    /// `presented_maximize`, whereas this asks about one specific window still
+    /// being painted. `core::present` paints such a window through its
+    /// fullscreen branch, so for the purpose of "may the keyboard move yet?" it
+    /// is up.
+    ///
+    /// Used by `State::pending_focus_owner_presented` (the deferral-lifetime
+    /// test) and by `decide_manage_focus` (the only creator of a deferral), so
+    /// a deferral can never be born behind an overlay that its own lifetime test
+    /// already rejects.
+    pub fn overlay_presented_in(&self, mon_idx: usize, ws_idx: usize, win: WindowId) -> bool {
+        // Stale indices (a `n_tags` shrink, or a monitor disappearing on hotplug)
+        // leave nothing to be presented: the context is gone for good.
+        let focused = self.monitors.get(mon_idx).and_then(|m| m.focused);
+        self.monitors
+            .get(mon_idx)
+            .and_then(|m| m.workspaces.get(ws_idx))
+            .is_some_and(|_ws| {
+                self.clients.get(&win).is_some_and(|c| {
+                    c.monitor == mon_idx
+                        && c.workspace == ws_idx
+                        && (c.is_fullscreen_overlay()
+                            || ((c.is_maximized_v() || c.is_maximized_h()) && focused == Some(win)))
+                })
+            })
+    }
+
+    /// True iff `self.pending_focus` (if set) names an owner whose overlay is
+    /// still presented on the deferral's (monitor, workspace) — the crate
+    /// invariant E, verbatim: "that owner is still a presented overlay on the
+    /// deferral's own `monitor`/`workspace`".
+    ///
+    /// The lifetime question is "has the overlay this deferral waits behind been
+    /// torn down?", and only [`State::overlay_presented_in`] answers that;
+    /// `pending_focus.monitor`/`workspace` are the *presentation context* the
+    /// deferral was created under, not the owner's address, which is why an owner
+    /// that is merely *hidden* — the user switched workspace, or is looking at
+    /// another monitor — keeps the deferral alive while an owner that left the
+    /// context entirely loses it.
+    ///
+    /// Single definition, used by `check_invariants` #8c and by
+    /// `reconcile_pending_focus_after_transition`, so the checker and the
+    /// resolver can never disagree about a deferral's lifetime.
     pub fn pending_focus_owner_presented(&self) -> bool {
         let pf = match self.pending_focus {
             Some(p) => p,
             None => return false,
         };
-        self.monitors.get(pf.monitor).is_some_and(|m| {
-            let focused = m.focused;
-            m.workspaces.get(pf.workspace).is_some_and(|_ws| {
-                self.clients.get(&pf.owner).is_some_and(|c| {
-                    c.monitor == pf.monitor
-                        && c.workspace == pf.workspace
-                        && (c.is_fullscreen() && c.is_true_fullscreen()
-                            || (c.is_maximized_v() || c.is_maximized_h())
-                                && focused == Some(pf.owner))
-                })
-            })
-        })
+        self.overlay_presented_in(pf.monitor, pf.workspace, pf.owner)
     }
 
     /// Monitor index containing `(x, y)`, or `sel_mon` if outside all screens.
@@ -2224,14 +2289,16 @@ impl State {
             if dup {
                 v.push(format!("monitor {mi}: focus_stack has duplicate entries"));
             }
-            // 8c. The global `pending_focus` slot names a live client and is owned
-            // by a currently presented overlay on the SAME monitor/workspace the
+            // 8c. The global `pending_focus` slot names a live client and its owner
+            // is still a presented overlay on the SAME monitor/workspace the
             // deferral was created for. The overlay need not be on the *active*
             // workspace — switching workspaces only hides it, it does not dismiss
             // it, so the deferral legitimately survives a workspace switch and is
             // only consumed or dropped when the overlay is torn down. Requiring
-            // the owner to still be the presented overlay is what stops a
-            // deferred window from being orphaned.
+            // the owner to still be presented is what stops a deferred window
+            // from being orphaned. The lifetime test itself is
+            // `State::pending_focus_owner_presented`, shared with
+            // `reconcile_pending_focus_after_transition`.
             if let Some(pf) = self.pending_focus {
                 if !self.clients.contains_key(&pf.window) {
                     v.push(format!(

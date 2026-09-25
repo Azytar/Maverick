@@ -370,19 +370,33 @@ pub enum ManageFocusIntent {
 /// current presented overlay or focused immediately. See `ManageFocusIntent`.
 pub fn decide_manage_focus(state: &State, win: WindowId) -> ManageFocusIntent {
     let mi = state.sel_mon;
+    let ws_i = state.monitors[mi].active_ws;
     if let Some(owner) = state.presented_overlay_owner(mi) {
-        let ws_i = state.monitors[mi].active_ws;
-        let owned_dialog = state
-            .clients
-            .get(&win)
-            .and_then(|c| c.transient_parent)
-            .is_some_and(|p| owner == p);
-        if !owned_dialog {
-            return ManageFocusIntent::Defer {
-                owner,
-                monitor: mi,
-                workspace: ws_i,
-            };
+        // The owner has to be presented *in the context the deferral is keyed on*.
+        // `presented_overlay_owner` is monitor-scoped: it reads that monitor's
+        // focus stack, which can legitimately name a window placed elsewhere (a
+        // focus slot is a logical pointer — see `overlay_presented_in`), and the
+        // newly mapped window is placed on `sel_mon`, so the only overlay that can
+        // be stealing *its* focus is one presented right here. Deferring behind an
+        // overlay that is not on this monitor would create a deferral its own
+        // lifetime test (`State::pending_focus_owner_presented`, which
+        // `check_invariants` #8c shares) rejects the instant it is recorded: the
+        // slot is keyed to a context the owner does not live in, so the next
+        // command's safety net would resolve it again immediately and the new
+        // window would never actually be held back.
+        if state.overlay_presented_in(mi, ws_i, owner) {
+            let owned_dialog = state
+                .clients
+                .get(&win)
+                .and_then(|c| c.transient_parent)
+                .is_some_and(|p| owner == p);
+            if !owned_dialog {
+                return ManageFocusIntent::Defer {
+                    owner,
+                    monitor: mi,
+                    workspace: ws_i,
+                };
+            }
         }
     }
     ManageFocusIntent::Focus(win)
