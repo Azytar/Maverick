@@ -1,8 +1,8 @@
-// maverick-vk/src/swapchain.rs
-//
-// Swapchain creation plus the *pure* selection helpers (format / present-mode /
-// extent / image-count). The helpers are free of any Vulkan handle so they can
-// be unit-tested in `tests/unit.rs` without a GPU or instance.
+//! Swapchain creation plus the *pure* selection helpers (format, present mode,
+//! extent, image count).
+//!
+//! The helpers take plain slices and touch no Vulkan handle, so they are
+//! unit-tested in `tests/unit.rs` without a loader, a surface or a GPU.
 
 use ash::vk;
 
@@ -16,9 +16,10 @@ pub(crate) const PREFERRED_COLOR_SPACE: vk::ColorSpaceKHR = vk::ColorSpaceKHR::S
 
 /// Pick a surface format, or `None` when the driver reports none.
 ///
-/// If the surface reports exactly one format with `FORMAT_UNDEFINED`, the
-/// implementation lets us choose any format — return the preferred sRGB BGRA8.
-/// Otherwise prefer `B8G8R8A8_SRGB`, falling back to the first reported format.
+/// A lone `UNDEFINED` format means the surface lets us choose, so the preferred
+/// sRGB BGRA8 is returned. Otherwise prefer `B8G8R8A8_SRGB` with the sRGB
+/// colour space, then that format with any colour space, then whatever the
+/// driver listed first.
 pub fn choose_surface_format(formats: &[vk::SurfaceFormatKHR]) -> Option<vk::SurfaceFormatKHR> {
     if formats.len() == 1 && formats[0].format == vk::Format::UNDEFINED {
         return Some(vk::SurfaceFormatKHR {
@@ -44,8 +45,10 @@ pub fn choose_present_mode(modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
     }
 }
 
-/// Clamp the requested extent to the surface's min/max. If the surface reports
-/// a *fixed* current extent (`u32::MAX` means "use the window size"), honour it.
+/// Clamp the requested extent to the surface's min/max.
+///
+/// A `current_extent` other than `u32::MAX` means the window manager (not us)
+/// owns the size, so it wins and the request is ignored.
 pub fn clamp_extent(caps: &vk::SurfaceCapabilitiesKHR, width: u32, height: u32) -> vk::Extent2D {
     if caps.current_extent.width != u32::MAX {
         return caps.current_extent;
@@ -58,8 +61,9 @@ pub fn clamp_extent(caps: &vk::SurfaceCapabilitiesKHR, width: u32, height: u32) 
     }
 }
 
-/// Choose the swapchain image count: `min_image_count + 1`, capped at
-/// `max_image_count` (when `max != 0`).
+/// Choose the swapchain image count: `min_image_count + 1` so a frame can be
+/// recorded while another is being presented, capped at `max_image_count`
+/// (which is `0` when the driver sets no upper bound).
 pub fn choose_image_count(caps: &vk::SurfaceCapabilitiesKHR) -> u32 {
     let mut count = caps.min_image_count + 1;
     if caps.max_image_count != 0 && count > caps.max_image_count {
@@ -80,8 +84,10 @@ pub struct Swapchain {
 }
 
 impl Swapchain {
-    /// Create (or, when `old` is `Some`, recreate) the swapchain and its image
-    /// views for the given target size.
+    /// Create the swapchain and one image view per image, for the requested
+    /// size. Passing `old` sets `oldSwapchain`, which lets the driver retire
+    /// the previous images in place; the caller then destroys the old
+    /// swapchain with [`Swapchain::destroy`].
     pub fn new(
         device: &Device,
         surface: &Surface,
@@ -128,7 +134,8 @@ impl Swapchain {
             &[]
         };
 
-        // Prefer opaque compositing; fall back to the first supported flag.
+        // OPAQUE avoids the compositor's alpha being blended with the window;
+        // the rest are probed in spec order for drivers that refuse it.
         let composite_alpha = if caps
             .supported_composite_alpha
             .contains(vk::CompositeAlphaFlagsKHR::OPAQUE)
@@ -210,12 +217,16 @@ impl Drop for Swapchain {
 }
 
 impl Swapchain {
-    /// Destroy this swapchain's views and handle WITHOUT running `Drop`.
-    /// Used by `recreate_swapchain`, which already destroyed the pieces
-    /// through another path: a plain `drop` afterwards would double-free.
-    /// Consumes `self`; view/image buffers are freed normally, the bare
-    /// device/loader handles need no cleanup, and `forget` skips the `Drop`
-    /// impl above. Views are destroyed before the swapchain, per spec order.
+    /// Destroy this swapchain's views and handle, bypassing the `Drop` impl
+    /// above.
+    ///
+    /// `recreate_swapchain` uses this for the swapchain it replaces, which must
+    /// therefore *not* be dropped as well — that would destroy the views and
+    /// the handle twice. Consuming `self` is what prevents that: the two
+    /// handle vectors are moved out and dropped normally (a `Vec<vk::Image>`
+    /// owns no Vulkan memory, and the `ash` loaders own nothing to release),
+    /// and `mem::forget` then skips `Drop` for the rest. Views go first, as
+    /// the spec requires.
     pub(crate) fn destroy(mut self) {
         let views = std::mem::take(&mut self.views);
         let _images = std::mem::take(&mut self.images);
@@ -225,7 +236,6 @@ impl Swapchain {
             }
             self.loader.destroy_swapchain(self.handle, None);
         }
-        // `_images` (plain handles) and the taken Vec buffers drop here.
         std::mem::forget(self);
     }
 }

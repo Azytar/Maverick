@@ -1,8 +1,10 @@
-// maverick-vk/src/instance.rs
-//
-// The Vulkan instance: loads the loader, picks instance extensions/layers, and
-// optionally installs a debug-utils messenger. No GPU is required to build an
-// instance, so this step succeeds on any machine that has `libvulkan.so.1`.
+//! The Vulkan instance: loader, instance extensions/layers, and an optional
+//! debug-utils messenger.
+//!
+//! No GPU is needed to build an instance, so this step succeeds on any machine
+//! with `libvulkan.so.1`. Every failure it can report (`VkError::Loader`,
+//! `VkError::Instance`) happens before a device exists, which is what makes the
+//! error layering in `VkError` worth having.
 
 use std::ffi::CStr;
 use std::os::raw::c_void;
@@ -27,9 +29,14 @@ pub(crate) const REQUIRED_EXTENSIONS: &[&CStr] = &[vk::KHR_SURFACE_NAME, vk::KHR
 pub struct Instance {
     pub entry: ash::Entry,
     pub handle: ash::Instance,
+    // Loader plus handle together, so `Drop` destroys the messenger before the
+    // instance it was created from.
     debug: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
 }
 
+// Invoked by the loader from whichever thread reports the error, so it may
+// touch nothing that belongs to the instance. Returning `vk::FALSE` keeps a
+// validation error from aborting the process.
 unsafe extern "system" fn debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     message_types: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -70,8 +77,8 @@ impl Instance {
             .engine_version(ENGINE_VERSION)
             .api_version(vk::API_VERSION_1_2);
 
-        // Collect the extensions the instance must enable. `debug_utils` is only
-        // needed when validation is on (and only if the layer exists).
+        // `debug_utils` is requested only when validation is on, so a normal
+        // run does not depend on the extension being present.
         let use_validation = enable_validation && has_validation_layer(&entry)?;
         let mut ext_names: Vec<&CStr> = REQUIRED_EXTENSIONS.to_vec();
         if use_validation {
@@ -94,8 +101,8 @@ impl Instance {
         let handle = unsafe { entry.create_instance(&create_info, None) }
             .map_err(|r| VkError::Instance(r.to_string()))?;
 
-        // Install the messenger *after* the instance exists, and keep both the
-        // loader and the handle so Drop can destroy it in the right order.
+        // The messenger can only be created from an existing instance, hence
+        // after the `create_instance` above.
         let debug = if use_validation {
             let loader = ash::ext::debug_utils::Instance::new(&entry, &handle);
             let ci = vk::DebugUtilsMessengerCreateInfoEXT::default()
@@ -111,7 +118,8 @@ impl Instance {
                 .pfn_user_callback(Some(debug_callback));
             match unsafe { loader.create_debug_utils_messenger(&ci, None) } {
                 Ok(messenger) => Some((loader, messenger)),
-                // A failure here must not break the whole backend.
+                // Debug output is optional: a driver that refuses the
+                // messenger must not take the compositor down with it.
                 Err(_) => None,
             }
         } else {
@@ -143,7 +151,9 @@ fn has_validation_layer(entry: &ash::Entry) -> Result<bool, VkError> {
 
 impl Drop for Instance {
     fn drop(&mut self) {
-        // Destroy the debug messenger *before* the instance.
+        // The messenger is an instance extension object: destroying the
+        // instance first would leave `destroy_debug_utils_messenger` calling
+        // into freed loader state.
         if let Some((loader, messenger)) = self.debug.take() {
             unsafe {
                 loader.destroy_debug_utils_messenger(messenger, None);

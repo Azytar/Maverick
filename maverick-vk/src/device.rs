@@ -1,11 +1,10 @@
-// maverick-vk/src/device.rs
-//
-// Physical-device selection and the logical device. The selector is vendor-
-// agnostic: it scores discrete > integrated > cpu > other and never names a
-// specific vendor, so it works the same on Intel/Mesa, AMD/RADV and NVIDIA/NVK.
-// A chosen device must expose `VK_KHR_swapchain`, a graphics queue family, a
-// present-capable queue family (same family is fine), and a non-empty
-// surface format + present-mode set.
+//! Physical-device selection and logical-device creation.
+//!
+//! Selection is vendor-agnostic: device types are ranked discrete > virtual >
+//! integrated > cpu > other, so the same code works on Intel/Mesa, AMD/RADV and
+//! NVIDIA/NVK. A candidate is eligible only if it exposes `VK_KHR_swapchain`,
+//! a graphics queue family, a present-capable queue family (one family may
+//! serve both), and a non-empty surface format and present-mode set.
 
 use std::ffi::CStr;
 use std::fmt;
@@ -56,7 +55,8 @@ pub struct Device {
     pub report: DeviceReport,
 }
 
-/// Return the score for a physical device type (higher is better).
+/// Rank a physical device type; higher wins. Only the order matters, the gaps
+/// are arbitrary: `Device::new` keeps the first candidate when scores tie.
 pub(crate) fn score_device_type(t: vk::PhysicalDeviceType) -> i32 {
     match t {
         vk::PhysicalDeviceType::DISCRETE_GPU => 1000,
@@ -67,7 +67,8 @@ pub(crate) fn score_device_type(t: vk::PhysicalDeviceType) -> i32 {
     }
 }
 
-/// Does `p` expose `VK_KHR_swapchain`?
+/// Whether `p` exposes `VK_KHR_swapchain`. An enumeration failure disqualifies
+/// the device rather than aborting the whole selection.
 fn has_swapchain_ext(instance: &ash::Instance, p: vk::PhysicalDevice) -> bool {
     match unsafe { instance.enumerate_device_extension_properties(p) } {
         Ok(props) => props.iter().any(|e| {
@@ -98,16 +99,16 @@ impl Device {
 
         let (p, graphics_family, present_family, _score) = best.ok_or(VkError::NoPhysicalDevice)?;
 
-        // Logical device: enable swapchain. Validation is instance-level, so no
-        // device layers are requested here.
+        // Only `VK_KHR_swapchain` is enabled on the device: validation is an
+        // instance-level layer, so no device layers are requested here.
         let swapchain_ext = vk::KHR_SWAPCHAIN_NAME.as_ptr();
         let ext_ptrs = [swapchain_ext];
 
-        // One queue create info per *distinct* family.
-        // NOTE: the priority slices must be named bindings, NOT `&[1.0f32]`
-        // temporaries inline in the `push` calls — a temporary dies at the end
-        // of its statement, leaving `DeviceQueueCreateInfo` with a dangling
-        // pointer that `create_device` dereferences below (classic ash UB).
+        // One queue create info per *distinct* family. The priority slices must
+        // be named bindings, not `&[1.0f32]` temporaries inside the `push`
+        // calls: such a temporary dies at the end of its statement and leaves
+        // the `DeviceQueueCreateInfo` holding a dangling pointer that
+        // `create_device` dereferences below.
         let gfx_priorities = [1.0f32];
         let present_priorities = [1.0f32];
         let mut qcis = Vec::new();
@@ -167,8 +168,8 @@ impl Device {
         })
     }
 
-    /// Score a physical device; returns `Some((graphics_family, present_family,
-    /// score))` only if it meets every hard requirement.
+    /// Score a physical device, returning `Some((graphics_family,
+    /// present_family, score))` only when every hard requirement is met.
     fn rate(
         instance: &ash::Instance,
         surface: &Surface,
@@ -180,8 +181,9 @@ impl Device {
 
         let queue_families = unsafe { instance.get_physical_device_queue_family_properties(p) };
 
-        // First graphics family, and a present-capable family (prefer the same
-        // one if it can also present).
+        // First graphics family wins. The present family is preferred whenever
+        // it is that same family: it keeps the swapchain EXCLUSIVE instead of
+        // forcing CONCURRENT access from two queue families.
         let mut graphics_family: Option<u32> = None;
         let mut present_family: Option<u32> = None;
         for (idx, qf) in queue_families.iter().enumerate() {
@@ -199,7 +201,6 @@ impl Device {
                 if present_family.is_none() {
                     present_family = Some(idx);
                 }
-                // Prefer the graphics family if it also presents.
                 if Some(idx) == graphics_family {
                     present_family = Some(idx);
                 }
@@ -211,7 +212,8 @@ impl Device {
             _ => return Ok(None),
         };
 
-        // Swapchain support must be non-empty.
+        // A device whose surface reports no formats or no present modes cannot
+        // back a swapchain, so it is not eligible no matter how good it is.
         let formats = unsafe {
             surface
                 .loader

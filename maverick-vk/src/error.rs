@@ -1,8 +1,8 @@
-// maverick-vk/src/error.rs
-//
-// The crate's single error type. Every fallible step in the Vulkan bootstrap
-// maps to one of these variants so callers (today only the smoke test) get a
-// specific, human-readable reason instead of an opaque `vk::Result`.
+//! The crate's single error type.
+//!
+//! Every fallible step of the Vulkan bootstrap maps to one of these variants,
+//! so a caller learns which step failed instead of receiving an opaque
+//! `vk::Result`. Strings carry the driver status verbatim.
 
 use std::error::Error;
 use std::fmt;
@@ -28,9 +28,12 @@ pub enum VkError {
     Acquire(String),
     /// `queue_present` returned a non-success status.
     Present(String),
-    /// A requested feature/format/present-mode is not supported.
+    /// A requested feature/format/present-mode is not supported — or any
+    /// `vk::Result` reaching the blanket `From` impl below, whose status is
+    /// kept verbatim in the message.
     Unsupported(String),
-    /// Two parts of the setup contradict each other (e.g. families mismatch).
+    /// Reserved for setup that contradicts itself (e.g. queue-family mismatch).
+    /// No bootstrap step produces it yet.
     Incompatible(String),
 }
 

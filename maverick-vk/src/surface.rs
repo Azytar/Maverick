@@ -1,10 +1,11 @@
-// maverick-vk/src/surface.rs
-//
-// The window-system surface: a Vulkan `VK_KHR_xcb_surface` anchored to a raw
-// `xcb_connection_t*` and X `Window`. The connection pointer is supplied by the
-// caller as a raw `*mut c_void` on purpose — this crate must NOT couple to
-// `maverick-gl`'s `XCBConnection` alias. The contract is simply: that pointer
-// must be a live `xcb_connection_t*` that outlives `Vulkan`.
+//! The window-system surface: a `VK_KHR_xcb_surface` anchored to a raw
+//! `xcb_connection_t*` and an X window.
+//!
+//! The connection arrives as a bare `*mut c_void` on purpose, so this crate
+//! stays free of any X11 or x11rb dependency and does not have to agree with
+//! the rest of the workspace on a connection wrapper type. The contract is
+//! simply that the pointer is a live `xcb_connection_t*` and must outlive the
+//! `Vulkan` value that owns the surface.
 
 use ash::vk;
 use std::os::raw::c_void;

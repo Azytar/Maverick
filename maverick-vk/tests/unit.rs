@@ -1,8 +1,3 @@
-// maverick-vk/tests/unit.rs
-//
-// No-GPU unit tests: the pure selection helpers and error mapping. These run on
-// any machine (`cargo test --workspace` stays green without a Vulkan driver).
-
 use ash::vk;
 use maverick_vk::{
     choose_image_count, choose_present_mode, choose_surface_format, clamp_extent, VkError,
@@ -65,7 +60,8 @@ fn present_mode_prefers_mailbox_then_fifo() {
         choose_present_mode(&[vk::PresentModeKHR::IMMEDIATE, vk::PresentModeKHR::FIFO]),
         vk::PresentModeKHR::FIFO
     );
-    // FIFO is always available.
+    // `choose_present_mode` cannot return anything else: every driver must
+    // report `FIFO`, and it is not preferred over `MAILBOX`.
     assert_eq!(
         choose_present_mode(&[vk::PresentModeKHR::FIFO]),
         vk::PresentModeKHR::FIFO

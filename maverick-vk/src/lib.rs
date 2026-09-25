@@ -1,21 +1,18 @@
-//! Minimal Vulkan/X11 backend — scaffold / proof of concept, not the primary path.
+//! Minimal Vulkan/X11 backend — scaffold, not a compositor.
 //!
-//! Proves that Vulkan can be brought up on X11 and present cleared frames via
-//! `vkCmdClearColorImage`. There is no shader, pipeline, or render pass; the
-//! primary rendering path remains the OpenGL/GLX compositor in `maverick-gl`.
-//! Active only when the `compositor-vulkan` feature is enabled and
-//! `[compositor].backend = "vulkan"`; initialization failure falls back to
-//! the OpenGL path.
+//! Brings Vulkan up on X11 and presents frames cleared with
+//! `vkCmdClearColorImage`. There is no shader, pipeline or render pass, and
+//! nothing in the workspace links this crate: the `compositor-vulkan` feature
+//! is empty, so the backend is exercised only by its own tests.
 //!
-//! Role is `instance → surface → device → swapchain` plus a one-shot command
-//! buffer and synchronization objects (`image_available`, `render_finished`,
-//! `in_flight` fence). `recreate_swapchain` is used on resize; `report`,
-//! `extent`, and `format` expose diagnostics without transferring ownership.
+//! The owned objects are `instance → surface → device → swapchain` plus a
+//! one-shot command buffer and the `image_available` / `render_finished`
+//! semaphores and `in_flight` fence. `recreate_swapchain` handles resize;
+//! `report`, `extent` and `format` are diagnostics and transfer no ownership.
 //!
-//! What is not owned: [`SurfaceTarget::xcb_connection`] is a borrowed raw
-//! `xcb_connection_t*` and the `window` XID; both must outlive the [`Vulkan`]
-//! instance and remain valid for the surface's lifetime. The X connection
-//! itself is owned by the caller.
+//! What it does not own: [`SurfaceTarget::xcb_connection`] is a borrowed raw
+//! `xcb_connection_t*` and `window` a borrowed XID; both must stay valid until
+//! the [`Vulkan`] value is dropped. The X connection itself is the caller's.
 //!
 //! # Ownership
 //!
@@ -29,20 +26,18 @@
 //!
 //! # Invariants
 //!
-//! Swapchain creation uses pure helpers ([`choose_surface_format`],
-//! [`choose_present_mode`], [`clamp_extent`], [`choose_image_count`]) that do
-//! not touch Vulkan handles and are unit-testable. Image layout transitions
-//! are `UNDEFINED → TRANSFER_DST_OPTIMAL → PRESENT_SRC_KHR` with
-//! `TRANSFER_WRITE → BOTTOM_OF_PIPE/MEMORY_READ` barriers. Validation layers
-//! are enabled only when `MAVERICK_VK_VALIDATION=1` and the Khronos layer is
-//! present.
+//! Swapchain parameters come from pure helpers ([`choose_surface_format`],
+//! [`choose_present_mode`], [`clamp_extent`], [`choose_image_count`]) that
+//! touch no Vulkan handle and are unit-tested without a GPU. Validation layers
+//! are enabled only when `MAVERICK_VK_VALIDATION=1` *and* the Khronos layer is
+//! installed.
 //!
 //! # Safety
 //!
-//! All Vulkan calls are `unsafe` FFI via `ash`; the caller must ensure the
-//! instance/device outlive every submission and that queues are not used after
-//! device destruction. `SurfaceTarget.xcb_connection` must be a live
-//! `xcb_connection_t*` for the surface lifetime.
+//! Every Vulkan entry point is `unsafe` FFI through `ash`. The caller must keep
+//! the instance and device alive for every submission, must not use a queue
+//! after device destruction, and must supply a live `xcb_connection_t*` for the
+//! whole lifetime of the [`Vulkan`] value.
 
 mod device;
 mod error;
@@ -121,8 +116,8 @@ impl Vulkan {
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
-        // A driver could legally return fewer buffers than requested: index
-        // only after checking instead of panicking on `[0]`.
+        // Index instead of `[0]`: a driver that hands back fewer buffers than
+        // requested then yields an `Err` rather than a panic.
         let command_buffer = unsafe { device.handle.allocate_command_buffers(&alloc_ci) }?
             .into_iter()
             .next()
@@ -252,10 +247,11 @@ impl Vulkan {
         Ok(())
     }
 
-    /// Recreate the swapchain (and image views) for a new size. The previous
-    /// swapchain's views and handle are destroyed exactly once, in spec order
-    /// (views first), via [`swapchain::Swapchain::destroy`]: the replaced
-    /// struct must NOT go through `Drop` afterwards (that would double-free).
+    /// Recreate the swapchain (and image views) for a new size.
+    ///
+    /// The replaced swapchain is destroyed exactly once, views before handle,
+    /// by [`swapchain::Swapchain::destroy`]: it must not be dropped afterwards
+    /// as well, or the views and the handle would be destroyed twice.
     pub fn recreate_swapchain(&mut self, w: u32, h: u32) -> Result<(), VkError> {
         // Wait for the in-flight frame so we don't pull the swapchain out from
         // under a submission that still references it.
@@ -276,7 +272,7 @@ impl Vulkan {
         Ok(())
     }
 
-    /// Diagnostic snapshot of the chosen GPU and the swapchain format.
+    /// Startup diagnostics: chosen GPU name, PCI ids, driver version and type.
     pub fn report(&self) -> &DeviceReport {
         &self.device.report
     }

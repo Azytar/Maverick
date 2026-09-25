@@ -1,12 +1,3 @@
-// maverick-vk/tests/smoke.rs
-//
-// Optional, env-gated smoke test. It is `#[ignore]`d so `cargo test --workspace`
-// stays green on machines with no GPU, and additionally requires
-// `MAVERICK_VK_SMOKE=1` *and* `DISPLAY`. It reuses `maverick_gl::open_x()` to
-// get the shared XCB connection and creates its OWN override-redirect window so
-// the live compositor's overlay is never disturbed; the test window is destroyed
-// before returning.
-
 use maverick_gl::open_x;
 use maverick_vk::{SurfaceTarget, Vulkan};
 use x11rb::connection::Connection;
@@ -33,6 +24,8 @@ fn smoke_init_and_present() {
     let setup = conn.setup();
     let screen = &setup.roots[screen_num];
     let window = conn.generate_id().unwrap();
+    // Its own override-redirect window: a managed window would be picked up by
+    // the running compositor's overlay and damage tracking.
     let aux = xproto::CreateWindowAux::new().override_redirect(Some(1u32));
     conn.create_window(
         screen.root_depth,
@@ -88,6 +81,7 @@ fn smoke_init_and_present() {
     }
 
     cleanup();
-    // `_display` / `conn` are intentionally left alive: the kernel closes the
-    // socket at process exit, and nothing here calls Xlib event functions.
+    // `_display` and `conn` are still live here and are dropped after `vk`,
+    // whose surface borrows their `xcb_connection_t*`; the kernel reaps the
+    // socket at process exit.
 }
