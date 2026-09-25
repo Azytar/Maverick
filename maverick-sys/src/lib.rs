@@ -58,11 +58,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// SeqCst keeps it simple and correct; these are rare, low-contention writes.
 const ORD: Ordering = Ordering::SeqCst;
 
-// ─── Cross-thread/signal flags ───────────────────────────────────────────────
-//
-// Formerly `static`s living in `backend/x11.rs`. Now owned by this crate so the
-// WM core has no `unsafe` and no raw statics. The event loop polls these.
-
 static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static NEED_REGRAB: AtomicBool = AtomicBool::new(false);
 
@@ -96,8 +91,6 @@ pub fn clear_regrab() {
 pub fn request_quit() {
     QUIT_REQUESTED.store(true, ORD);
 }
-
-// ─── Signal builder ──────────────────────────────────────────────────────────
 
 /// Builder for installing POSIX signal handlers without writing `sigaction`
 /// structs by hand. Each method is safe; the FFI only happens inside `install()`.
@@ -144,7 +137,6 @@ impl Signal {
     /// reaps spawned children (alacritty, rofi, …) without leaving zombies —
     /// that behavior is mandatory for a WM, not optional.
     pub fn install(self) {
-        // SIGCHLD: reap children, never become a zombie parent.
         install_raw(
             libc::SIGCHLD,
             libc::SIG_DFL,
@@ -224,24 +216,18 @@ fn install_raw(sig: libc::c_int, action: usize, flags: libc::c_int) -> bool {
     true
 }
 
-// ─── Terminal detachment ─────────────────────────────────────────────────────
-
 /// Detach from the launching terminal so the WM outlives the shell that
-/// started it (standard daemon/WM behavior). Returns nothing; failures are
-/// non-fatal (best-effort detach).
+/// started it (standard daemon/WM behavior). Failures are non-fatal: this is
+/// best-effort detach, and it returns nothing.
 ///
-/// B13 (sin confirmar): this used to call `setsid()` unconditionally before
-/// checking `isatty`. Under `startx`, Maverick is a child of the same login
-/// session that owns the VT/seat Xorg is running on. Forcing a brand new
-/// POSIX session here was observed correlating with Xorg losing its DRM
-/// master mid-startup (`EnterVT failed`, `Failed to enable any CRTC`) right
-/// as Maverick's autostart phase kicked in — a different Maverick build
-/// (refactor line, no `setsid()` here) did not reproduce it on the same
-/// hardware/Xorg/kernel. We no longer create a new session at all: Maverick
-/// doesn't need one (it isn't forking away from its parent), and staying in
-/// the launching session avoids touching seat/session assignment that Xorg
-/// depends on. We keep the stdin/stdout redirect so a display-manager-less
-/// `startx` launch doesn't hang the shell that started it.
+/// `setsid` is deliberately *not* called. Under `startx` the WM is a child of
+/// the very login session that owns the VT/seat Xorg runs on, and forcing a
+/// fresh POSIX session here has been observed correlating with Xorg losing
+/// its DRM master mid-startup (`EnterVT failed`, `Failed to enable any CRTC`)
+/// during Maverick's autostart phase. Staying in the launching session keeps
+/// seat/session assignment, which Xorg depends on, untouched. The stdio
+/// redirect below is retained so a display-manager-less `startx` launch does
+/// not leave the starting shell blocked on the WM.
 pub fn detach_from_terminal() {
     unsafe {
         // Already detached (e.g. launched by a display manager, or stdin is
@@ -250,7 +236,6 @@ pub fn detach_from_terminal() {
             return;
         }
 
-        // Redirect stdin/stdout to /dev/null so we don't hang the terminal.
         let devnull = match std::ffi::CString::new("/dev/null") {
             Ok(s) => s,
             Err(_) => return,
@@ -267,8 +252,6 @@ pub fn detach_from_terminal() {
         }
     }
 }
-
-// ─── Event-loop poll helper ──────────────────────────────────────────────────
 
 /// Wait until `fd` is readable or `timeout` elapses, whichever comes first.
 ///
@@ -315,8 +298,6 @@ pub fn wait_readable_fds(
     }
 }
 
-// ─── Modules ─────────────────────────────────────────────────────────────────
-
 pub mod control;
 pub mod ctl;
 pub mod discover;
@@ -324,7 +305,6 @@ pub mod hub;
 pub mod identity;
 pub mod json;
 
-// Re-export the most common items at the crate root for convenience.
 pub use control::ControlServer;
 pub use hub::{ControlCommand, ControlHub};
 pub use identity::{self_info, InstanceInfo, DEFAULT_NAME};

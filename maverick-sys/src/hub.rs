@@ -27,8 +27,6 @@
 //!
 //! # Invariants
 //!
-//! - `ControlCommand::Query` carries a one-shot `SyncSender<String>` reply channel;
-//!   therefore `ControlCommand` is not `Eq`/`PartialEq` — callers use `matches!`.
 //! - `drain_commands` never blocks (`try_recv` loop); `publish_state`/`emit` hold
 //!   their `Mutex` only long enough to swap/clone.
 //! - `emit` never blocks the WM thread (`try_send` only): a slow subscriber's
@@ -148,8 +146,6 @@ impl ControlHub {
         }
     }
 
-    // ── server thread side ────────────────────────────────────────────────
-
     /// Queue a command for the WM to execute. Called from the server thread.
     /// Never blocks. Returns `false` when the queue is full or the WM thread
     /// has gone away (receiver dropped); the caller must reply `error busy`
@@ -175,6 +171,8 @@ impl ControlHub {
         }
     }
 
+    // The self-pipe carries no payload: drain it completely so `poll(2)` does
+    // not keep reporting readability from a stale wakeup.
     fn drain_wake(&self) {
         let mut buf = [0u8; 64];
         if let Ok(mut wake) = self.inner.wake_read.lock() {
@@ -208,8 +206,6 @@ impl ControlHub {
         }
         rx
     }
-
-    // ── WM thread side ────────────────────────────────────────────────────
 
     /// Drain all pending commands. Called once per event-loop iteration on the
     /// WM thread. Never blocks.
@@ -288,7 +284,6 @@ mod tests {
             "second command must be the queued dispatch, got {:?}",
             cmds[1]
         );
-        // Draining again yields nothing.
         assert!(hub.drain_commands().is_empty());
     }
 
@@ -307,7 +302,6 @@ mod tests {
         assert_eq!(hub.subscriber_count(), 1);
         hub.emit("{\"event\":\"focus\"}");
         assert_eq!(rx.recv().unwrap(), "{\"event\":\"focus\"}");
-        // Drop the receiver: next emit should prune the dead subscriber.
         drop(rx);
         hub.emit("{\"event\":\"workspace\"}");
         assert_eq!(hub.subscriber_count(), 0);
@@ -318,7 +312,6 @@ mod tests {
         let a = ControlHub::new();
         let b = a.clone();
         a.push_command(ControlCommand::Reload);
-        // Drained from the other clone -> same underlying queue.
         let cmds = b.drain_commands();
         assert_eq!(cmds.len(), 1);
         assert!(matches!(cmds[0], ControlCommand::Reload));
@@ -344,21 +337,18 @@ mod tests {
     #[test]
     fn command_queue_is_bounded_and_never_blocks() {
         let hub = ControlHub::new();
-        // Fill to capacity: every push must succeed without blocking.
         for i in 0..CMD_CAP {
             assert!(
                 hub.push_command(ControlCommand::Dispatch(format!("a{i}"))),
                 "push {i} must succeed while filling"
             );
         }
-        // One more must be rejected, not block and not grow memory.
         assert!(
             !hub.push_command(ControlCommand::Dispatch("overflow".into())),
             "queue must reject beyond CMD_CAP"
         );
         let cmds = hub.drain_commands();
         assert_eq!(cmds.len(), CMD_CAP);
-        // After draining there is room again.
         assert!(hub.push_command(ControlCommand::Quit));
         let cmds = hub.drain_commands();
         assert_eq!(cmds.len(), 1);
@@ -383,7 +373,6 @@ mod tests {
         for _ in 0..SUB_CAP {
             assert_eq!(rx.try_recv().unwrap(), "{\"event\":\"focus\"}");
         }
-        // Next emit fits again — no further drop.
         hub.emit("{\"event\":\"focus\"}");
         assert_eq!(hub.dropped_events(), 10);
         assert_eq!(rx.try_recv().unwrap(), "{\"event\":\"focus\"}");

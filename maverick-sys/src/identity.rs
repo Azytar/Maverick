@@ -25,9 +25,9 @@
 //! Unix sockets are bound as `sockaddr_un.sun_path`, which is 108 bytes on
 //! Linux (107 usable + NUL). [`sock_path`] uses a **fixed** filename
 //! `control.sock` inside the per-session directory so the random `sid`
-//! contributes to the path only once (as the directory name). An `assert!`
-//! panics if the resulting path would exceed `SUN_LEN` rather than silently
-//! truncating. See `identity::tests::sock_path_fits_sun_len` for the
+//! contributes to the path only once (as the directory name). If the resulting
+//! path would exceed `SUN_LEN`, [`try_sock_path`] returns an error rather than
+//! silently truncating. See `identity::tests::sock_path_fits_sun_len` for the
 //! regression guard.
 
 use std::io;
@@ -147,9 +147,9 @@ fn validate_sid(sid: &str) -> io::Result<()> {
 /// Per-session sub-directory: `<runtime_dir>/<sid>/`. Created `0700` so other
 /// UIDs cannot interfere with this session's socket/ficha.
 ///
-/// Prefer [`try_session_dir`] when `sid` comes from external input
-/// (CLI, env, directory listing); this wrapper keeps backward compat for
-/// internally-generated ids.
+/// An invalid `sid` yields a `__invalid__` sentinel path; prefer
+/// [`try_session_dir`] when `sid` comes from external input (CLI, env,
+/// directory listing).
 pub fn session_dir(sid: &str) -> PathBuf {
     match try_session_dir(sid) {
         Ok(p) => p,
@@ -166,12 +166,11 @@ pub fn try_session_dir(sid: &str) -> io::Result<PathBuf> {
 /// Full path to the control socket for session `sid`.
 ///
 /// The socket lives inside the per-session directory (`session_dir`) under a
-/// FIXED filename `control.sock`. The random `sid` therefore contributes to the
-/// path only ONCE (as the directory name), never twice — this keeps the total
-/// length well under the `sockaddr_un.sun_path` limit (107 usable bytes on
-/// Linux) even for the longest realistic `sid`, and avoids the
-/// `path must be shorter than SUN_LEN` failure that occurred when `sid` was
-/// embedded both as the directory AND as `<sid>.sock`.
+/// FIXED filename `control.sock`, so the random `sid` contributes to the path
+/// only ONCE (as the directory name) instead of twice (directory *and*
+/// `<sid>.sock`). Spending the `sid` twice against `sockaddr_un.sun_path`'s 107
+/// usable bytes is what pushes the path past the budget where `bind`/`connect`
+/// fail with a length error.
 pub fn sock_path(sid: &str) -> PathBuf {
     match try_sock_path(sid) {
         Ok(p) => p,
@@ -229,7 +228,8 @@ pub fn new_session_id() -> String {
     format!("{pid:x}-{nanos:x}-{rand:x}")
 }
 
-/// Read 8 bytes of entropy from `/dev/urandom`.
+/// Read 8 bytes of entropy from `/dev/urandom`. `None` when the source is
+/// unavailable, so the caller can fall back to the clock.
 fn read_urandom_u64() -> Option<u64> {
     use std::io::Read;
     let mut f = std::fs::File::open("/dev/urandom").ok()?;
@@ -294,8 +294,9 @@ pub fn read_proc_tty(pid: u32) -> u64 {
     let path = format!("/proc/{pid}/stat");
     if let Ok(s) = std::fs::read_to_string(&path) {
         // Format: pid (comm) state ppid pgrp session tty_nr ...
-        // comm may contain spaces/parens, so find the first ')' and count from there.
-        // Use rfind to handle process names containing ')' themselves.
+        // `comm` (field 2) may itself contain spaces and parentheses, so the
+        // fixed-offset fields are anchored at the last `)` — the remainder of
+        // `stat` never contains one.
         if let Some(pos) = s.rfind(')') {
             let rest = &s[pos + 1..];
             let mut fields = rest.split_whitespace();
@@ -321,6 +322,7 @@ pub fn read_proc_starttime(pid: u32) -> u64 {
         // After ')': state ppid pgrp session tty_nr tpgid flags minflt cminflt
         // majflt cmajflt utime stime cutime cstime priority nice num_threads
         // itrealvalue <starttime=field 22>
+        // Fields are counted from the last `)`: `comm` may contain `)`.
         if let Some(pos) = s.rfind(')') {
             let rest = &s[pos + 1..];
             let mut fields = rest.split_whitespace();
@@ -550,11 +552,13 @@ pub fn self_info(name: &str) -> InstanceInfo {
     }
 }
 
-/// Best-effort X server identity. Unknown here, but recorded so `list` can show
-/// an "XSERVER" column; the value is enriched from `DISPLAY` semantics only.
+/// X server identity placeholder.
+///
+/// The server binary is not discoverable from the client's `DISPLAY` without
+/// extra probing, so this always yields `"?"`; the field exists so the ficha
+/// schema (and the `list` column) stays stable.
 fn x_server_identity() -> String {
-    // The actual server binary is not trivially discoverable without extra
-    // probing; record "?" so the field round-trips and the column renders.
+    // Record "?" so the field round-trips through the ficha and `list` renders.
     "?".to_string()
 }
 
@@ -603,9 +607,9 @@ mod tests {
 
     #[test]
     fn session_dirs_are_isolated_per_sid() {
-        // Two distinct session ids must live in distinct sub-directories with
-        // distinct socket/ficha paths — this is the core fix for C1 (two
-        // `default` sessions clobbering each other).
+        // Two distinct session ids must map to distinct directories, sockets
+        // and fichas — two sessions both named `default` must not clobber
+        // each other's control socket.
         let a = "aaaaaaaa";
         let b = "bbbbbbbb";
         assert_ne!(session_dir(a), session_dir(b));
@@ -619,7 +623,7 @@ mod tests {
     fn sock_path_fits_sun_len() {
         // Longest realistic sid (pid up to 8 hex + '-' + nanos up to 16 hex +
         // '-' + 16 hex) must keep the socket path under the 108-byte kernel
-        // limit (107 usable). Regression for `path must be shorter than SUN_LEN`.
+        // limit (107 usable).
         let long_sid = format!("{:x}-{:x}-{:x}", u32::MAX, u128::MAX, u64::MAX);
         let p = sock_path(&long_sid);
         let len = p.as_os_str().len();
@@ -637,7 +641,6 @@ mod tests {
 
     #[test]
     fn sock_path_is_stable_and_isolated() {
-        // Same sid -> same path; distinct sids -> distinct paths (isolation).
         let s = new_session_id();
         assert_eq!(sock_path(&s), sock_path(&s));
         assert_ne!(sock_path("aaaaaaaa"), sock_path("bbbbbbbb"));
@@ -645,7 +648,6 @@ mod tests {
 
     #[test]
     fn start_time_reads_self() {
-        // Our own start time must be non-zero (the kernel always reports one).
         let st = read_proc_starttime(std::process::id());
         assert!(st != 0);
     }

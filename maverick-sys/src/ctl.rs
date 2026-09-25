@@ -108,13 +108,11 @@ INSTANCE SELECTION:
     );
 }
 
-// ── option parsing ────────────────────────────────────────────────────────
-
 /// Parsed CLI options shared by all `ctl` commands.
 ///
-/// Extracted from the raw `args` slice before command dispatch. `name`/`session`
-/// feed [`resolve_target`]; `confirm`/`yes` gate [`cmd_quit`]/[`cmd_quit_all`];
-/// `positional` carries the remaining action/topic words.
+/// `name`/`session` feed [`resolve_target`]; `confirm`/`yes` gate
+/// [`cmd_quit`]/[`cmd_quit_all`]; `positional` carries the remaining
+/// action/topic words.
 struct Opts {
     /// `--name` / `-n` human label or session id.
     name: Option<String>,
@@ -128,10 +126,10 @@ struct Opts {
     positional: Vec<String>,
 }
 
-/// Parse `args` into [`Opts`], discarding flags listed in `keep_flags` without
-/// treating them as positional. `--name`/`--session` consume the next token;
-/// `--confirm`/`--yes` are booleans; everything else is positional unless it
-/// appears in `keep_flags`.
+/// Parse `args` into [`Opts`]. Flags listed in `keep_flags` are consumed and
+/// discarded (accepted for CLI compatibility) instead of becoming positional;
+/// `--name`/`--session` take the next token as their value, while
+/// `--confirm`/`--yes` are booleans.
 fn parse_opts(args: &[String], keep_flags: &[&str]) -> Opts {
     let mut o = Opts {
         name: None,
@@ -157,22 +155,15 @@ fn parse_opts(args: &[String], keep_flags: &[&str]) -> Opts {
     o
 }
 
-/// Convenience wrapper around [`parse_opts`] with no kept flags.
 fn parse_opts_default(args: &[String]) -> Opts {
     parse_opts(args, &[])
 }
 
-/// Resolve the target instance `session_id` using the documented precedence.
-///
-/// Precedence (first match wins): `--session` → `--name` → `$MAVERICK_INSTANCE`
-/// → `DISPLAY`+TTY context → singleton. On ambiguity or no match prints the
-/// candidates to `stderr` and returns `None`. The returned string is the
-/// filesystem key (`session_id`), not the human label.
-///
-/// This function is `pub(crate)` so `cargo doc --document-private-items`
-/// includes it; it is not part of the public API.
+/// Resolve the target instance `session_id` using the module's documented
+/// precedence. On no match or ambiguity prints the candidates to `stderr` and
+/// returns `None` rather than guessing. The returned string is the filesystem
+/// key (`session_id`), not the human label.
 fn resolve_target(tool: &str, name: &Option<String>, session: &Option<String>) -> Option<String> {
-    // 1. `--session <sid>` is an explicit, unambiguous session id.
     if let Some(s) = session {
         return if crate::identity::read_meta(s).is_some() {
             Some(s.clone())
@@ -181,26 +172,28 @@ fn resolve_target(tool: &str, name: &Option<String>, session: &Option<String>) -
             None
         };
     }
-    // 2. `--name <label>` matches a known instance by human label or sid.
     if let Some(n) = name {
         return discover::find_by_name(n).map(|i| i.session_id);
     }
-    // 3. `$MAVERICK_INSTANCE` holds the session id the WM exported to its
-    //    children (the common case when a tool is launched by a Maverick keybind).
+    // `$MAVERICK_INSTANCE` holds the session id the WM exported to its children
+    // (the common case when a tool is launched from a Maverick keybind).
     if let Ok(env) = std::env::var("MAVERICK_INSTANCE") {
         if !env.is_empty() && crate::identity::read_meta(&env).is_some() {
             return Some(env);
         }
     }
-    // 4. Resolve by the caller's own context: DISPLAY + controlling tty. This
-    //    is what lets `maverickctl` launched from a bare TTY pick "the session
-    //    on my DISPLAY/TTY" rather than a globally ambiguous "default".
+    // Fall back to the caller's own context (DISPLAY + controlling tty), which
+    // is what lets `maverickctl` launched from a bare TTY pick "the session on
+    // my DISPLAY/TTY" rather than a globally ambiguous "default".
     let ctx_display = current_display();
     let ctx_tty = current_tty_nr();
     let live: Vec<InstanceInfo> = discover::list_instances()
         .into_iter()
         .filter(|i| i.alive)
         .collect();
+    // An empty DISPLAY or a 0 tty means "unknown", not "match nothing": each
+    // degrades to a wildcard so a tool launched without a terminal still
+    // resolves.
     let by_context: Vec<InstanceInfo> = live
         .iter()
         .filter(|i| {
@@ -229,8 +222,6 @@ fn resolve_target(tool: &str, name: &Option<String>, session: &Option<String>) -
         }
     }
 }
-
-// ── commands ──────────────────────────────────────────────────────────────
 
 /// List all known instances with `alive`/`STALE` status (`list`/`ls`).
 fn cmd_list(_tool: &str) -> ExitCode {
@@ -480,11 +471,8 @@ fn cmd_forward(tool: &str, line: &str) -> ExitCode {
     print_json(tool, res)
 }
 
-// ── confirmation ────────────────────────────────────────────────────────────
-
-/// Ask the user to confirm `prompt`. Tries, in order:
-///   1. `zenity` / `kdialog` graphical prompts
-///   2. an interactive TTY prompt
+/// Ask the user to confirm `prompt`. Tries `zenity` then `kdialog` for a
+/// graphical prompt and only then falls back to an interactive TTY.
 fn confirm(tool: &str, prompt: &str) -> bool {
     if which("zenity") {
         if let Some(ok) = run_confirm("zenity", &["--question", "--text", prompt]) {
@@ -537,8 +525,7 @@ fn which(bin: &str) -> bool {
                 continue;
             }
             let p = std::path::Path::new(dir).join(bin);
-            // Must be a regular file AND have at least one exec bit —
-            // `is_file` alone announces non-executable files.
+            // `is_file` alone accepts non-executable files.
             if !p.is_file() {
                 continue;
             }

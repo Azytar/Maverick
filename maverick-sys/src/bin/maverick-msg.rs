@@ -3,8 +3,6 @@
 // control socket (actions like "focus-right", structured queries like "query
 // tree", or raw protocol words like "state"). Known admin subcommands
 // (list/state/quit/…) behave like `maverickctl`.
-//
-// Thin wrapper over the shared CLI engine in `maverick-sys::ctl`.
 
 use std::process::ExitCode;
 

@@ -1,9 +1,10 @@
 //! Discovery and remote control for Maverick instances.
 //!
-//! Scans the per-user runtime dir for `*.json` fichas, enriches them with live
-//! `/proc` data (`DISPLAY`, `tty_nr`), and offers operations to quit one or all
-//! instances by name. This is what lets a tool tell three Mavericks on three
-//! different TTYs/`DISPLAY`s apart and target the right one.
+//! Scans the per-user runtime dir for per-session subdirectories, enriches the
+//! identity ficha found in each with live `/proc` data (`DISPLAY`, `tty_nr`,
+//! `exe`), and offers operations to quit one or all instances by name. This is
+//! what lets a tool tell three Mavericks on three different TTYs/`DISPLAY`s
+//! apart and target the right one.
 //!
 //! # Ownership and lifecycle
 //!
@@ -33,13 +34,10 @@ use crate::identity::{self, InstanceInfo};
 
 /// List every Maverick instance with a ficha on disk.
 ///
-/// Each session lives in its own subdirectory of `runtime_dir()` named after
-/// its `session_id`; the ficha is `<sid>/<sid>.json`. Each entry is enriched:
-/// if the ficha's `display`/`tty_nr` are empty we fall back to reading
-/// `/proc/<pid>/environ` and `/proc/<pid>/stat`. `alive` requires both that the
-/// socket answers a ping *and* that the recorded pid is still the same process
-/// (its `/proc/<pid>/stat` start time matches ours), so a crashed instance
-/// whose PID was later recycled is not mistaken for live.
+/// Each session lives in its own subdirectory of [`crate::identity::runtime_dir`]
+/// named after its `session_id`, and the ficha is `<sid>/<sid>.json`. Missing
+/// `display`/`tty_nr`/`exe` fields are filled in from `/proc/<pid>`, and
+/// `alive` comes from the ping + start-time check documented at module level.
 pub fn list_instances() -> Vec<InstanceInfo> {
     let dir = identity::runtime_dir();
     let mut out = Vec::new();
@@ -65,7 +63,8 @@ pub fn list_instances() -> Vec<InstanceInfo> {
             Some(s) => s.to_string(),
             None => continue,
         };
-        // Reject traversal ids (`..`, `a/b`, overlong) before any fs access.
+        // Reject traversal ids (`..`, `a/b`, overlong) before any path is
+        // built from them.
         if !identity::is_valid_sid(&sid) {
             continue;
         }
@@ -74,7 +73,7 @@ pub fn list_instances() -> Vec<InstanceInfo> {
             None => continue,
         };
 
-        // Enrich with live /proc data so we can distinguish TTYs/DISPLAYs.
+        // Fill gaps in the ficha from /proc so TTYs/DISPLAYs can be told apart.
         if info.display.is_empty() {
             info.display = identity::read_proc_environ_display(info.pid);
         }
@@ -85,7 +84,6 @@ pub fn list_instances() -> Vec<InstanceInfo> {
             info.exe = identity::read_proc_exe(info.pid);
         }
 
-        // Robust liveness via socket + PID/start_time match.
         info.alive = is_instance_alive(&info);
 
         out.push(info);
@@ -95,17 +93,14 @@ pub fn list_instances() -> Vec<InstanceInfo> {
     out
 }
 
-/// True if the instance's socket answers a ping *and* the recorded pid is still
-/// the same process (its start time matches). Guards against PID reuse after a
-/// crash leaving a stale ficha (the socket's own stale socket was already
-/// unlinked by a TOCTOU-safe check at spawn, but a SIGKILL'd instance may still
-/// have a dead socket lying around that rejects connections).
+/// True if the instance's socket answers a ping *and* the recorded pid is
+/// still the same process. Without the start-time half, a crashed instance
+/// whose pid the kernel has since recycled would look alive through its
+/// leftover socket file.
 fn is_instance_alive(info: &InstanceInfo) -> bool {
-    // 1. The socket must answer a ping.
     if control::ping(&info.session_id).is_err() {
         return false;
     }
-    // 2. The pid must still exist and be the *same* process we recorded.
     if info.start_time != 0 {
         let live_start = identity::read_proc_starttime(info.pid);
         if live_start == 0 || live_start != info.start_time {

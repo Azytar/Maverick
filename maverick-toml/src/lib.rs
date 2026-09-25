@@ -1,10 +1,10 @@
 //! Ultra-light, zero-dependency parser for the TOML *subset* that Maverick's
 //! optional config relies on.
 //!
-//! Built to replace `toml` + `serde` at startup for two reasons: binary size
-//! (neither pulls in serde-derived codegen, `winnow`, or other machinery) and
-//! a deliberate, narrow grammar — everything outside this subset is a hard,
-//! whole-file error reported with the offending line number.
+//! A full `toml` + `serde` stack is unacceptable in a WM binary (serde-derived
+//! codegen, `winnow` and the rest of that machinery), and Maverick's config
+//! wants a deliberately narrow grammar: everything outside this subset is a
+//! hard, whole-file error reported with the offending line number.
 //!
 //! The parser is an **event-driven, mostly zero-copy iterator**: it walks the
 //! input `&str` advancing a cursor and borrows directly from the buffer. Keys
@@ -293,9 +293,9 @@ impl<'a> Parser<'a> {
     /// `[name]` vs `[[name]]`; the name is trimmed and must be non-empty.
     fn parse_header(&mut self) -> Result<Header<'a>, ParseError> {
         let is_array = self.byte(self.pos + 1) == b'[';
-        self.pos += 1; // consume '['
+        self.pos += 1;
         if is_array {
-            self.pos += 1; // consume second '['
+            self.pos += 1;
         }
         self.skip_horizontal_ws();
         let start = self.pos;
@@ -607,7 +607,7 @@ impl<'a> Parser<'a> {
     /// All arms bounded to [`MAX_ARRAY_ELEMS`] total elements.
     fn parse_array(&mut self) -> Result<Value<'a>, ParseError> {
         debug_assert_eq!(self.byte(self.pos), b'[');
-        self.pos += 1; // consume '['
+        self.pos += 1;
         self.skip_ws_comments();
         if self.byte(self.pos) == b']' {
             // Empty array. Reported as an empty string list; consumers check
@@ -624,7 +624,7 @@ impl<'a> Parser<'a> {
                     if grid.len() >= MAX_ARRAY_ELEMS {
                         return Err(self.err("array"));
                     }
-                    self.pos += 1; // consume inner '['
+                    self.pos += 1;
                     let inner = self.parse_string_list_body()?;
                     total += inner.len();
                     if total > MAX_ARRAY_ELEMS {

@@ -1,13 +1,13 @@
 //! Minimal JSON string helpers shared by the whole project (no `serde` dependency).
 //!
-//! One canonical copy replaces the three duplicated escapers that used to live
-//! in `identity::serde_free_json`, `control::json_esc` and
-//! `maverick/src/core/ipc.rs::esc`.
+//! Maverick's payloads (ficha, state snapshot, event lines) are small flat
+//! objects written by the WM itself, so a full JSON stack would be dead weight
+//! in a WM binary. [`crate::identity`] and [`crate::control`] both go through
+//! this single escaper to stay wire-compatible.
 //!
 //! # Ownership
 //!
-//! Pure functions on `&str` → `String`; no allocation beyond the returned
-//! string, no global state.
+//! Pure `&str` → `String` helpers; no global state, no dependencies.
 
 /// Escape `s` for use inside a JSON string literal, WITHOUT adding the
 /// surrounding quotes. Quotes, backslashes and C0 control characters are
@@ -110,7 +110,7 @@ mod tests {
         ] {
             assert_eq!(json_unescape(&json_escape(s)), s);
             let quoted = json_quote(s);
-            // json_quote adds the surrounding quotes; unescape expects the
+            // `json_quote` adds the surrounding quotes; `unescape` expects the
             // body without them (matching `identity::unquote`).
             assert_eq!(json_unescape(&quoted[1..quoted.len() - 1]), s);
         }

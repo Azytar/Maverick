@@ -78,22 +78,8 @@ pub const MAX_CMD_LEN: usize = 64 * 1024;
 
 /// Handle to a running control server. Dropping it removes the socket file.
 ///
-/// # Thread model
-///
-/// The accept loop runs on a dedicated thread; each connection is handled on
-/// its own thread. All threads share `stop` and an `AtomicUsize` active-count
-/// (capped at 32). The WM thread never blocks on this server.
-///
-/// # Ownership
-///
-/// Owns `name` (used to derive [`crate::identity::sock_path`]) and the shared
-/// `stop` flag. `hub` is cloned into the accept thread and per-connection
-/// threads.
-///
-/// # Lifecycle
-///
-/// Created by [`ControlServer::spawn`]; stopped by [`ControlServer::shutdown`]
-/// or `Drop`. Socket file is unlinked on both paths.
+/// See the module documentation for the thread model, ownership split and
+/// invariants.
 pub struct ControlServer {
     name: String,
     stop: Arc<AtomicBool>,
@@ -140,7 +126,6 @@ impl ControlServer {
         let sock = UnixListener::bind(&path)?;
 
         let stop = Arc::new(AtomicBool::new(false));
-        // Limit concurrent connection handler threads to prevent resource exhaustion.
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let srv_name = name.to_string();
@@ -152,7 +137,6 @@ impl ControlServer {
                 if srv_stop.load(ORD) {
                     break;
                 }
-                // Back-pressure: don't accept if too many handlers are active.
                 if srv_active.load(ORD) >= MAX_CONCURRENT {
                     thread::sleep(Duration::from_millis(100));
                     continue;
@@ -212,10 +196,9 @@ impl Drop for ControlServer {
     }
 }
 
-/// Handle a single client connection on its own thread (documented for
-/// `cargo doc --document-private-items`). Reads line-delimited commands,
-/// dispatches them via [`dispatch_line`], and hijacks the connection for
-/// [`stream_events`] on `subscribe`.
+/// Handle a single client connection on its own thread. Reads line-delimited
+/// commands, dispatches them via [`dispatch_line`], and hijacks the connection
+/// for [`stream_events`] on `subscribe`.
 fn handle_conn(
     stream: UnixStream,
     name: &str,
@@ -233,7 +216,7 @@ fn handle_conn(
     loop {
         line.clear();
         match reader.read_line(&mut line) {
-            Ok(0) => break, // EOF
+            Ok(0) => break,
             Ok(_) => {}
             Err(_) => break,
         }
@@ -243,8 +226,7 @@ fn handle_conn(
             let _ = writer.write_all(b"error line too long\n");
             break;
         }
-        // Strip `\n` and also `\r` (telnet-style clients). `trim_end` alone
-        // leaves interior `\r` which enables terminal/log spoofing.
+        // Drop the line terminator, tolerating a telnet-style trailing `\r`.
         let cmd = line.trim_end_matches(['\n', '\r']).trim();
         if cmd.is_empty() {
             continue;
@@ -575,22 +557,17 @@ mod tests {
         hub.publish_state("{\"focus\":7}");
         let server = ControlServer::spawn(name, json, hub.clone()).expect("server binds");
 
-        // ping
         let pong = ping(name).expect("ping");
         assert!(pong.starts_with("pong testctl"), "got: {pong}");
 
-        // identify returns our json
         let ident = identify(name).expect("identify");
         assert!(ident.contains("\"display\":\":9\""), "got: {ident}");
 
-        // state returns the published snapshot
         let st = state(name).expect("state");
         assert_eq!(st, "{\"focus\":7}");
 
-        // dispatch enqueues a command for the WM thread
         assert_eq!(dispatch(name, "focus-left").expect("dispatch"), "ok");
 
-        // quit enqueues a Quit and replies ok
         assert_eq!(quit(name).expect("quit"), "ok");
 
         // The WM thread would drain these; verify order/content here.
@@ -602,7 +579,6 @@ mod tests {
             .any(|c| matches!(c, ControlCommand::Dispatch(a) if a == "focus-left")));
         assert!(cmds.iter().any(|c| matches!(c, ControlCommand::Quit)));
 
-        // socket file is removed on shutdown
         server.shutdown();
         assert!(!identity::sock_path(name).exists());
     }
@@ -632,12 +608,12 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let _ = subscribe_stream(&nm, |line| {
                 got_c.lock().unwrap().push(line.to_string());
-                // Stop after the first event so the test terminates.
                 false
             });
         });
 
-        // Wait until the subscriber has registered, then emit.
+        // Poll for subscriber registration before emitting, otherwise the
+        // event is published to an empty sink list.
         for _ in 0..50 {
             if hub.subscriber_count() > 0 {
                 break;
@@ -673,7 +649,6 @@ mod tests {
         let server =
             ControlServer::spawn(name, identity_json(&info), hub.clone()).expect("server binds");
 
-        // Fill every subscriber slot with blocking subscribers.
         let mut handles = Vec::new();
         for _ in 0..MAX_SUBSCRIBERS {
             let nm = name.to_string();
