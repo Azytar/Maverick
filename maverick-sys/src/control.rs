@@ -28,10 +28,12 @@
 //! iteration.
 //!
 //! Back-pressure is enforced via an `AtomicUsize` counter capped at 32 concurrent
-//! handlers; excess accepts sleep 100 ms before retrying. Because a subscriber
-//! occupies its handler slot until it disconnects, `subscribe` additionally
-//! admits at most [`MAX_SUBSCRIBERS`] streams and rejects the rest, keeping
-//! slots free for short commands.
+//! handlers; excess accepts sleep 100 ms before retrying. A handler holds its
+//! slot until its thread finishes, including when the handler unwinds, so a
+//! panicking connection cannot permanently consume capacity. Because a
+//! subscriber occupies its handler slot until it disconnects, `subscribe`
+//! additionally admits at most [`MAX_SUBSCRIBERS`] streams and rejects the
+//! rest, keeping slots free for short commands.
 //!
 //! # Ownership and lifecycle
 //!
@@ -55,7 +57,7 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -154,15 +156,19 @@ impl ControlServer {
                 }
                 match sock.accept() {
                     Ok((stream, _)) => {
-                        srv_active.fetch_add(1, ORD);
+                        // Count the slot here, before the handler thread can
+                        // exist, so the gate above is not a window where a
+                        // second accept passes on a stale count. The guard then
+                        // travels into the handler and is released there, even
+                        // if the handler unwinds.
+                        let slot = HandlerSlot::take(&srv_active);
                         let name = srv_name.clone();
                         let ident = identity_json.clone();
                         let hub = hub.clone();
                         let stop = srv_stop.clone();
-                        let act = srv_active.clone();
                         thread::spawn(move || {
+                            let _slot = slot;
                             handle_conn(stream, &name, &ident, &hub, &stop);
-                            act.fetch_sub(1, ORD);
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -204,6 +210,35 @@ impl ControlServer {
 impl Drop for ControlServer {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+/// One live control-connection handler slot, against the `active` count the
+/// accept loop gates on.
+///
+/// The count is the server's whole back-pressure mechanism, and it is only
+/// correct if every handler gives its slot back on the way out. A bare
+/// `fetch_sub` after the handler call is skipped when that call unwinds, and
+/// nothing would ever return the slot: `MAX_CONCURRENT` of those stop the
+/// accept loop outright, so the control server silently stops answering and
+/// the window manager becomes unmanageable. Releasing from `Drop` instead makes
+/// the accounting unwind-safe without catching anything — the panic still
+/// propagates, and the connection dies with it, but the slot comes back.
+struct HandlerSlot(Arc<AtomicUsize>);
+
+impl HandlerSlot {
+    /// Take one slot, on the accept thread, so the gate sees the new handler
+    /// before it exists. The returned guard is moved into that handler's
+    /// thread, which is where it is dropped.
+    fn take(active: &Arc<AtomicUsize>) -> Self {
+        active.fetch_add(1, ORD);
+        Self(active.clone())
+    }
+}
+
+impl Drop for HandlerSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, ORD);
     }
 }
 
@@ -614,6 +649,48 @@ mod tests {
 
         server.shutdown();
         assert!(!identity::sock_path(name).exists());
+    }
+
+    // `active` is the count the accept loop checks against `MAX_CONCURRENT`, so
+    // a slot lost on the way out of a handler is lost for the life of the
+    // process: enough of them and the control server stops accepting anything,
+    // which leaves the window manager unmanageable. The slot therefore has to
+    // come back down on *every* exit, including while the thread unwinds — and
+    // the panic itself still has to reach the runtime instead of being caught.
+    #[test]
+    fn a_handler_slot_is_released_even_when_the_handler_unwinds() {
+        let active = Arc::new(AtomicUsize::new(0));
+
+        std::thread::spawn({
+            let active = active.clone();
+            move || {
+                let _slot = HandlerSlot::take(&active);
+            }
+        })
+        .join()
+        .expect("a handler that returns normally must not unwind");
+        assert_eq!(
+            active.load(ORD),
+            0,
+            "a returned handler must give its slot back"
+        );
+
+        let unwinding = std::thread::spawn({
+            let active = active.clone();
+            move || {
+                let _slot = HandlerSlot::take(&active);
+                panic!("handler unwind");
+            }
+        });
+        assert!(
+            unwinding.join().is_err(),
+            "the unwind must propagate, not be swallowed at the slot"
+        );
+        assert_eq!(
+            active.load(ORD),
+            0,
+            "a panicking handler must give its slot back"
+        );
     }
 
     // The event stream is the one reply path whose payload the server does not
