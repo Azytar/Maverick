@@ -803,10 +803,13 @@ pub fn ideal_scroll(ws: &Workspace, cfg: &Cfg, workarea: Rect, fs: FsCtx) -> f32
 ///
 /// Canonical order: `snap_float_to_hints` -> `clamp_float_geom` ->
 /// `settle_to_grid`. The middle clamp guarantees the grid can never push the
-/// rect outside the workarea, and the final settle only shrinks within
-/// `[min, clamped]`, so the answer lands on the grid the client itself declares
-/// and there is nothing left for it to correct (a float that does not move
-/// generates no spurious `ConfigureWindow`).
+/// rect outside the workarea, and the final settle never grows the clamped
+/// size, so the answer lands on the grid the client itself declares — or, where
+/// no grid point fits under the clamp, on the size the client's own correction
+/// asks for. Either way the answer is the fixed point of the *whole*
+/// composition, not only of its last step: there is nothing left for the next
+/// normalize to correct (a float that does not move generates no spurious
+/// `ConfigureWindow`).
 ///
 /// # Authority: never apply this to a rect the client asked for
 ///
@@ -938,9 +941,9 @@ pub fn clamp_float_geom(mut g: Rect, wa: Rect, border_w: u32) -> Rect {
 /// Snapping first makes the WM's answer something the toolkit accepts, so a
 /// resize storm terminates in exactly one configure per distinct size.
 ///
-/// Order matters: min/max clamp, increment round-snap (nearest multiple of
-/// `(size - base)`, the rounding the drag path uses), then min/max clamp again
-/// as the final word. Hard `[min, max]` bounds win over
+/// Order matters: the 1 px protocol floor, min/max clamp, increment round-snap
+/// (nearest multiple of `(size - base)`, the rounding the drag path uses), then
+/// min/max clamp again as the final word. Hard `[min, max]` bounds win over
 /// the increment grid because a toolkit always accepts its own min/max, so
 /// the result is a fixed point of the client's correction function even when
 /// the hints themselves are not increment-aligned (pathological).
@@ -957,8 +960,15 @@ pub(crate) fn snap_float_to_hints(g: Rect, h: SizeHints) -> Rect {
     if !h.valid {
         return g;
     }
-    let mut w = g.w as i32;
-    let mut hh = g.h as i32;
+    // The 1 px protocol floor (`ConfigureWindow` of 0 is `BadValue`, and the
+    // server drops the request) is applied on *both* sides of the increment
+    // round, and that is not redundant: flooring only afterwards lets the round
+    // choose a grid line for a size of 0, and the 1 px the floor then leaves is
+    // *off* the client's grid, so the next normalize rounds it again and the
+    // float grows a whole increment one arrange late. Flooring first makes the
+    // round answer for a size X can actually represent.
+    let mut w = (g.w as i32).max(1);
+    let mut hh = (g.h as i32).max(1);
     if h.min_w > 0 {
         w = w.max(h.min_w);
     }
@@ -1003,9 +1013,28 @@ pub(crate) fn snap_float_to_hints(g: Rect, h: SizeHints) -> Rect {
 
 /// Floor a (workarea-clamped) size onto the increment grid without ever
 /// growing it: the workarea clamp wins over the grid. A grid point is adopted
-/// only when it still satisfies `min`; otherwise the clamped size is kept
-/// (no grid point fits `[min, clamped]` — unsatisfiable constraints the
-/// client must yield on, documented in `snap_float_to_hints`).
+/// only when it still satisfies `min`; otherwise no grid point fits
+/// `[min, clamped]` (unsatisfiable constraints the client must yield on,
+/// documented in `snap_float_to_hints`) and the size kept is the one the
+/// client's own correction of it asks for — the only size the grid, the hard
+/// bounds and the clamp hold at the same time.
+///
+/// # Why the fallback is not the clamped size
+///
+/// A workarea clamp can leave a size between two grid lines, and a client may
+/// put its `min` above the lower grid line (`base = 12`, `inc = 11`,
+/// `min = 113`, a workarea that hosts 116 px). Keeping such a size verbatim
+/// looks like the safe choice — it is inside the workarea — but it is not a
+/// fixed point of the projection: the *next* call's `snap_float_to_hints` rounds
+/// it down onto the grid and the minimum pulls it back up, so the float moved a
+/// second time (`116 -> 113 -> 113`) and one arrange per float emitted a
+/// `ConfigureWindow` for a window that had not changed. The snap is idempotent,
+/// so *its* answer is a size the next snap keeps; and since the settle only
+/// shrinks, adopting it can never break the workarea containment the clamp
+/// established.
+///
+/// `g` must be workarea-clamped ([`clamp_float_geom`]) for that containment to
+/// carry over to the result.
 pub(crate) fn settle_to_grid(mut g: Rect, h: SizeHints) -> Rect {
     if !h.valid {
         return g;
@@ -1036,6 +1065,15 @@ pub(crate) fn settle_to_grid(mut g: Rect, h: SizeHints) -> Rect {
             }
         }
     }
+    // The last word on agreement, shared with the snap the next call runs: a
+    // hint-respecting toolkit accepts exactly this size without re-asserting
+    // it, so adopting it (never growing past it, never past the workarea clamp
+    // either) is what leaves the projection with nothing to correct. On the
+    // healthy path it is a no-op — a size already on the grid the client
+    // declared is its own correction.
+    let corrected = snap_float_to_hints(g, h);
+    g.w = g.w.min(corrected.w);
+    g.h = g.h.min(corrected.h);
     g
 }
 
@@ -2668,15 +2706,12 @@ mod proptests {
     /// geometry, and `State::check_invariants` deliberately does not reject it
     /// ("valid intermediate states ... legitimately carry a default rect").
     ///
-    /// This currently fails on unmutated code: with a client that declares a
-    /// size increment of two or more and no maximum, `clamp_float_geom`'s
-    /// one-pixel protocol floor lifts a zero extent to 1, which is *off* the
-    /// client's increment grid, so the next arrange snaps it up by a whole
-    /// increment. The minimized case is kept in
+    /// The two ways this used to fail are pinned deterministically below
+    /// (`the_clamp_and_the_min_hint_agree_on_one_size`,
+    /// `the_protocol_floor_lands_on_the_client_grid`); a random hint set is a
+    /// weak oracle for either, so the seeds this property shrunk to are kept in
     /// `proptest-regressions/core/layout.txt`.
     #[test]
-    #[ignore = "known defect: normalize_float_geom is not a fixed point when a \
-                size hint's max exceeds the workarea capacity. Reported, not fixed."]
     fn the_wm_float_normalization_is_a_fixed_point() {
         proptest!(|(wa in screen_rect(), h in size_hints(), bw in 0u32..=64, g in screen_rect())| {
             let once = normalize_float_geom(g, h, wa, bw);
@@ -2692,6 +2727,83 @@ mod proptests {
                 bw
             );
         });
+    }
+
+    /// The reported interaction, pinned: a client that publishes base / inc /
+    /// min / max (xterm, foot, most GTK dialogs) inside a workarea too small for
+    /// its `max` — a dock reservation, a small panel. The `2 * border_w` frame
+    /// leaves 116 px of height, which is not on the client's 11 px grid, and the
+    /// grid line below it (111) is under the client's own `min` of 113, so the
+    /// grid and the minimum cannot both be honoured inside the workarea.
+    ///
+    /// The canonical answer is therefore 113: the one size under the clamp that
+    /// the grid, the hard bounds and the workarea all hold at once. Keeping the
+    /// clamped 116 (it is inside the workarea, which is what made it look safe)
+    /// is what used to cost a second configure and a 3 px jump one arrange
+    /// later, because the next call's snap rounded it onto the grid and the
+    /// minimum pulled it back up: `116 -> 113 -> 113`.
+    #[test]
+    fn the_clamp_and_the_min_hint_agree_on_one_size() {
+        let h = SizeHints {
+            base_h: 12,
+            inc_h: 11,
+            max_h: 118,
+            min_h: 113,
+            valid: true,
+            ..SizeHints::default()
+        };
+        let wa = Rect::new(0, 0, 0, 124);
+        let bw = 4;
+        let once = normalize_float_geom(Rect::new(0, 0, 0, 118), h, wa, bw);
+        assert_eq!(once.h, 113, "the minimum is the only size left to agree on");
+        assert_eq!(
+            once,
+            normalize_float_geom(once, h, wa, bw),
+            "not a fixed point"
+        );
+        assert_eq!(
+            snap_float_to_hints(once, h),
+            once,
+            "the answer must be the size the client's own correction asks for"
+        );
+        assert!(
+            once.h + 2 * bw <= wa.h,
+            "the answer stayed inside the workarea the frame was reserved from: {once:?}"
+        );
+        // The zero-extent width axis, clamped to the 1 px the protocol can
+        // represent out of a workarea with no width at all.
+        assert_eq!(once.w, 1, "a `ConfigureWindow` of 0 is BadValue");
+    }
+
+    /// The other way the same two stages could disagree: the 1 px protocol floor
+    /// is not on the client's grid. A zero-extent request (the geometry a
+    /// freshly managed client carries) for a client with no min and no max but
+    /// an increment of 2 has no grid line at or below 1, so flooring the
+    /// clamped 1 onto the grid is impossible and the 1 px floor has to be taken
+    /// onto the grid instead — as 2, the line a `1` rounds to.
+    ///
+    /// Flooring *after* the increment round (the previous order) left the
+    /// answer at 1, which the next call's snap then grew to 2: the float
+    /// enlarged itself a whole increment after the first arrange.
+    #[test]
+    fn the_protocol_floor_lands_on_the_client_grid() {
+        let h = SizeHints {
+            base_w: 0,
+            base_h: 0,
+            inc_w: 2,
+            inc_h: 2,
+            valid: true,
+            ..SizeHints::default()
+        };
+        let wa = Rect::new(0, 0, 200, 100);
+        let once = normalize_float_geom(Rect::new(0, 0, 0, 0), h, wa, 0);
+        assert_eq!((once.w, once.h), (2, 2), "the floor must land on the grid");
+        assert_eq!(
+            once,
+            normalize_float_geom(once, h, wa, 0),
+            "not a fixed point"
+        );
+        assert_eq!(snap_float_to_hints(once, h), once);
     }
 
     /// `float_client_authority` is the seal that ends the configure ping-pong:
