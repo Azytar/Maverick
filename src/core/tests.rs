@@ -8942,6 +8942,50 @@ mod unit_tests {
         /// that was no longer maximized ("presented_maximize 1 is not
         /// maximized"); the same staleness appears when the window moves to
         /// another workspace ("presented_maximize 1 on wrong workspace").
+        #[test]
+        fn maximize_presentation_is_re_derived_on_every_monitor_that_shows_it() {
+            let base = |ops| Scenario {
+                n_mon: 2,
+                seed: 1,
+                floatness: 0,
+                ops,
+            };
+            let focus_elsewhere_then_back = |last: Op| {
+                base(vec![
+                    Op::Cmd(GenCmd::ToggleMaximize),
+                    Op::Wire(Action::FocusMon(Dir::Left)),
+                    Op::Cmd(GenCmd::FocusWindow(0)),
+                    Op::Wire(Action::FocusMon(Dir::Left)),
+                    last,
+                ])
+            };
+            // Un-maximizing while a foreign monitor's slot names the window.
+            let engine = run_ops_leaving_state_valid(&focus_elsewhere_then_back(Op::Cmd(
+                GenCmd::ToggleMaximize,
+            )));
+            assert!(
+                engine.state.monitors[1].workspaces[0]
+                    .presented_maximize
+                    .is_none(),
+                "the foreign monitor must not keep naming a window that is no longer \
+                 maximized\nSTATE:\n{}",
+                logical_dump(&engine)
+            );
+            // Moving it to another workspace while a foreign monitor's slot names
+            // it: the name is attached to a workspace it no longer lives on.
+            let engine = run_ops_leaving_state_valid(&focus_elsewhere_then_back(Op::Cmd(
+                GenCmd::MoveToWorkspace(1),
+            )));
+            assert!(
+                engine.state.monitors[1].workspaces[0]
+                    .presented_maximize
+                    .is_none(),
+                "the foreign monitor must not keep naming a window that left that \
+                 workspace\nSTATE:\n{}",
+                logical_dump(&engine)
+            );
+        }
+
         /// Contract: a monitor's focus stack names each client at most once.
         ///
         /// Moving a window to another monitor makes it the most recently focused

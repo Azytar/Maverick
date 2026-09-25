@@ -411,8 +411,28 @@ pub fn apply_maximize(state: &mut State, win: WindowId, vert: Option<bool>, hori
         }
         c.geometry_dirty = true;
     }
-    let mi = state.clients.get(&win).map_or(0, |c| c.monitor);
-    state.sync_presented_maximize(mi);
+    sync_presented_maximize_everywhere(state, win);
+}
+
+/// Re-derive the maximize presentation on every monitor that can be showing `win`.
+///
+/// `presented_maximize` is a function of the *focus*, not of the client: a
+/// monitor's owner is the window its focus slot names on its active workspace. A
+/// focus slot is written on the monitor the user is looking at, which need not be
+/// the window's own monitor, so one window can be the presented overlay owner of
+/// several monitors. Every transition that changes what the derivation reads —
+/// this window's maximize flags or the workspace it lives on — must therefore
+/// refresh all of them, not just `c.monitor`: a monitor left behind would keep
+/// naming a window that is no longer maximized, or one that no longer lives on
+/// the workspace the name is attached to, which is what the `presented_maximize`
+/// invariant rejects.
+fn sync_presented_maximize_everywhere(state: &mut State, win: WindowId) {
+    for mi in 0..state.monitors.len() {
+        let names_win = state.monitors[mi].focused == Some(win);
+        if names_win || state.clients.get(&win).is_some_and(|c| c.monitor == mi) {
+            state.sync_presented_maximize(mi);
+        }
+    }
 }
 
 /// Minimum/maximum `page_zoom` factor. < 1.0 would be an Overview-style zoom-out
@@ -825,6 +845,7 @@ impl Command for ToggleFloat {
         // wrong tree — leaving the window tiled in its home workspace *and*
         // floating in the active one (cross-workspace duplication).
         // `NewColumn` applies the same guard.
+
         let ws_i = state
             .clients
             .get(&win)
@@ -1288,6 +1309,11 @@ impl Command for MoveToWorkspace {
         let new_focus = state.best_focus(mi);
         state.monitors[mi].focused = new_focus;
         state.sync_presented_maximize(mi);
+        // The window's workspace just changed, so *every* monitor that can be
+        // showing it has to re-derive: another monitor's focus slot may already
+        // name it as the presented overlay owner on a workspace it no longer
+        // lives on. See `sync_presented_maximize_everywhere`.
+        sync_presented_maximize_everywhere(state, win);
         cmds.push(Effect::SetWindowDesktop { win, ws: ws_idx });
         cmds.push(Effect::ArrangeMonitor(mi));
         cmds.push(Effect::FocusWindow(new_focus));
