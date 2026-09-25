@@ -1509,6 +1509,11 @@ pub struct State {
     /// WM's logical intent) and the painted border (visual). `reconcile_focus`
     /// keeps all three in lock-step; without it an external `XSetInputFocus`
     /// (popup/dialog/Wine) silently desyncs logical vs real focus.
+    ///
+    /// The mirror names a *managed* client or nothing: every writer filters the
+    /// server's answer through `clients`, so an XID the WM does not manage (a
+    /// child window, an override-redirect popup) is recorded as `None` rather
+    /// than stored — see `State::check_invariants` #10.
     pub x11_input_focus: Option<WindowId>,
     /// Deferred focus request with explicit context (see `PendingFocus`). This is
     /// the single global slot; the deferral names the exact `monitor`/`workspace`
@@ -1791,6 +1796,22 @@ impl State {
             if pf.window == win || pf.owner == win {
                 self.pending_focus = None;
             }
+        }
+        // Drop the X focus mirror when — and only when — it names the window
+        // that just left `clients`. The mirror holds a managed client or
+        // `None` (every writer filters the server's answer through `clients`,
+        // and invariant 10 rejects anything else), so the removal of `win` from
+        // `clients` above is exactly what invalidates `Some(win)` and nothing
+        // else: a mirror naming a different client is still a live window and
+        // must keep being reported as the real X focus, while an unmanaged XID
+        // — an override-redirect popup the WM never owned focus bookkeeping for
+        // — cannot legitimately be stored here in the first place. Leaving the
+        // stale id behind is not cosmetic either: X11 recycles window ids, so a
+        // brand-new unrelated client that lands on the recycled id would be
+        // reported as the X focus and dragged into `reconcile_focus`'s
+        // focus-repair path.
+        if self.x11_input_focus == Some(win) {
+            self.x11_input_focus = None;
         }
         if self.monitors.is_empty() {
             return Some(c);

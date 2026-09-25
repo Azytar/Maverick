@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{arb_dir, arb_spec, build, Built};
+use common::{arb_dir, arb_spec, build, focus_logically, Built};
 use maverick_core::types::{
     Client, Column, Dir, FullscreenPolicy, Monitor, PendingFocus, Rect, SizeHints, State, WinFlags,
     WindowId, Workspace,
@@ -84,8 +84,6 @@ proptest! {
 // this checks the sweep rather than one call site at a time.
 proptest! {
     #[test]
-    #[ignore = "known defect: remove_client does not clear x11_input_focus, so the X \
-                focus keeps naming a window that no longer exists. Reported, not fixed."]
     fn removing_a_window_leaves_no_reference_anywhere(
         spec in arb_spec(),
         victim in 0usize..8,
@@ -123,6 +121,86 @@ proptest! {
         let after = state.check_invariants();
         prop_assert!(after.is_ok(), "removing a window left a broken state: {:?}", after);
     }
+}
+
+// A single-monitor workspace holding `wins` tiled clients, with the logical
+// focus, the focus stack and the X focus mirror all on the last one added — the
+// state `reconcile_focus` leaves behind once the WM has taken focus.
+fn x11_mirror_state(wins: &[WindowId]) -> (State, WindowId) {
+    let mut state = single_monitor_state();
+    for &win in wins {
+        add_plain_client(&mut state, win);
+        state.monitors[0].workspaces[0].add_tiled(win, 0.5);
+    }
+    let focused = *wins.last().expect("the fixture was given windows");
+    focus_logically(&mut state, 0, focused);
+    state.monitors[0].focus_stack = wins.to_vec();
+    state.x11_input_focus = Some(focused);
+    let before = state.check_invariants();
+    assert!(
+        before.is_ok(),
+        "the fixture state is already broken: {before:?}"
+    );
+    (state, focused)
+}
+
+// The mirror must not outlive the client it names.
+//
+// The sweep above covers this for every window of every generated state; this
+// pins the one case that matters on its own, because it is the only ordering in
+// which the mirror is *supposed* to be cleared: the X focus is the client that
+// just died, so nothing else in the state names it any more.
+#[test]
+fn removing_the_x11_focused_client_clears_the_focus_mirror() {
+    let (mut state, focused) = x11_mirror_state(&[0x201, 0x202, 0x203]);
+
+    let removed = state.remove_client(focused);
+
+    assert_eq!(
+        removed.map(|c| c.window),
+        Some(focused),
+        "the client was not returned"
+    );
+    assert_eq!(
+        state.x11_input_focus, None,
+        "the mirror still names the removed client"
+    );
+    let after = state.check_invariants();
+    assert!(
+        after.is_ok(),
+        "removing the focused client left a broken state: {after:?}"
+    );
+}
+
+// ...and it must survive the removal of some *other* client.
+//
+// This is the half that rules out "clear the mirror unconditionally": the mirror
+// is the WM's record of a window the WM manages, so a client that is still alive
+// is still what the X server reports, and a removal elsewhere in the state is not
+// a reason to forget it.
+#[test]
+fn removing_another_client_leaves_the_focus_mirror_alone() {
+    let (mut state, focused) = x11_mirror_state(&[0x201, 0x202, 0x203]);
+    let other = 0x201;
+    assert_ne!(other, focused, "the fixture removed the focused client");
+
+    let removed = state.remove_client(other);
+
+    assert_eq!(
+        removed.map(|c| c.window),
+        Some(other),
+        "the client was not returned"
+    );
+    assert_eq!(
+        state.x11_input_focus,
+        Some(focused),
+        "an unrelated removal took the X focus"
+    );
+    let after = state.check_invariants();
+    assert!(
+        after.is_ok(),
+        "removing an unfocused client left a broken state: {after:?}"
+    );
 }
 
 // --- the focus pointer inside a workspace -----------------------------------
