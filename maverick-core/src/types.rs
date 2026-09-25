@@ -1274,13 +1274,35 @@ impl Monitor {
     }
 
     /// Recompute `reserved` and `workarea` from `reserved_regions`.
+    ///
+    /// `reserved` is the per-edge collapse of `reserved_regions` and `workarea`
+    /// is `screen` minus those totals, so the workarea is never larger than
+    /// `screen` nor anchored outside it.
+    ///
+    /// `reserved_regions` carries untrusted thickness values (on X11, any
+    /// window's `_NET_WM_STRUT[_PARTIAL]` CARDINALs) and `screen` comes from
+    /// the backend, so no `u32` input may panic, wrap, or move the workarea
+    /// away from the screen it is subtracted from. An edge total larger than
+    /// the extent it pushes into collapses to that extent: the workarea is
+    /// then empty and sits on the screen's own edge, which is a legitimate
+    /// result (a strut can cover the whole screen) — the arrangement pass, not
+    /// this one, is what clamps what it presents to a non-zero size.
     pub fn recalc_geometry(&mut self) {
         self.reserved = ReservedArea::from_regions(&self.reserved_regions);
         let r = self.reserved;
-        let x = self.screen.x + r.left as i32;
-        let y = self.screen.y + r.top as i32;
-        let w = self.screen.w.saturating_sub(r.left + r.right);
-        let h = self.screen.h.saturating_sub(r.top + r.bottom);
+        // A total beyond the screen extent is meaningless and must be bounded
+        // before it is used, or it can both wrap when summed with the opposite
+        // edge and cast to a negative offset that moves the origin outwards.
+        let left = r.left.min(self.screen.w);
+        let right = r.right.min(self.screen.w);
+        let top = r.top.min(self.screen.h);
+        let bottom = r.bottom.min(self.screen.h);
+        // The i32 origin is computed in i64 so a screen near the coordinate
+        // limit cannot wrap the sum into a negative offset.
+        let x = (i64::from(self.screen.x) + i64::from(left)).min(i64::from(i32::MAX)) as i32;
+        let y = (i64::from(self.screen.y) + i64::from(top)).min(i64::from(i32::MAX)) as i32;
+        let w = self.screen.w.saturating_sub(left.saturating_add(right));
+        let h = self.screen.h.saturating_sub(top.saturating_add(bottom));
         self.workarea = Rect::new(x, y, w, h);
     }
 
@@ -2355,6 +2377,26 @@ mod reservation_tests {
         Monitor::new(Rect::new(0, 0, 1920, 1080), 9)
     }
 
+    /// Assert the standing workarea contract: `workarea` is `screen` minus the
+    /// collapsed `reserved` totals, so it can never be larger than `screen` nor
+    /// anchored outside it — whatever the reservations say.
+    fn assert_workarea_inside_screen(m: &Monitor, what: &str) {
+        let screen = m.screen;
+        let wa = m.workarea;
+        assert!(
+            screen.contains_rect(wa),
+            "{what}: workarea {wa:?} is not inside screen {screen:?}"
+        );
+        assert!(
+            wa.w <= screen.w && wa.h <= screen.h,
+            "{what}: workarea {wa:?} is larger than screen {screen:?}"
+        );
+        assert!(
+            wa.x >= screen.x && wa.y >= screen.y,
+            "{what}: workarea {wa:?} starts before screen {screen:?}"
+        );
+    }
+
     #[test]
     fn top_dock_reserves_top_only() {
         let mut m = mon();
@@ -2444,6 +2486,70 @@ mod reservation_tests {
         m.set_reserved_regions(0x9001, &[]);
         assert!(m.reserved.is_empty());
         assert!(m.reserved_regions.is_empty());
+    }
+
+    /// A hostile dock (any window may set `_NET_WM_STRUT[_PARTIAL]` to any
+    /// `u32`) must not be able to wrap the derived geometry: the workarea stays
+    /// inside the screen and never grows past it, whatever the edges sum to.
+    #[test]
+    fn hostile_strut_values_never_escape_the_screen() {
+        let screens = [
+            Rect::new(0, 0, 1920, 1080),
+            Rect::new(-1920, -1080, 1920, 1080),
+            Rect::new(3840, 0, 1280, 1024),
+            Rect::new(0, 0, 1, 1),
+        ];
+        let hostile: [&[(Edge, u32)]; 6] = [
+            &[(Edge::Left, u32::MAX), (Edge::Right, u32::MAX)],
+            &[(Edge::Top, u32::MAX), (Edge::Bottom, u32::MAX)],
+            &[(Edge::Left, 3_000_000_000), (Edge::Right, 2_000_000_000)],
+            &[(Edge::Top, u32::MAX), (Edge::Left, 1)],
+            &[(Edge::Bottom, u32::MAX / 2), (Edge::Top, u32::MAX / 2)],
+            &[(Edge::Right, u32::MAX)],
+        ];
+        for screen in screens {
+            for regions in hostile {
+                let mut m = Monitor::new(screen, 1);
+                m.set_reserved_regions(0xFEED, regions);
+                assert_workarea_inside_screen(&m, &format!("{screen:?} + {regions:?}"));
+            }
+        }
+    }
+
+    /// A reservation wider than the screen it pushes into (a stale dock after a
+    /// resolution change, or a lying one) leaves no usable area: the workarea
+    /// collapses onto the screen's own edge instead of past it.
+    #[test]
+    fn reservation_larger_than_the_screen_collapses_onto_its_edge() {
+        // Exactly the screen height: empty workarea sitting on the bottom edge.
+        let mut m = mon();
+        m.set_reserved_region(0x1, Edge::Top, 1080);
+        assert_eq!(m.workarea, Rect::new(0, 1080, 1920, 0));
+        assert_workarea_inside_screen(&m, "top == screen height");
+
+        // Beyond it, on both axes at once.
+        let mut m = mon();
+        m.set_reserved_regions(0x1, &[(Edge::Top, 5_000), (Edge::Left, 9_000)]);
+        assert_eq!(m.workarea, Rect::new(1920, 1080, 0, 0));
+        assert_workarea_inside_screen(&m, "struts beyond the screen");
+
+        // The unclamped side is still subtracted normally.
+        let mut m = mon();
+        m.set_reserved_regions(0x1, &[(Edge::Left, 3_000), (Edge::Top, 30)]);
+        assert_eq!(m.workarea, Rect::new(1920, 30, 0, 1050));
+        assert_workarea_inside_screen(&m, "left beyond the screen, top within");
+    }
+
+    /// A screen whose origin sits near `i32::MAX` plus a reservation must not
+    /// overflow the coordinate (debug builds would panic on it).
+    #[test]
+    fn screen_origin_near_i32_max_survives_a_reservation() {
+        let screen = Rect::new(i32::MAX - 10, 0, 1920, 1080);
+        let mut m = Monitor::new(screen, 1);
+        m.set_reserved_regions(0x1, &[(Edge::Left, 100), (Edge::Top, 20)]);
+        assert_eq!(m.workarea.w, 1820, "the reservation still subtracts");
+        assert_eq!(m.workarea.h, 1060, "the reservation still subtracts");
+        assert_workarea_inside_screen(&m, "origin at i32::MAX - 10");
     }
 }
 
