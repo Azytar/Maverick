@@ -285,7 +285,17 @@ fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -
     fn single_line(s: &str) -> String {
         let mut out: String = s.replace(['\n', '\r'], " ");
         if out.len() > MAX_LINE_LEN {
-            out.truncate(MAX_LINE_LEN);
+            // The bound is in bytes but the payload is UTF-8, so the cut can
+            // land inside a multi-byte character, and `truncate` panics on any
+            // offset that is not a character boundary. Walk back to the last
+            // boundary at or before the limit: a char is at most 4 bytes, so
+            // the walk settles within three steps, and cutting a byte prefix
+            // leaves the reply a valid, still-bounded prefix of what was sent.
+            let mut cut = MAX_LINE_LEN;
+            while !out.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            out.truncate(cut);
         }
         out
     }
@@ -882,10 +892,6 @@ mod reply_props {
     proptest! {
         #![proptest_config(config())]
         #[test]
-        #[ignore = "known defect: single_line truncates with String::truncate at a byte \
-                    offset, which panics when MAX_LINE_LEN lands inside a multi-byte \
-                    character. Reachable from maverick-msg identify/state. Reported, \
-                    not fixed."]
         fn an_oversized_payload_is_still_answered_in_one_bounded_line(
             verb in prop_oneof![Just(IDENTIFY_CMD), Just(STATE_CMD)],
             name in text(),
@@ -895,6 +901,57 @@ mod reply_props {
             let hub = ControlHub::new();
             hub.publish_state(snapshot);
             assert_one_frame(verb, &dispatch_line(verb, &name, &identity, &hub))?;
+        }
+    }
+
+    // The shrinking target of the property above, made deterministic: a payload
+    // that lays a multi-byte character across the byte bound, where the cut has
+    // to stop at the character start instead of splitting it. Each width gets
+    // its own case, and each case is walked to the byte before the bound, the
+    // bound itself and the byte after it, so a regression cannot hide behind a
+    // generator that rarely lands on a straddling offset.
+    #[test]
+    fn a_character_straddling_the_bound_is_cut_back_to_its_prefix() {
+        for wide in ['\u{00e9}', '\u{20ac}', '\u{1f600}'] {
+            // Where the payload ends relative to the bound: one byte short,
+            // exactly on it, one byte past it. Only the last one straddles the
+            // cut, since the character's last bytes are then past the bound
+            // while its first ones are not.
+            for over in [-1i64, 0, 1] {
+                let head = MAX_LINE_LEN as i64 + over - wide.len_utf8() as i64;
+                let payload = format!("{}{wide}", "x".repeat(head as usize));
+                for verb in [IDENTIFY_CMD, STATE_CMD] {
+                    let label = format!("{verb} with {wide:?} reaching {over:+}");
+                    let hub = ControlHub::new();
+                    hub.publish_state(payload.clone());
+                    let reply = dispatch_line(verb, "testctl", &payload, &hub);
+                    if let Err(e) = assert_one_frame(verb, &reply) {
+                        panic!("{label} broke the frame contract: {e:?}");
+                    }
+                    let body = reply
+                        .strip_suffix('\n')
+                        .expect("reply is newline terminated");
+                    // A payload that already ends inside the bound is answered
+                    // whole; one that reaches past it loses the straddling
+                    // character entirely, since half of it is not a reply.
+                    let kept = if over > 0 {
+                        head as usize
+                    } else {
+                        payload.len()
+                    };
+                    assert!(
+                        std::str::from_utf8(body.as_bytes()).is_ok(),
+                        "{label} answered with bytes that do not decode"
+                    );
+                    assert_eq!(
+                        body,
+                        &payload[..kept],
+                        "{label} kept {} bytes, which is not the last character \
+                         boundary at or before the bound",
+                        body.len()
+                    );
+                }
+            }
         }
     }
 
