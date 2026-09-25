@@ -294,6 +294,43 @@ pub(crate) fn reconcile_pending_focus_after_transition(state: &mut State) -> Opt
     }
 }
 
+/// Resolve a deferral that a *requested* focus move is about to orphan.
+///
+/// A command that moves the logical focus itself (`FocusDirection`,
+/// `ViewWorkspace`, …) needs nothing: `Engine::execute` runs
+/// [`reconcile_pending_focus_after_transition`] afterwards and sees the new
+/// focus. A command that only emits `Effect::FocusWindow` and lets the X sink
+/// apply it breaks that premise — the safety net runs while the old focus is
+/// still in place, still sees the overlay as presented, and leaves the deferral
+/// queued for an overlay the pending effect is about to unfocus. The input focus
+/// would then land on a window nobody can see behind a dismissed overlay.
+///
+/// Only the focus-driven presentation is at stake: a *maximize* overlay is
+/// presented exactly while it holds the focus (that is what
+/// `State::pending_focus_owner_presented` tests), so a request that takes the
+/// focus off the deferral's owner has to resolve the deferral now. A fullscreen
+/// owner stays presented regardless of the focus and keeps its queue.
+///
+/// An explicit focus request supersedes the queued one (the same reasoning as
+/// `FocusDirection` yielding an overlay), so the deferral is dropped rather than
+/// redirected: the requested window is what the user asked to be looking at.
+fn drop_deferral_yielded_by_focus_move(state: &mut State, to: Option<WindowId>) {
+    let Some(pf) = state.pending_focus else {
+        return;
+    };
+    if Some(pf.owner) == to {
+        return;
+    }
+    let owner_holds_focus = state
+        .monitors
+        .get(pf.monitor)
+        .and_then(|m| m.focused)
+        .is_some_and(|f| f == pf.owner);
+    if owner_holds_focus {
+        state.pending_focus = None;
+    }
+}
+
 /// Apply a *logical* focus (update `mon.focused` + `focus_stack` +
 /// `presented_maximize`) without touching the real X input focus.
 ///
@@ -584,6 +621,9 @@ impl Command for FocusWindow {
         let from = state.monitors.get(before).and_then(|m| m.focused);
         if let Some(win) = self.0 {
             if before < state.monitors.len() {
+                // The sink applies this focus, i.e. after `Engine::execute` ran
+                // its deferral safety net; see the helper.
+                drop_deferral_yielded_by_focus_move(state, Some(win));
                 return CommandReport::with_event(
                     vec![Effect::FocusWindow(Some(win))],
                     Event::FocusChanged {
@@ -807,6 +847,9 @@ impl Command for MoveWindow {
         );
         state.monitors[mi].workspaces[ws_i].camera.retarget(scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
+        // This focus is requested, not applied, so a deferral owned by the
+        // overlay it takes the focus from is resolved here; see the helper.
+        drop_deferral_yielded_by_focus_move(state, Some(self.0));
         cmds.push(Effect::FocusWindow(Some(self.0)));
         CommandReport::with_event(cmds, Event::WindowMoved(self.0))
     }
@@ -845,15 +888,18 @@ impl Command for ToggleFloat {
         // wrong tree — leaving the window tiled in its home workspace *and*
         // floating in the active one (cross-workspace duplication).
         // `NewColumn` applies the same guard.
-
-        let ws_i = state
-            .clients
-            .get(&win)
-            .map_or_else(|| state.monitors[mi].active_ws, |c| c.workspace);
-        let is_float = state
-            .clients
-            .get(&win)
-            .is_some_and(crate::types::Client::is_float);
+        //
+        // A focus slot can also name a window that is not a client at all: the
+        // teardown path purges the focus bookkeeping of the monitor the window
+        // was *placed* on, so a slot on another monitor keeps naming it until
+        // the next focus settles there. Both branches below write into a
+        // placement index, and a placement index must only ever name live
+        // clients, so a stale slot absorbs the toggle instead of pushing a
+        // phantom entry into `floats`.
+        let (ws_i, is_float) = match state.clients.get(&win) {
+            Some(c) => (c.workspace, c.is_float()),
+            None => return CommandReport::new(cmds),
+        };
         // Guard against cross-monitor focus corruption. If the focused window
         // does not actually belong to the selected monitor, mutating the
         // selected monitor's trees would remove it from tree A and insert it
@@ -1400,6 +1446,14 @@ impl Command for NewColumn {
         // on its own workspace — otherwise we would splice it into the wrong
         // tree while it is still tiled on its own (cross-workspace duplication).
         let ws_i = state.clients.get(&win).map_or(ws_i, |c| c.workspace);
+        // Same for the monitor: the focus slot lives on the monitor the user is
+        // looking at and can name a window that is placed on another one. Splicing
+        // that window into this monitor's tree would reference it from two
+        // placements at once; relocating it across monitors is
+        // `MoveWindowToMonitor`'s job, so absorb the request instead.
+        if state.clients.get(&win).is_some_and(|c| c.monitor != mi) {
+            return CommandReport::new(cmds);
+        }
         if state
             .clients
             .get(&win)
@@ -1623,6 +1677,14 @@ impl Command for MoveWindowToMonitor {
         if state.monitors[mi].workspaces[src_ws_real].presented_maximize == Some(win) {
             state.monitors[mi].workspaces[src_ws_real].presented_maximize = None;
         }
+        // The window becomes the most recently focused one on its new monitor, so
+        // it belongs at the top of that monitor's stack exactly once — the same
+        // `retain`-then-`push` shape `focus_logical_on` uses. A bare `push`
+        // would duplicate the entry when the destination stack already names this
+        // window (a focus slot on the other monitor, a consumed deferral), and a
+        // stack with duplicates breaks the "each client once" focus bookkeeping
+        // the invariant checker asserts.
+        state.monitors[new_mi].focus_stack.retain(|&w| w != win);
         state.monitors[new_mi].focus_stack.push(win);
         if let Some(c) = state.clients.get_mut(&win) {
             c.monitor = new_mi;
@@ -1874,6 +1936,10 @@ impl Command for OverviewNav {
         // we just selected, otherwise the keyboard keeps going to the previous
         // window and `ws.focus.column_idx` desyncs from `mon.focused`.
         if let Some(w) = ws.columns.get(new).and_then(Column::focused_win) {
+            // That focus is only *requested* here (the X sink applies it), so
+            // selecting a column away from the overlay that owns a deferral
+            // has to resolve that deferral now; see the helper.
+            drop_deferral_yielded_by_focus_move(state, Some(w));
             cmds.push(Effect::FocusWindow(Some(w)));
         }
         CommandReport::with_event(
@@ -1923,6 +1989,9 @@ impl Command for OverviewEnter {
             .get(ws.focus.column_idx)
             .and_then(Column::focused_win)
         {
+            // Same as `OverviewNav`: this focus is requested, not applied, so a
+            // deferral owned by the overlay this drops must be resolved here.
+            drop_deferral_yielded_by_focus_move(state, Some(w));
             cmds.push(Effect::FocusWindow(Some(w)));
         }
         CommandReport::with_event(

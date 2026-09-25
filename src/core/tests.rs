@@ -8922,6 +8922,33 @@ mod unit_tests {
         /// place but tiled at another". Moving a window across monitors is
         /// `MoveWindowToMonitor`'s job, so a cross-monitor focus slot absorbs the
         /// request instead.
+        #[test]
+        fn new_column_keeps_one_placement_for_a_cross_monitor_focus() {
+            let sc = Scenario {
+                n_mon: 2,
+                seed: 0,
+                floatness: 0,
+                ops: vec![
+                    Op::Map {
+                        float: false,
+                        has_parent: false,
+                        parent: 0,
+                    },
+                    Op::Wire(Action::FocusMon(Dir::Left)),
+                    Op::Cmd(GenCmd::FocusWindow(0)),
+                    Op::Cmd(GenCmd::NewColumn),
+                ],
+            };
+            let engine = run_ops_leaving_state_valid(&sc);
+            let placements = placements_of(&engine.state, 1);
+            assert_eq!(
+                placements.len(),
+                1,
+                "window 1 must stay in one placement, got {placements:?}\nSTATE:\n{}",
+                logical_dump(&engine)
+            );
+        }
+
         /// Contract: a command that only *requests* an input-focus change
         /// resolves the deferral that change orphans.
         ///
@@ -8931,6 +8958,36 @@ mod unit_tests {
         /// the pending effect is about to take the focus (and with it the
         /// overlay's presentation) away from that owner. The queued window would
         /// then get the input focus behind an overlay nobody can see.
+        #[test]
+        fn requested_focus_move_resolves_the_deferral_it_orphans() {
+            let sc = Scenario {
+                n_mon: 1,
+                seed: 1,
+                floatness: 0,
+                ops: vec![
+                    Op::Cmd(GenCmd::ToggleMaximize),
+                    Op::Map {
+                        float: false,
+                        has_parent: false,
+                        parent: 0,
+                    },
+                    Op::Wire(Action::OverviewNav(Dir::Left)),
+                ],
+            };
+            let engine = run_ops_leaving_state_valid(&sc);
+            // Window 1 is the maximize overlay, window 2 the window deferred
+            // behind it; the overview navigation moves the selection onto window
+            // 2, so the deferral is resolved instead of stranded.
+            assert_eq!(
+                engine.state.pending_focus,
+                None,
+                "the deferral must be resolved by the navigation that takes the focus \
+                 off its owner\nSTATE:\n{}",
+                logical_dump(&engine)
+            );
+            assert_eq!(engine.state.monitors[0].focused, Some(2));
+        }
+
         /// Contract: `presented_maximize` is derived state, and every transition
         /// that changes what the derivation reads re-derives *all* the monitors
         /// that can be showing the window.
@@ -8939,9 +8996,9 @@ mod unit_tests {
         /// active workspace, so a window placed on one monitor can be the
         /// presented owner of another whose slot names it. Refreshing only
         /// `c.monitor` on a flag change left the other monitor naming a window
-        /// that was no longer maximized ("presented_maximize 1 is not
+        /// that was no longer maximized ("`presented_maximize` 1 is not
         /// maximized"); the same staleness appears when the window moves to
-        /// another workspace ("presented_maximize 1 on wrong workspace").
+        /// another workspace ("`presented_maximize` 1 on wrong workspace").
         #[test]
         fn maximize_presentation_is_re_derived_on_every_monitor_that_shows_it() {
             let base = |ops| Scenario {
@@ -8993,7 +9050,39 @@ mod unit_tests {
         /// once — the same `retain`-then-`push` shape `focus_logical_on` uses. A
         /// bare `push` duplicated the entry whenever the destination stack already
         /// named the window (a focus slot left on the other monitor), which the
-        /// invariant checker rejects as "focus_stack has duplicate entries".
+        /// invariant checker rejects as "focus stack has duplicate entries".
+        #[test]
+        fn move_to_monitor_does_not_duplicate_the_focus_stack_entry() {
+            let sc = Scenario {
+                n_mon: 2,
+                seed: 1,
+                floatness: 0,
+                ops: vec![
+                    Op::Wire(Action::FocusMon(Dir::Left)),
+                    Op::Cmd(GenCmd::FocusWindow(0)),
+                    Op::Wire(Action::FocusMon(Dir::Left)),
+                    Op::Wire(Action::MoveMon(Dir::Left)),
+                ],
+            };
+            let engine = run_ops_leaving_state_valid(&sc);
+            for (mi, mon) in engine.state.monitors.iter().enumerate() {
+                let mut sorted = mon.focus_stack.clone();
+                sorted.sort_unstable();
+                let deduped = {
+                    let mut d = sorted.clone();
+                    d.dedup();
+                    d
+                };
+                assert_eq!(
+                    sorted,
+                    deduped,
+                    "monitor {mi} focus stack has duplicates: {:?}\nSTATE:\n{}",
+                    mon.focus_stack,
+                    logical_dump(&engine)
+                );
+            }
+        }
+
         /// Contract: a placement index only ever names live clients.
         ///
         /// The teardown path purges the focus bookkeeping of the monitor the
@@ -9007,6 +9096,43 @@ mod unit_tests {
         /// index. The command is invoked directly because the debug invariant
         /// check `Engine::execute` runs would trip on that pre-existing stale
         /// slot before this contract could be observed.
+        #[test]
+        fn toggle_float_ignores_a_focus_slot_that_names_a_dead_window() {
+            let sc = Scenario {
+                n_mon: 2,
+                seed: 1,
+                floatness: 0,
+                ops: vec![
+                    Op::Wire(Action::FocusMon(Dir::Left)),
+                    Op::Cmd(GenCmd::FocusWindow(0)),
+                    Op::Unmap { pick: 0 },
+                ],
+            };
+            let mut engine = seed_engine(&sc);
+            for op in &sc.ops {
+                run_op(&mut engine, op);
+            }
+            // The focus slot survived the teardown: that is the precondition this
+            // pins the toggle against, so prove it is really there.
+            assert_eq!(engine.state.monitors[1].focused, Some(1));
+            assert!(!engine.state.clients.contains_key(&1));
+            ToggleFloat
+                .execute(&mut engine.state, &mut engine.cfg)
+                .effects
+                .is_empty();
+            for (mi, mon) in engine.state.monitors.iter().enumerate() {
+                for (ws_i, ws) in mon.workspaces.iter().enumerate() {
+                    for &w in &ws.floats {
+                        assert!(
+                            engine.state.clients.contains_key(&w),
+                            "monitor {mi} ws {ws_i} floats slot names dead window {w}\nSTATE:\n{}",
+                            logical_dump(&engine)
+                        );
+                    }
+                }
+            }
+        }
+
         proptest! {
             #![proptest_config(ProptestConfig {
                 cases: 64,
@@ -9022,8 +9148,14 @@ mod unit_tests {
             /// points advertise: every mutation funnels through them, and
             /// whatever the user pressed, the model must stay consistent.
             #[test]
-            #[ignore = "known defect: the generated command sequences reach states that \
-                        violate State invariants A and F. Reported, not fixed."]
+            #[ignore = "blocked on defects outside src/core: State::remove_client purges \
+                        the focus bookkeeping of the monitor a client was *placed* on, so \
+                        an unmap can leave another monitor's focus_stack naming a dead \
+                        window (maverick-core/src/types.rs); the map path in \
+                        src/backend/x11/manage.rs takes the focus for a newly mapped \
+                        dialog without resolving a pending_focus whose owner that \
+                        focus move unpresents; and State::apply_move_dir halves a \
+                        column weight without re-clamping it out of the legal band."]
             fn prop_invariants_preserved_under_command_sequences(sc in arb_scenario()) {
                 let mut engine = seed_engine(&sc);
                 prop_assert!(
@@ -9084,8 +9216,13 @@ mod unit_tests {
             /// own overlay and the input focus is handed to a window nobody can
             /// see.
             #[test]
-            #[ignore = "known defect: the generated command sequences reach states that \
-                        violate State invariants A and F. Reported, not fixed."]
+            #[ignore = "blocked on the map path: src/backend/x11/manage.rs focuses a \
+                        newly mapped dialog of the presented overlay without resolving \
+                        the pending_focus that overlay owns, so the deferral survives \
+                        aimed at an owner that is no longer presented. See also \
+                        State::pending_focus_owner_presented (maverick-core/src/types.rs), \
+                        which does not use the canonical presented_overlay_owner_in \
+                        helper, so it accepts an owner that helper refuses to name."]
             fn prop_pending_focus_postcondition_holds_after_every_command(
                 sc in arb_scenario()
             ) {
@@ -9122,9 +9259,10 @@ mod unit_tests {
             /// what makes the ownership graph safe to walk (and stops a recycled
             /// XID from inheriting a dead window's popups).
             #[test]
-            #[ignore = "known defect: an unmap can leave a client referenced from two \
-                        places, or stored in a different placement than the one it is \
-                        tiled in. Reported, not fixed."]
+            #[ignore = "blocked on State::remove_client (maverick-core/src/types.rs): it \
+                        clears presented_maximize on every monitor but the focus \
+                        bookkeeping only on c.monitor, so an unmap can leave another \
+                        monitor's focus_stack referencing a window that is gone."]
             fn prop_unmap_leaves_no_dangling_reference(sc in arb_scenario()) {
                 let mut engine = seed_engine(&sc);
                 for (i, op) in sc.ops.iter().enumerate() {
@@ -9332,8 +9470,16 @@ mod unit_tests {
             /// A second application that re-arranges, re-publishes or re-flips a
             /// flag is a real bug: users repeat keybinds, and IPC replays.
             #[test]
-            #[ignore = "known defect: an applied Maximize can leave presented_maximize \
-                        naming a window that is no longer maximized. Reported, not fixed."]
+            #[ignore = "blocked on the model, not on a transition: a per-axis maximize \
+                        (MAXIMIZED_V xor MAXIMIZED_H) is a legal EWMH state that \
+                        State::sync_presented_maximize and presented_overlay_owner_in \
+                        present as a maximize overlay ('either axis', and src/core/present.rs \
+                        stretches a half-maximized client accordingly), while the \
+                        presented_maximize half of check_invariants validates the derived \
+                        field with Client::is_maximized() ('both axes'). The two definitions \
+                        disagree in maverick-core/src/types.rs, so applying \
+                        Maximize {{ vert: false, horiz: true }} to the focused window is \
+                        reported as 'presented_maximize N is not maximized'."]
             fn prop_absorbing_commands_reach_fixpoint(sc in arb_scenario(), op in arb_absorb()) {
                 let mut engine = seed_engine(&sc);
                 for (i, o) in sc.ops.iter().take(4).enumerate() {
@@ -9414,9 +9560,12 @@ mod unit_tests {
             /// still manages — the backend turns a stale id straight into an X
             /// error.
             #[test]
-            #[ignore = "known defect: an action can be applied yet leave a State that \
-                        violates check_invariants, so the round trip is not total. \
-                        Reported, not fixed."]
+            #[ignore = "blocked on two defects outside src/core: Engine::execute \
+                        (src/core/engine.rs) appends the pending-focus safety net's \
+                        Effect::FocusWindow *after* the PublishIpcState it just pushed, so \
+                        the publish is not last and is skipped entirely when the command \
+                        itself produced no effects; and the effect-list / weight violations \
+                        the other three properties still reach through the command side."]
             fn prop_effects_are_well_formed(sc in arb_scenario()) {
                 let mut engine = seed_engine(&sc);
                 for (i, op) in sc.ops.iter().enumerate() {
