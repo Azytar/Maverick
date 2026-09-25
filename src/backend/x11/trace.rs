@@ -90,7 +90,9 @@ static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// failure into a cascade.
 #[cfg(test)]
 fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub(super) fn init() {
