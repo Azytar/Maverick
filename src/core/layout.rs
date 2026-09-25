@@ -497,6 +497,30 @@ pub(crate) fn ribbon_geom_into<'s>(
     }
 }
 
+/// Ceiling for the user-configured border width at the u32→i32 boundary
+/// (see [`effective_border_w`]). Same rationale as [`MAX_CFG_GAP`]: any value
+/// above this already covers any real display, and `2 * MAX_CFG_BORDER` is
+/// `2_000_000`, so the frame reserved on both sides of a row is far inside
+/// `i32`.
+pub(crate) const MAX_CFG_BORDER: i32 = 1_000_000;
+
+/// The border width the projection may reserve around a tiled window, resolved
+/// from a `Cfg::border_w` the caller is free to set without validating it (the
+/// config file and the IPC `SetBorderWidth` command both do).
+///
+/// This is the u32→i32 representation boundary for user config: a raw
+/// `border_w` above `i32::MAX` wraps negative here and would *add* the frame to
+/// a row instead of reserving it, and one above `i32::MAX / 2` overflows the
+/// `2 * bw` the frame costs. Clamping to [`MAX_CFG_BORDER`] is not a behavior
+/// change — past ~1M px a border already exceeds any display, where the `.max(1)`
+/// protocol floor already dominates — but it keeps the frame arithmetic exact
+/// and every emitted rectangle a valid one. The clamped value is also the one
+/// reported in [`Placements`], so a window is always configured with the border
+/// its geometry was computed from.
+fn effective_border_w(cfg: &Cfg) -> u32 {
+    cfg.border_w.min(MAX_CFG_BORDER as u32)
+}
+
 fn arrange_columns(
     state: &State,
     mon: &Monitor,
@@ -507,7 +531,7 @@ fn arrange_columns(
 ) {
     let ws = mon.ws();
     let full_wa = mon.workarea;
-    let bw = cfg.border_w as i32;
+    let bw = effective_border_w(cfg);
 
     // Derived fullscreen descriptor — the single source of truth for where the
     // fullscreen tile lives in the ribbon. It is computed here (not stored) so
@@ -643,9 +667,9 @@ fn arrange_columns(
                 screen_col_x,
                 screen_y,
                 inner_w,
-                (screen_h as i32 - 2 * bw).max(1) as u32,
+                (screen_h as i32 - 2 * bw as i32).max(1) as u32,
             );
-            out.push((win, geom, cfg.border_w));
+            out.push((win, geom, bw));
         }
     }
 
@@ -717,11 +741,11 @@ pub(crate) fn column_screen_extents_into(
         // *inner* (border-exclusive) width, so the hit-test extent agrees
         // with the `client.geom` X11 hit-tests against (invariant A). A
         // fullscreen column is drawn with border 0, so it contributes no
-        // border to subtract; tiled columns use `cfg.border_w`.
+        // border to subtract; tiled columns reserve [`effective_border_w`].
         let bw = if fs.cols.contains(&i) {
             0.0
         } else {
-            cfg.border_w as f32
+            effective_border_w(cfg) as f32
         };
         let l = g.wa.x as f32 + (x - ws.camera.position) * g.alpha + g.cx;
         let inner_w = (w * g.alpha - 2.0 * bw).max(1.0);
@@ -1568,6 +1592,101 @@ mod tests {
             };
             let mut state = grid_state(1920, 1080, 2, 3);
             assert_gaps_geometry_within_workarea(&mut state, &cfg, 3);
+        }
+    }
+
+    /// Border sweep over every `u32` a user can type in `border_width`:
+    /// realistic widths, the clamp ceiling, the value that makes `2 * bw`
+    /// overflow `i32`, and the two that wrap NEGATIVE through `u32 as i32`.
+    ///
+    /// The contract: the projection never panics and never emits a rectangle
+    /// larger than the workarea — a border that wrapped negative would *add* the
+    /// frame to a row instead of reserving it, which on a 1x1 workarea is a
+    /// three-pixel window — and every placement reports the border actually
+    /// reserved, never the raw config value.
+    #[test]
+    fn border_w_sweep_extreme_config_stays_valid() {
+        let assert_valid = |state: &mut State, cfg: &Cfg, border_w: u32| {
+            let wa = state.monitors[0].workarea;
+            let p = place(state, cfg);
+            assert!(!p.is_empty(), "every client must receive a placement");
+            for (_, rect, bw) in &p {
+                assert!(
+                    rect.w >= 1 && rect.h >= 1,
+                    "degenerate rectangle for border_w={border_w}: {rect:?}"
+                );
+                assert!(
+                    rect.w <= wa.w && rect.h <= wa.h,
+                    "window larger than the workarea for border_w={border_w}: \
+                     {rect:?} wa={wa:?}"
+                );
+                assert!(
+                    rect.x.abs() < 1 << 24 && rect.y.abs() < 1 << 24,
+                    "coordinates escaped for border_w={border_w}: {rect:?}"
+                );
+                assert!(
+                    *bw <= MAX_CFG_BORDER as u32,
+                    "placement must report the reserved border, not the raw config \
+                     value (border_w={border_w}, reported={bw})"
+                );
+            }
+        };
+
+        for border_w in [
+            0u32,
+            1,
+            2,
+            4,
+            1_000_000,               // the ceiling
+            1_000_001,               // first value the ceiling actually clamps
+            i32::MAX as u32 / 2 + 1, // `2 * bw` no longer fits in `i32`
+            i32::MAX as u32,
+            u32::MAX, // `as i32` wraps to -1: the frame would be *added*
+        ] {
+            let cfg = Cfg {
+                border_w,
+                ..Cfg::default()
+            };
+            assert_valid(&mut grid_state(1920, 1080, 2, 3), &cfg, border_w);
+            // A 1x1 workarea: one pixel per row, so any frame arithmetic that is
+            // not exactly right shows up as a window that no longer fits.
+            assert_valid(&mut grid_state(1, 1, 2, 2), &cfg, border_w);
+        }
+    }
+
+    /// A `border_w` the user can actually type must reach the layout untouched:
+    /// the placement reports exactly that border and keeps the geometry the
+    /// unclamped projection produced, so nothing between the config and the
+    /// rectangle rewrites an observable value.
+    ///
+    /// The expected rectangles are the projection's own output for a 1920x1080
+    /// monitor with one column of two rows, pinned so a later bound cannot move
+    /// a realistic border by a single pixel.
+    #[test]
+    fn realistic_border_w_is_passed_through_unchanged() {
+        for (border_w, expected) in [
+            (0u32, [(1, 8, 8, 1904, 530), (2, 8, 542, 1904, 530)]),
+            (1, [(1, 8, 8, 1902, 528), (2, 8, 542, 1902, 528)]),
+            (2, [(1, 8, 8, 1900, 526), (2, 8, 542, 1900, 526)]),
+            (4, [(1, 8, 8, 1896, 522), (2, 8, 542, 1896, 522)]),
+        ] {
+            let cfg = Cfg {
+                border_w,
+                ..Cfg::default()
+            };
+            let mut state = grid_state(1920, 1080, 1, 2);
+            let p = place(&mut state, &cfg);
+            let got: Vec<_> = p
+                .iter()
+                .map(|&(win, rect, bw)| {
+                    assert_eq!(
+                        bw, border_w,
+                        "the reported border must be the configured one (border_w={border_w})"
+                    );
+                    (win, rect.x, rect.y, rect.w, rect.h)
+                })
+                .collect();
+            assert_eq!(got, expected, "border_w={border_w} changed the projection");
         }
     }
 }
