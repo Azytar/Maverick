@@ -12,25 +12,24 @@
 //!
 //! # XKB
 //!
-//! `setup_xkb` requests `NEW_KEYBOARD_NOTIFY|MAP_NOTIFY`
-//! events. No `StateNotify` (strict group-1 policy).
-//! The keymap is normalised to lowercase (R8).
+//! `setup_xkb` requests `NEW_KEYBOARD_NOTIFY|MAP_NOTIFY` and
+//! `GROUP_STATE` events. The unified resolver reads all XKB key types
+//! and symbols; keymap entries are normalised to lowercase (R8).
 //!
 //! # Key grabs
 //!
-//! `plan_key_grabs` uses a strict group-1 policy:
-//! only group-1 keysyms are bound; group-2 (`AltGr`)
-//! falls back to a recorded keysym. `grab_buttons` installs
-//! a catch-all `SYNC`/`ASYNC` grab on managed windows
-//! (pointer freeze until `AllowEvents`; keyboard must be
+//! `plan_key_grabs` calls the same `resolve_key` path as `KeyPress`
+//! dispatch. It derives the exact core state for every XKB level,
+//! including `LevelThree`/`AltGr` and keypad `NumLock` selection.
+//! `grab_buttons` installs a catch-all `SYNC`/`ASYNC` grab on managed
+//! windows (pointer freeze until `AllowEvents`; keyboard must be
 //! `ASYNC` or shortcuts freeze).
 //!
 //! # Modifiers
 //!
-//! `clean_mask` strips XKB group bits so the mask is
-//! portable across layouts. `compute_numlock` derives the
-//! numlock mask from the modifier map. `keysym_to_codes_group1`
-//! resolves only columns 0-1 (R1 fix).
+//! `clean_mask` strips XKB group and configured lock bits. The
+//! resolver separately records the exact level selector mask, including
+//! real modifiers such as Mod5 for `LevelThree`.
 
 use super::*;
 
@@ -160,20 +159,30 @@ impl WindowManager {
         Ok(())
     }
 
+    pub(super) fn active_layout(&self) -> ActiveLayout<'_> {
+        ActiveLayout {
+            keysyms: &self.raw_keymap,
+            min: self.raw_min,
+            kpk: self.raw_kpk,
+            xkb: self.xkb.as_ref(),
+            group: self.xkb_group,
+            numlock: self.numlock,
+            scroll: self.scroll,
+        }
+    }
+
     /// Subscribe to XKB keyboard-change events. Best-effort: without XKB the WM
     /// still sees core `MappingNotify`, it just misses the remaps the server
     /// reports only through XKB.
     ///
-    /// `StateNotify` is selected for `GROUP_STATE` changes: grabs and dispatch
-    /// both resolve keysyms through the *active* XKB group (BUG B), so a layout
-    /// toggle must regrasp — a burst of state events collapses into the same
-    /// debounced refresh as map changes.
+    /// `StateNotify` is selected for `GROUP_STATE` changes. The resolver stores
+    /// every XKB group, but keeping the existing refresh here preserves the
+    /// current group-change notification and passive-grab rebuild policy.
     ///
-    /// The keymap itself is still read with core `GetKeyboardMapping`, always
-    /// clamped to `Setup.min_keycode..=max_keycode`: a server cannot change the
-    /// keycode range of an established connection, and asking outside it is a
-    /// `BadValue` — so the range carried by `XkbNewKeyboardNotify` must never be
-    /// used for the request.
+    /// `XkbGetMap(KEY_TYPES | KEY_SYMS)` is always read inside the fixed
+    /// `Setup.min_keycode..=max_keycode` range. A server cannot change the
+    /// keycode range of an established connection, so `XkbNewKeyboardNotify`'s
+    /// range must never be used for the request.
     pub(super) fn setup_xkb(&self) {
         use x11rb::protocol::xkb::{ConnectionExt as _, EventType, SelectEventsAux, ID};
 
@@ -251,10 +260,10 @@ impl WindowManager {
 
     /// Rebuild every key grab from the current config and keymap.
     ///
-    /// Grabs and dispatch must agree on which keysym a keycode "is", so both
-    /// sides work on group 1 and share the same keysym-directed fallback (see
-    /// `plan_key_grabs`). Anything grabbed here that `on_key` could not resolve
-    /// would be a key stolen from the focused application, not a no-op.
+    /// Grabs and dispatch share `ActiveLayout::resolve_key`: XKB-backed
+    /// layouts use key types/groups/levels, while the explicit fallback keeps
+    /// the legacy core columns 0/1. Every planned mask is therefore validated
+    /// through the same key translation used by `on_key`.
     pub(super) fn grab_keys(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         crate::log::config_trace(
             "grabs_start",
@@ -264,18 +273,14 @@ impl WindowManager {
             ),
         );
         let _ = self.conn.ungrab_key(0u8, self.root, ModMask::ANY);
-        self.code_bindings.clear();
 
-        // P7: Use cached keyboard mapping instead of fetching it again
-        let kpk = self.raw_kpk;
-        if kpk == 0 {
+        if self.raw_kpk == 0 && self.xkb.is_none() {
             crate::log::config_trace(
                 "grabs_end",
                 format_args!("kind=passive_key status=skipped_empty_keymap"),
             );
             return Ok(());
         }
-        let min = self.raw_min;
 
         let binds: Vec<(u16, u32)> = self
             .engine
@@ -284,15 +289,7 @@ impl WindowManager {
             .iter()
             .map(|(mask, keysym, _)| (*mask, *keysym))
             .collect();
-        let plan = plan_key_grabs(
-            &self.raw_keymap,
-            min,
-            kpk,
-            &binds,
-            ActiveLayout {
-                group_levels: &self.group_levels,
-            },
-        );
+        let plan = plan_key_grabs(&binds, self.active_layout());
 
         // Diagnostics are collected, not logged inline: see the dedup at the
         // end of the function.
@@ -305,10 +302,6 @@ impl WindowManager {
         }
 
         for (mask, keysym, code) in &plan.grabs {
-            // Base variant, checked. A rejection means another client already
-            // owns the shortcut and the bind is simply dead — worth a warning,
-            // and one round-trip per bind is an acceptable price on
-            // startup/reload/mapping change.
             match self.conn.grab_key(
                 true,
                 self.root,
@@ -337,30 +330,6 @@ impl WindowManager {
                     crate::log::config_trace("key_grab", format_args!("kind=passive root={:#x} keycode={code} mask={mask:#x} keysym={keysym:#x} status=request_failed error={e}", self.root));
                 }
             }
-
-            // NumLock/CapsLock variants. Unchecked: they share the base
-            // variant's destination, so a check would cost a round-trip without
-            // adding information. Repeats are skipped — `mod_variants` yields
-            // the same mask twice when NumLock is unmapped, and a duplicate
-            // grab is a `BadAccess` that would show up as a phantom conflict.
-            let mut done: Vec<u16> = vec![0];
-            for extra in mod_variants(self.numlock, self.scroll) {
-                if done.contains(&extra) {
-                    continue;
-                }
-                done.push(extra);
-                match self.conn.grab_key(
-                    true,
-                    self.root,
-                    (mask | extra).into(),
-                    *code,
-                    GrabMode::ASYNC,
-                    GrabMode::ASYNC,
-                ) {
-                    Ok(_) => crate::log::config_trace("key_grab", format_args!("kind=passive root={:#x} keycode={code} mask={:#x} keysym={keysym:#x} status=submitted_unchecked owner_events=true pointer_mode=ASYNC keyboard_mode=ASYNC", self.root, mask | extra)),
-                    Err(e) => crate::log::config_trace("key_grab", format_args!("kind=passive root={:#x} keycode={code} mask={:#x} keysym={keysym:#x} status=request_failed error={e}", self.root, mask | extra)),
-                }
-            }
         }
 
         // Grabs are rebuilt on every keyboard change, and a broken bind stays
@@ -376,14 +345,18 @@ impl WindowManager {
         crate::log::config_trace(
             "grabs_end",
             format_args!(
-                "kind=passive_key planned={} missing={} fallback_keycodes={} warnings={:?}",
+                "kind=passive_key xkb={} xkb_group={} planned={} missing={} warnings={:?}",
+                if self.xkb.is_some() {
+                    "enabled"
+                } else {
+                    "core-fallback"
+                },
+                self.xkb_group,
                 plan.grabs.len(),
                 plan.missing.len(),
-                plan.code_bindings.len(),
                 self.last_grab_warnings
             ),
         );
-        self.code_bindings = plan.code_bindings;
         Ok(())
     }
 
@@ -454,60 +427,17 @@ impl WindowManager {
         }
         Ok(())
     }
+}
 
-    pub(super) fn keycode_to_keysym(
-        &self,
-        code: u8,
-        _state: u16,
-    ) -> Result<u32, Box<dyn std::error::Error>> {
-        // BUG B: resolve the key through the *active XKB group*'s projected
-        // level-1 keysym, so a press made with a non-default layout dispatches
-        // the keysym that group actually produces. Shift travels only in the
-        // modifier mask (B6), so a shifted symbol such as
-        // `Mod4+Shift+bracketleft` still resolves to the entry bound by name.
-        // Without XKB data, keep the core column-0 lookup.
-        Ok(self.keysym_at_level(code, 0))
+/// Core-mapping lookup retained only for servers without XKB.
+pub(crate) fn keysym_at_col(keysyms: &[u32], min: u8, kpk: usize, code: u8, col: usize) -> u32 {
+    if kpk == 0 || code < min {
+        return 0;
     }
-
-    /// Active-group keysym at level 0 (unshifted) or 1 (shifted) for a keycode.
-    ///
-    /// Reads the active-group projection built from the XKB `KeySymMap` — raw
-    /// core columns are not group pairs and would silently resolve the *other*
-    /// layout's keysym. Falls back to the core keymap's group-1 columns when
-    /// XKB is unavailable.
-    pub(crate) fn keysym_at_level(&self, code: u8, level: usize) -> u32 {
-        if self.group_levels.is_empty() {
-            let shift = level != 0;
-            let col = dispatch_col(shift, false, self.raw_kpk);
-            return self.keysym_at_col(code, col);
-        }
-        if self.raw_kpk == 0 || code < self.raw_min {
-            return 0;
-        }
-        let idx = (code - self.raw_min) as usize;
-        self.group_levels
-            .get(idx)
-            .and_then(|levels| levels.get(level.min(1)))
-            .copied()
-            .unwrap_or(0)
+    let idx_base = usize::from(code - min) * kpk;
+    if idx_base >= keysyms.len() {
+        return 0;
     }
-
-    /// Raw keysym lookup at a given keycode column (0 = unshifted). Used both for
-    /// the column-0 primary lookup and the `on_key` fallback to the shifted
-    /// column, so legacy behaviour (where the shifted keysym was the only one
-    /// considered) still works when nothing matches column 0.
-    pub(crate) fn keysym_at_col(&self, code: u8, col: usize) -> u32 {
-        if self.raw_kpk == 0 {
-            return 0;
-        }
-        if code < self.raw_min {
-            return 0;
-        }
-        let idx_base = (code - self.raw_min) as usize * self.raw_kpk;
-        if idx_base >= self.raw_keymap.len() {
-            return 0;
-        }
-        let col = col.min(self.raw_kpk.saturating_sub(1));
-        self.raw_keymap.get(idx_base + col).copied().unwrap_or(0)
-    }
+    let col = col.min(kpk - 1);
+    keysyms.get(idx_base + col).copied().unwrap_or(0)
 }

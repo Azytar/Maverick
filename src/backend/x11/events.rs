@@ -35,9 +35,10 @@
 //! - **`ClientMessage`** — `_NET_WM_STATE` fullscreen/maximize via
 //!   `FullscreenPolicy::Deny` + `ToggleFullscreen` funnel; `_NET_ACTIVE_WINDOW`
 //!   via `decide_active_window`; `_NET_CLOSE_WINDOW` → kill.
-//! - **`KeyPress`** — updates `last_event_time`, `clean_mask`, `keysym_at_col`
-//!   (group 0/shifted), `resolve_binding` (group 1 + fallback), rate-limits
-//!   via `last_key_times`, then `do_action` and arms `pointer_guard_until`.
+//! - **`KeyPress`** — updates `last_event_time`, derives core/group state,
+//!   resolves the effective XKB key through `ActiveLayout::resolve_key`, matches
+//!   `resolve_binding`, rate-limits via `last_key_times`, then `do_action` and
+//!   arms `pointer_guard_until`.
 //! - **`EnterNotify`** — focus-follows-mouse guard (50 ms after key to avoid
 //!   fighting keyboard focus).
 //! - **MappingNotify/XkbMapNotify/NewKeyboardNotify** — coalesced 50 ms keyboard
@@ -854,38 +855,27 @@ impl WindowManager {
         if self.kbd_refresh_due.take().is_some() {
             self.refresh_keyboard();
         }
+        let state = KeyLookupState::from_x11_with_group(u16::from(e.state), self.xkb_group);
+        let resolved = self.active_layout().resolve_key(e.detail, state);
         let mods = clean_mask(u16::from(e.state), self.numlock, self.scroll);
-        // Primary lookup uses the active XKB group's unshifted keysym (BUG B).
-        // Shift/Lock travel only in `mods`, so `Mod4+Shift+bracketleft`
-        // resolves to the bound keysym.
-        let ks_primary = self.keycode_to_keysym(e.detail, u16::from(e.state))?;
-        // Fallback to the shifted/locked level of the same active group:
-        // anyone who relied on the old shifted-only resolution still works
-        // (B6). With XKB data this reads the projected group pair; without it,
-        // the core keymap's group-1 columns.
-        let shift = u16::from(e.state) & u16::from(ModMask::SHIFT) != 0;
-        let lock = u16::from(e.state) & u16::from(ModMask::LOCK) != 0;
-        let ks_shifted = if self.group_levels.is_empty() {
-            let col = dispatch_col(shift, lock, self.raw_kpk);
-            self.keysym_at_col(e.detail, col)
-        } else {
-            self.keysym_at_level(e.detail, usize::from(shift ^ lock))
-        };
-
-        // Last resort: keycodes grabbed through the keysym-directed fallback
-        // (the bind only exists at an AltGr / second-group level).
-        let resolved = resolve_binding(
-            &self.keymap,
-            &self.code_bindings,
-            mods,
-            e.detail,
-            ks_primary,
-            ks_shifted,
-        );
-        let Some((key, action)) = resolved else {
+        let Some(resolved) = resolved else {
             log::debug!(
-                "key press keycode={} mods={mods:#x} (keysyms {ks_primary:#x}/{ks_shifted:#x}) matched no binding",
-                e.detail
+                "key press keycode={} state={:#x} resolved no XKB/core keysym",
+                e.detail,
+                u16::from(e.state)
+            );
+            return Ok(());
+        };
+        let Some((key, action)) =
+            resolve_binding(&self.keymap, self.active_layout(), resolved, mods)
+        else {
+            log::debug!(
+                "key press keycode={} group={} level={} state={:#x} keysym={:#x} matched no binding",
+                e.detail,
+                resolved.group,
+                resolved.level,
+                u16::from(e.state),
+                resolved.keysym
             );
             return Ok(());
         };
