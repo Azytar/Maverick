@@ -22,12 +22,14 @@
 //!
 //! # Important semantics
 //!
-//! - **`ConfigureRequest`** — drag authority (I1/I2): during a drag the WM
-//!   re-asserts its geometry; tiled windows ignore client requests (model A);
-//!   floats normalize + adopt via `normalize_float_request`.
-//! - **`ConfigureNotify`** — convergence step 3: compares the client's reported
-//!   rect against `AppliedState` via `classify_configure`. Floats adopt
-//!   (follow); tiled re-asserts the desired rect.
+//! - **`ConfigureRequest`** — drag authority: during a drag the WM re-asserts
+//!   its geometry; tiled and fullscreen windows ignore client requests
+//!   (model A); a float adopts the requested rect verbatim via
+//!   `adopt_float_request`.
+//! - **`ConfigureNotify`** — the client's reported rect is classified against
+//!   `AppliedState` via `classify_configure`. Either it is our own echo
+//!   (Compliant, ignored) or stale traffic whose model is re-asserted; a
+//!   reported rect never becomes the model, for a float or a tile.
 //! - **`MapRequest`** — manages the window (creates `Client`, applies rules).
 //! - **DestroyNotify/UnmapNotify** — unmanages, cleans compositor texture,
 //!   refocuses; the synthetic `SendEvent` `ConfigureNotify` is discarded
@@ -47,8 +49,7 @@
 //! # Invariants
 //!
 //! - Synthetic `SendEvent` `ConfigureNotifies` are discarded.
-//! - `Inferior`/`POINTER` focus events and non-`NORMAL` grab modes are ignored
-//!   (INV-C).
+//! - `Inferior`/`POINTER` focus events and non-`NORMAL` grab modes are ignored.
 //! - `last_event_time` is updated on every key/pointer event so
 //!   `WM_TAKE_FOCUS` timestamps are monotonic and never `CurrentTime`.
 //!
@@ -120,8 +121,8 @@ impl WindowManager {
         // only the variant targeted at the window itself (`e.event == e.window`)
         // reflects a real client unmap, and the root-targeted copy is just the
         // server's own broadcast of the same event. The WM never unmaps managed
-        // windows itself today (it culls off-screen ones via ConfigureNotify),
-        // so there is no self-unmap to ignore here.
+        // windows itself (it culls off-workspace ones by configuring them to the
+        // off-screen parking rect), so there is no self-unmap to ignore here.
         if e.event == self.root {
             return Ok(());
         }
@@ -147,8 +148,9 @@ impl WindowManager {
         &mut self,
         e: ConfigureRequestEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // I1/I2: while a float is being dragged, WM drag geometry has exclusive
-        // authority — client ConfigureRequest must not change x/y/width/height.
+        // While a float is being dragged the WM drag geometry has exclusive
+        // authority: the request is not applied, it is answered with a synthetic
+        // `ConfigureNotify` carrying the current model rect and border.
         if self.drag.as_ref().is_some_and(|d| d.win == e.window) {
             if let Some(client) = self.engine.state.clients.get(&e.window) {
                 let geom = client.geom;
@@ -239,13 +241,13 @@ impl WindowManager {
                 bw = e.border_width as u32;
             }
             let geom = adopt_float_request(geom);
-            // Autoridad: este rect lo pidio el cliente y el WM lo adopto
-            // verbatim. Sellar al cliente como autoridad de su flotante para
-            // que el proximo `arrange` lo proyecte tal cual (solo sanidad de
-            // protocolo) en vez de re-normalizarlo y reabrir el ping-pong
-            // (cliente re-pide → WM re-escribe: el flotante "salta solo").
-            // El sello se limpia cuando el WM vuelve a decidir la geometria
-            // (drag, reglas, `ToggleFloat`, cambio de workarea/monitor — ver
+            // This rect was requested by the client and the WM adopted it
+            // verbatim, so stamp the client as the authority over its own float:
+            // the next `arrange` must project it as-is (protocol sanity only)
+            // instead of re-normalizing it and reopening the ping-pong (client
+            // re-requests → WM re-writes: the float moves on its own). The
+            // stamp is cleared when the WM decides the geometry again (drag,
+            // rules, `ToggleFloat`, workarea/monitor change — see
             // `layout::settle_float_in_workarea`).
             if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
                 c.float_client_authority = true;
@@ -254,9 +256,9 @@ impl WindowManager {
                 // Parked off-screen because its workspace is not the active one:
                 // record the new logical rect so it comes back with the right
                 // size, but configure the window *parked*. Configuring the model
-                // rect here is what used to resurrect a background window onto
-                // the workspace the user was actually looking at (a float
-                // "appearing out of nowhere" every time it self-resized).
+                // rect here would resurrect a background window onto the
+                // workspace the user is actually looking at (a float "appearing
+                // out of nowhere" every time it self-resized).
                 if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
                     c.geom = geom;
                     c.border_w = bw;
@@ -311,7 +313,7 @@ impl WindowManager {
         if e.response_type & 0x80 != 0 {
             return Ok(());
         }
-        // ── Observation of X11 Real, never an instruction ──────────────────
+        // Observation of X11 Real, never an instruction.
         //
         // Only the root-targeted (SubstructureNotify) copy is considered here;
         // the window also delivers a StructureNotify copy that the compositor
@@ -351,13 +353,11 @@ impl WindowManager {
                     match verdict {
                         // Our own echo: X11 agrees, nothing to do.
                         Some(reconciler::ConfigureObservation::Compliant) | None => {}
-                        // Stale echo (or a genuinely external change): re-assert
-                        // the *model*, never the reported rect. When X11 already
-                        // matches the model — the normal case, because the
-                        // divergence is our own older request — the reconciler's
-                        // diff emits nothing at all, so a stale echo costs a hash
-                        // lookup and no protocol traffic (this is what kills the
-                        // ping-pong).
+                        // Stale echo: re-assert the *model*, never the reported
+                        // rect. When X11 already matches the model — the normal
+                        // case, because the divergence is our own older request —
+                        // the reconciler's diff emits nothing at all, so a stale
+                        // echo costs a hash lookup and no protocol traffic.
                         Some(reconciler::ConfigureObservation::Stale) => {
                             self.apply_geom(e.window, model_rect, model_bw, true)?;
                         }
@@ -416,8 +416,8 @@ impl WindowManager {
                 // Preserve the layout of monitors whose screen rect did not
                 // change, and only re-home the windows that belonged to monitors
                 // which have disappeared (hotplug / unplug). Replacing every
-                // monitor wholesale used to wipe the tile/float layout of all
-                // surviving monitors (N4).
+                // monitor wholesale would wipe the tile/float layout of all
+                // surviving monitors.
                 let old = std::mem::take(&mut self.engine.state.monitors);
                 let old_sel = self.engine.state.sel_mon;
 
@@ -538,7 +538,7 @@ impl WindowManager {
             // Update EWMH properties for external taskbars. Only the
             // count/names change here — `_NET_CURRENT_DESKTOP` is published by
             // `ViewWorkspace` via `Effect::SetCurrentDesktop` and must NOT be
-            // reset to 0 on every monitor topology change (N1).
+            // reset to 0 on every monitor topology change.
             self.update_ewmh_desktop_count()?;
             self.update_workarea()?;
 
@@ -889,14 +889,10 @@ impl WindowManager {
                 return Ok(());
             }
         }
-        // Prune per-binding timestamps older than 1 s to bound the map.
-        // Invariant: `Instant::now() - 1s` is virtually always representable
-        // (monotonic clock long past its minimum by the time the WM runs).
-        // Why it holds: `checked_sub` only returns `None` within 1 s of the
-        // clock's minimum — unreachable in practice after process startup.
-        // Failure handling: if somehow `None`, skip pruning this keypress
-        // (the map holds one entry per binding, so growth is bounded) rather
-        // than panicking the WM event loop on a key press.
+        // Prune per-binding timestamps older than 1 s to bound the map. If the
+        // clock were somehow too young for `checked_sub`, pruning is skipped
+        // instead of panicking the event loop: the map then holds one entry per
+        // binding, so its growth is bounded either way.
         if let Some(cutoff) =
             std::time::Instant::now().checked_sub(std::time::Duration::from_secs(1))
         {
@@ -933,10 +929,11 @@ impl WindowManager {
             }
             if let Some(cw) = self.find_client(e.event) {
                 // Compare against the entered window's own monitor, not
-                // `sel_mon`: with the pointer on another monitor this used to
-                // compare (and refocus) against the wrong monitor's focus.
-                // `find_client` resolves the client; its monitor is the
-                // authority here. Guarded for a stale `sel_mon` after hotplug.
+                // `sel_mon`: with the pointer on another monitor, comparing
+                // against `sel_mon` would evaluate — and refocus — the wrong
+                // monitor's focus. `find_client` resolves the client; its monitor
+                // is the authority here. Guarded for a stale `sel_mon` after
+                // hotplug.
                 let mon_of = self
                     .engine
                     .state
@@ -969,7 +966,7 @@ impl WindowManager {
     /// clients such as Gecko do constantly between their internal windows) means
     /// the top-level focus has not actually changed. Ignoring both prevents the
     /// spurious `reconcile_focus` churn that fights clients with child windows
-    /// and causes focus ping-pong (INV-C).
+    /// and causes focus ping-pong.
     pub(super) fn on_focus_in(
         &mut self,
         e: FocusInEvent,
@@ -1003,7 +1000,7 @@ impl WindowManager {
     /// As with `on_focus_in`, ignore grab-mode and `Inferior` transitions: a
     /// child-window `FocusOut` is not the top-level window losing focus, and a
     /// grab-induced `FocusOut` (which will be paired with a `FocusIn` on
-    /// ungrab) must not clear our mirror nor trigger a spurious repair (INV-C).
+    /// ungrab) must not clear our mirror nor trigger a spurious repair.
     pub(super) fn on_focus_out(
         &mut self,
         e: FocusOutEvent,
@@ -1021,9 +1018,9 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Core `MappingNotify`. Only arms the debounced refresh — re-reading the
-    /// keymap here (and propagating the error with `?`) used to take the whole
-    /// WM down on a transient failure, since this runs inside `run_once` (R3).
+    /// Core `MappingNotify`. Only arms the debounced refresh: reading the keymap
+    /// here and propagating the error would take the whole WM down on a
+    /// transient failure, since this runs inside `run_once`.
     ///
     /// `POINTER` is ignored: it reports button mapping, which changes nothing
     /// about the keyboard grabs. Note that toggling `NumLock` does *not* generate

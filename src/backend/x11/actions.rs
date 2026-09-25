@@ -179,7 +179,7 @@ impl WindowManager {
             Effect::SetWallpaper => {
                 // Push the engine's current wallpaper spec into the compositor.
                 // A decode/compile failure there logs once and leaves the
-                // wallpaper disabled — it never takes the WM down (criterio #2).
+                // wallpaper disabled — it never takes the WM down.
                 if let Some(comp) = self.compositor.as_mut() {
                     comp.set_wallpaper(&self.engine.state.wallpaper);
                 }
@@ -415,7 +415,6 @@ impl WindowManager {
                 }
             }
         }
-        // config to every workspace camera.
         self.engine.apply_camera_cfg();
         self.keymap = build_keymap(&self.engine.cfg);
         self.grab_keys()?;
@@ -483,9 +482,9 @@ impl WindowManager {
 
     /// Publish a fresh JSON state snapshot to the hub, but only when it changed.
     ///
-    /// Granular `focus`/`workspace` lines for `subscribe` clients are no longer
-    /// derived here: they come from the typed `EventBus` via `HubEventSink`, so a
-    /// single source of truth describes every transition.
+    /// Granular `focus`/`workspace` lines for `subscribe` clients do not come
+    /// from here: they are produced by the typed `EventBus` via `HubEventSink`,
+    /// so a single source of truth describes every transition.
     pub(super) fn publish_state(&mut self) {
         let hub = match &self.hub {
             Some(h) => h.clone(),

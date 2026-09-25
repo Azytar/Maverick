@@ -51,16 +51,19 @@
 //!
 //! # Safety
 //!
-//! This module contains `unsafe` blocks for X11 FFI calls. The safety
-//! invariants are documented in `maverick_x11` and `maverick_gl`.
+//! The only `unsafe` in this area is the `FD_CLOEXEC` `fcntl` in
+//! `actions::restart`, documented there. The X11 FFI invariants — the
+//! `Display*`/`xcb_connection_t` pairing in particular — live in
+//! `maverick_x11` and `maverick_gl`.
 //!
 //! # Invariants
 //!
 //! - Every X11 request goes through the same `XCBConnection` — never
 //!   two sockets.
 //! - `AppliedState` is the sole gate for `ConfigureWindow` calls.
-//! - `classify_configure` decides whether a client's reported geometry
-//!   is followed or re-asserted.
+//! - `classify_configure` decides whether a reported geometry is our own
+//!   echo or stale traffic; the model is never taken from a
+//!   `ConfigureNotify`.
 //! - Float geometry is clamped to the workarea before emission.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -114,8 +117,6 @@ use pointer::DragState;
 /// hotplug); 50 ms is far below human perception and comfortably wider than the
 /// gap between them.
 const KBD_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
-
-// Presentation cache removed from WM — lives in compositor (see `compositor_gl::ProjSig`).
 
 /// The X11 backend — owns the single `Rc<XConn>` + `XDisplay`, the `State`/
 /// `Engine`, EWMH, grabs, and the compositor handle.
@@ -187,21 +188,23 @@ pub struct WindowManager {
     /// (losing a grab mid-burst is exactly when it hurts).
     kbd_refresh_due: Option<Instant>,
     drag: Option<DragState>,
-    /// P5: Deferred _`NET_CLIENT_LIST` update. Set on manage/unmanage, flushed in event loop.
+    /// Deferred `_NET_CLIENT_LIST` update: set on manage/unmanage, flushed once
+    /// per event-loop turn so a burst of window changes costs one property
+    /// write.
     client_list_dirty: bool,
-    /// P9: Deferred restack — only restack when floats/fullscreen change.
+    /// Deferred restack: only re-stack when the float/fullscreen set changes.
     stack_dirty: bool,
-    /// Fase 1 (plan 1786564084575): the Reconciler's record of what geometry has
-    /// actually been written to X11. `apply_geom` diffs every desired placement
-    /// against this so `configure_window` fires only on real changes.
+    /// The `Reconciler`'s record of what geometry has actually been written to
+    /// X11. Every desired placement is diffed against this so
+    /// `configure_window` fires only on real changes.
     applied: crate::backend::x11::reconciler::AppliedState,
-    /// No-compositor rounded-corner path (`round_corners`): last (`outer_w`,
-    /// `outer_h`, radius) a Shape `BOUNDING` mask was actually set for, per
-    /// window. `emit_geometry` runs on every `Configure` effect, including
-    /// pure position moves (camera scroll/animation touches every visible
-    /// window's `x` every frame) — without this cache a SHAPE `SET` request
-    /// was reissued every such frame even though the mask geometry (a pure
-    /// function of size, not position) hadn't changed.
+    /// No-compositor rounded-corner path (`round_corners`): the last
+    /// (`outer_w`, `outer_h`, radius, `bw`) a Shape `BOUNDING` mask was
+    /// actually set for, per window. The mask is a pure function of size,
+    /// never of position, so this cache is what suppresses the re-upload
+    /// during the pure-move configures `emit_geometry` issues for every
+    /// visible window on every animation frame. `bw` is part of the key
+    /// because the mask origin (`-bw, -bw`) re-anchors with the border.
     shape_mask_cache: std::collections::HashMap<Window, (u32, u32, i32, u32)>,
     /// Last `_NET_FRAME_EXTENTS` border width published per window.
     /// `emit_geometry` is the single writer: it publishes `[bw × 4]` only when
@@ -211,20 +214,20 @@ pub struct WindowManager {
     /// No-compositor wallpaper (`rootwall.rs`): the pixmap ID last installed as
     /// the root background, if any. `apply_root_wallpaper` runs repeatedly
     /// (startup, config reload, monitor reconfiguration, GL-failure fallback)
-    /// and every call previously allocated a brand-new root-sized pixmap
-    /// without freeing the last one — a full-screen (`root_w`*`root_h`*4 byte)
-    /// leak in the X server on every reload/RandR event for as long as the
-    /// session runs. Freed right after the new one replaces it as the root's
-    /// `background_pixmap`, once nothing but our own creation still holds it.
+    /// and each run allocates a fresh root-sized pixmap, so the previous one is
+    /// freed as soon as the root stops pointing at it — only our own creation
+    /// can still reference it by then. Without that, every reload or `RandR`
+    /// event would leak a full-screen (`root_w`*`root_h`*4 byte) pixmap in the
+    /// X server for the rest of the session.
     last_root_pixmap: Option<Pixmap>,
-    /// P12: Reusable buffers for `hide_offscreen` — avoids reallocation per arrange.
+    /// Reusable buffers for `hide_offscreen` — avoids reallocation per arrange.
     hide_ws_set: std::collections::HashSet<Window>,
     hide_mon_vec: Vec<Window>,
     /// The single desired representation fed to the `Reconciler`: `layout::arrange`
     /// fills it with the base `(win, geom, border_w)` for every window, then
     /// `present_into` rewrites it in place with the fullscreen/maximized overlay.
     /// The `Reconciler` diffs this `Desired` against `AppliedState` to decide what
-    /// to write to X11. P10: reusable buffer — avoids allocation per `arrange()`.
+    /// to write to X11. Reusable buffer — avoids allocation per `arrange()`.
     desired: Placements,
     /// Per-monitor "is a spring still moving" flag, produced by
     /// `tick_animations_multi`. Lets the frame loop recompute the live layout for
@@ -247,8 +250,8 @@ pub struct WindowManager {
     session_id: String,
     /// Config file path that was loaded at boot (the --config override when
     /// given, otherwise the resolved XDG path, or `None` when the compiled
-    /// defaults were used). `reload_config` re-reads this exact file (B10/T7):
-    /// the override must survive a reload, not be silently replaced by the
+    /// defaults were used). `reload_config` re-reads this exact file: the
+    /// override must survive a reload, not be silently replaced by the
     /// XDG default.
     config_path: Option<PathBuf>,
     /// Original command-line arguments (excluding argv[0]) captured at startup.
@@ -293,12 +296,12 @@ pub struct WindowManager {
     animation_due: Option<Instant>,
     /// Per-monitor cached stacking order (top-to-bottom) so `stack_overlay`
     /// only re-issues `raise()` when the order actually changed, instead of
-    /// re-raising every float/popup on every animation frame (bug C6).
+    /// re-raising every float/popup on every animation frame.
     last_stack_order: std::collections::HashMap<usize, Vec<WindowId>>,
     /// Per-monitor record of which fullscreen window was "covering" (raised
     /// above the dock) on the previous frame, so the dock is only re-raised on
-    /// the covering→not-covering transition — not every frame (which would push
-    /// floats below the bar, a regression).
+    /// the covering→not-covering transition. Re-raising it every frame would
+    /// push floats below the bar.
     fs_covering: std::collections::HashMap<usize, Option<WindowId>>,
     /// The OpenGL/GLX compositor, if enabled and a GL driver was available at
     /// startup. While `Some`, every animation frame is drawn here (GPU
@@ -372,7 +375,7 @@ impl WindowManager {
             // XKB keyboard changes. `MapNotify` covers remaps that never raise a
             // core `MappingNotify` (a pure XKB `setxkbmap`), `NewKeyboardNotify`
             // covers hotplug. A `StateNotify` with `GROUP_STATE` set is a layout
-            // toggle (BUG B): the active group moved, so grabs and the projected
+            // toggle: the active group moved, so grabs and the projected
             // group keysyms must be rebuilt. All share the debounced refresh, so
             // the usual burst regrabs only once.
             Event::XkbMapNotify(_) | Event::XkbNewKeyboardNotify(_) => {
@@ -389,7 +392,7 @@ impl WindowManager {
             // died between our request and the server processing it is routine
             // — `maverick-gl` installs a silent Xlib error handler for the same
             // reason. Without this arm a `BadAccess` from a rejected grab was
-            // simply invisible (R4).
+            // simply invisible.
             Event::Error(e) => log::debug!("X error: {e:?}"),
             _ => {}
         }
@@ -410,7 +413,7 @@ impl WindowManager {
 
     /// Re-read the keymap and rebuild every grab. Deliberately infallible:
     /// this runs from the event loop, and a transient failure to read the
-    /// keyboard must never take the WM down with it (R3) — the previous keymap
+    /// keyboard must never take the WM down with it — the previous keymap
     /// stays in place and the next notification retries.
     pub(super) fn refresh_keyboard(&mut self) {
         match fetch_keyboard_state(&self.conn) {
@@ -477,7 +480,6 @@ impl WindowManager {
             &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),
         );
 
-        // Ungrab buttons on all managed windows
         for win in self.engine.state.clients.keys() {
             let _ = self
                 .conn
@@ -495,8 +497,8 @@ impl WindowManager {
             .delete_property(self.root, self.atoms.net_client_list);
         let _ = self.conn.destroy_window(self.check_win);
 
-        // The last root pixmap is root-sized: free it here (it was only
-        // freed on replace before, leaking one full-screen pixmap per exit).
+        // The last root pixmap has no successor that would release it, so it is
+        // freed here rather than on the next install.
         if let Some(pm) = self.last_root_pixmap.take() {
             let _ = self.conn.free_pixmap(pm);
         }
@@ -519,7 +521,6 @@ impl WindowManager {
 
         trace::begin_turn();
         let _turn_trace = trace::Span::new("turn");
-        // ── signal phase ─────────────────────────────────────────────────────────
         // SIGCONT (resume from stop) requests a key regrab; SIGTERM requests quit.
         // Both are set by the maverick-sys signal handlers (the only unsafe code).
         if maverick_sys::need_regrab() {
@@ -532,7 +533,6 @@ impl WindowManager {
             return Ok(());
         }
 
-        // ── flush phase ─────────────────────────────────────────────────────────
         // Drain the deferred _NET_CLIENT_LIST update (if any manage/unmanage
         // marked it dirty) before blocking on the next event, so all X11
         // output from the previous event batch is flushed in one shot.
@@ -546,17 +546,14 @@ impl WindowManager {
             self.compositor.is_some()
         );
 
-        // ── drain phase ───────────────────────────────────────────────────────
-        // Drain X11 + control-socket events *before* deciding the frame (B2):
-        // a freshly arrived DamageNotify/ConfigureNotify must feed this turn's
-        // `FrameScheduler`, not the next one after the present. The previous
-        // ordering drained after the swap, so every frame was composed with
-        // ≥1 refresh of stale input state.
+        // Drain X11 + control-socket events *before* deciding the frame: a
+        // freshly arrived DamageNotify/ConfigureNotify must feed this turn's
+        // `FrameScheduler`, not the one after the present, or the frame is
+        // composed from a refresh of stale input state.
         while let Some(ev) = self.conn.poll_for_event()? {
             self.dispatch(ev)?;
         }
 
-        // ── animation phase ──────────────────────────────────────────────────
         // Advance camera (and accordion/zoom) springs. While anything is still
         // moving we use a refresh-derived deadline; once the scene settles the
         // loop parks on X11 plus the control self-pipe. Presentation and
@@ -584,8 +581,8 @@ impl WindowManager {
             "raw_s={raw_dt} clamped_s={dt} was_animating={was_animating}"
         );
 
-        // Fase 9 — single authoritative frame scheduler for this turn. Built once
-        // from the animation flag (set by the tick below) and the dirty reasons
+        // Single authoritative frame scheduler for this turn. Built once from
+        // the animation flag (set by the tick below) and the dirty reasons
         // accumulated since the last present. Both the render gate and the wait
         // timeout read this one object, so no subsystem can request a redundant
         // render and multiple reasons (Damage×N, Geometry, Animation, …) coalesce
@@ -593,13 +590,13 @@ impl WindowManager {
         let mut sched;
 
         if let Some(comp) = self.compositor.as_mut() {
-            // ── Composition policy (per-output fullscreen bypass) ──────────
-            // Pure decision (see `crate::compositor_policy`): for each monitor,
-            // engage bypass on the single eligible fullscreen window, or
-            // disengage it. `engage_bypass`/`disengage_bypass` are no-ops when
-            // the mode is unchanged, so re-evaluating every turn is stable and
-            // free of cycles. Bypass never touches VSync — it only removes
-            // Maverick's redirection of that one window.
+            // Composition policy (per-output fullscreen bypass). Pure decision
+            // (see `crate::compositor_policy`): for each monitor, engage bypass on
+            // the single eligible fullscreen window, or disengage it.
+            // `engage_bypass`/`disengage_bypass` are no-ops when the mode is
+            // unchanged, so re-evaluating every turn is stable and free of cycles.
+            // Bypass never touches VSync — it only removes Maverick's redirection
+            // of that one window.
             if self.engine.cfg.compositor.fullscreen_bypass {
                 let nmon = self.engine.state.monitors.len();
                 for i in 0..nmon {
@@ -635,9 +632,9 @@ impl WindowManager {
             // springs, but the camera trajectory is not Euler/FPS-dependent.
             // Swap interval 1 (set at init) paces the present from inside
             // `end_frame`, so there is no explicit vblank wait here — the flip
-            // is scheduled by the server for the next retrace (B1). The WM's
-            // settled geometry was already written by whichever action
-            // triggered the change, so no per-frame `ConfigureWindow` storm.
+            // is scheduled by the server for the next retrace. The WM's settled
+            // geometry was already written by whichever action triggered the
+            // change, so no per-frame `ConfigureWindow` storm.
             let nmon = self.engine.state.monitors.len();
             if self.anim_per_mon.len() != nmon {
                 self.anim_per_mon = vec![false; nmon];
@@ -688,11 +685,11 @@ impl WindowManager {
             // WM springs use (no separate timer). A static wallpaper leaves
             // `wallpaper_animating` false and the loop goes idle.
             comp.tick_wallpaper(dt);
-            // Fase 9 — frame scheduling. Build the single turn scheduler from the
-            // WM-side animation flag, the wallpaper animation flag, and the
-            // compositor's *why* (its reason bits), so the render-loop decision is
-            // explicit and testable. Idle stays free: when the scheduler reports no
-            // reason we do no GL work and the wait phase blocks on X11/control.
+            // Build the single turn scheduler from the WM-side animation flag,
+            // the wallpaper animation flag, and the compositor's *why* (its
+            // reason bits), so the render-loop decision is explicit and testable.
+            // Idle stays free: when the scheduler reports no reason we do no GL
+            // work and the wait phase blocks on X11/control.
             sched = FrameScheduler::from_compositor(
                 self.animating || comp.presentation_animating(),
                 comp.wallpaper_animating(),
@@ -763,15 +760,14 @@ impl WindowManager {
                     // wallpaper on the root (feh-style) and keep going.
                     self.apply_root_wallpaper();
                 }
-                // NOTE: the frame clock is *not* re-seeded here. `last_frame`
-                // was already stamped at the top of the animation phase, so the
-                // next turn's `dt` spans one whole turn — which, with exactly
-                // one present per turn, is precisely the inter-present interval.
-                // Re-seeding after the present instead subtracted the present
-                // itself from `dt`, and with swap interval 1 the present *is*
-                // almost the entire frame: the springs were then advanced by the
-                // few hundred microseconds of loop overhead per 16.7 ms frame,
-                // running every animation 15–150x slow (B8).
+                // The frame clock is deliberately *not* re-seeded here.
+                // `last_frame` was already stamped at the top of the animation
+                // phase, so the next turn's `dt` spans one whole turn — which,
+                // with exactly one present per turn, is precisely the
+                // inter-present interval. Re-seeding after the present would
+                // subtract the present itself from `dt`, and with swap interval 1
+                // the present is almost the entire frame, leaving the springs
+                // advanced by only the loop overhead of each 16.7 ms frame.
             }
         } else {
             // No compositor: dwm-style, zero animation. Every state change has
@@ -822,7 +818,6 @@ impl WindowManager {
                 .is_some_and(compositor::Compositor::presentation_animating)
         );
 
-        // ── wait phase ────────────────────────────────────────────────────────
         // Wait on X11 plus the control self-pipe. A continuous animation has a
         // refresh-derived rate limit; a settled WM blocks indefinitely, so idle
         // does not wake on a heartbeat timer.
@@ -862,7 +857,6 @@ impl WindowManager {
             }
         }
 
-        // ── keyboard phase ─────────────────────────────────────────────────────
         // One regrab per burst of keyboard-change notifications (see
         // `schedule_keyboard_refresh`).
         if self
@@ -873,7 +867,6 @@ impl WindowManager {
             self.refresh_keyboard();
         }
 
-        // ── control phase ────────────────────────────────────────────────────────
         // Execute any commands from the control socket, then publish state.
         let control_trace = trace::Span::new("control");
         self.drain_control()?;
@@ -997,7 +990,6 @@ impl WindowManager {
             engine.state.wallpaper.mode = engine.cfg.wallpaper.mode;
         }
 
-        // create EWMH check window
         let check_win = conn.generate_id()?;
         conn.create_window(
             COPY_DEPTH_FROM_PARENT,
@@ -1192,12 +1184,10 @@ impl WindowManager {
     }
 }
 
-// ── Free functions ─────────────────────────────────────────────────────────────
-
 /// Interpret a strut vector as every non-zero (edge, thickness). Both
 /// `_NET_WM_STRUT` (4 values) and `_NET_WM_STRUT_PARTIAL` (12 values) start
 /// with `[left, right, top, bottom]`; a single dock may reserve several edges
-/// at once (bug B4), so all non-zero ones are returned.
+/// at once, so all non-zero ones are returned.
 fn strut_edge(v: &[u32]) -> Option<Vec<(Edge, u32)>> {
     let (left, right, top, bottom) = (v[0], v[1], v[2], v[3]);
     let mut out: Vec<(Edge, u32)> = Vec::new();
@@ -1341,12 +1331,12 @@ fn build_keymap(cfg: &Cfg) -> BTreeMap<(u16, u32), Action> {
     for (m, k, a) in &cfg.keybinds {
         // Index by the *normalised* keysym: `on_key` normalises what it reads
         // from the keymap, so a bind written as the raw escape `0x41` (`A`) has
-        // to be stored under `0x61` (`a`) or it could never be matched (R8).
-        // The grab side still searches for the raw keysym — `0x41` genuinely
-        // lives in column 1 of the `a` keycode — so both halves agree.
+        // to be stored under `0x61` (`a`) or it could never be matched. The grab
+        // side still searches for the raw keysym — `0x41` genuinely lives in
+        // column 1 of the `a` keycode — so both halves agree.
         //
         // First wins: a later duplicate `(mods, keysym)` does not overwrite the
-        // earlier one (B7). Mirrors the conflict policy in `parse_keybindings`.
+        // earlier one. Mirrors the conflict policy in `parse_keybindings`.
         map.entry((*m, normalize_ksym(*k)))
             .or_insert_with(|| a.clone());
     }
@@ -1389,8 +1379,8 @@ fn effective_group(row: &KeySymMap, requested: u8) -> u8 {
     }
 }
 
-/// P2: Pipelined keyboard+modifier state — fire both requests, then collect both replies.
-/// 2 RTTs → 1.
+/// Pipelined keyboard+modifier state: fire both requests, then collect both
+/// replies, so the two round trips collapse into one.
 fn fetch_keyboard_state(conn: &XConn) -> Result<KeyboardState, Box<dyn std::error::Error>> {
     let setup = conn.setup();
     let min = setup.min_keycode;
@@ -2017,7 +2007,8 @@ fn x_error_kind(e: &x11rb::errors::ReplyError) -> String {
 }
 
 /// Read a window title without needing a mutable Client reference.
-/// P14: Fire both `net_wm_name` and `WM_NAME` requests before reading any reply.
+/// Both `net_wm_name` and `WM_NAME` requests are fired before any reply is
+/// read, so the two round trips collapse into one.
 fn read_title_value(
     conn: &XConn,
     win: Window,

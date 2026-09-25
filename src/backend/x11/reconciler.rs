@@ -1,12 +1,10 @@
 //! Reconciliation — the single owner of "what geometry/stack has
 //! actually been written to X11".
 //!
-//! Before this module, geometry writes were scattered across `render`,
-//! `manage` and `events`, each re-deriving "has this changed?" with its
-//! own heuristic. The `Reconciler` keeps one `AppliedState` — the last
-//! *applied* rect/border per window — and diffs every *desired*
-//! placement against it, emitting only the `configure_window` calls that
-//! actually changed.
+//! `AppliedState` keeps one `AppliedWindow` — the last *applied* rect/border
+//! per window — and diffs every *desired* placement against it, emitting only
+//! the `configure_window` calls that actually changed. No other code path may
+//! decide on its own whether a configure is needed.
 //!
 //! # Pipeline
 //!
@@ -19,7 +17,11 @@
 //!
 //! # Source of truth
 //!
-//! - **Desired** — the pure layout+present snapshot (`DesiredState`).
+//! - **Desired** — the pure layout+present snapshot (`DesiredState`): every
+//!   window's desired rect/border/stacking for one arrange cycle, produced by
+//!   `layout::arrange` + `present::present_into`. `client.geom` is the desired
+//!   *logical* geometry the core wants; the reconciler never writes it (only
+//!   `emit_geometry` does, on the normal path).
 //! - **Applied** — what X11 *currently* shows (`AppliedState`).
 //! - **Real** — what X11 *reports* via `ConfigureNotify`
 //!   (observed in `events.rs::on_configure_notify`). With
@@ -55,9 +57,8 @@
 use crate::core::desired::DesiredState;
 use crate::types::{Rect, State, WindowId};
 
-// ── window-trace instrumentation (feature `window-trace`) ─────────────────────
-// Observability-only macro for the reconcile/desired→applied pipeline. No-op
-// unless `window-trace` is enabled. Fase 8.
+// Observability-only macro for the reconcile/desired→applied pipeline: no-op
+// unless `window-trace` is enabled.
 #[cfg(feature = "window-trace")]
 #[allow(unused_macros)]
 macro_rules! wtrace {
@@ -79,9 +80,10 @@ pub struct AppliedWindow {
     /// False until the first configure has been applied. A freshly-mapped
     /// window has nothing applied yet, so the first diff always emits.
     pub seen: bool,
-    /// Last X11 sequence number applied, if known. `None` for synthetic or
-    /// untracked configures. Used by tests to pin ordering; the reconciler
-    /// itself does not yet use it for decisions.
+    /// X11 sequence number of the request that produced `rect`, when the writer
+    /// knew it. No verdict in this module reads it; it exists so an applied
+    /// record can be traced back to a request, and is `None` for synthetic or
+    /// untracked configures.
     pub sequence: Option<u32>,
 }
 
@@ -136,9 +138,8 @@ impl AppliedState {
     /// is worse than noise: it emits a fresh `ConfigureNotify` that a toolkit may
     /// answer with another `ConfigureRequest` — the feedback loop that reads on
     /// screen as a window that moves by itself.
-    // Kept for the unit tests below (they install already-applied geometry to
-    // exercise the echo/Stale contract); the production sink currently records
-    // through `diff` only, so the non-test build sees no caller.
+    // Exercised by the unit tests below, which install already-applied geometry
+    // to pin the echo/Stale contract; the production sink records through `diff`.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn observe(&mut self, win: WindowId, rect: Rect, border_w: u32) {
         let prev = self.windows.entry(win).or_default();
@@ -192,31 +193,11 @@ pub fn reconcile(
     out
 }
 
-/// The `Reconciler` keeps three distinct geometries straight:
-///
-/// * **Desired** — `crate::core::desired::DesiredState`, the single explicit
-///   desired representation produced purely by `layout::arrange` +
-///   `present::present_into` (via `DesiredState::from_placements`) and diffed
-///   here against `AppliedState`. `client.geom` is the *desired logical*
-///   geometry the core wants; `DesiredState` is the explicit snapshot of every
-///   window's desired rect/border/stacking for one arrange cycle.
-/// * **Applied** — `AppliedState` (this module), the last rect/border actually
-///   written to X11, so unchanged placements are never re-emitted. `Desired`
-///   and `Applied` are independent records; the `Reconciler` never writes
-///   `Desired` — it only reads `Desired` and mutates `Applied`.
-/// * **X11 Real** — what X11 *reports*, observed externally via
-///   `ConfigureNotify`. This is deliberately NOT trusted as state — and, with
-///   `SUBSTRUCTURE_REDIRECT` held on the root, it is not even a client message:
-///   the server never applies a client's `ConfigureWindow` to a viewable child of
-///   the root, so a reported rect can only be the echo of a request *this WM*
-///   issued (possibly an older one still in flight). `Real` is therefore used
-///   for observability and to detect that a configure is owed; it never becomes
-///   the model.
-///
-/// `diff` takes the *desired* `(win, rect, border_w)` and the *applied*
-/// `AppliedWindow` and returns the configure only when they differ.
-///
 /// The verdict of comparing an external `ConfigureNotify` against `Applied`.
+///
+/// The caller acts on the verdict in `on_configure_notify`: `Compliant` does
+/// nothing, `Stale` re-asserts the *model* and lets `AppliedState::diff`
+/// decide whether a write is even owed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigureObservation {
     /// Reported geometry equals what we last applied: our own echo. Nothing to do.
@@ -241,12 +222,11 @@ pub enum ConfigureObservation {
 /// `ConfigureRequest` and leaves the window untouched: **only this WM moves
 /// managed windows**. A `ConfigureNotify` is thus an *echo*, and one that
 /// diverges from `Applied` is a *stale* echo (an older request of ours whose
-/// event was queued behind newer traffic). Adopting it — as this code used to —
-/// overwrites the model with a geometry the WM already left behind and
-/// re-configures the window onto it, so the client's next request is answered
-/// with the past: measured as a ~150 configures/s ping-pong between two
-/// geometries (the window visibly jumping between two sizes/positions) with the
-/// WM burning a core.
+/// event was queued behind newer traffic). Adopting it would overwrite the model
+/// with a geometry the WM already left behind and re-configure the window onto
+/// it, so the client's next request is answered with the past: measured as a
+/// ~150 configures/s ping-pong between two geometries (the window visibly
+/// jumping between two sizes/positions) with the WM burning a core.
 pub(crate) fn classify_configure(
     reported_rect: Rect,
     reported_bw: u32,
@@ -324,13 +304,12 @@ mod tests {
         );
     }
 
-    // ── Convergence: external ConfigureNotify vs Applied ────────────────────
+    // Convergence: external ConfigureNotify vs Applied.
     //
     // A managed window's `ConfigureNotify` is an *echo* of a request this WM
     // issued: `SUBSTRUCTURE_REDIRECT` on the root means the server never applies
     // a client's `ConfigureWindow` to a viewable child of the root. The scenarios
-    // below are the ones that used to produce the erratic-float ping-pong by
-    // treating a stale echo as a client decision.
+    // below pin what happens when that echo is treated as a client decision.
 
     /// The echo of our own latest request is Compliant — nothing to do. Pinned
     /// for a float and for a tiled window (authority does not enter here: both
@@ -474,7 +453,7 @@ mod tests {
         );
     }
 
-    // ── Phase 10: reconcile() — the full Desired × Applied diff ────────────
+    // `reconcile()` — the full Desired × Applied diff.
     //
     // `reconcile` is the top-level entry the backend calls once per arrange
     // cycle: it walks `DesiredState` and emits exactly the `GeometryEffect`s
@@ -702,16 +681,14 @@ mod tests {
         );
     }
 
-    // ── Fase 1.3: invalid geometry ConfigureRequest on a TILED window ────────
+    // Invalid geometry ConfigureRequest on a TILED window.
     //
     // A hostile client (Firefox / Wine / a game) asks for 0×0, a 60000×60000
     // monster, or a rect parked off the monitor. For a *tiled* (WM-owned) window
-    // the old verdict was `Diverged { follow: false }` — the WM re-asserted its
-    // own Desired and never adopted the bogus rect. The follow decision no
-    // longer lives in `classify_configure` at all: a reported rect that differs
-    // from `Applied` is a `Stale` echo the caller re-asserts over, and the
-    // verdict is the same regardless of *which* invalid rect is reported or of
-    // the window being tiled or a float.
+    // the verdict is `Stale`: the WM re-asserts its own model and never adopts
+    // the bogus rect. The verdict does not depend on *which* invalid rect is
+    // reported, nor on the window being tiled or a float — anything that differs
+    // from `Applied` is stale traffic the caller re-asserts over.
     fn tiled_invalid_is_diverged(reported: Rect) {
         let applied = AppliedWindow {
             rect: Rect::new(0, 0, 1000, 800),
@@ -742,15 +719,14 @@ mod tests {
         tiled_invalid_is_diverged(Rect::new(5000, 5000, 300, 300));
     }
 
-    // ── Fase 1.3: invalid geometry ConfigureRequest on a FLOAT ───────────────
+    // Invalid geometry ConfigureRequest on a FLOAT.
     //
-    // A float *is* allowed external geometry: the old verdict was
-    // `Diverged { follow: true }`, with the backend's single geometry sink then
-    // routing the reported rect through `clamp_float_to_workarea`. That adopt
-    // decision moved into the sink; the classification only separates *our
-    // echo* (Compliant) from *stale traffic* (Stale) — a 0×0 report on a float
-    // is Stale exactly like on a tile, and never reaches X11 as a degenerate
-    // configure (X11 rejects 0×0 with BadValue).
+    // A float *is* allowed external geometry, but the adopt decision belongs to
+    // the backend's single geometry sink, not to this classification. The
+    // classification only separates *our echo* (Compliant) from *stale traffic*
+    // (Stale), so a 0×0 report on a float is Stale exactly like on a tile and
+    // never reaches X11 as a degenerate configure (X11 rejects 0×0 with
+    // BadValue).
 
     #[test]
     fn float_invalid_configure_request_is_followed_then_clamped() {
@@ -778,14 +754,14 @@ mod tests {
         );
     }
 
-    // ── I1/I2/I3: drag authority table ─────────────────────────────────────
+    // Drag authority table.
     //
-    // The old table mapped (float, fullscreen, dragged) → follow. Authority is
-    // no longer a `classify_configure` output: the sink owns the drag policy.
-    // What classify still guarantees — and what this table now pins — is that
-    // the verdict depends ONLY on geometry equality, never on the window's
-    // flags or the drag state: any divergent report is Stale (the caller
-    // re-asserts over it), any echo of Applied is Compliant.
+    // The (float, fullscreen, dragged) → follow table no longer exists:
+    // `classify_configure` does not produce a follow decision at all, the sink
+    // owns the drag policy. What classify still guarantees — and what this
+    // table pins — is that the verdict depends ONLY on geometry equality, never
+    // on the window's flags or the drag state: any divergent report is Stale
+    // (the caller re-asserts over it), any echo of Applied is Compliant.
     #[test]
     fn drag_authority_table() {
         let mk = |is_float: bool, is_fs: bool| {
@@ -874,7 +850,7 @@ mod tests {
         );
     }
 
-    // ── Fase 1.3: `clamp_float_to_workarea` — the single normalizer ──────────
+    // `clamp_float_to_workarea` — the single normalizer.
     //
     // Pure over (rect, workarea, border): every degenerate the hostile client
     // can send must come back as a strictly-positive, in-workarea rect.

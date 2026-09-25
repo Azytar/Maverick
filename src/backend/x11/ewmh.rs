@@ -13,24 +13,24 @@
 //! - `_NET_DESKTOP_GEOMETRY` — the full screen rect.
 //! - `_NET_NUMBER_OF_DESKTOPS` — `n_tags`.
 //! - `_NET_DESKTOP_NAMES` — nul-separated UTF-8.
-//! - `_NET_CURRENT_DESKTOP` — reset to 0 on workspace
-//!   changes (Maverick manages workspaces, not the
-//!   client).
+//! - `_NET_CURRENT_DESKTOP` — published by
+//!   `Effect::SetCurrentDesktop`; only the initial startup
+//!   publish resets it to 0.
 //! - `_NET_CLIENT_LIST` / `_NET_CLIENT_LIST_STACKING`
 //!   — bottom-to-top: tiled → floats → `focus_stack` →
 //!   remaining. Updated lazily (deferred dirty coalesce).
 //! - `_NET_WM_STATE` — `WM_STATE` normal (1) on manage;
 //!   `write_net_wm_state` rewrites the atom list
 //!   preserving urgent.
-//! - `_NET_ACTIVE_WINDOW` — set on focus; uses real
-//!   timestamp for `WM_TAKE_FOCUS`, `CurrentTime` fallback.
+//! - `_NET_ACTIVE_WINDOW` — set on focus.
 //!
 //! # Invariants
 //!
 //! - `flush_client_list` is deferred (dirty coalesce) so
 //!   multiple changes in one frame produce one write.
 //! - `update_ewmh_desktops` resets `_NET_CURRENT_DESKTOP`
-//!   to 0 because Maverick owns the workspace numbering.
+//!   to 0; `update_ewmh_desktop_count` never does, so a
+//!   workspace reconcile cannot yank the active desktop.
 
 use super::*;
 
@@ -142,8 +142,8 @@ impl WindowManager {
     }
 
     pub(super) fn update_client_list(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // Sorted for stability: `HashMap` iteration order is random, which
-        // made taskbars flicker/reorder on every manage/unmanage.
+        // Sorted for stability: `HashMap` iteration order is random, and an
+        // unstable list makes taskbars reorder on every manage/unmanage.
         let mut wins: Vec<u32> = self.engine.state.clients.keys().copied().collect();
         wins.sort_unstable();
         self.conn
@@ -223,9 +223,8 @@ impl WindowManager {
 
     /// Read the root window's `WM_NAME` into `state.status`. External bars
     /// (polybar, waybar, …) and `maverickctl state`/`subscribe` consume this
-    /// through IPC; the WM no longer renders it itself. Kept when the internal
-    /// bar was removed so an external bar still has a status source without
-    /// having to parse `xsetroot` output.
+    /// through IPC, so an external bar has a status source without having to
+    /// parse `xsetroot` output.
     pub(super) fn update_status(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let prop = self
             .conn
@@ -244,9 +243,7 @@ impl WindowManager {
 
     /// Drain the deferred `_NET_CLIENT_LIST` update. Set on manage/unmanage and
     /// flushed once per event-loop iteration (in `run_once`) so a burst of
-    /// window changes rewrites the property at most once. This used to live in
-    /// the bar module's `flush_bars`; it was preserved when the internal bar
-    /// was removed because it is EWMH bookkeeping, not bar drawing.
+    /// window changes rewrites the property at most once.
     pub(super) fn flush_client_list(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.client_list_dirty {
             self.client_list_dirty = false;

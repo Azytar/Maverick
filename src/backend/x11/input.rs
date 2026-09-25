@@ -14,7 +14,7 @@
 //!
 //! `setup_xkb` requests `NEW_KEYBOARD_NOTIFY|MAP_NOTIFY` and
 //! `GROUP_STATE` events. The unified resolver reads all XKB key types
-//! and symbols; keymap entries are normalised to lowercase (R8).
+//! and symbols; keymap entries are normalised to lowercase.
 //!
 //! # Key grabs
 //!
@@ -33,7 +33,8 @@
 
 use super::*;
 
-// ── input-trace instrumentation (feature `input-trace`) ───────────────────────
+// Observability macro for the `input-trace` feature: compiles to nothing
+// unless the feature is enabled.
 #[cfg(feature = "input-trace")]
 #[allow(unused_macros)]
 macro_rules! itrace {
@@ -47,7 +48,8 @@ macro_rules! itrace {
     ($($arg:tt)*) => {{}};
 }
 
-// ── window-trace instrumentation (feature `window-trace`) ─────────────────────
+// Observability macro for the `window-trace` feature: compiles to nothing
+// unless the feature is enabled.
 #[cfg(feature = "window-trace")]
 #[allow(unused_macros)]
 macro_rules! wtrace {
@@ -175,9 +177,9 @@ impl WindowManager {
     /// still sees core `MappingNotify`, it just misses the remaps the server
     /// reports only through XKB.
     ///
-    /// `StateNotify` is selected for `GROUP_STATE` changes. The resolver stores
-    /// every XKB group, but keeping the existing refresh here preserves the
-    /// current group-change notification and passive-grab rebuild policy.
+    /// `StateNotify` is selected for `GROUP_STATE` changes: the resolver stores
+    /// every XKB group, but a group switch still has to reach the passive-grab
+    /// planner, and a rebuild is the only thing that can do that.
     ///
     /// `XkbGetMap(KEY_TYPES | KEY_SYMS)` is always read inside the fixed
     /// `Setup.min_keycode..=max_keycode` range. A server cannot change the
@@ -369,16 +371,17 @@ impl WindowManager {
         let motion =
             EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION;
 
-        // SYNC grab on ALL windows (not just unfocused).
-        // Without this, allow_events(ReplayPointer) in on_button_press fails with
-        // BadValue because pointer is not frozen → process::exit(1).
+        // SYNC grab on ALL windows (not just unfocused): `on_button_press`
+        // replays the pointer through `allow_events(REPLAY_POINTER)`, and the
+        // server rejects that with BadValue unless the pointer is actually
+        // frozen.
         //
         // keyboard_mode MUST be ASYNC here. With SYNC/SYNC, every matching
-        // ButtonPress freezes *both* devices, but on_button_press only calls
-        // allow_events(REPLAY_POINTER) — never a keyboard AllowEvents mode — so
-        // the keyboard stayed frozen after clicking any managed window. That's
-        // what broke shortcuts (and the app's own key input) for clients like
-        // Firefox/Minecraft that grab focus on click.
+        // ButtonPress freezes *both* devices, but `on_button_press` only ever
+        // calls `allow_events(REPLAY_POINTER)` — never a keyboard AllowEvents
+        // mode — so the keyboard stays frozen for the rest of the session,
+        // breaking every shortcut (and the app's own key input) for clients
+        // that take focus on click.
         let _ = self.conn.grab_button(
             false,
             win,
@@ -403,7 +406,7 @@ impl WindowManager {
         );
 
         // keyboard_mode MUST be ASYNC here too, for the same reason as the
-        // catch-all grab above: on_button_press never calls allow_events with
+        // catch-all grab above: `on_button_press` never calls allow_events with
         // a keyboard mode, so a SYNC keyboard grab here freezes the keyboard
         // (all shortcuts, including focus-move and spawn keybinds) the moment
         // the user does a Mod+drag (move/resize) on any window, and it never

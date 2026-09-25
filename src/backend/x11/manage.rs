@@ -1,13 +1,13 @@
 //! Window lifecycle: scan, manage, unmanage, apply rules.
 //!
 //! `manage` is the core of the client lifecycle. It creates
-//! a `Client`, pipelines 8 property reads (P1), parses
+//! a `Client`, pipelines the property reads, parses
 //! title/class/window-type/state/size-hints/bypass-hint,
 //! applies rules, and maps the window. `unmanage` reverses
 //! it: remove from state, clean up the compositor texture,
 //! refocus.
 //!
-//! # Manage pipeline (8-property read, P1)
+//! # Manage pipeline (pipelined property read)
 //!
 //! All 8 `get_property` cookies are pipelined before any
 //! `.reply()` is called — one RTT for all properties,
@@ -54,7 +54,8 @@ use super::*;
 use crate::core::layout::fs_ctx;
 use x11rb::protocol::shape::ConnectionExt as _;
 
-// ── input-trace instrumentation (feature `input-trace`) ───────────────────────
+// Observability macro for the `input-trace` feature: compiles to nothing
+// unless the feature is enabled.
 #[cfg(feature = "input-trace")]
 #[allow(unused_macros)]
 macro_rules! itrace {
@@ -68,7 +69,8 @@ macro_rules! itrace {
     ($($arg:tt)*) => {{}};
 }
 
-// ── window-trace instrumentation (feature `window-trace`) ─────────────────────
+// Observability macro for the `window-trace` feature: compiles to nothing
+// unless the feature is enabled.
 #[cfg(feature = "window-trace")]
 #[allow(unused_macros)]
 macro_rules! wtrace {
@@ -92,7 +94,7 @@ impl WindowManager {
             }
         };
 
-        // P13: Pipeline window attributes — fire all requests, then collect replies.
+        // Pipeline window attributes — fire all requests, then collect replies.
         let mut cookies: Vec<(Window, _)> = Vec::with_capacity(tree.children.len());
         for &w in &tree.children {
             if let Ok(c) = self.conn.get_window_attributes(w) {
@@ -153,7 +155,7 @@ impl WindowManager {
 
         let mut unmanaged = false;
 
-        // P1: Pipeline all property reads — fire all requests before any reply.
+        // Pipeline all property reads — fire all requests before any reply.
         // Scoped so Cookies (which borrow self.conn) are dropped before &mut self calls below.
         {
             let c_title_net = self.conn.get_property(
@@ -211,7 +213,6 @@ impl WindowManager {
                 1,
             )?;
 
-            // Process title (net_wm_name with WM_NAME fallback)
             if let Ok(ref prop) = c_title_net.reply() {
                 if !prop.value.is_empty() {
                     client.name = String::from_utf8_lossy(&prop.value).into_owned();
@@ -223,7 +224,6 @@ impl WindowManager {
                 }
             }
 
-            // Process class
             if let Ok(ref prop) = c_class.reply() {
                 let s = String::from_utf8_lossy(&prop.value);
                 let mut parts = s.split('\0');
@@ -231,7 +231,6 @@ impl WindowManager {
                 client.class = parts.next().unwrap_or("").to_string();
             }
 
-            // Process window type
             if let Ok(ref prop) = c_wtype.reply() {
                 if prop.type_ == u32::from(AtomEnum::ATOM) {
                     let atoms: Vec<u32> = prop
@@ -266,7 +265,6 @@ impl WindowManager {
                 unmanaged = true;
             }
 
-            // Process window state
             if let Ok(ref sp) = c_wstate.reply() {
                 if sp.type_ == u32::from(AtomEnum::ATOM) {
                     let atoms: Vec<u32> = sp
@@ -290,7 +288,6 @@ impl WindowManager {
                 }
             }
 
-            // Process WM hints
             if let Ok(ref prop) = c_hints.reply() {
                 if let Some(vals) = prop.value32() {
                     let v: Vec<u32> = vals.collect();
@@ -326,7 +323,6 @@ impl WindowManager {
                 }
             }
 
-            // Process _NET_WM_BYPASS_COMPOSITOR
             if let Ok(ref prop) = c_bypass.reply() {
                 if let Some(v) = prop.value32().and_then(|mut i| i.next()) {
                     if v == 1 || v == 2 {
@@ -337,7 +333,8 @@ impl WindowManager {
         } // cookies dropped here
 
         if unmanaged {
-            // Docks reserve screen space via _NET_WM_STRUT[_PARTIAL].
+            // Docks and desktops are mapped but not managed: they reserve screen
+            // space through `_NET_WM_STRUT[_PARTIAL]` instead.
             self.apply_dock_strut(win)?;
             return Ok(());
         }
@@ -426,9 +423,10 @@ impl WindowManager {
             };
             if client.monitor < self.engine.state.monitors.len() {
                 let wa = self.engine.state.monitors[client.monitor].workarea;
-                // Normalizacion unica con hints (ver `layout::normalize_float_geom`):
-                // el recien nacido ya es punto fijo, asi el primer arrange no lo
-                // corrige (temblor del nuevo float hasta moverlo con Mod+drag).
+                // Normalize once with the client's hints (see
+                // `layout::normalize_float_geom`) so the newborn float is already
+                // a fixed point and the first `arrange` does not correct it (a
+                // jitter that would persist until the user dragged it).
                 client.geom = normalize_float_request(target, client.hints, wa, client.border_w);
             } else {
                 client.geom = target;
@@ -446,11 +444,12 @@ impl WindowManager {
             client.saved_geom = g;
         }
 
-        // El borde lo aplica el Reconciler vía `arrange` (único dueño de
-        // `configure_window`). Emitirlo aquí creaba una carrera con `arrange`:
-        // dos configures (borde suelto + geometría completa) y dos
-        // `ConfigureNotify` con posiciones distintas; para un float eso se
-        // adopta (`follow=true`) y rebota hasta el siguiente `arrange`.
+        // The border is applied by the Reconciler through `arrange` (the sole
+        // owner of `configure_window`). Emitting it here as a separate
+        // `ConfigureWindow` would race `arrange`: two configures (loose border +
+        // full geometry) and two `ConfigureNotify`s with different positions,
+        // which the float sink then classifies as a client-driven change and
+        // re-asserts over, bouncing the window until the next `arrange`.
         let _ = self.conn.change_window_attributes(
             win,
             &ChangeWindowAttributesAux::new()
@@ -470,12 +469,11 @@ impl WindowManager {
         self.grab_buttons(win, false)?;
 
         // `_NET_FRAME_EXTENTS` is published by `emit_geometry` (the single X
-        // geometry sink) when `arrange` below applies the first configure, so
+        // geometry sink) when the `arrange` below applies the first configure, so
         // it always mirrors the border actually in effect — including later
         // fullscreen/maximize transitions that change it.
         let _ = self.set_wm_state(win, 1);
 
-        // place into workspace structure
         let ws_i = client.workspace;
         let mon_i = client.monitor;
         let is_fl = client.is_float();
@@ -540,7 +538,7 @@ impl WindowManager {
         // target` branch keeps the focused column visible without teleporting
         // when other windows already exist, so the open-window scroll animates
         // via the spring). A second unconditional `snap` here would kill that
-        // animation, so arrange directly (bug C5).
+        // animation, so arrange directly.
         self.arrange(mon_i)?;
 
         // Presentation-aware focus policy (EWMH focus stealing): a new window
@@ -614,7 +612,8 @@ impl WindowManager {
         win: Window,
         destroyed: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // 1. If already removed (e.g. double Unmap + Destroy event), exit silently.
+        // A double Unmap+Destroy is routine; a second pass finds nothing to
+        // remove and returns here.
         let client = match self.engine.state.remove_client(win) {
             Some(c) => c,
             None => return Ok(()),
@@ -653,7 +652,7 @@ impl WindowManager {
             order.retain(|&w| w != win);
         }
 
-        // 2. Avoid panic if the monitor no longer exists after a hotplug.
+        // The monitor may no longer exist after a hotplug.
         if mon_i < self.engine.state.monitors.len() {
             let ws_i = client.workspace;
             if ws_i < self.engine.state.monitors[mon_i].workspaces.len() {
@@ -741,9 +740,9 @@ impl WindowManager {
     }
 
     pub(super) fn apply_rules(&self, c: &mut Client) {
-        // Global invariant (INV-B): a window's map-time `_NET_WM_STATE` is
-        // normalized away unless it is explicitly honoured. The default is to
-        // open as a normal tile — only an app that genuinely must launch
+        // Global invariant: a window's map-time `_NET_WM_STATE` is normalized
+        // away unless it is explicitly honoured. The default is to open as a
+        // normal tile — only an app that genuinely must launch
         // maximized/fullscreen opts in, either globally via
         // `[general].honor_initial_state = true` or per-window via a rule's
         // `honor_initial_state`. This is what keeps apps that "remember" their
@@ -766,21 +765,15 @@ impl WindowManager {
                     c.flags.set(WinFlags::STICKY);
                 }
                 if rule.ignore_initial_state {
-                    // A rule can still force the old behaviour explicitly.
+                    // A rule can still force the default behaviour explicitly.
                     honor_initial = false;
                 }
-                // ── Rule fields that used to be parsed but never applied ──
-                // (config audit: they were a "tapadera" — accepted, stored on
-                // `Rule`, and silently ignored at manage time). Wire them to the
-                // client so a `[[rules]]` entry actually does what the example
-                // config promises.
-                //
                 // Pin to a specific workspace. `rule.ws` is 0-based and was
-                // bounds-checked by `parse_rules` — against the `n_tags` of
-                // the config that parsed it. A later `reload` with fewer tags
-                // (or a hotplug-restored monitor with fewer workspaces) can
-                // leave it out of range, stranding the window off-tree and
-                // invisible. Clamp to the live workspace count.
+                // bounds-checked by `parse_rules` — against the `n_tags` of the
+                // config that parsed it. A later `reload` with fewer tags (or a
+                // hotplug-restored monitor with fewer workspaces) can leave it
+                // out of range, stranding the window off-tree and invisible.
+                // Clamp to the live workspace count.
                 if let Some(ws) = rule.ws {
                     let n = self
                         .engine
@@ -815,19 +808,17 @@ impl WindowManager {
         }
         if !honor_initial {
             // Undo whatever `_NET_WM_STATE_MAXIMIZED_*`/`_FULLSCREEN`
-            // manage() already set from the window's own map-time
-            // request (see the property-parsing pass above, which
-            // runs before apply_rules). The window falls back to a
-            // normal tile like every other new client.
+            // manage() already set from the window's own map-time request (see
+            // the property-parsing pass above, which runs before apply_rules).
+            // The window falls back to a normal tile like every other new client.
             c.flags.clear(WinFlags::MAXIMIZED_V);
             c.flags.clear(WinFlags::MAXIMIZED_H);
             c.flags.clear(WinFlags::FULLSCREEN);
-            // `c` isn't in `state.clients` yet at this point in
-            // manage() (added further down), so `write_net_wm_state`
-            // — which reads flags back out of `state.clients` — can't
-            // be used here. Strip the atoms directly instead, so the
-            // window's own `_NET_WM_STATE` matches the tile we're
-            // about to give it rather than still claiming maximized.
+            // `c` isn't in `state.clients` yet at this point in manage() (added
+            // further down), so `write_net_wm_state` — which reads flags back
+            // out of `state.clients` — can't be used here. Strip the atoms
+            // directly instead, so the window's own `_NET_WM_STATE` matches the
+            // tile we're about to give it rather than still claiming maximized.
             let mut atoms: Vec<u32> = self
                 .conn
                 .get_property(
@@ -887,11 +878,12 @@ impl WindowManager {
                 c.geom.x = wa.x + x;
                 c.geom.y = wa.y + y;
             }
-            // Normalizacion unica con hints para no discrepar de `arrange`.
+            // Normalize once with the client's hints so this rect cannot diverge
+            // from what `arrange` would project later.
             c.geom = normalize_float_request(c.geom, c.hints, wa, c.border_w);
             c.saved_geom = c.geom;
-            // El WM reclamo la geometria con una regla: el sello de autoridad
-            // del cliente muere aqui (el rect ya no es una peticion suya).
+            // A rule makes the WM the authority over this rect, so the client's
+            // authority stamp dies here: it is no longer a client request.
             c.float_client_authority = false;
         }
     }
@@ -1088,8 +1080,8 @@ impl WindowManager {
                     cg.w,
                     cg.h,
                 );
-                // Normalizacion unica para que el hijo reenlazado nazca punto
-                // fijo y `arrange` no lo desplace en el siguiente frame.
+                // Normalize once so the relinked child is born a fixed point and
+                // `arrange` does not displace it on the following frame.
                 let wa = self
                     .engine
                     .state
@@ -1098,7 +1090,8 @@ impl WindowManager {
                     .map_or(Rect::new(0, 0, 800, 600), |m| m.workarea);
                 c.geom = normalize_float_request(centered, c.hints, wa, c.border_w);
                 c.saved_geom = c.geom;
-                // Reenlace del WM: geometria reclamada por el WM (sello fuera).
+                // The WM claimed the geometry, so the client's authority stamp is
+                // dropped.
                 c.float_client_authority = false;
                 c.geometry_dirty = true;
                 if pmon < self.engine.state.monitors.len()
@@ -1151,8 +1144,8 @@ impl WindowManager {
 
     /// Re-read `WM_NORMAL_HINTS` for `win` through the shared pure parser.
     /// Returns `None` when the property is absent, unreadable, or malformed —
-    /// the caller then keeps the previous hints (a transient read failure must
-    /// never drop constraints, per the R3 philosophy).
+    /// the caller then keeps the previous hints, because a transient read
+    /// failure must never drop constraints.
     pub(super) fn read_size_hints(&self, win: Window) -> Option<SizeHints> {
         let reply = self
             .conn
@@ -1197,13 +1190,12 @@ impl WindowManager {
         win: Window,
         fs: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // X11-only: reflect the core's desired fullscreen state in the EWMH hint
-        // and the compositor bypass hint. ALL logical state — the `FULLSCREEN`
-        // flag, border width, `fs_snapshot` and the scroll `camera` — is now
-        // owned by the `ToggleFullscreen` Command, so this handler must not
-        // mutate `State` at all. The Command has already set the flag (so
-        // `write_net_wm_state` below reads it correctly), snapshotted/restored
-        // the geometry, retargeted the camera and emitted `ArrangeMonitor`.
+        // All logical state — the `FULLSCREEN` flag, border width, `fs_snapshot`
+        // and the scroll `camera` — is owned by the `ToggleFullscreen` Command,
+        // so this handler must not mutate `State` at all. The Command has already
+        // set the flag (so `write_net_wm_state` below reads it correctly),
+        // snapshotted/restored the geometry, retargeted the camera and emitted
+        // `ArrangeMonitor`.
         if !self.engine.state.clients.contains_key(&win) {
             return Ok(());
         }
@@ -1249,7 +1241,7 @@ impl WindowManager {
             return Ok(());
         }
         // Logical state (MAXIMIZED_V/H, saved_geom, geom, geometry_dirty,
-        // presented_maximize) is now owned by `apply_maximize` (core). This sink
+        // presented_maximize) is owned by `apply_maximize` (core). This sink
         // only reflects it on X11.
         self.write_net_wm_state(win);
         let mi = self.engine.state.clients.get(&win).map_or(0, |c| c.monitor);
