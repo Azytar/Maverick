@@ -1,0 +1,13 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2f930902f9a7e7bdc9f4a30971ba1414c55c85e30a6ff3b65aeb3fd266dde26d # shrinks to w = 1, h = 1, bit_depth = 1, samples = [85]
+cc a99dfbe0be5f71158af0dee7afbb4de33b42d69cb395001d53351f7f85534462 # shrinks to w = 1, h = 2, channels = 3, top_down = false, region = []
+cc 6b3da72a83ce1121dc9a65cb1abeacd95bdf24c19566da8e75e8c2ce59f9928c # shrinks to len = 9
+cc 4c353f032e35115253d7be40451c06abc5571e792de57fc20d1b82ed71d2d618 # shrinks to w = 2, h = 3, channels = 3, pixels = [46, 47]
+cc 66b733b6c7aee080d7c418c49083797141976c35579c8a4a7bda77e000141039 # shrinks to bytes = []
+cc d3345cb47664ceb699faf4741288ad60280fce15cefc2c777bd68c32bb285228 # shrinks to keep = 0
+cc e2c17ce6788139312f4431da256b81c8114ccd9505647fa8bb362b1ad2ee6a1b # shrinks to w = 0, h = 0, tail = []

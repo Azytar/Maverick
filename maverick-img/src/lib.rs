@@ -118,6 +118,13 @@ pub fn decode(path: &Path) -> Result<Rgba8, String> {
 
 fn decode_ppm(path: &Path) -> Result<Rgba8, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("ppm: {e}"))?;
+    decode_ppm_bytes(&bytes)
+}
+
+/// PPM body of [`decode_ppm`], split out so the parser is exercised from an
+/// in-memory buffer: every input-domain test can then feed a byte string
+/// directly instead of standing up a file.
+fn decode_ppm_bytes(bytes: &[u8]) -> Result<Rgba8, String> {
     let mut i = 2usize;
     if bytes.len() < 2 || &bytes[0..2] != b"P6" {
         return Err("ppm: not a P6 file".into());
@@ -187,6 +194,11 @@ fn decode_ppm(path: &Path) -> Result<Rgba8, String> {
 
 fn decode_farbfeld(path: &Path) -> Result<Rgba8, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("farbfeld: {e}"))?;
+    decode_farbfeld_bytes(&bytes)
+}
+
+/// farbfeld body of [`decode_farbfeld`]; see [`decode_ppm_bytes`].
+fn decode_farbfeld_bytes(bytes: &[u8]) -> Result<Rgba8, String> {
     if bytes.len() < 16 || &bytes[0..8] != b"farbfeld" {
         return Err("farbfeld: bad magic".into());
     }
@@ -219,6 +231,11 @@ fn decode_farbfeld(path: &Path) -> Result<Rgba8, String> {
 
 fn decode_qoi(path: &Path) -> Result<Rgba8, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("qoi: {e}"))?;
+    decode_qoi_bytes(&bytes)
+}
+
+/// QOI body of [`decode_qoi`]; see [`decode_ppm_bytes`].
+fn decode_qoi_bytes(bytes: &[u8]) -> Result<Rgba8, String> {
     if bytes.len() < 14 || &bytes[0..4] != b"qoif" {
         return Err("qoi: bad magic".into());
     }
@@ -329,6 +346,11 @@ fn decode_qoi(path: &Path) -> Result<Rgba8, String> {
 
 fn decode_bmp(path: &Path) -> Result<Rgba8, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("bmp: {e}"))?;
+    decode_bmp_bytes(&bytes)
+}
+
+/// BMP body of [`decode_bmp`]; see [`decode_ppm_bytes`].
+fn decode_bmp_bytes(bytes: &[u8]) -> Result<Rgba8, String> {
     if bytes.len() < 54 || &bytes[0..2] != b"BM" {
         return Err("bmp: bad magic".into());
     }
@@ -421,6 +443,11 @@ fn decode_bmp(path: &Path) -> Result<Rgba8, String> {
 
 fn decode_png(path: &Path) -> Result<Rgba8, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("png: {e}"))?;
+    decode_png_bytes(&bytes)
+}
+
+/// PNG body of [`decode_png`]; see [`decode_ppm_bytes`].
+fn decode_png_bytes(bytes: &[u8]) -> Result<Rgba8, String> {
     if bytes.len() < 8 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
         return Err("png: bad signature".into());
     }
@@ -1148,6 +1175,10 @@ fn ppm_from_bytes(bytes: &[u8]) -> Result<Rgba8, String> {
         h: h as u32,
     })
 }
+
+#[cfg(test)]
+#[path = "../tests/properties/mod.rs"]
+mod properties;
 
 #[cfg(test)]
 mod tests {
