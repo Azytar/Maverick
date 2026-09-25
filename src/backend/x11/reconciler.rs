@@ -901,4 +901,524 @@ mod tests {
             "off-monitor rect must be pulled back inside"
         );
     }
+
+    // Property coverage of the same contracts, over generated inputs rather
+    // than one hand-picked scenario each.
+
+    use proptest::prelude::*;
+
+    /// The geometry a client (or the layout) can ask for. Every field spans its
+    /// full range: the reconciler is handed hostile rects exactly as often as
+    /// sane ones, and X11 rejects a 0×0 configure with `BadValue`.
+    fn arb_rect() -> impl Strategy<Value = Rect> {
+        (any::<i32>(), any::<i32>(), any::<u32>(), any::<u32>())
+            .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
+    }
+
+    /// One generated placement: what the layout wants for `win`, whether the
+    /// client is flagged `geometry_dirty` (a pending fullscreen/maximize
+    /// transition), and whether a client record exists for it at all.
+    #[derive(Debug, Clone)]
+    struct Row {
+        win: WindowId,
+        rect: Rect,
+        border: u32,
+        dirty: bool,
+        known: bool,
+    }
+
+    /// A desired snapshot plus the client records that back it. Window ids are
+    /// drawn from a small range so duplicate ids occur, and are then collapsed
+    /// to their first occurrence: `present_into` places each window on exactly
+    /// one monitor, and a repeated entry would make the per-window
+    /// correspondence the assertions rely on ambiguous.
+    fn arb_rows() -> impl Strategy<Value = Vec<Row>> {
+        prop::collection::vec(
+            (
+                1u32..=12,
+                arb_rect(),
+                any::<u32>(),
+                any::<bool>(),
+                any::<bool>(),
+            ),
+            0..=8,
+        )
+        .prop_map(|v| {
+            let mut seen = std::collections::HashSet::new();
+            v.into_iter()
+                .map(|(win, rect, border, dirty, known)| Row {
+                    win,
+                    rect,
+                    border,
+                    dirty,
+                    known,
+                })
+                .filter(|r| seen.insert(r.win))
+                .collect()
+        })
+    }
+
+    /// A pre-existing applied record per generated index into `rows`.
+    ///
+    /// The records are *derived* from the desired geometry — nudged by one pixel
+    /// or one border step rather than drawn independently — because the
+    /// interesting reconcile cases are "X11 already shows this", "X11 shows this
+    /// with one field off" and "X11 has never been told", and an unrelated
+    /// random rect would only ever produce the last two. An empty placement set
+    /// is a legal input rather than a strategy that cannot be built, and one
+    /// extra record is always left over for a window the layout dropped.
+    fn arb_applied(
+        rows: &[Row],
+    ) -> impl Strategy<Value = std::collections::HashMap<WindowId, AppliedWindow>> {
+        let rows: Vec<Row> = rows.to_vec();
+        prop::collection::vec(
+            (
+                0usize..=8,
+                any::<bool>(),
+                any::<bool>(),
+                any::<bool>(),
+                any::<u32>(),
+            ),
+            0..=10,
+        )
+        .prop_map(move |records| {
+            let mut map = std::collections::HashMap::new();
+            for (idx, seen, nudge_x, nudge_w, border_step) in records {
+                let Some(row) = rows.get(idx % rows.len().max(1)) else {
+                    continue;
+                };
+                map.insert(
+                    row.win,
+                    AppliedWindow {
+                        rect: Rect::new(
+                            row.rect.x.wrapping_add(i32::from(nudge_x)),
+                            row.rect.y,
+                            row.rect.w.wrapping_add(u32::from(nudge_w)),
+                            row.rect.h,
+                        ),
+                        border_w: row.border.wrapping_add(border_step),
+                        seen,
+                        sequence: None,
+                    },
+                );
+            }
+            // An id no row can produce, so a stale record for an unmanaged
+            // window is always in play.
+            map.insert(
+                0xF00D,
+                AppliedWindow {
+                    rect: Rect::new(0, 0, 10, 10),
+                    border_w: 1,
+                    seen: true,
+                    sequence: None,
+                },
+            );
+            map
+        })
+    }
+
+    /// A desired snapshot together with the applied records that precede it.
+    /// Flat-mapped so the records are generated against the same windows the
+    /// snapshot names.
+    fn arb_rows_and_applied(
+    ) -> impl Strategy<Value = (Vec<Row>, std::collections::HashMap<WindowId, AppliedWindow>)> {
+        arb_rows().prop_flat_map(|rows| {
+            let applied = arb_applied(&rows);
+            (Just(rows), applied).prop_map(|(rows, applied)| (rows, applied))
+        })
+    }
+
+    /// The `State` the reconciler is allowed to *read*: one client per `known`
+    /// row, carrying only the flag it is documented to read.
+    fn state_for(rows: &[Row]) -> State {
+        let mut state = State::new();
+        for r in rows.iter().filter(|r| r.known) {
+            let mut c = Client::new(r.win, 0, 0);
+            c.geometry_dirty = r.dirty;
+            state.clients.insert(r.win, c);
+        }
+        state
+    }
+
+    /// The desired snapshot for a set of rows.
+    fn desired_for(rows: &[Row]) -> DesiredState {
+        DesiredState {
+            windows: rows
+                .iter()
+                .map(|r| DesiredWindow {
+                    window: r.win,
+                    rect: r.rect,
+                    border: r.border,
+                    mapped: true,
+                })
+                .collect(),
+            raise: rows.iter().map(|r| r.win).collect(),
+        }
+    }
+
+    /// Every field of `State`, in a form that does not depend on hash-map
+    /// iteration order, so any mutation the reconciler made to the logical
+    /// state shows up as a difference.
+    fn fingerprint(state: &State) -> Vec<String> {
+        let mut parts: Vec<String> = state
+            .clients
+            .iter()
+            .map(|(&w, c)| format!("{w}={c:?}"))
+            .collect();
+        parts.sort();
+        parts.push(format!(
+            "monitors={:?} sel={} serial={} running={} status={:?} transients={:?} \
+             focus={:?} pending={:?} wallpaper={:?} rev={}",
+            state.monitors,
+            state.sel_mon,
+            state.focus_serial,
+            state.running,
+            state.status,
+            state.pending_transients,
+            state.x11_input_focus,
+            state.pending_focus,
+            state.wallpaper,
+            state.wallpaper_rev
+        ));
+        parts
+    }
+
+    /// A run of arrange cycles: each snapshot is a fresh desired state, and
+    /// `records` seeds X11 with geometry the window manager believes it has
+    /// already written (`idx` picks the window out of the first snapshot).
+    #[derive(Debug, Clone)]
+    struct Scenario {
+        snapshots: Vec<Vec<Row>>,
+        records: Vec<Record>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct Record {
+        idx: usize,
+        rect: Rect,
+        border_w: u32,
+    }
+
+    fn arb_scenario() -> impl Strategy<Value = Scenario> {
+        (
+            prop::collection::vec(arb_rows(), 1..=4),
+            prop::collection::vec((0usize..=8, arb_rect(), any::<u32>()), 0..=8),
+        )
+            .prop_map(|(snapshots, records)| Scenario {
+                snapshots,
+                records: records
+                    .into_iter()
+                    .map(|(idx, rect, border_w)| Record {
+                        idx,
+                        rect,
+                        border_w,
+                    })
+                    .collect(),
+            })
+    }
+
+    proptest! {
+        /// Totality: one round either writes every window whose geometry X11
+        /// does not already have — carrying exactly the desired rect and border
+        /// — or writes nothing at all. It never configures a window the layout
+        /// no longer manages, never configures one window twice in a round, and
+        /// never leaves the record claiming X11 shows something other than what
+        /// was just asked for. A managed window whose desired geometry was
+        /// dropped is the failure this guards: it keeps whatever it had.
+        #[test]
+        fn reconcile_writes_exactly_the_pending_configures(
+            (rows, applied) in arb_rows_and_applied(),
+        ) {
+            let mut applied = AppliedState { windows: applied };
+            let state = state_for(&rows);
+            let desired = desired_for(&rows);
+
+            let effects = reconcile(&desired, &state, &mut applied);
+
+            let mut emitted: Vec<WindowId> = Vec::new();
+            for e in &effects {
+                let GeometryEffect::Configure { win, rect, border } = e;
+                prop_assert!(
+                    !emitted.contains(win),
+                    "window {} configured twice in one round",
+                    win
+                );
+                let row = rows.iter().find(|r| r.win == *win)
+                    .expect("reconcile configured a window the layout does not manage");
+                prop_assert_eq!(*rect, row.rect, "effect for {} carries a foreign rect", win);
+                prop_assert_eq!(
+                    *border,
+                    row.border,
+                    "effect for {} carries a foreign border",
+                    win
+                );
+                emitted.push(*win);
+            }
+
+            // Whatever came out, the record now says X11 shows the desired
+            // geometry for every window in the snapshot.
+            for r in &rows {
+                let w = applied.windows.get(&r.win)
+                    .unwrap_or_else(|| panic!("window {} was left unapplied", r.win));
+                prop_assert!(w.seen, "window {} was never configured", r.win);
+                prop_assert_eq!(w.rect, r.rect, "window {} applied a stale rect", r.win);
+                prop_assert_eq!(w.border_w, r.border, "window {} applied a stale border", r.win);
+            }
+        }
+
+        /// Idempotence: a repeat of a reconcile that already ran emits nothing.
+        /// The render loop calls this once per animating monitor per frame, so
+        /// any churn here is a `configure_window` storm on the X server.
+        #[test]
+        fn a_repeated_reconcile_emits_nothing(
+            (rows, applied) in arb_rows_and_applied(),
+        ) {
+            let mut applied = AppliedState { windows: applied };
+            // Clean clients: nothing is mid-transition, so no flag can force a
+            // re-poke of an unchanged geometry.
+            let clean: Vec<Row> = rows.iter().map(|r| Row { dirty: false, ..r.clone() }).collect();
+            let state = state_for(&clean);
+            let desired = desired_for(&clean);
+
+            let _first = reconcile(&desired, &state, &mut applied);
+            let second = reconcile(&desired, &state, &mut applied);
+            prop_assert!(
+                second.is_empty(),
+                "reconciling an applied state emitted {:?}",
+                second.len()
+            );
+        }
+
+        /// The only thing that may re-poke an unchanged geometry is a pending
+        /// transition on *that* window: a dirty client is re-asserted every
+        /// turn until it settles, and no other window is dragged into it. This
+        /// is what keeps a fullscreen transition from turning into a flood.
+        #[test]
+        fn only_a_dirty_client_is_re_poked(
+            (rows, applied) in arb_rows_and_applied(),
+        ) {
+            let mut applied = AppliedState { windows: applied };
+            let state = state_for(&rows);
+            let desired = desired_for(&rows);
+
+            let _first = reconcile(&desired, &state, &mut applied);
+            let second = reconcile(&desired, &state, &mut applied);
+
+            // A desired window with no client record has nothing to report a
+            // pending transition: only a tracked dirty client is re-poked.
+            let mut expected: Vec<WindowId> = rows
+                .iter()
+                .filter(|r| r.dirty && r.known)
+                .map(|r| r.win)
+                .collect();
+            expected.sort_unstable();
+            let mut got: Vec<WindowId> = second.iter().map(|e| match e {
+                GeometryEffect::Configure { win, .. } => *win,
+            }).collect();
+            got.sort_unstable();
+            prop_assert_eq!(got, expected, "only pending transitions may re-emit");
+        }
+
+        /// Purity: `reconcile` reads `State` and mutates only the applied
+        /// record. A write to `client.geom` here would let a projection feed
+        /// back into the layout that produced it, and the next arrange would
+        /// compound the error.
+        #[test]
+        fn reconcile_never_touches_the_logical_state(
+            (rows, applied) in arb_rows_and_applied(),
+        ) {
+            let mut applied = AppliedState { windows: applied };
+            let state = state_for(&rows);
+            let desired = desired_for(&rows);
+            let before = fingerprint(&state);
+
+            let _ = reconcile(&desired, &state, &mut applied);
+
+            prop_assert_eq!(fingerprint(&state), before, "reconcile mutated State");
+        }
+
+        /// Convergence: however the desired geometry churns between arrange
+        /// cycles, the applied record re-converges on the latest desired state
+        /// within a single round, and a desired state that stops changing is a
+        /// fixed point from then on. A reconciler that needed several rounds, or
+        /// that oscillated between two geometries, would never let the render
+        /// loop go idle.
+        #[test]
+        fn reconciliation_converges_on_the_latest_desired_state(
+            scenario in arb_scenario(),
+        ) {
+            let mut applied = AppliedState::default();
+            for r in &scenario.records {
+                if let Some(win) = scenario.snapshots[0].iter().map(|row| row.win).nth(r.idx) {
+                    applied.observe(win, r.rect, r.border_w);
+                }
+            }
+
+            for (round, rows) in scenario.snapshots.iter().enumerate() {
+                let state = state_for(rows);
+                let desired = desired_for(rows);
+                let effects = reconcile(&desired, &state, &mut applied);
+                // A round writes at most one configure per desired window, so
+                // the request count can never grow with the number of rounds.
+                prop_assert!(
+                    effects.len() <= rows.len(),
+                    "round {round} emitted {} requests for {} windows",
+                    effects.len(),
+                    rows.len()
+                );
+                for row in rows {
+                    let w = applied.windows.get(&row.win).unwrap_or_else(|| {
+                        panic!("round {round} left window {} unapplied", row.win)
+                    });
+                    prop_assert!(w.seen, "round {} never configured {}", round, row.win);
+                    prop_assert_eq!(w.rect, row.rect, "round {} left {} stale", round, row.win);
+                    prop_assert_eq!(
+                        w.border_w,
+                        row.border,
+                        "round {} left {} stale",
+                        round,
+                        row.win
+                    );
+                }
+            }
+
+            // Stationary desired state with nothing mid-transition: the next
+            // round must be silent, however many rounds it took to get here. A
+            // client still flagged `geometry_dirty` is the documented reason to
+            // keep re-asserting, so it is settled here first.
+            let last = scenario.snapshots.last().expect("at least one snapshot");
+            let settled: Vec<Row> = last.iter().map(|r| Row { dirty: false, ..r.clone() }).collect();
+            let state = state_for(&settled);
+            let desired = desired_for(&settled);
+            prop_assert!(
+                reconcile(&desired, &state, &mut applied).is_empty(),
+                "a settled desired state still emits requests"
+            );
+        }
+
+        /// Unmanage/re-manage: `forget` drops the record, so a window that comes
+        /// back is configured from scratch even at the identical geometry it had
+        /// before (X11 has nothing applied for it any more). Forgetting a window
+        /// nobody knows is not an error — the unmanage path races map events.
+        #[test]
+        fn a_forgotten_window_is_re_emitted(
+            rect in arb_rect(),
+            border in any::<u32>(),
+            stale in arb_rect(),
+        ) {
+            let mut applied = AppliedState::default();
+            let row = Row { win: 7, rect, border, dirty: false, known: true };
+            let state = state_for(std::slice::from_ref(&row));
+            let desired = desired_for(std::slice::from_ref(&row));
+
+            // A different window's stale record is irrelevant to the round.
+            applied.observe(9, stale, border.saturating_add(1));
+            applied.forget(7);
+            applied.forget(1234);
+            prop_assert!(!applied.windows.contains_key(&7));
+
+            let effects = reconcile(&desired, &state, &mut applied);
+            prop_assert_eq!(effects.len(), 1, "a re-mapped window needs one configure");
+            match &effects[0] {
+                GeometryEffect::Configure { win, rect: r, border: b } => {
+                    prop_assert_eq!(*win, 7);
+                    prop_assert_eq!(*r, rect);
+                    prop_assert_eq!(*b, border);
+                }
+            }
+        }
+
+        /// The `ConfigureNotify` verdict is decided by geometry equality and
+        /// nothing else: not by whether the record was ever applied, not by the
+        /// sequence number, not by the reported size. A report that differs is
+        /// stale traffic the caller re-asserts over; a report that matches is
+        /// the WM's own echo. Any dependence on the bookkeeping fields would
+        /// make a real echo look stale (a configure storm) or a genuine
+        /// divergence look compliant (a window that drifts off the layout).
+        #[test]
+        fn the_configure_verdict_depends_only_on_geometry_equality(
+            applied_rect in arb_rect(),
+            reported in arb_rect(),
+            applied_bw in any::<u32>(),
+            reported_bw in any::<u32>(),
+            seen in any::<bool>(),
+            sequence in prop::option::of(any::<u32>()),
+        ) {
+            let verdict = |seen: bool, sequence: Option<u32>| {
+                classify_configure(
+                    reported,
+                    reported_bw,
+                    &AppliedWindow { rect: applied_rect, border_w: applied_bw, seen, sequence },
+                )
+            };
+            let expected = if applied_rect == reported && applied_bw == reported_bw {
+                ConfigureObservation::Compliant
+            } else {
+                ConfigureObservation::Stale
+            };
+            prop_assert_eq!(verdict(seen, sequence), expected);
+            // Same reported geometry, opposite bookkeeping: still the same
+            // verdict, so an echo is never mistaken for stale traffic.
+            prop_assert_eq!(verdict(!seen, sequence.map(|s| s.wrapping_add(1))), expected);
+        }
+    }
+
+    /// A monitor workarea as a hostile dock can leave it: any origin in the
+    /// signed range, an extent an output can actually describe. The width is
+    /// held to a `RandR` 16-bit dimension because `Rect`'s saturating edges cannot
+    /// represent a wider rect — beyond that, `right()` is a clamped fiction and
+    /// "is this rect inside that one" stops being a question with an answer. The
+    /// untrusted input in this property is the *client's* rect, which stays
+    /// unrestricted.
+    fn arb_workarea() -> impl Strategy<Value = Rect> {
+        (any::<i32>(), any::<i32>(), 0u32..=65_535, 0u32..=65_535)
+            .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
+    }
+
+    proptest! {
+        /// Every degenerate a hostile client can send comes out X11-valid: a
+        /// configure with `w == 0` or `h == 0` is rejected with `BadValue`, so
+        /// the clamp is the last line of defence — and it is reachable with a
+        /// workarea a hostile dock already shrank to nothing, which is why the
+        /// workarea is generated over the whole output range and not just a real
+        /// 1920×1080 screen.
+        ///
+        /// Containment is asserted where the workarea can actually host the
+        /// window: a zero-extent workarea has no interior to stay inside, and
+        /// there the size floor wins, because a 1px window is survivable and a
+        /// 0×0 configure is not.
+        #[test]
+        fn a_clamped_float_is_always_x11_valid(
+            g in arb_rect(),
+            wa in arb_workarea(),
+            bw in any::<u32>(),
+        ) {
+            let out = clamp_float_to_workarea(g, wa, bw);
+            prop_assert!(
+                out.w >= 1 && out.h >= 1,
+                "0-sized configure reached X11: {:?}",
+                out
+            );
+            // The border frame is accounted in u64: a hostile `bw` must not
+            // overflow the *test's* arithmetic either.
+            let frame = 2u64 * u64::from(bw);
+            if u64::from(wa.w) > frame && u64::from(wa.h) > frame {
+                prop_assert!(
+                    wa.contains_rect(out),
+                    "{:?} escaped workarea {:?}",
+                    out,
+                    wa
+                );
+            }
+            // Settling must be a fixed point: re-clamping the answer is what a
+            // toolkit's own correction would otherwise bounce against.
+            prop_assert_eq!(
+                clamp_float_to_workarea(out, wa, bw),
+                out,
+                "clamp is not idempotent for {:?} in {:?}",
+                g,
+                wa
+            );
+        }
+    }
 }

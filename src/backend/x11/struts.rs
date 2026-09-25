@@ -293,3 +293,248 @@ impl WindowManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // The reservation pipeline is the one place where a value the window manager
+    // never authored reaches geometry the layout then presents:
+    //
+    //     _NET_WM_STRUT[_PARTIAL] CARDINALs -> strut_edge -> ReservedRegion[]
+    //         -> ReservedArea -> Monitor::workarea -> every tiled rect
+    //
+    // Any window may publish those CARDINALs, so every field is drawn from the
+    // full X11 range here. The guards only matter for values no honest dock
+    // sends (a wrapped sum, a coordinate pushed past the screen), so a strategy
+    // that only produced plausible panel sizes would test nothing.
+
+    /// A monitor's screen geometry as a backend reports it. The origin spans
+    /// the full signed range — a virtual desktop genuinely places an output at
+    /// a negative or extreme `x`/`y` — while the extent is a `RandR` 16-bit
+    /// dimension: an output wider than that cannot be described by the protocol
+    /// at all, so it is not part of the hostile domain. The untrusted input here
+    /// is the dock's strut, not the screen it is subtracted from.
+    fn arb_screen() -> impl Strategy<Value = Rect> {
+        (any::<i32>(), any::<i32>(), 0u32..=65_535, 0u32..=65_535)
+            .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
+    }
+
+    /// One dock's strut: the `[left, right, top, bottom]` prefix both
+    /// `_NET_WM_STRUT` and `_NET_WM_STRUT_PARTIAL` start with.
+    type Strut = [u32; 4];
+
+    fn arb_strut() -> impl Strategy<Value = Strut> {
+        prop::array::uniform4(any::<u32>())
+    }
+
+    /// The workarea contract every reservation must leave behind: inside the
+    /// screen it is subtracted from, never larger than it, and never inverted.
+    /// A zero extent is *not* a failure — a strut that covers the whole screen
+    /// legitimately leaves no usable area, and the arrangement pass is what
+    /// clamps what it presents.
+    fn assert_workarea_inside_screen(m: &Monitor, what: &str) {
+        let screen = m.screen;
+        let wa = m.workarea;
+        assert!(
+            wa.x >= screen.x && wa.y >= screen.y,
+            "{what}: workarea {wa:?} starts outside screen {screen:?}"
+        );
+        assert!(
+            wa.w <= screen.w && wa.h <= screen.h,
+            "{what}: workarea {wa:?} is larger than screen {screen:?}"
+        );
+        assert!(
+            wa.right() <= screen.right() && wa.bottom() <= screen.bottom(),
+            "{what}: workarea {wa:?} runs past screen {screen:?}"
+        );
+        assert!(
+            wa.right() >= wa.x && wa.bottom() >= wa.y,
+            "{what}: workarea {wa:?} is inverted"
+        );
+    }
+
+    proptest! {
+        /// The headline boundary: whatever CARDINALs a dock publishes, the
+        /// workarea the layout is handed stays a valid geometry anchored inside
+        /// the screen it is derived from. A workarea pushed outside its screen
+        /// is not a cosmetic problem — every tiled rect is computed from it, so
+        /// windows land off the desktop (or on another monitor's area), and an
+        /// unbounded sum wraps into a huge `w` that no client can be configured
+        /// with.
+        ///
+        /// Docks are applied one after another because that is the real
+        /// lifecycle: a second dock lands on a monitor whose workarea has
+        /// already been narrowed by the first, and its struts must be bounded
+        /// against that state too.
+        #[test]
+        fn hostile_struts_never_escape_the_monitor(
+            screen in arb_screen(),
+            docks in prop::collection::vec(arb_strut(), 0..=4),
+        ) {
+            let mut m = Monitor::new(screen, 1);
+            for (i, strut) in docks.iter().enumerate() {
+                // The exact path `apply_dock_strut` walks: the property's
+                // CARDINALs through the shared parse, into the reservation list.
+                if let Some(regions) = strut_edge(strut) {
+                    m.set_reserved_regions(0x2000 + i as WindowId, &regions);
+                }
+                assert_workarea_inside_screen(&m, &format!("screen {screen:?} + docks {docks:?}"));
+            }
+        }
+
+        /// A dock may reserve several edges at once, and every one of them must
+        /// survive: dropping an edge silently lets a panel overlap the tiles it
+        /// was reserving space for, with nothing in the layout to notice. So the
+        /// parse is total — one entry per non-zero edge, carrying that edge's own
+        /// thickness — and "nothing reserved" is signalled, not an empty list.
+        #[test]
+        fn every_nonzero_strut_edge_reaches_the_reservation(
+            strut in arb_strut(),
+        ) {
+            let (left, right, top, bottom) = (strut[0], strut[1], strut[2], strut[3]);
+            let edges = strut_edge(&strut);
+            let expected = [
+                (Edge::Top, top),
+                (Edge::Bottom, bottom),
+                (Edge::Left, left),
+                (Edge::Right, right),
+            ];
+            if left == 0 && right == 0 && top == 0 && bottom == 0 {
+                prop_assert!(
+                    edges.is_none(),
+                    "an all-zero strut must reserve nothing, got {:?}",
+                    edges
+                );
+                return Ok(());
+            }
+            let edges = edges.expect("a non-zero strut must reserve at least one edge");
+            prop_assert_eq!(
+                edges.len(),
+                expected.iter().filter(|(_, t)| *t > 0).count(),
+                "one entry per reserved edge, no extras: {:?}",
+                edges
+            );
+            for (edge, thickness) in expected {
+                if thickness > 0 {
+                    prop_assert!(
+                        edges.contains(&(edge, thickness)),
+                        "{:?} strut of {} was dropped: {:?}",
+                        edge,
+                        thickness,
+                        edges
+                    );
+                } else {
+                    prop_assert!(
+                        !edges.iter().any(|(e, _)| *e == edge),
+                        "{:?} reserved a zero thickness: {:?}",
+                        edge,
+                        edges
+                    );
+                }
+            }
+        }
+
+        /// A dock's reservation is *replaced*, never accumulated: a dock that
+        /// changes its strut (or is re-read with the same values) must not
+        /// slowly eat the screen, and a dock that goes away must give the whole
+        /// screen back. Forgetting a dock nobody tracked is not an error — the
+        /// unmanage path races map and destroy events.
+        #[test]
+        fn a_docks_reservation_is_replaced_and_fully_released(
+            screen in arb_screen(),
+            first in arb_strut(),
+            second in arb_strut(),
+            other in arb_strut(),
+        ) {
+            let mut m = Monitor::new(screen, 1);
+            let owner: WindowId = 0x3000;
+            let other_owner: WindowId = 0x3001;
+
+            let a = strut_edge(&first);
+            let b = strut_edge(&second);
+            let o = strut_edge(&other);
+            let Some(a) = a else { return Ok(()) };
+            m.set_reserved_regions(owner, &a);
+            let after_first = m.workarea;
+
+            // Re-read of the same strut (property change, rescan) and a
+            // genuine change of strut: neither may stack on the previous one.
+            m.set_reserved_regions(owner, &a);
+            prop_assert_eq!(m.workarea, after_first, "a re-read strut was accumulated");
+            if let Some(b) = &b {
+                m.set_reserved_regions(owner, b);
+                assert_workarea_inside_screen(&m, "replaced reservation");
+            }
+
+            // Another dock stacks with this one; the collapsed totals are the
+            // saturating per-edge sum, so no sum can wrap round into a
+            // *smaller* reservation than the docks asked for.
+            if let Some(o) = &o {
+                m.set_reserved_regions(other_owner, o);
+                // The owner's live reservation is the replacement, not both.
+                let live: Vec<(Edge, u32)> = match &b {
+                    Some(b) => b.clone(),
+                    None => a.clone(),
+                };
+                let all = live.iter().chain(o.iter());
+                for (edge, total) in [
+                    (Edge::Top, m.reserved.top),
+                    (Edge::Bottom, m.reserved.bottom),
+                    (Edge::Left, m.reserved.left),
+                    (Edge::Right, m.reserved.right),
+                ] {
+                    let sum = all
+                        .clone()
+                        .filter(|(e, _)| *e == edge)
+                        .fold(0u32, |acc, (_, t)| acc.saturating_add(*t));
+                    prop_assert_eq!(
+                        total,
+                        sum,
+                        "{:?} collapsed to {}, expected {}",
+                        edge,
+                        total,
+                        sum
+                    );
+                }
+            }
+
+            // Both docks leave: the screen is handed back in full.
+            m.remove_reserved_region(owner);
+            m.remove_reserved_region(other_owner);
+            prop_assert!(
+                !m.remove_reserved_region(0xDEAD),
+                "forgetting an untracked dock must report nothing removed"
+            );
+            prop_assert_eq!(m.workarea, screen, "a departed dock kept screen space");
+            prop_assert!(m.reserved.is_empty());
+            prop_assert!(m.reserved_regions.is_empty());
+        }
+
+        /// Docks can only ever take space away: the workarea never grows while
+        /// reservations accumulate, no matter how hostile the values are. A
+        /// growing workarea would be a wrapped sum — a dock asking for
+        /// `u32::MAX` pixels reserving *less* than one asking for 1.
+        #[test]
+        fn accumulating_docks_never_grow_the_workarea(
+            screen in arb_screen(),
+            docks in prop::collection::vec(arb_strut(), 0..=5),
+        ) {
+            let mut m = Monitor::new(screen, 1);
+            let mut previous = m.workarea.area();
+            for (i, strut) in docks.iter().enumerate() {
+                if let Some(regions) = strut_edge(strut) {
+                    m.set_reserved_regions(0x4000 + i as WindowId, &regions);
+                }
+                let now = m.workarea.area();
+                prop_assert!(
+                    now <= previous,
+                    "workarea grew from {previous} to {now} px after dock {i} ({strut:?})"
+                );
+                previous = now;
+                assert_workarea_inside_screen(&m, &format!("after dock {i} {strut:?}"));
+            }
+        }
+    }
+}

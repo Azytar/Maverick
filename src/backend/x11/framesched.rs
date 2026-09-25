@@ -261,6 +261,232 @@ mod tests {
     //  - `Some(0)` means "render now", `None` parks on X11 + the self-pipe;
     //  - `clamp_frame_dt` bounds the idle edge to one refresh and an already
     //    running transition to `MAX_ANIMATION_DT`.
+    //
+    // The property tests below cover the same ground over the *whole* input
+    // space (every dirty-reason mask, both animation flags, arbitrary mark
+    // sequences and arbitrary frame deltas) instead of one hand-picked turn
+    // each; the examples that follow stay as the readable narrative of the
+    // policy.
+
+    use proptest::prelude::*;
+
+    /// Every compositor dirty reason, as the render loop can report them. The
+    /// mask is what `from_compositor` maps onto `FrameReason` bits, so the
+    /// properties below enumerate all 32 combinations of it.
+    const ALL_DIRTY: [DirtyReason; 5] = [
+        DirtyReason::DAMAGE,
+        DirtyReason::GEOMETRY,
+        DirtyReason::SURFACE,
+        DirtyReason::FOCUS,
+        DirtyReason::WALLPAPER,
+    ];
+
+    /// An arbitrary set of compositor dirty reasons, drawn from the same set a
+    /// real turn can report (a damage plus a focus change, a bare geometry
+    /// change, nothing at all).
+    fn arb_dirty() -> impl Strategy<Value = DirtyReason> {
+        prop::collection::vec(
+            prop::sample::select(ALL_DIRTY.to_vec()),
+            0..=ALL_DIRTY.len(),
+        )
+        .prop_map(|parts| {
+            let mut d = DirtyReason::NONE;
+            for p in parts {
+                d.insert(p);
+            }
+            d
+        })
+    }
+
+    /// An arbitrary burst of frame requests within one turn.
+    fn arb_marks() -> impl Strategy<Value = Vec<FrameReason>> {
+        prop::collection::vec(prop::sample::select(FrameReason::ALL.to_vec()), 0..=24)
+    }
+
+    /// True when at least one compositor reason is set. `contains` is a
+    /// bitwise overlap test, so it cannot be asked about `NONE` directly.
+    fn any_dirty(d: DirtyReason) -> bool {
+        ALL_DIRTY.iter().any(|r| d.contains(*r))
+    }
+
+    proptest! {
+        /// (a)+(b) — a frame is requested *iff* the turn has work: something
+        /// animating, an animating wallpaper, or a dirty reason. A settled
+        /// scene with no pending reason must park on X11 plus the self-pipe (no
+        /// heartbeat poll, no wasted GL work), and any pending reason must
+        /// produce a frame. The reason *set* is checked too: a turn must not
+        /// invent a reason it was not told about (a phantom `Animation` is what
+        /// pins the compositor at full rate on a static desktop) nor lose one
+        /// (`WALLPAPER` is a one-shot geometry change, not a dropped reason).
+        #[test]
+        fn a_frame_is_requested_exactly_when_the_turn_has_work(
+            animating in any::<bool>(),
+            wallpaper_animating in any::<bool>(),
+            dirty in arb_dirty(),
+        ) {
+            let s = FrameScheduler::from_compositor(animating, wallpaper_animating, dirty);
+            let has_work = animating || wallpaper_animating || any_dirty(dirty);
+
+            prop_assert_eq!(s.needs_frame(), has_work);
+            prop_assert_eq!(s.timeout_ms(), has_work.then_some(0));
+            prop_assert_eq!(s.is_animating(), animating);
+            prop_assert_eq!(s.has(FrameReason::WallpaperAnimation), wallpaper_animating);
+            prop_assert_eq!(s.is_continuous(), animating || wallpaper_animating);
+            prop_assert_eq!(s.has_dirty(), any_dirty(dirty));
+
+            let expected = |r: FrameReason| match r {
+                FrameReason::Animation => animating,
+                FrameReason::WallpaperAnimation => wallpaper_animating,
+                FrameReason::Damage => dirty.contains(DirtyReason::DAMAGE),
+                FrameReason::SurfaceChange => dirty.contains(DirtyReason::SURFACE),
+                FrameReason::Focus => dirty.contains(DirtyReason::FOCUS),
+                // A wallpaper (re)set is a structural repaint, so it shares
+                // the one-shot geometry reason rather than a bit of its own.
+                FrameReason::Geometry => {
+                    dirty.contains(DirtyReason::GEOMETRY)
+                        || dirty.contains(DirtyReason::WALLPAPER)
+                }
+            };
+            for r in FrameReason::ALL {
+                prop_assert_eq!(s.has(r), expected(r), "reason {:?} mismatch", r.as_str());
+            }
+            prop_assert_eq!(
+                s.reasons().count(),
+                usize::from(expected(FrameReason::Animation))
+                    + usize::from(expected(FrameReason::WallpaperAnimation))
+                    + usize::from(expected(FrameReason::Damage))
+                    + usize::from(expected(FrameReason::Geometry))
+                    + usize::from(expected(FrameReason::SurfaceChange))
+                    + usize::from(expected(FrameReason::Focus)),
+                "each pending reason is reported exactly once"
+            );
+        }
+
+        /// (c) — many requests in one turn coalesce: N marks (repeats
+        /// included) still leave a single pending frame, the reported reasons
+        /// carry no duplicates, and nothing already marked is lost when another
+        /// reason arrives. A present then drops every one-shot reason while the
+        /// continuous ones survive, so only ongoing work keeps the loop tight.
+        #[test]
+        fn reasons_coalesce_into_one_pending_frame(
+            marks in arb_marks(),
+        ) {
+            let mut s = FrameScheduler::new();
+            for &r in &marks {
+                s.mark(r);
+            }
+
+            prop_assert_eq!(s.needs_frame(), !marks.is_empty());
+            // One decision, not one per event: a pending frame is a single
+            // immediate wake-up regardless of how many sources asked for it.
+            prop_assert_eq!(s.timeout_ms(), (!marks.is_empty()).then_some(0));
+
+            let reported: Vec<FrameReason> = s.reasons().collect();
+            let mut sorted_reported = reported.clone();
+            sorted_reported.sort_by_key(|r| r.as_str());
+            sorted_reported.dedup();
+            prop_assert_eq!(
+                reported.len(),
+                sorted_reported.len(),
+                "a repeated reason must not be reported twice: {:?}",
+                reported
+            );
+            let mut expected: Vec<FrameReason> = marks.clone();
+            expected.sort_by_key(|r| r.as_str());
+            expected.dedup();
+            prop_assert_eq!(
+                sorted_reported, expected,
+                "the reported set is exactly what was marked"
+            );
+
+            // Marking more never unsets what is already pending.
+            let before: Vec<bool> = FrameReason::ALL.iter().map(|&r| s.has(r)).collect();
+            s.mark(FrameReason::Geometry);
+            for (i, &r) in FrameReason::ALL.iter().enumerate() {
+                prop_assert!(s.has(r) || !before[i], "reason {:?} was dropped", r.as_str());
+            }
+
+            s.clear_dirty();
+            prop_assert!(!s.has_dirty(), "a present consumes every one-shot reason");
+            prop_assert_eq!(s.is_continuous(), marks.contains(&FrameReason::Animation)
+                || marks.contains(&FrameReason::WallpaperAnimation));
+            prop_assert_eq!(s.is_animating(), marks.contains(&FrameReason::Animation));
+            prop_assert_eq!(
+                s.has(FrameReason::WallpaperAnimation),
+                marks.contains(&FrameReason::WallpaperAnimation)
+            );
+        }
+
+        /// The animation bit is a *report*, not a latch: over any sequence of
+        /// turns it is exactly what the last turn said the springs were doing.
+        /// A transition that starts during a frame keeps the loop awake for one
+        /// more turn, and a settled one parks it — a latched bit is a WM
+        /// rendering at full rate forever, and a bit that is dropped too early
+        /// is a half-presented transition.
+        #[test]
+        fn the_animation_bit_tracks_the_last_turn_and_never_latches(
+            turns in prop::collection::vec(any::<bool>(), 0..=16),
+        ) {
+            let mut s = FrameScheduler::from_compositor(false, false, DirtyReason::NONE);
+            prop_assert_eq!(s.timeout_ms(), None, "a settled loop parks");
+            for animating in &turns {
+                s.after_present(*animating);
+                prop_assert_eq!(s.is_animating(), *animating);
+                prop_assert_eq!(s.has_dirty(), false, "a present leaves no dirty reason");
+                prop_assert_eq!(s.timeout_ms(), (*animating).then_some(0));
+            }
+            // Whatever happened before, a settled turn parks the loop: the
+            // scheduler must not be able to hold a frame open on its own.
+            s.after_present(false);
+            prop_assert_eq!(s.timeout_ms(), None);
+            prop_assert!(!s.needs_frame());
+        }
+
+        /// (d) — the delta handed to the springs is always usable: finite, never
+        /// negative, and inside the bound for the edge it is clamped for. The
+        /// idle edge is never the looser of the two, so a long idle gap can
+        /// never become the first spring step of a resumed transition, and an
+        /// already-clamped delta is a fixed point (re-clamping the same frame
+        /// twice must not drift it).
+        ///
+        /// `NaN` is excluded on purpose: it cannot come from `Instant`
+        /// arithmetic, and `f32::clamp` propagates it, so pinning it here would
+        /// assert a guarantee this policy does not claim.
+        #[allow(clippy::float_cmp)]
+        #[test]
+        fn the_clamped_dt_is_always_a_usable_spring_step(
+            raw in prop_oneof![
+                any::<f32>().prop_filter("finite", |v: &f32| v.is_finite()),
+                // The magnitudes a real `Instant` gap actually takes, from a
+                // 240 Hz refresh to a multi-second suspend.
+                Just(1.0f32 / 240.0),
+                Just(1.0 / 120.0),
+                Just(ONE_REFRESH),
+                Just(0.25),
+                Just(1.0),
+                Just(60.0),
+                Just(3_600.0),
+                Just(f32::MAX),
+            ],
+            was_animating in any::<bool>(),
+        ) {
+            let dt = clamp_frame_dt(raw, was_animating);
+            let bound = if was_animating { MAX_ANIMATION_DT } else { ONE_REFRESH };
+
+            prop_assert!(dt.is_finite(), "raw {} produced a non-finite dt", raw);
+            prop_assert!(dt >= 0.0, "a negative dt must never reach the springs");
+            prop_assert!(dt <= bound, "dt {} escaped the {}s bound", dt, bound);
+            prop_assert_eq!(
+                clamp_frame_dt(dt, was_animating),
+                dt,
+                "an already-clamped dt must be a fixed point"
+            );
+            prop_assert!(
+                clamp_frame_dt(raw, false) <= clamp_frame_dt(raw, true),
+                "the idle edge must never be the looser of the two"
+            );
+        }
+    }
 
     #[test]
     fn transition_started_during_frame_does_not_idle_before_next_frame() {
