@@ -26,3 +26,7 @@ maverick-gl = { path = "../maverick-gl" }
 x11rb = { version = "0.13", default-features = false, features = [
     "allow-unsafe-code",
 ] }
+# Property-based coverage for this crate's pure deterministic validation logic
+# (capability/flag checks, extent and present-mode validation) that runs
+# without a Vulkan device.
+proptest.workspace = true

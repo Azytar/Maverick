@@ -11,3 +11,7 @@ categories = ["os::unix-apis"]
 keywords = ["window-manager", "tiling", "core"]
 
 [dependencies]
+
+[dev-dependencies]
+# Property-based coverage for this crate's pure deterministic logic.
+proptest.workspace = true

@@ -12,6 +12,20 @@ members = [
 exclude = []
 resolver = "2"
 
+# Centralised versions for shared dev-dependencies. Every entry here must be
+# referenced by at least one `[dev-dependencies]` block below, otherwise cargo
+# will not record it and the declaration is dead weight.
+[workspace.dependencies]
+# Property-based testing for the pure deterministic core: layout geometry,
+# state transitions, configuration normalization and image decoding. A member
+# crate opts in with `proptest.workspace = true` in its own manifest.
+proptest = "1"
+# Filesystem-isolated config loading tests. `UserConfig::load_from_path` reads a
+# real file, so the reload/parse-fallback tests need a private directory rather
+# than a hand-rolled name built from pid+nanos, which collides under parallel
+# test execution and leaks the file when a test panics.
+tempfile = "3"
+
 [package]
 name = "maverick"
 version = "0.7.0"
@@ -52,6 +66,15 @@ x11rb = { version = "0.13", default-features = false, features = [
 # OpenGL/GLX compositor backend. Optional: build with `--no-default-features`
 # for a pure X11 WM, or `--features compositor-opengl` to enable it.
 maverick-gl = { path = "maverick-gl", optional = true }
+
+[dev-dependencies]
+# The GL backend stays an *optional* dependency, deliberately not repeated
+# here: repeating it under `[dev-dependencies]` would make `cargo test` pull
+# maverick-gl in even for a `--no-default-features` build, defeating the
+# "pure X11 WM" configuration this manifest advertises. Tests that need the
+# backend reach it through the `compositor-opengl` feature instead.
+proptest.workspace = true
+tempfile.workspace = true
 
 [features]
 # Default build includes the OpenGL compositor backend.

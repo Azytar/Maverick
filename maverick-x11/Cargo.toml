@@ -15,3 +15,7 @@ keywords = ["x11", "window-manager"]
 # type that can wrap the `xcb_connection_t*` owned by an Xlib `Display*`.
 x11rb = { version = "0.13", default-features = false, features = ["allow-unsafe-code"] }
 libc = "0.2"
+
+[dev-dependencies]
+# Property-based coverage for this crate's pure deterministic logic.
+proptest.workspace = true

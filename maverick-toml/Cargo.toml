@@ -11,3 +11,7 @@ categories = ["parsing"]
 keywords = ["toml", "parser", "window-manager"]
 
 [dependencies]
+
+[dev-dependencies]
+# Property-based coverage for this crate's pure deterministic logic.
+proptest.workspace = true

@@ -19,3 +19,7 @@ libc = "0.2"
 [[bin]]
 name = "maverick-msg"
 path = "src/bin/maverick-msg.rs"
+
+[dev-dependencies]
+# Property-based coverage for this crate's pure deterministic logic.
+proptest.workspace = true

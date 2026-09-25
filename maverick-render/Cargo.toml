@@ -11,3 +11,7 @@ categories = ["os::unix-apis", "rendering"]
 keywords = ["window-manager", "x11", "compositor", "renderer"]
 
 [dependencies]
+
+[dev-dependencies]
+# Property-based coverage for this crate's pure deterministic logic.
+proptest.workspace = true

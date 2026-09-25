@@ -22,3 +22,7 @@ maverick-x11 = { path = "../maverick-x11" }
 x11rb = { version = "0.13", default-features = false, features = [
     "allow-unsafe-code",
 ] }
+
+[dev-dependencies]
+# Property-based coverage for this crate's pure deterministic logic.
+proptest.workspace = true

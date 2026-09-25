@@ -10,3 +10,7 @@ name = "maverick_img"
 path = "src/lib.rs"
 
 [dependencies]
+
+[dev-dependencies]
+# Property-based coverage for this crate's pure deterministic logic.
+proptest.workspace = true
