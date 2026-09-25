@@ -143,19 +143,29 @@ fn rounded_rectangles(w: i32, h: i32, r: i32) -> Vec<Rectangle> {
         let dy = r - i;
         let chord = ((r * r - dy * dy).max(0) as f64).sqrt() as i32;
         let inset = (r - chord).clamp(0, w / 2);
-        // `width` reaches 0 exactly when `w == 2*r` on the tangent row
-        // (`i == 0`, `chord == 0`): the circle then touches the frame at the
-        // single point `x == r`, so one visible pixel is the true geometry —
-        // the row must not be dropped (it would clip the frame's top edge).
-        let width = (w - 2 * inset).max(1) as u16;
+        // The span reaches 0 exactly when `w == 2*r` on the tangent row
+        // (`i == 0`, `chord == 0`): the circle then touches the frame at a
+        // single point, so the row has no area of its own and must not be
+        // dropped (it would clip the frame's top edge). The minimum-area floor
+        // alone is not enough, because a one-pixel row can only be symmetric
+        // about the frame's centre when the centre is a single pixel — and a
+        // degenerate span is reachable only for an even `w` (an odd `w` can
+        // never satisfy `2 * r == w`), whose centre falls between two columns.
+        // Widening the floor to those two centre columns is therefore the
+        // smallest mask that keeps the row symmetric about the centre, and
+        // `x` is derived from the width so that invariance holds by
+        // construction rather than by a special case.
+        let span = w - 2 * inset;
+        let width = if span == 0 { 2 } else { span } as u16;
+        let x = ((w - i32::from(width)) / 2) as i16;
         rects.push(Rectangle {
-            x: inset as i16,
+            x,
             y: i as i16,
             width,
             height: 1,
         });
         rects.push(Rectangle {
-            x: inset as i16,
+            x,
             y: (h - 1 - i) as i16,
             width,
             height: 1,
@@ -2867,19 +2877,12 @@ mod tests {
             for row in &rects[1..] {
                 let left = i32::from(row.x);
                 let right_edge = i32::from(row.x) + i32::from(row.width);
-                // A chord of zero (`2 * inset == w` — the arc's tangent row,
-                // only reachable once the radius is half the frame's width)
-                // leaves the row nothing to give, and the minimum-area floor
-                // then covers a single pixel to the right of the inset instead
-                // of centring it. Every other row must be exactly symmetric.
-                if 2 * left != w {
-                    prop_assert_eq!(
-                        left,
-                        w - right_edge,
-                        "row y={} leaves unequal insets for w={} h={} r={}",
-                        row.y, w, h, r
-                    );
-                }
+                prop_assert_eq!(
+                    left,
+                    w - right_edge,
+                    "row y={} leaves unequal insets for w={} h={} r={}",
+                    row.y, w, h, r
+                );
                 prop_assert_eq!(
                     i32::from(row.height),
                     1,
@@ -3322,42 +3325,69 @@ mod tests {
         }
     }
 }
-/// Reduced, deterministic reproducer for a reported defect rather than a
-/// property. The property above has to carve out the tangent row, because
-/// the defect lives exactly there and nowhere else.
+/// Contract, reduced to a deterministic set: every row of a rounded mask
+/// leaves the same inset on the left as on the right, for every radius a
+/// caller can pass — including the radius boundary `2 * r == w`.
 ///
-/// When the corner radius is exactly half the frame width the circle is
-/// tangent to the frame at a single pixel, and the row is forced to a
-/// minimum area of one pixel *to the right of* the inset rather than
-/// centred on it. The frame's own centre for an even width sits between two
-/// pixels, so the tangent row comes out one pixel asymmetric on both the top
-/// and the bottom edge.
+/// At that boundary the corner circle is tangent to the frame and the row has
+/// no area of its own. It must not be dropped (that clips the frame's top and
+/// bottom edge), and it must not be floored to a single pixel either: an even
+/// width has no centre pixel — its centre is the boundary between two columns
+/// — so a one-pixel row can never be symmetric about it, and the mask then
+/// eats one side of the frame. Odd widths have a centre pixel but can never
+/// reach the boundary at all (`2 * r` is even), so both parities are pinned
+/// here.
 ///
 /// Reachable whenever `corner_radius` equals half a window's width --
 /// `corner_radius 10` on a 20px-wide window, `corner_radius 69` on a 138px
-/// one. The existing `rounded_mask_is_horizontally_symmetric` example uses
-/// (8, 6, 2), whose radius is a quarter of the width, so it never reaches it.
+/// one. The `rounded_mask_is_horizontally_symmetric` example uses a radius a
+/// quarter of the width, so it never reaches the boundary.
 #[test]
-#[ignore = "known defect: rounded_rectangles is 1px asymmetric on the tangent row \
-                when 2 * radius == width. Reported, not fixed."]
-fn known_violation_tangent_row_is_one_pixel_asymmetric() {
-    // A radius strictly inside the half-width domain is symmetric ...
-    assert!(rounded_rectangles(138, 138, 68).iter().skip(1).all(|row| {
-        let left = i32::from(row.x);
-        left == 138 - (left + i32::from(row.width))
-    }));
-    // ... and one exactly at it is not, on both edges.
-    let rects = rounded_rectangles(138, 138, 69);
-    let tangent: Vec<_> = rects
-        .iter()
-        .skip(1)
-        .filter(|row| row.y == 0 || row.y == 137)
-        .collect();
-    assert!(
-        tangent.iter().any(|row| {
-            let left = i32::from(row.x);
-            left != 138 - (left + i32::from(row.width))
-        }),
-        "expected the tangent row to be asymmetric"
-    );
+fn every_rounded_mask_row_stays_symmetric_at_the_radius_boundary() {
+    for &(w, h) in &[(138, 138), (20, 20), (401, 300), (19, 21), (2, 10), (1, 9)] {
+        // Inside the boundary, on it, and past it (which the radius clamp
+        // absorbs), plus the two degenerate radii that bypass the arc entirely.
+        for r in [0, 1, w / 2 - 1, w / 2, w / 2 + 1, w * 2] {
+            let rects = rounded_rectangles(w, h, r);
+            for row in &rects {
+                let left = i32::from(row.x);
+                let right_edge = left + i32::from(row.width);
+                assert_eq!(
+                    left,
+                    w - right_edge,
+                    "row y={} of w={w} h={h} r={r} leaves unequal insets",
+                    row.y
+                );
+                assert!(
+                    i32::from(row.width) >= 1 && i32::from(row.height) >= 1,
+                    "a mask rectangle must not be zero-area: {row:?} for w={w} h={h} r={r}"
+                );
+            }
+        }
+    }
+}
+
+/// The tangent row is the frame's own top and bottom edge when `2 * r == w`,
+/// so the mask has to cover it — dropping it would clip the corners away and
+/// leave the window with square edges at exactly the rows the radius was meant
+/// to round.
+#[test]
+fn tangent_row_is_covered_when_the_radius_is_half_the_width() {
+    for &(w, h) in &[(20, 20), (138, 138), (2, 10)] {
+        let rects = rounded_rectangles(w, h, w / 2);
+        for edge in [0, h - 1] {
+            let row = rects
+                .iter()
+                .find(|row| i32::from(row.y) == edge)
+                .unwrap_or_else(|| panic!("no mask row at y={edge} for w={w} h={h}"));
+            assert!(
+                i32::from(row.width) >= 1,
+                "the tangent row at y={edge} must not be empty: {row:?} for w={w} h={h}"
+            );
+            assert!(
+                i32::from(row.x) + i32::from(row.width) <= w,
+                "the tangent row at y={edge} must stay inside the frame: {row:?}"
+            );
+        }
+    }
 }
