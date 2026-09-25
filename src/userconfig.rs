@@ -106,6 +106,11 @@ struct CompositorEntry {
     fullscreen_bypass: Option<bool>,
     backend: Option<String>,
     vsync: Option<String>,
+    /// Deprecated spring spellings. They carry no compositor state: the values
+    /// are folded onto `Cfg::animations` by `apply_compositor`, which runs
+    /// before `apply_animations` so the `[animations]` table wins a tie.
+    stiffness: Option<f32>,
+    damping: Option<f32>,
 }
 
 #[derive(Debug, Default)]
@@ -484,6 +489,12 @@ fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>, diag: &mut D
 }
 
 /// Map one `[compositor]` key onto the model.
+///
+/// `stiffness`/`camera_stiffness`/`damping`/`camera_damping` are deprecated
+/// spellings of the `[animations]` keys of the same meaning: they still apply
+/// their value (onto `Cfg::animations`, see `apply_compositor`) and add a
+/// deprecation warning. A wrong-typed value is skipped with a warning, a
+/// non-positive one reported as an error — identical to `[animations]`.
 fn apply_compositor_key(
     c: &mut CompositorEntry,
     key: &str,
@@ -501,17 +512,21 @@ fn apply_compositor_key(
                     .push("compositor.backend must be 'opengl'|'vulkan'".to_string());
             }
         }
-        // Legacy animation keys that were previously under `[compositor]` — keep
-        // them as aliases that set `[animations]` instead, with a deprecation warning.
-        "stiffness" | "camera_stiffness" | "damping" | "camera_damping" => {
+        // Deprecated spring spellings, kept as aliases onto the animation model:
+        // the value is carried to `Cfg::animations` by `apply_compositor` and
+        // range-checked by the same helper the `[animations]` table uses, so a
+        // legacy key configures exactly what its modern twin configures.
+        "stiffness" | "camera_stiffness" => {
             diag.warnings.push(format!(
-                "[compositor].{key} is deprecated; use [animations].{} instead",
-                if key.contains("stiffness") {
-                    "stiffness"
-                } else {
-                    "damping"
-                }
+                "[compositor].{key} is deprecated; use [animations].stiffness instead"
             ));
+            set_f32(&mut c.stiffness, key, value, diag);
+        }
+        "damping" | "camera_damping" => {
+            diag.warnings.push(format!(
+                "[compositor].{key} is deprecated; use [animations].damping instead"
+            ));
+            set_f32(&mut c.damping, key, value, diag);
         }
         "vsync" => {
             if let Some(s) = value.as_str() {
@@ -572,6 +587,15 @@ fn apply_compositor(cfg: &mut Cfg, c: CompositorEntry, diag: &mut Diagnostics) {
             )),
         }
     }
+    // The spring constants live on `Cfg::animations`, so a deprecated
+    // `[compositor]` spelling has to reach across to the animation model
+    // instead of writing compositor state.
+    if let Some(v) = c.stiffness {
+        set_spring(&mut cfg.animations.stiffness, "stiffness", v, diag);
+    }
+    if let Some(v) = c.damping {
+        set_spring(&mut cfg.animations.damping, "damping", v, diag);
+    }
 }
 
 /// Fold a parsed `[animations]` table into the compiled `Cfg`.
@@ -580,20 +604,22 @@ fn apply_animations(cfg: &mut Cfg, a: AnimationsEntry, diag: &mut Diagnostics) {
         cfg.animations.enabled = v;
     }
     if let Some(v) = a.stiffness {
-        if v > 0.0 {
-            cfg.animations.stiffness = v;
-        } else {
-            diag.errors
-                .push(format!("animations.stiffness must be > 0; ignoring {v}"));
-        }
+        set_spring(&mut cfg.animations.stiffness, "stiffness", v, diag);
     }
     if let Some(v) = a.damping {
-        if v > 0.0 {
-            cfg.animations.damping = v;
-        } else {
-            diag.errors
-                .push(format!("animations.damping must be > 0; ignoring {v}"));
-        }
+        set_spring(&mut cfg.animations.damping, "damping", v, diag);
+    }
+}
+
+/// Store a spring constant, refusing the non-positive values the integrator
+/// cannot use. `[animations]` and its deprecated `[compositor]` aliases share it
+/// so both spellings accept and reject the same range.
+fn set_spring(slot: &mut f32, name: &str, v: f32, diag: &mut Diagnostics) {
+    if v > 0.0 {
+        *slot = v;
+    } else {
+        diag.errors
+            .push(format!("animations.{name} must be > 0; ignoring {v}"));
     }
 }
 
@@ -1632,6 +1658,126 @@ commands = [["example", "--flag"]]
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(!cfg.rules[0].deny_fullscreen);
         assert!(!cfg.rules[0].true_fullscreen);
+    }
+
+    #[test]
+    fn compositor_spring_aliases_agree_with_animations_table() {
+        // A deprecated `[compositor]` spring key must reach the same
+        // `Cfg::animations` fields as its `[animations]` counterpart; the two
+        // spellings may differ in the deprecation warning they emit, nothing
+        // else.
+        let baseline = compiled_config();
+        for (alias, table_key, value) in [
+            ("stiffness", "stiffness", "150.5"),
+            ("camera_stiffness", "stiffness", "150.5"),
+            ("damping", "damping", "41.25"),
+            ("camera_damping", "damping", "41.25"),
+        ] {
+            let mut diag = Diagnostics::default();
+            let user = parse_user(&format!("[compositor]\n{alias} = {value}\n"), &mut diag)
+                .expect("valid TOML");
+            let legacy = merge_config(compiled_config(), user, &mut diag);
+            let modern = merge_config(
+                compiled_config(),
+                parse_string(&format!("[animations]\n{table_key} = {value}\n")),
+                &mut Diagnostics::default(),
+            );
+
+            let spring = |cfg: &Cfg| (cfg.animations.stiffness, cfg.animations.damping);
+            assert_ne!(
+                spring(&legacy),
+                spring(&baseline),
+                "'[compositor].{alias}' must override the compiled spring constants"
+            );
+            assert_eq!(
+                spring(&legacy),
+                spring(&modern),
+                "'[compositor].{alias}' must configure the same spring as \
+                 '[animations].{table_key}'"
+            );
+            assert!(
+                diag.warnings.contains(&format!(
+                    "[compositor].{alias} is deprecated; use [animations].{table_key} instead"
+                )),
+                "'[compositor].{alias}' must announce its deprecation, got {:?}",
+                diag.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn compositor_spring_aliases_validate_like_animations_table() {
+        // Validation is shared with `[animations]`, so a deprecated spelling
+        // reports the same faults and leaves the compiled defaults in place.
+        let values = "\nstiffness = \"fast\"\ndamping = 0\n";
+        let baseline = compiled_config();
+        let mut legacy_diag = Diagnostics::default();
+        let legacy_user =
+            parse_user(&format!("[compositor]{values}"), &mut legacy_diag).expect("valid TOML");
+        let legacy = merge_config(compiled_config(), legacy_user, &mut legacy_diag);
+        let mut modern_diag = Diagnostics::default();
+        let modern_user =
+            parse_user(&format!("[animations]{values}"), &mut modern_diag).expect("valid TOML");
+        let modern = merge_config(compiled_config(), modern_user, &mut modern_diag);
+
+        let type_warnings = |d: &Diagnostics| {
+            d.warnings
+                .iter()
+                .filter(|w| w.contains("unexpected type"))
+                .count()
+        };
+        assert_eq!(
+            type_warnings(&legacy_diag),
+            type_warnings(&modern_diag),
+            "a wrong-typed alias must be reported like a wrong-typed [animations] key"
+        );
+        assert_eq!(
+            type_warnings(&modern_diag),
+            1,
+            "the string is the type fault"
+        );
+        assert_eq!(
+            legacy_diag.errors, modern_diag.errors,
+            "a non-positive alias must be range-checked like [animations].damping"
+        );
+        let spring = |cfg: &Cfg| (cfg.animations.stiffness, cfg.animations.damping);
+        assert_eq!(
+            spring(&legacy),
+            spring(&baseline),
+            "a rejected alias must leave the compiled spring in place"
+        );
+        assert_eq!(
+            spring(&legacy),
+            spring(&modern),
+            "a rejected alias must leave the spring exactly as the modern key does"
+        );
+    }
+
+    #[test]
+    fn animations_table_wins_over_deprecated_compositor_aliases() {
+        // Section order decides, not file order: `[animations]` is folded after
+        // `[compositor]`, so an explicit modern value always beats a deprecated
+        // alias and only the alias is diagnosed.
+        let mut diag = Diagnostics::default();
+        let user = parse_user(
+            "[compositor]\nstiffness = 100.0\ndamping = 10.0\n\n\
+             [animations]\nstiffness = 300.0\ndamping = 20.0\n",
+            &mut diag,
+        )
+        .expect("valid TOML");
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(
+            (cfg.animations.stiffness, cfg.animations.damping),
+            (300.0, 20.0),
+            "[animations] must win over the deprecated aliases"
+        );
+        assert!(diag.errors.is_empty(), "{:?}", diag.errors);
+        assert_eq!(
+            diag.warnings.len(),
+            2,
+            "only the deprecated aliases are reported, got {:?}",
+            diag.warnings
+        );
     }
 
     #[test]
