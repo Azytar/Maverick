@@ -1918,21 +1918,30 @@ impl State {
         // MoveToWorkspace) may still be named as the maximize-overlay owner on a
         // former monitor/workspace, and a dangling entry breaks the
         // `presented_maximize` invariant as soon as the window is destroyed.
+        //
+        // The focus slots get the same sweep for the same reason. A focus slot is
+        // a *logical* pointer and is not required to agree with `Client::monitor`
+        // at all times, so a monitor other than the one the window died on can
+        // still be naming it: `check_invariants` requires every `focus_stack`
+        // entry to be a known client, and a monitor whose logical focus names a
+        // destroyed window hands the next focus query an id that can be recycled
+        // by X11 onto an unrelated client. A test fixture that wants a stale
+        // logical focus can still install one directly.
         for mon in &mut self.monitors {
             for ws in &mut mon.workspaces {
                 if ws.presented_maximize == Some(win) {
                     ws.presented_maximize = None;
                 }
             }
+            mon.focus_stack.retain(|&w| w != win);
+            if mon.focused == Some(win) {
+                mon.focused = mon.focus_stack.last().copied();
+            }
         }
         // c.monitor may be stale after hotplug (fewer monitors than before).
         // Clamp to avoid panic index out-of-bounds.
         let mon_i = c.monitor.min(self.monitors.len().saturating_sub(1));
         let mon = &mut self.monitors[mon_i];
-        mon.focus_stack.retain(|&w| w != win);
-        if mon.focused == Some(win) {
-            mon.focused = mon.focus_stack.last().copied();
-        }
         if c.workspace < mon.workspaces.len() {
             let ws_i = c.workspace;
             mon.workspaces[ws_i].remove_window(win);
@@ -2262,7 +2271,15 @@ impl State {
             // dangling-reference check above (stack must name real clients) is
             // the part that catches real corruption.
             // 9. `presented_maximize`, if set, names a real maximized client on the
-            //    active workspace.
+            //    active workspace. "Maximized" here means *either* axis, matching
+            //    the field's own contract: `sync_presented_maximize`,
+            //    `presented_overlay_owner_in` and `pending_focus_owner_presented`
+            //    all derive the owner with `is_maximized_v() || is_maximized_h()`.
+            //    A per-axis maximize is a legal EWMH state — `_NET_WM_STATE`
+            //    sets `MAXIMIZED_VERT` and `MAXIMIZED_HORZ` independently and the
+            //    X11 sink deliberately does not promote one to the other — so
+            //    checking both axes here rejected states the rest of the model
+            //    produces on purpose.
             let pm = mon
                 .workspaces
                 .get(mon.active_ws)
@@ -2272,7 +2289,7 @@ impl State {
                     None => v.push(format!(
                         "monitor {mi}: presented_maximize {w} not in clients"
                     )),
-                    Some(c) if !c.is_maximized() => v.push(format!(
+                    Some(c) if !(c.is_maximized_v() || c.is_maximized_h()) => v.push(format!(
                         "monitor {mi}: presented_maximize {w} is not maximized"
                     )),
                     Some(c) if c.workspace != mon.active_ws => v.push(format!(
