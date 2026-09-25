@@ -16,10 +16,11 @@
 #   ./tests/xephyr-partial.sh            # normal (partial-redraw) path
 #   FORCE_FULL=1 ./tests/xephyr-partial.sh   # pretend no buffer-age (full redraw)
 #
-# Requirements: xephyr, x11-utils (xprop), gcc. The C clients are compiled to
-# /tmp on first run.
+# Requirements: xephyr, x11-utils (xprop, xdpyinfo), mesa-utils (glxinfo),
+# gcc. The C clients are compiled to /tmp on first run.
 
 set -u
+HOST_DISPLAY="${HOST_DISPLAY:-${DISPLAY:-:0}}"
 export DISPLAY="${DISPLAY:-}"
 
 SCREEN_W=1920
@@ -38,21 +39,77 @@ gcc -O2 tests/winmove.c   -o "$BIN/winmove"   -lX11 2>/dev/null
 
 LOG="$(mktemp -t maverick-partial.XXXXXX.log)"
 PASS=0; FAIL=0
+CLIENT_PIDS=()
 log()  { printf '%s\n' "$*" | tee -a "$LOG"; }
 ok()   { log "PASS: $*"; PASS=$((PASS+1)); }
 bad()  { log "FAIL: $*"; FAIL=$((FAIL+1)); }
 
-# Launch a client; echoes its WINID (parsed from the client's stderr "WINID=...").
-launch() { # $1=cmd...  -> prints WINID
-    local lf; lf="$(mktemp -t client.XXXXXX.log)"
+check_x_capabilities() {
+    local info extension
+    if ! command -v xdpyinfo >/dev/null 2>&1; then
+        bad "xdpyinfo is required to verify nested X capabilities"
+        return 1
+    fi
+    if ! info="$(DISPLAY="$DISPLAY" xdpyinfo 2>/dev/null)"; then
+        bad "nested X server is not reachable on $DISPLAY"
+        return 1
+    fi
+    for extension in Composite DAMAGE XFIXES GLX; do
+        if ! printf '%s\n' "$info" | grep -Eq "^[[:space:]]*${extension}([[:space:]]|$)"; then
+            bad "nested X server on $DISPLAY lacks required $extension extension"
+            return 1
+        fi
+    done
+    if ! command -v glxinfo >/dev/null 2>&1; then
+        bad "glxinfo is required to verify GLX capability"
+        return 1
+    fi
+    if ! DISPLAY="$DISPLAY" glxinfo -B >/dev/null 2>&1; then
+        bad "GLX is advertised but no usable GLX context is available"
+        return 1
+    fi
+    ok "nested X capabilities verified (Composite, DAMAGE, XFIXES, GLX)"
+}
+
+# Launch a client; records its owned PID and XID in LAST_PID/LAST_XID.
+launch() {
+    local lf w
+    lf="$(mktemp -t client.XXXXXX.log)"
     "$@" >"$lf" 2>&1 &
-    local pid=$!
+    LAST_PID=$!
+    CLIENT_PIDS+=("$LAST_PID")
     for _ in $(seq 1 50); do
-        local w; w="$(grep -oE 'WINID=0x[0-9a-f]+' "$lf" 2>/dev/null | head -1 | cut -d= -f2)"
-        if [ -n "$w" ]; then echo "$w"; return 0; fi
+        w="$(grep -oE 'WINID=0x[0-9a-f]+' "$lf" 2>/dev/null | head -1 | cut -d= -f2)"
+        if [ -n "$w" ]; then
+            LAST_XID="$w"
+            rm -f "$lf"
+            return 0
+        fi
         sleep 0.1
     done
-    bad "client did not report WINID: $*"; echo ""; return 1
+    bad "client did not report WINID: $*"
+    kill "$LAST_PID" 2>/dev/null
+    rm -f "$lf"
+    return 1
+}
+
+sample_root() {
+    local x="$1" y="$2" w="$3" h="$4" hex="$5" image pixel value r g b
+    image="$(mktemp -t maverick-root.XXXXXX.png)"
+    if ! import -window root "$image" >/dev/null 2>&1; then
+        bad "root capture failed @$x,$y"
+        rm -f "$image"
+        return 1
+    fi
+    value="${hex#0x}"
+    r=$((16#${value:0:2})); g=$((16#${value:2:2})); b=$((16#${value:4:2}))
+    pixel="$(convert "$image" -crop "${w}x${h}+${x}+${y}" +repage -format '%[pixel:p{0,0}]' info: 2>/dev/null | tr -d '[:space:]')"
+    rm -f "$image"
+    if [ "$pixel" = "srgb($r,$g,$b)" ] || [ "$pixel" = "#${value}" ]; then
+        ok "root pixel @$x,$y is 0x$hex"
+    else
+        bad "root pixel @$x,$y got '$pixel', expected 0x$hex"
+    fi
 }
 
 sample() { # X Y W H HEX [TOL]
@@ -63,6 +120,10 @@ sample() { # X Y W H HEX [TOL]
 
 # ── bring up the nested server (only if we're not already on one) ─────────────
 cleanup() {
+    local pid
+    for pid in "${CLIENT_PIDS[@]:-}"; do
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null
+    done
     [ -n "${MAV_PID:-}" ] && kill "$MAV_PID" 2>/dev/null
     [ -n "${XEPHYR_PID:-}" ] && kill "$XEPHYR_PID" 2>/dev/null
     rm -rf "$BIN"
@@ -70,11 +131,13 @@ cleanup() {
 trap cleanup EXIT
 
 if [ -z "$DISPLAY" ]; then
-    Xephyr "$XEPHYR_DISPLAY" -screen "${SCREEN_W}x${SCREEN_H}" -ac \
-        +extension GLX +extension RANDR +extension Composite >"$LOG.xephyr" 2>&1 &
+    DISPLAY="$HOST_DISPLAY" Xephyr "$XEPHYR_DISPLAY" -screen "${SCREEN_W}x${SCREEN_H}" -ac \
+        +extension GLX +extension RANDR +extension Composite +extension DAMAGE +extension XFIXES \
+        >"$LOG.xephyr" 2>&1 &
     XEPHYR_PID=$!
     sleep 1.5
     export DISPLAY="$XEPHYR_DISPLAY"
+    check_x_capabilities || exit 1
 fi
 
 MAV_EXTRA=""
@@ -91,13 +154,22 @@ fi
 ok "maverick started on $DISPLAY"
 
 # ── Scenario A: static backdrop + damager overlap; no residue ──────────────────
-BACKDROP="$(launch "$BIN/staticwin" 50 50 800 600 0x223355)"
-DAMAGER="$(launch "$BIN/damager" 0x33aa55 0xff3366)"
+launch "$BIN/staticwin" 50 50 800 600 0x223355 || exit 1
+BACKDROP_PID="$LAST_PID"
+BACKDROP_XID="$LAST_XID"
+launch "$BIN/damager" 0x33aa55 0xff3366 || exit 1
+DAMAGER_PID="$LAST_PID"
+DAMAGER_XID="$LAST_XID"
+# Make the expected source/backdrop order explicit for pixel assertions.
+xdotool windowlower "$BACKDROP_XID" >/dev/null 2>&1 || true
+xdotool windowraise "$DAMAGER_XID" >/dev/null 2>&1 || true
 sleep 2
 
 # Backdrop far from any window must show its colour.
-sample 100 100 60 60 0x223355
-# A corner of the damager that the moving dot never reaches must show the base.
+    log "damager geometry: $(xwininfo -id "$DAMAGER_XID" -stats 2>/dev/null | tr '\n' ' ')"
+    log "root tree after clients: $(xwininfo -root -tree 2>/dev/null | tr '\n' ' ')"
+    sample 100 100 60 60 0x223355
+    # A corner of the damager that the moving dot never reaches must show the base.
 sample 215 215 30 30 0x33aa55
 # After the dot settles (frame > 30) an EARLIER dot position must have been
 # redrawn to the base colour (partial-redraw must cover the erased area).
@@ -105,40 +177,49 @@ sleep 2
 sample 230 230 30 30 0x33aa55
 
 # ── Scenario B: move the damager away — old rect must not ghost ───────────────
-"$BIN/winmove" "$DAMAGER" 1500 800
+xdotool windowmove "$DAMAGER_XID" 1500 800
+log "moved damager geometry: $(xwininfo -id "$DAMAGER_XID" -stats 2>/dev/null | tr '\n' ' ')"
 sleep 1.5
 # The area the damager vacated (on the backdrop) must be clean backdrop.
-sample 300 300 80 80 0x223355
+sample_root 300 300 80 80 0x223355
 # The damager at its new location shows its base.
-sample 1520 820 30 30 0x33aa55
+sample_root 1520 820 30 30 0x33aa55
 
 # ── Scenario C: resize ─────────────────────────────────────────────────────────
-"$BIN/winmove" "$DAMAGER" 200 200 600 400
+xdotool windowmove "$DAMAGER_XID" 200 200
+xdotool windowsize "$DAMAGER_XID" 600 400
 sleep 1.5
 sample 230 230 30 30 0x33aa55   # still base after resize
 sample 100 100 60 60 0x223355   # backdrop untouched
 
 # ── Scenario D: overflow of DamageRegion (>32 damaging windows) ────────────────
-OVERFLOW=0
+OVERFLOW_PIDS=()
 for i in $(seq 1 40); do
-    launch "$BIN/damager" 0x44aa88 0xffaa00 >/dev/null 2>&1 &
-    OVERFLOW=$!
+    if launch "$BIN/damager" 0x44aa88 0xffaa00; then
+        OVERFLOW_PIDS+=("$LAST_PID")
+    else
+        bad "overflow damager $i did not start"
+    fi
 done
 sleep 2
 if kill -0 "$MAV_PID" 2>/dev/null; then ok "maverick survived 40 damaging windows (overflow -> full redraw)"; else bad "maverick crashed under overflow"; fi
 sample 100 100 60 60 0x223355   # backdrop still correct under overflow
-# tidy the overflow windows
-pkill -f "$BIN/damager" 2>/dev/null || true
+# tidy only the overflow processes started by this scenario
+for pid in "${OVERFLOW_PIDS[@]:-}"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+done
 sleep 1
 
 # ── Scenario E: structural — destroy a window, area must revert to backdrop ────
-STRUCT="$(launch "$BIN/staticwin" 1200 200 300 300 0x8833aa)"
+launch "$BIN/staticwin" 1200 200 300 300 0x8833aa || exit 1
+STRUCT_PID="$LAST_PID"
+STRUCT_XID="$LAST_XID"
 sleep 1.5
 sample 1220 220 40 40 0x8833aa
-# Kill the client process → window destroyed → compositor full-repaints.
-kill "$STRUCT" 2>/dev/null || true
+# Kill the owned client process → window destroyed → compositor full-repaints.
+kill "$STRUCT_PID" 2>/dev/null || true
 sleep 1.5
-sample 1220 220 40 40 0x223355   # backdrop back, no ghost of the dead window
+sample 700 500 40 40 0x223355   # backdrop back, no ghost of the dead window
 
 # ── Measurement: CPU during small-damage vs during scroll ─────────────────────
 # Sample maverick CPU via /proc across a quiet window of pure content damage.

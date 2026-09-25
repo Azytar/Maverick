@@ -10,10 +10,11 @@ import subprocess
 import time
 from typing import Any, Callable
 
-from harness import ROOT, Session, ShowcaseError, run
+from harness import CHORD_SPACING_SECONDS, ROOT, Session, ShowcaseError, run
 
 
 SCENES = ("workspace", "ribbon", "tools", "legibility", "floating", "hero")
+MIN_MATERIAL_WIDENING = 100
 
 
 @dataclass(frozen=True)
@@ -293,19 +294,62 @@ user_pref("network.proxy.type", 0);
         editor = self.ids["editor"]
         self.session.focus(editor)
         before = self.session.geometry(editor)
+        before_focus = self.session.focused()
+        if before_focus != editor:
+            raise ShowcaseError(f"legibility scene could not focus the editor: {editor} -> {before_focus}")
 
         # These are real WM shortcuts, not direct IPC geometry mutations.
+        last_injection = time.monotonic()
         self.session.chord("h")
         self.session.stable([editor])
         compact = self.session.geometry(editor)
+        compact_focus = self.session.focused()
+        if compact_focus != editor:
+            raise ShowcaseError(f"Mod+Ctrl+H changed focus: {editor} -> {compact_focus}")
         if compact[2] >= before[2]:
             raise ShowcaseError(f"Mod+Ctrl+H did not reduce the focused column: {before} -> {compact}")
 
-        self.session.chord("l", count=3)
-        self.session.stable([editor])
-        after = self.session.geometry(editor)
-        if after[2] <= before[2]:
-            raise ShowcaseError(f"Mod+Ctrl+L did not restore readable width: {before} -> {after}")
+        after_each_l: list[dict[str, Any]] = []
+        previous_geometry = compact
+        for press in range(1, 4):
+            injection = time.monotonic()
+            spacing_ms = (injection - last_injection) * 1000
+            if spacing_ms < CHORD_SPACING_SECONDS * 1000:
+                raise ShowcaseError(
+                    f"Mod+Ctrl+L press {press} was injected after only {spacing_ms:.1f} ms"
+                )
+            self.session.chord("l")
+            last_injection = injection
+            self.session.stable([editor])
+            current = self.session.geometry(editor)
+            current_focus = self.session.focused()
+            if current_focus != editor:
+                raise ShowcaseError(
+                    f"Mod+Ctrl+L press {press} changed focus: {editor} -> {current_focus}"
+                )
+            if current[2] <= previous_geometry[2]:
+                raise ShowcaseError(
+                    f"Mod+Ctrl+L press {press} did not widen the focused column: "
+                    f"{previous_geometry} -> {current}"
+                )
+            after_each_l.append(
+                {
+                    "press": press,
+                    "geometry": current,
+                    "focus": current_focus,
+                    "width_delta": current[2] - previous_geometry[2],
+                    "injection_spacing_before_ms": round(spacing_ms, 1),
+                }
+            )
+            previous_geometry = current
+
+        after = previous_geometry
+        material_widening = after[2] - compact[2]
+        if material_widening < MIN_MATERIAL_WIDENING:
+            raise ShowcaseError(
+                f"Mod+Ctrl+L x3 did not materially widen the focused column: "
+                f"{compact} -> {after} (+{material_widening}px)"
+            )
 
         tiled = [
             entry
@@ -324,10 +368,17 @@ user_pref("network.proxy.type", 0);
             json.dumps(
                 {
                     "shortcut_contract": "Mod+Ctrl+H then Mod+Ctrl+L x3",
+                    "minimum_chord_spacing_ms": CHORD_SPACING_SECONDS * 1000,
+                    "minimum_material_widening_px": MIN_MATERIAL_WIDENING,
                     "window": editor,
                     "before": before,
+                    "focus_before": before_focus,
                     "after_compact": compact,
+                    "focus_after_compact": compact_focus,
+                    "after_each_l": after_each_l,
                     "after_readable": after,
+                    "focus_after_readable": after_each_l[-1]["focus"],
+                    "material_widening_px": material_widening,
                     "tiled_windows_checked": len(tiled),
                 },
                 indent=2,

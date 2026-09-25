@@ -45,6 +45,7 @@ int main(int argc, char **argv) {
     ch.res_name = n; ch.res_class = c; XSetClassHint(d, win, &ch);
     GC gc = XCreateGC(d, win, 0, 0);
     XMapWindow(d, win);
+    XFlush(d);
     fprintf(stderr, "WINID=0x%lx\n", (unsigned long) win);
     fflush(stderr);
 

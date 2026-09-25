@@ -1,6 +1,6 @@
 [package]
 name = "maverick-img"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Dependency-free image decode for Maverick's native wallpaper (PNG + trivial formats + external-converter fallback)."
 license = "GPL-3.0"

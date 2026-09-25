@@ -18,6 +18,7 @@
 #include <X11/extensions/Xcomposite.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static int chan_shift(unsigned long mask) {
     int s = 0;
@@ -37,7 +38,12 @@ int main(int argc, char **argv) {
     if (argc < 6) { fprintf(stderr, "usage: pxsample X Y W H HEX [TOL]\n"); return 1; }
     int x = atoi(argv[1]), y = atoi(argv[2]), w = atoi(argv[3]), h = atoi(argv[4]);
     unsigned long exp = strtoul(argv[5], 0, 16);
-    int tol = argc > 6 ? atoi(argv[6]) : 28;
+    int sample_root = 0;
+    int tol = 28;
+    if (argc > 6) {
+        if (strcmp(argv[6], "--root") == 0) sample_root = 1;
+        else tol = atoi(argv[6]);
+    }
 
     Display *d = XOpenDisplay(NULL);
     if (!d) { fprintf(stderr, "pxsample: no display\n"); return 1; }
@@ -48,17 +54,19 @@ int main(int argc, char **argv) {
     decode(exp, vis, &er, &eg, &eb);
 
     Window root = RootWindow(d, scr);
-    Window ov = XCompositeGetOverlayWindow(d, root);
-    XImage *img = XGetImage(d, ov, x, y, w, h, AllPlanes, ZPixmap);
+    Window target = sample_root ? root : XCompositeGetOverlayWindow(d, root);
+    XImage *img = XGetImage(d, target, x, y, w, h, AllPlanes, ZPixmap);
     if (!img) { fprintf(stderr, "pxsample: XGetImage failed\n"); return 1; }
 
     long total = 0, match = 0;
     int maxdr = 0, maxdg = 0, maxdb = 0;
+    int first_r = -1, first_g = -1, first_b = -1;
     for (int iy = 0; iy < h; iy++) {
         for (int ix = 0; ix < w; ix++) {
             unsigned long pix = XGetPixel(img, ix, iy);
             int r, g, b;
             decode(pix, vis, &r, &g, &b);
+            if (first_r < 0) { first_r = r; first_g = g; first_b = b; }
             int dr = abs(r - er), dg = abs(g - eg), db = abs(b - eb);
             total++;
             if (dr <= tol && dg <= tol && db <= tol) match++;
@@ -66,14 +74,14 @@ int main(int argc, char **argv) {
         }
     }
     XDestroyImage(img);
-    XCompositeReleaseOverlayWindow(d, root);
+    if (!sample_root) XCompositeReleaseOverlayWindow(d, root);
 
     long mism = total - match;
     if (mism == 0) {
         printf("OK   pxsample %dx%d@(%d,%d) exp=0x%06lx match=%ld/%ld\n", w, h, x, y, exp, match, total);
         return 0;
     }
-    printf("FAIL pxsample %dx%d@(%d,%d) exp=0x%06lx match=%ld/%ld worst=+%d,+%d,+%d\n",
-           w, h, x, y, exp, match, total, maxdr, maxdg, maxdb);
+    printf("FAIL pxsample %dx%d@(%d,%d) exp=0x%06lx got=0x%02x%02x%02x match=%ld/%ld worst=+%d,+%d,+%d\n",
+           w, h, x, y, exp, first_r, first_g, first_b, match, total, maxdr, maxdg, maxdb);
     return 1;
 }

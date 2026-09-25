@@ -26,6 +26,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SIZE = (1920, 1080)
 DEFAULT_EVIDENCE = Path("/tmp/opencode/mav-showcase-evidence")
+CHORD_SPACING_SECONDS = 0.08
 PR_SET_CHILD_SUBREAPER = 36
 
 
@@ -138,6 +139,7 @@ class Session:
         self.logs: list[Any] = []
         self.log_paths: list[Path] = []
         self.windows: list[str] = []
+        self.compositor_selection_owner: str | None = None
         self.wm: subprocess.Popen[Any] | None = None
         self.xephyr: subprocess.Popen[Any] | None = None
         self.env = self._private_environment()
@@ -253,7 +255,7 @@ enabled = true
 stiffness = 220.0
 damping = 30.0
 [compositor]
-enabled = false
+enabled = true
 backend = "opengl"
 fullscreen_bypass = false
 [wallpaper]
@@ -269,7 +271,7 @@ mode = "fill"
         libc = ctypes.CDLL(None, use_errno=True)
         if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
             raise ShowcaseError("Linux PR_SET_CHILD_SUBREAPER is required for safe cleanup")
-        required = ("Xephyr", "xdpyinfo", "xdotool", "xsetroot", "import", "identify")
+        required = ("Xephyr", "xdpyinfo", "xdotool", "xprop", "xsetroot", "import", "identify")
         missing = [program for program in required if shutil.which(program) is None]
         if missing:
             raise ShowcaseError("missing showcase prerequisites: " + ", ".join(missing))
@@ -298,6 +300,12 @@ mode = "fill"
                 "Composite",
                 "+extension",
                 "DAMAGE",
+                "+extension",
+                "XFIXES",
+                "+extension",
+                "GLX",
+                "+extension",
+                "RANDR",
             ],
             "xephyr",
             env=xephyr_env,
@@ -308,7 +316,6 @@ mode = "fill"
             lambda: run(["xdpyinfo"], env=self.env, check=False).returncode == 0,
             timeout=15,
         )
-        self.env["MAVERICK_NO_COMPOSITOR"] = "1"
         config = self._write_private_config()
         run([self.binaries / "maverick", "--check-config", config], env=self.env, timeout=15)
         self.wm = self.spawn(
@@ -316,8 +323,42 @@ mode = "fill"
             "wm",
         )
         wait_for("Maverick IPC startup", lambda: self.state().get("monitors"), timeout=20)
+        self.compositor_selection_owner = wait_for(
+            "Maverick compositor selection ownership",
+            self.compositor_owner,
+            timeout=20,
+        )
         run(["xsetroot", "-solid", "#15191f"], env=self.env)
-        print(f"showcase: Xephyr {self.env['DISPLAY']} at {self.size[0]}x{self.size[1]}", flush=True)
+        print(
+            f"showcase: Xephyr {self.env['DISPLAY']} at {self.size[0]}x{self.size[1]}; "
+            f"_NET_WM_CM_S0 owner {self.compositor_selection_owner}",
+            flush=True,
+        )
+
+    def compositor_owner(self) -> str | None:
+        if self.wm is None or self.wm.poll() is not None:
+            return None
+        # `_NET_WM_CM_S<n>` is a core X selection, not a root property;
+        # `xprop -root` therefore reports "not found" even for a healthy
+        # compositor. Query the selection owner through Xlib directly.
+        x11 = ctypes.CDLL("libX11.so.6")
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        x11.XInternAtom.restype = ctypes.c_ulong
+        x11.XGetSelectionOwner.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        x11.XGetSelectionOwner.restype = ctypes.c_ulong
+        x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        x11.XCloseDisplay.restype = ctypes.c_int
+        display = x11.XOpenDisplay(self.env["DISPLAY"].encode())
+        if not display:
+            return None
+        try:
+            atom = x11.XInternAtom(display, b"_NET_WM_CM_S0", 0)
+            owner = x11.XGetSelectionOwner(display, atom)
+        finally:
+            x11.XCloseDisplay(display)
+        return f"0x{owner:x}" if owner else None
 
     def state(self) -> dict[str, Any]:
         result = run(
@@ -368,7 +409,9 @@ mode = "fill"
 
     def chord(self, key: str, count: int = 1) -> None:
         """Inject a real Super+Ctrl+key chord into the nested X server."""
-        for _ in range(count):
+        for index in range(count):
+            if index:
+                time.sleep(CHORD_SPACING_SECONDS)
             run(
                 [
                     "xdotool",
@@ -425,7 +468,7 @@ mode = "fill"
             if current != last:
                 last, since = current, time.monotonic()
                 return None
-            if time.monotonic() - since >= 0.7:
+            if time.monotonic() - since >= 1.5:
                 return current
             return None
 
@@ -464,6 +507,10 @@ mode = "fill"
             "description": description,
             "display": self.env["DISPLAY"],
             "size": dimensions,
+            "compositor": {
+                "selection": "_NET_WM_CM_S0",
+                "selection_owner": self.compositor_selection_owner,
+            },
             "geometry": {window: list(self.geometry(window)) for window in self.windows},
             "state": self.state(),
             "tree": tree,

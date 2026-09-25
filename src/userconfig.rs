@@ -1345,7 +1345,7 @@ fn keybind_from_str(input: &str) -> Option<(u16, u32)> {
     let mut mask = 0;
     for modifier in modifiers {
         let bit = match modifier.to_ascii_lowercase().as_str() {
-            "super" | "mod4" => u16::from(ModMask::M4),
+            "super" | "mod" | "mod4" => u16::from(ModMask::M4),
             "shift" => u16::from(ModMask::SHIFT),
             "control" | "ctrl" => u16::from(ModMask::CONTROL),
             "alt" | "mod1" => u16::from(ModMask::M1),
@@ -1392,6 +1392,14 @@ mod tests {
         ));
         std::fs::write(&path, contents).expect("write temporary config");
         path
+    }
+
+    #[test]
+    fn mod_alias_matches_super_for_legibility_chords() {
+        assert_eq!(
+            keybind_from_str("Mod+Ctrl+h"),
+            keybind_from_str("Super+Ctrl+h")
+        );
     }
 
     #[test]
