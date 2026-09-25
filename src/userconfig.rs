@@ -40,7 +40,10 @@
 //! rule with no criteria) drops only the offending value or entry and is
 //! recorded in `Diagnostics`. Callers decide what a diagnostic means:
 //! `load_config` logs and continues, `--check-config` turns it into an exit
-//! code.
+//! code, and `reload_config` goes further — it asks for the [`ConfigSource`]
+//! first, because a compiled baseline returned for a missing or unparseable file
+//! is not the configuration the session is already running, so it keeps that one
+//! and only warns (see `load_from_path_classified`).
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -277,16 +280,34 @@ fn default_config() -> Cfg {
     cfg
 }
 
-/// Parse `path` into a `Cfg`, returning the config together with the full
-/// `Diagnostics`. On a missing file the compiled defaults are returned with an
-/// empty diagnostic; on a syntax error the defaults are returned with the error
-/// recorded; on semantic issues the offending entries are dropped and reported.
-/// Never panics and never returns `None`.
+/// Why a load ended the way it did — information `Diagnostics` cannot carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// The file was read and parsed: the returned `Cfg` is the compiled
+    /// baseline with the file's overlay merged onto it. Values the file got
+    /// wrong are dropped and recorded in `Diagnostics` as always, so a non-empty
+    /// `errors` list does NOT make this variant.
+    UserFile,
+    /// The file is missing, unreadable, or not valid TOML: the returned `Cfg`
+    /// is the compiled baseline (`default_config`), and it is NOT the user's
+    /// configuration.
+    CompiledBaseline,
+}
+
+/// Parse `path` into a `Cfg`, the full `Diagnostics`, and the [`ConfigSource`]
+/// the load ended on. On a missing file the compiled defaults are returned with
+/// an empty diagnostic; on a read or syntax error the defaults are returned with
+/// the error recorded; on semantic issues the offending entries are dropped and
+/// reported. Never panics and never returns `None`.
 ///
-/// This is also the hot-reload entry point: `reload_config` re-reads the same
-/// path through it, so a file that stops parsing yields the compiled baseline
-/// again rather than the configuration that was live before the reload.
-pub fn load_from_path(path: &Path) -> (Cfg, Diagnostics) {
+/// The source is not a restatement of the diagnostic — it is the one fact the
+/// diagnostic cannot express. A missing file is *clean*, and a file that parsed
+/// but had a value rejected reports that through `errors` while the rest of the
+/// file is merged in, so neither `is_clean()` nor `!errors.is_empty()`
+/// identifies the compiled baseline. Startup (`load_config`, `--check-config`)
+/// takes the `Cfg` either way, because falling back to compiled defaults is what
+/// it is for.
+pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics) {
     log::config_trace("defaults_start", format_args!("path={}", path.display()));
     let baseline = default_config();
     log::config_trace("defaults_end", format_args!(""));
@@ -302,14 +323,14 @@ pub fn load_from_path(path: &Path) -> (Cfg, Diagnostics) {
         Ok(source) => source,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             log::config_snapshot("normalized_missing_file", &baseline);
-            return (baseline, diag);
+            return (ConfigSource::CompiledBaseline, baseline, diag);
         }
         Err(e) => {
             diag.errors.push(format!(
                 "cannot read '{}': {e}; using compiled defaults",
                 path.display()
             ));
-            return (baseline, diag);
+            return (ConfigSource::CompiledBaseline, baseline, diag);
         }
     };
 
@@ -346,7 +367,7 @@ pub fn load_from_path(path: &Path) -> (Cfg, Diagnostics) {
                 e.line,
                 e.kind
             ));
-            return (baseline, diag);
+            return (ConfigSource::CompiledBaseline, baseline, diag);
         }
     };
 
@@ -361,6 +382,23 @@ pub fn load_from_path(path: &Path) -> (Cfg, Diagnostics) {
         ),
     );
     log::config_snapshot("normalized_config", &cfg);
+    (ConfigSource::UserFile, cfg, diag)
+}
+
+/// The BOOT view of [`load_from_path_classified`]: the `Cfg` and its
+/// `Diagnostics`, with the [`ConfigSource`] thrown away. At startup a fallback to
+/// the compiled baseline is the intended outcome, not a fault, so nothing needs
+/// the distinction.
+///
+/// The reload path must NOT use this view. A reload *replaces* the
+/// configuration that is already live, and a compiled baseline returned for a
+/// missing, unreadable or unparseable file is not that configuration — adopting
+/// it would silently swap the user's keybinds, rules, theme and tag count for
+/// the compiled ones. `reload_config` therefore calls
+/// [`load_from_path_classified`] and keeps the configuration it is already
+/// running when the source is [`ConfigSource::CompiledBaseline`].
+pub fn load_from_path(path: &Path) -> (Cfg, Diagnostics) {
+    let (_source, cfg, diag) = load_from_path_classified(path);
     (cfg, diag)
 }
 
@@ -1983,5 +2021,56 @@ border_width = 0
                 "keysym {ksym:#x} used by action {action:?} has no name in KEYSYMS"
             );
         }
+    }
+
+    #[test]
+    fn classified_load_marks_a_broken_file_as_the_compiled_baseline() {
+        let path = write_temp("[general\ngaps = nope");
+        let (source, cfg, diag) = load_from_path_classified(&path);
+        assert_eq!(source, ConfigSource::CompiledBaseline);
+        assert_eq!(cfg.keybinds.len(), default_config().keybinds.len());
+        assert!(
+            diag.errors.iter().any(|e| e.contains("invalid TOML")),
+            "the syntax fault must be reported: {:?}",
+            diag.errors
+        );
+        // Boot keeps the documented baseline fallback — same config, same
+        // diagnostic; only the reason is dropped.
+        let (boot_cfg, boot_diag) = load_from_path(&path);
+        assert_eq!(boot_cfg.keybinds.len(), cfg.keybinds.len());
+        assert_eq!(boot_diag.errors, diag.errors);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn classified_load_marks_a_missing_file_as_the_compiled_baseline() {
+        let path = std::env::temp_dir().join("maverick-config-classified-missing.toml");
+        let _ = std::fs::remove_file(&path);
+        let (source, cfg, diag) = load_from_path_classified(&path);
+        assert_eq!(source, ConfigSource::CompiledBaseline);
+        assert_eq!(cfg.keybinds.len(), default_config().keybinds.len());
+        // A missing file yields a CLEAN diagnostic: the reason has to come from
+        // `ConfigSource`, never from the diagnostic lists.
+        assert!(diag.is_clean(), "{diag:?}");
+        let (boot_cfg, _) = load_from_path(&path);
+        assert_eq!(boot_cfg.keybinds.len(), cfg.keybinds.len());
+    }
+
+    #[test]
+    fn classified_load_marks_a_partly_rejected_file_as_the_users_file() {
+        // `diag.errors` is NOT an unusable signal: a rejected value is recorded
+        // while every other value in the file is merged in, so a reload must
+        // still adopt this config.
+        let path = write_temp("[general]\ngaps = 17\n\n[compositor]\nbackend = 7\n");
+        let (source, cfg, diag) = load_from_path_classified(&path);
+        assert_eq!(source, ConfigSource::UserFile);
+        assert_eq!(cfg.gaps_inner, 17);
+        assert_eq!(cfg.gaps_outer, 17);
+        assert!(
+            diag.errors.iter().any(|e| e.contains("compositor.backend")),
+            "{:?}",
+            diag.errors
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -351,12 +351,24 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Re-read the user TOML (same fail-safe path used at startup) and swap it
-    /// in. A config that can't be read, parsed, or applied leaves the current
-    /// config untouched and only logs a warning — reload can never crash or
-    /// blank the WM. If the tag count changed, every monitor's workspace list
-    /// is reconciled (grown/truncated) before the new keymap is grabbed and
-    /// everything is re-arranged.
+    /// Re-read the user TOML (the same fail-safe loader used at startup) and
+    /// swap it in. A file that cannot be read, or does not parse, is *not* the
+    /// configuration this session is running: the loader answers with the
+    /// compiled baseline, and adopting that would replace the user's keybinds,
+    /// rules, theme and tag count — and reconcile/clamp their windows against the
+    /// baseline's tag count. A missing file is treated the same way, even though
+    /// it is diagnosed silently: the current config is kept and a warning names
+    /// the path and the remedy (`restart` falls back to compiled defaults). A
+    /// file that *did* parse is applied even when individual values were
+    /// rejected, exactly as at startup — those land in `Diagnostics`, and are not
+    /// a reason to refuse the file.
+    ///
+    /// The decision is taken before any state is touched, so a rejected reload
+    /// leaves the running configuration, the workspace list, every client's
+    /// workspace and the grabbed keymap exactly as they were. If the tag count
+    /// did change, every monitor's workspace list is reconciled
+    /// (grown/truncated) before the new keymap is grabbed and everything is
+    /// re-arranged.
     pub(super) fn reload_config(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Re-read the same file we booted from: the `--config` override (stored
         // on `self.config_path`) must survive a reload, not be replaced by the
@@ -369,8 +381,22 @@ impl WindowManager {
             log::warn!("reload: no config path available; keeping current config");
             return Ok(());
         };
-        let (cfg, diag) = crate::userconfig::load_from_path(&path);
+        // `load_from_path` is the BOOT view and drops this distinction, so read
+        // the classified form: `Diagnostics` cannot decide it (a missing file is
+        // clean, a rejected value is still applied), and applying a compiled
+        // baseline over a live configuration is never what the user asked for.
+        // The check sits above `reconcile_workspaces` on purpose — it must run
+        // before anything is mutated for a rejected reload to leave the session
+        // untouched.
+        let (source, cfg, diag) = crate::userconfig::load_from_path_classified(&path);
         crate::userconfig::dump_diagnostics(&diag);
+        if source != crate::userconfig::ConfigSource::UserFile {
+            log::warn!(
+                "reload: '{}' is missing, unreadable or not valid TOML; keeping current config (run `maverickctl restart` to fall back to compiled defaults)",
+                path.display()
+            );
+            return Ok(());
+        }
 
         let tags_changed =
             cfg.n_tags != self.engine.cfg.n_tags || cfg.tag_names != self.engine.cfg.tag_names;
