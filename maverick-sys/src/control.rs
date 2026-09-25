@@ -48,6 +48,9 @@
 //!   to avoid TOCTOU symlink attacks.
 //! - Commands containing `'\n'` are rejected in [`send_command`] to prevent
 //!   line-protocol injection.
+//! - Every reply and event is cut back to at most [`MAX_LINE_LEN`] bytes on a
+//!   character boundary ([`single_line`]), so a hub payload can never make a
+//!   handler unwind mid-write.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::FileTypeExt;
@@ -275,30 +278,33 @@ fn handle_conn(
     }
 }
 
+/// Flatten a payload the hub published into one bounded protocol line.
+///
+/// All hub-published payloads must be single-line; a WM bug emitting `\n` would
+/// otherwise desync `subscribe_stream`'s `lines()` framing. The bound is in
+/// bytes but the payload is UTF-8, so the cut can land inside a multi-byte
+/// character, and [`String::truncate`] panics on any offset that is not a
+/// character boundary. Walk back to the last boundary at or before the limit: a
+/// character is at most 4 bytes, so the walk settles within three steps, and
+/// cutting a byte prefix leaves what is sent a valid, still-bounded prefix of
+/// the payload.
+fn single_line(s: &str) -> String {
+    let mut out: String = s.replace(['\n', '\r'], " ");
+    if out.len() > MAX_LINE_LEN {
+        let mut cut = MAX_LINE_LEN;
+        while !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+    }
+    out
+}
+
 /// Turn a single request line into a response, enqueuing commands as needed.
 fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -> String {
     // `name` comes from `--name` (external input): sanitize for the
     // line protocol so `pong evil\ninject` cannot break framing.
     let safe_name: String = name.chars().filter(|c| !c.is_control()).take(128).collect();
-    // All hub-published payloads must be single-line; a WM bug emitting
-    // `\n` would otherwise desync `subscribe_stream`'s `lines()` framing.
-    fn single_line(s: &str) -> String {
-        let mut out: String = s.replace(['\n', '\r'], " ");
-        if out.len() > MAX_LINE_LEN {
-            // The bound is in bytes but the payload is UTF-8, so the cut can
-            // land inside a multi-byte character, and `truncate` panics on any
-            // offset that is not a character boundary. Walk back to the last
-            // boundary at or before the limit: a char is at most 4 bytes, so
-            // the walk settles within three steps, and cutting a byte prefix
-            // leaves the reply a valid, still-bounded prefix of what was sent.
-            let mut cut = MAX_LINE_LEN;
-            while !out.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            out.truncate(cut);
-        }
-        out
-    }
     match cmd {
         PING_CMD => format!("pong {safe_name}\n"),
         IDENTIFY_CMD => format!("{}\n", single_line(identity_json)),
@@ -374,8 +380,8 @@ fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -
 
 /// Stream hub events to a subscribed client until it disconnects or the server
 /// stops. Blocks on this connection's thread only.
-/// Enforces single-line framing and a write timeout so one slow client
-/// cannot wedge its thread forever.
+/// Enforces single-line framing, a [`MAX_LINE_LEN`] byte bound and a write
+/// timeout so one slow client cannot wedge its thread forever.
 fn stream_events(
     writer: &mut UnixStream,
     rx: std::sync::mpsc::Receiver<String>,
@@ -388,11 +394,11 @@ fn stream_events(
         }
         match rx.recv_timeout(Duration::from_millis(250)) {
             Ok(line) => {
-                let clean = line.replace(['\n', '\r'], " ");
-                let mut out = clean;
-                if out.len() > MAX_LINE_LEN {
-                    out.truncate(MAX_LINE_LEN);
-                }
+                // The event text is whatever the WM put on the hub, which traces
+                // back to window titles and `WM_NAME`: the same framing and byte
+                // bound the reply path needs, and for the same reason — the cut
+                // must not land inside a multi-byte character.
+                let out = single_line(&line);
                 if writer.write_all(out.as_bytes()).is_err() || writer.write_all(b"\n").is_err() {
                     break;
                 }
@@ -608,6 +614,60 @@ mod tests {
 
         server.shutdown();
         assert!(!identity::sock_path(name).exists());
+    }
+
+    // The event stream is the one reply path whose payload the server does not
+    // choose: `hub.emit` carries client-supplied text (window titles,
+    // `WM_NAME`), so a multi-byte character can straddle the byte bound the
+    // frame has to be cut at. Replayed more times than there are handler slots,
+    // a subscriber that used to unwind on every oversized event must leave the
+    // server still serving commands.
+    #[test]
+    fn subscribers_streaming_oversized_events_leave_the_server_serving() {
+        let name = "testsubbig";
+        let hub = ControlHub::new();
+        let server = ControlServer::spawn(name, "{}\n".into(), hub.clone()).expect("server binds");
+        // A 2-byte character laid across the bound: the offset the raw cut
+        // cannot land on. The frame is the head without it, never a split of it.
+        let kept = "x".repeat(MAX_LINE_LEN - 1);
+        let payload = format!("{kept}é");
+        for round in 0..(MAX_CONCURRENT * 2) {
+            // Sinks are pruned by `emit`, so a connection that has only just
+            // ended may still be counted: the round's own registration is the
+            // one that has to be *new*, hence the baseline.
+            let before = hub.subscriber_count();
+            let mut s = UnixStream::connect(identity::try_sock_path(name).expect("sock path"))
+                .expect("connect");
+            s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            s.set_write_timeout(Some(Duration::from_secs(5))).ok();
+            s.write_all(b"subscribe\n").expect("write subscribe");
+            let mut lines = BufReader::new(&s).lines();
+            assert_eq!(
+                lines.next().expect("ack line").expect("read ack"),
+                "ok subscribe",
+                "round {round}: the subscribe was refused, so no slot was ever taken"
+            );
+            for _ in 0..250 {
+                if hub.subscriber_count() > before {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            // Published only once the sink is registered, or the event goes to
+            // an empty subscriber list and this client waits for a line that
+            // was never sent.
+            hub.emit(payload.clone());
+            assert_eq!(
+                lines.next().expect("event line").expect("read event"),
+                kept,
+                "round {round}: the subscriber did not get a bounded prefix of the event"
+            );
+        }
+        assert!(
+            ping(name).is_ok(),
+            "every handler slot must be back after every connection"
+        );
+        server.shutdown();
     }
 
     #[test]
@@ -1033,5 +1093,145 @@ mod reply_props {
     ) -> bool {
         let mut haystack = haystack.peekable();
         needle.all(|c| haystack.by_ref().find(|&h| h == c).is_some())
+    }
+}
+
+/// Properties of the event stream, the one output path whose payload the server
+/// does not choose: `hub.emit` carries client-supplied text (window titles,
+/// `WM_NAME`, whatever the WM puts in a title event), so the byte the frame has
+/// to be cut at can land anywhere, including inside a multi-byte character.
+#[cfg(test)]
+mod event_props {
+    use super::*;
+    use crate::prop_support::{config, text};
+    use proptest::prelude::*;
+
+    /// Run one payload through [`stream_events`] and return what the subscriber
+    /// saw on the wire.
+    ///
+    /// The sender is dropped before the call, so the loop writes the queued
+    /// event and then leaves on `Disconnected` instead of parking on its recv
+    /// timeout: a test observes one whole frame and nothing else. Reading the
+    /// peer afterwards rather than before is safe for the same reason — the
+    /// payload is bounded well under a socket buffer, so no write can block on
+    /// a reader that has not started yet.
+    fn stream_through(payload: String) -> Vec<u8> {
+        let (mut writer, mut peer) = UnixStream::pair().expect("socket pair");
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(payload).expect("queue the event");
+        drop(tx);
+        let stop = Arc::new(AtomicBool::new(false));
+        stream_events(&mut writer, rx, &stop);
+        drop(writer);
+        let mut seen = Vec::new();
+        peer.read_to_end(&mut seen).expect("drain the stream");
+        seen
+    }
+
+    // The client reads the stream with one `read_line` per event, so one hub
+    // event has to produce exactly one frame: a single trailing newline, no CR
+    // anywhere, and at most `MAX_LINE_LEN` bytes of payload in front of it. And
+    // a cut frame is still the head of what was published — never bytes the
+    // WM did not emit, and never the same character twice.
+    fn assert_one_event_frame(payload: &str, frame: &str) -> Result<(), TestCaseError> {
+        prop_assert!(
+            frame.ends_with('\n'),
+            "event frame is not newline terminated: {frame:?}"
+        );
+        prop_assert_eq!(
+            frame.matches('\n').count(),
+            1,
+            "event frame carries more than one frame: {:?}",
+            frame
+        );
+        prop_assert!(!frame.contains('\r'), "event frame carries a CR: {frame:?}");
+        let body = frame.strip_suffix('\n').expect("newline terminated");
+        prop_assert!(
+            body.len() <= MAX_LINE_LEN,
+            "event body is {} bytes, past the {MAX_LINE_LEN} byte line bound",
+            body.len()
+        );
+        // The framing turns a CR or LF into a space; both are one byte, so the
+        // flattening moves no character boundary and leaves the bound and the
+        // prefix relation to compare against the published payload.
+        let clean = payload.replace(['\n', '\r'], " ");
+        prop_assert!(
+            clean.starts_with(body),
+            "event body is not the head of the published payload: {frame:?}"
+        );
+        Ok(())
+    }
+
+    // The shrinking target of the property below, made deterministic: a payload
+    // that lays a character across the byte bound, where the cut has to stop at
+    // the character start instead of splitting it. Every character width gets
+    // its own case, and each is walked to the byte before the bound, the bound
+    // itself and the byte after it, so a regression cannot hide behind a
+    // generator that rarely lands on a straddling offset.
+    #[test]
+    fn an_event_straddling_the_bound_is_streamed_as_its_utf8_prefix() {
+        for wide in ['a', '\u{00e9}', '\u{20ac}', '\u{1f600}'] {
+            // Where the payload ends relative to the bound: one byte short,
+            // exactly on it, one byte past it. Only the last one straddles the
+            // cut, since the character's last bytes are then past the bound
+            // while its first ones are not.
+            for over in [-1i64, 0, 1] {
+                let head = MAX_LINE_LEN as i64 + over - wide.len_utf8() as i64;
+                let payload = format!("{}{wide}", "x".repeat(head as usize));
+                let label = format!("{wide:?} reaching {over:+}");
+                let seen = stream_through(payload.clone());
+                let frame = String::from_utf8(seen.clone())
+                    .unwrap_or_else(|e| panic!("{label} wrote bytes that do not decode: {e}"));
+                if let Err(e) = assert_one_event_frame(&payload, &frame) {
+                    panic!("{label} broke the frame contract: {e:?}");
+                }
+                // A payload that already ends inside the bound is streamed
+                // whole; one reaching past it loses the straddling character
+                // entirely, since half of it is not a frame.
+                let kept = if over > 0 {
+                    head as usize
+                } else {
+                    payload.len()
+                };
+                assert_eq!(
+                    frame.strip_suffix('\n').expect("newline terminated"),
+                    &payload[..kept],
+                    "{label} kept {} bytes, which is not the last character \
+                     boundary at or before the bound",
+                    frame.len()
+                );
+            }
+        }
+    }
+
+    // That case is the shape that used to unwind the handler thread; this one
+    // is the shape nobody thought of. The character landing on the bound, its
+    // width and everything after it are generated freely, so the cut is
+    // exercised on a boundary and inside every width a UTF-8 payload can have.
+    proptest! {
+        #![proptest_config(config())]
+        #[test]
+        fn an_event_of_any_character_width_is_streamed_as_one_bounded_frame(
+            over in 0usize..8,
+            boundary in prop_oneof![Just('a'), any::<char>()],
+            tail in text(),
+        ) {
+            let mut payload = "x".repeat(MAX_LINE_LEN - over);
+            payload.push(boundary);
+            payload.push_str(&tail);
+            let seen = stream_through(payload.clone());
+            let frame = String::from_utf8(seen.clone())
+                .unwrap_or_else(|e| panic!("a {} byte event wrote bytes that do not decode: {e}", seen.len()));
+            assert_one_event_frame(&payload, &frame)?;
+            // Exactly the last character boundary at or before the bound, and
+            // not one byte less: a cut that under- or over-shoots still frames
+            // correctly, but hands the client an event the WM never sent.
+            let clean = payload.replace(['\n', '\r'], " ");
+            let mut cut = MAX_LINE_LEN.min(clean.len());
+            while !clean.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            prop_assert_eq!(frame.strip_suffix('\n').expect("terminated"), &clean[..cut]);
+        }
     }
 }
