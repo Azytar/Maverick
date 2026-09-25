@@ -194,3 +194,115 @@ impl XDisplay {
 pub fn install_silent_error_handler() {
     unsafe { XSetErrorHandler(Some(silent_error_handler)) };
 }
+
+/// The one piece of bookkeeping in this module: what a caller is allowed to
+/// conclude from [`take_x_error`], over any sequence of the operations the
+/// sanctioned `clear → request → sync → take` round trip is made of.
+///
+/// Nothing here needs a connection. The handler only ever reads
+/// `error_code`, so a fabricated event is exactly as good as a real one, and
+/// the cell it writes is thread-local, so a test never sees another thread's
+/// errors.
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Hand the error cell a code the way Xlib would, through the real
+    /// handler, without a `Display*` to report it on.
+    fn record(code: u8) {
+        let mut ev = XErrorEvent {
+            type_: 0,
+            display: std::ptr::null_mut(),
+            resourceid: 0,
+            serial: 0,
+            error_code: code,
+            request_code: 0,
+            minor_code: 0,
+        };
+        // SAFETY: the handler dereferences `err` and reads `display` and
+        // `error_code` only; both are valid here, and `display` is never
+        // touched.
+        let rc = unsafe { silent_error_handler(std::ptr::null_mut(), &mut ev) };
+        assert_eq!(rc, 0, "the handler must never ask Xlib to exit");
+    }
+
+    proptest! {
+        /// Whatever sequence of round trips went through, a take reports
+        /// exactly what the last error was, reports it once, and reports
+        /// nothing for a round trip that was clean.
+        ///
+        /// The discipline around it is the contract: a caller clears, issues
+        /// the request that could be wrong, syncs, and takes. A take that did
+        /// not clear would report the previous frame's `BadMatch` against
+        /// every later pixmap, and the compositor would drop windows it had
+        /// just composited. Code 0 means "no error since the last clear", so
+        /// reporting it would turn a clean round trip into a failure.
+        #[test]
+        fn a_taken_x_error_is_reported_exactly_once(steps in prop::collection::vec(any::<u8>(), 1..24)) {
+            clear_x_error();
+            prop_assert_eq!(take_x_error(), None, "a cleared cell holds nothing");
+            for code in steps {
+                record(code);
+                if code == 0 {
+                    prop_assert_eq!(take_x_error(), None, "0 is not an error code");
+                } else {
+                    prop_assert_eq!(take_x_error(), Some(code));
+                }
+                prop_assert_eq!(take_x_error(), None, "a taken error was reported again");
+                // A round trip that is never checked must not leave anything
+                // behind for the next one either.
+                clear_x_error();
+                prop_assert_eq!(take_x_error(), None);
+            }
+        }
+    }
+
+    /// A clear forgets whatever the previous round trip recorded, so a stale
+    /// error cannot be blamed on the request that follows it.
+    #[test]
+    fn clearing_x_error_discards_the_recorded_code() {
+        for code in [1u8, 8, 11, 17, 200, 255] {
+            record(code);
+            clear_x_error();
+            assert_eq!(take_x_error(), None, "code {code} survived a clear");
+        }
+    }
+
+    /// Each of the 17 core protocol codes has its own name, and nothing else
+    /// does.
+    ///
+    /// The name is the whole of what a user sees when a request the compositor
+    /// made was refused, so two codes sharing one name (or a known code falling
+    /// through to the extension catch-all) makes the log point at the wrong
+    /// problem — and the table is fixed by the protocol, never extended by a
+    /// driver.
+    #[test]
+    fn every_core_x_error_code_has_its_own_name() {
+        const CORE: u8 = 17;
+        let mut seen: Vec<&str> = Vec::new();
+        for code in 1..=CORE {
+            let name = x_error_name(code);
+            assert!(!name.is_empty(), "code {code} has no name");
+            assert!(
+                !seen.contains(&name),
+                "code {code} is reported as {name:?}, which another code already uses"
+            );
+            assert_ne!(
+                name,
+                x_error_name(0),
+                "a core code fell through to the extension catch-all"
+            );
+            seen.push(name);
+        }
+        // Everything the protocol does not define is an extension's, and says
+        // so — a name that guesses would be worse than none.
+        for code in (CORE + 1)..=u8::MAX {
+            assert_eq!(
+                x_error_name(code),
+                x_error_name(0),
+                "code {code} guessed a name"
+            );
+        }
+    }
+}

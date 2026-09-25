@@ -131,3 +131,85 @@ fn last_error() -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+/// The two properties of the loader that hold without a driver being present:
+/// the candidate list keeps the search path it is supposed to keep, and a
+/// symbol name that cannot be one is never resolved.
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+
+    /// Every candidate is an absolute path except the bare soname, which is
+    /// there only as a last resort, tried last and exactly once.
+    ///
+    /// This is the crate's one piece of hardening: a bare `dlopen("libGL.so.1")`
+    /// honours `LD_LIBRARY_PATH` and `LD_PRELOAD`, so a hostile environment in
+    /// the compositor's process could inject code into it, while an absolute
+    /// path cannot. The soname stays last so a layout the fixed list does not
+    /// know (a Nix store, say) keeps working. A NUL inside a candidate would
+    /// panic the loader's `CString::new(..).expect` on a machine nobody
+    /// expects to fail.
+    ///
+    /// The list is a constant, so this is a scan of it rather than a generated
+    /// case.
+    #[test]
+    fn gl_candidates_are_absolute_paths_first_and_nul_free() {
+        let (last, head) = GL_CANDIDATES.split_last().expect("a candidate list");
+        assert_eq!(*last, "libGL.so.1", "the bare soname is the last resort");
+        for cand in head {
+            assert!(
+                cand.starts_with('/'),
+                "{cand} is not absolute, so a search path could hijack it"
+            );
+        }
+        for cand in GL_CANDIDATES {
+            assert!(!cand.contains('\0'), "{cand:?} is not a C string");
+            assert!(cand.ends_with("libGL.so.1"), "{cand} is not libGL at all");
+        }
+        for (i, cand) in GL_CANDIDATES.iter().enumerate() {
+            assert_eq!(
+                GL_CANDIDATES.iter().filter(|c| *c == cand).count(),
+                1,
+                "{cand} is tried more than once, so a failing one fails twice"
+            );
+            let _ = i;
+        }
+    }
+
+    /// A symbol name carrying an interior NUL resolves to nothing, even when
+    /// its prefix is a symbol the driver really has.
+    ///
+    /// The lookup goes through `glXGetProcAddressARB`/`dlsym`, both of which
+    /// take a C string: handed a name with a NUL in it, the C side would stop
+    /// there and resolve the *prefix*. That turns "look up this name" into
+    /// "look up whatever the caller started with", which is how a caller ends
+    /// up calling the wrong entry point.
+    ///
+    /// Needs a driver to look anything up; on a machine with none there is
+    /// nothing to resolve against and the guard is unreachable, so the check
+    /// is simply not made there.
+    #[test]
+    fn a_symbol_name_with_an_embedded_nul_never_resolves() {
+        let Ok(lib) = Lib::open_gl() else {
+            return;
+        };
+        for name in [
+            "glGetError\0junk",
+            "\0",
+            "glXSwapBuffers\0",
+            "junk\0glGetError",
+        ] {
+            assert!(
+                lib.sym_opt(name).is_none(),
+                "{name:?} resolved to something"
+            );
+            let err = lib
+                .sym(name)
+                .expect_err("a name with a NUL must not resolve");
+            assert!(
+                err.contains(name),
+                "{err:?} does not name the symbol it missed"
+            );
+        }
+    }
+}

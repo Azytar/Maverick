@@ -111,6 +111,24 @@ void main() {
 }
 "#;
 
+/// The context the compositor asks for, as the key/value list
+/// `glXCreateContextAttribsARB` expects: attribute/value pairs closed by a
+/// `0`, which is a terminator and not an attribute.
+///
+/// The version is deliberately kept in step with the `#version` line both
+/// built-in shaders declare. GLSL only ever versions *downwards*: a context
+/// older than its shaders is a compile failure on a real driver, and nothing
+/// in this process reports it before the window goes black.
+const GLX_CTX_ATTRIBS: [c_int; 7] = [
+    GLX_CONTEXT_MAJOR_VERSION_ARB,
+    3,
+    GLX_CONTEXT_MINOR_VERSION_ARB,
+    3,
+    GLX_CONTEXT_PROFILE_MASK_ARB,
+    GLX_CONTEXT_CORE_PROFILE_BIT_ARB,
+    0,
+];
+
 /// A window (or pixmap) bound as an OpenGL texture through
 /// `GLX_EXT_texture_from_pixmap`.
 ///
@@ -430,6 +448,34 @@ struct FbAttrs {
     y_inverted: Option<c_int>,
 }
 
+/// The `GLX_TEXTURE_FORMAT_EXT` a pixmap of visual `want` is bound with.
+///
+/// Decided by the *visual*, never by the fbconfig: an ARGB visual is
+/// sampled as RGBA and everything else as RGB, where the TFP spec
+/// guarantees the sampler returns `a = 1.0` whatever alpha the config
+/// carries. So this must agree with what [`rate_fbconfig`] demands the
+/// chosen config be bindable as, or a window ends up bound through a
+/// config that cannot serve the request.
+fn tfp_texture_format(want: VisualFormat) -> c_int {
+    if want.has_alpha() {
+        GLX_TEXTURE_FORMAT_RGBA_EXT
+    } else {
+        GLX_TEXTURE_FORMAT_RGB_EXT
+    }
+}
+
+/// Whether a texture from an fbconfig reporting `y_inverted` has to be
+/// sampled y-flipped.
+///
+/// `GLX_Y_INVERTED_EXT == TRUE` puts the *top* of the drawable at `t = 0`,
+/// which is already how `VERTEX_SRC` measures `u_src.y`, so only FALSE
+/// needs a flip. Tested against 0 rather than against "not TRUE": such
+/// servers measurably answer the out-of-spec `GLX_DONT_CARE` (-1), and
+/// flipping on that would turn every window upside down.
+fn tfp_flip(y_inverted: Option<c_int>) -> bool {
+    y_inverted == Some(0)
+}
+
 /// Why an fbconfig was turned down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reject {
@@ -582,6 +628,66 @@ impl fmt::Display for Rejects {
         }
         Ok(())
     }
+}
+
+/// The rectangle `glScissor` must be given for a damage rect of
+/// `(x, y, w, h)` in top-left screen coordinates on a `width x height`
+/// screen, returned as GL's own bottom-left `(x, y, w, h)`.
+///
+/// Every number here is decided by clamping and saturating arithmetic over
+/// values a client can push arbitrarily out of range — a window being
+/// resized hands us a rect from the screen it is *leaving* — and both
+/// failure directions are silent: a box escaping the viewport is a GL
+/// error, and a box that is too small leaves stale pixels in the frame.
+///
+/// `width`/`height` are narrowed to `i32` to clamp against, so a screen of
+/// 2^31 pixels or more is outside what this accepts rather than supported.
+fn scissor_box(
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    width: u32,
+    height: u32,
+) -> (GLint, GLint, GLsizei, GLsizei) {
+    let x0 = x.clamp(0, width as i32) as u32;
+    let y0 = y.clamp(0, height as i32) as u32;
+    let right = (x as i64 + w as i64).clamp(0, width as i64) as u32;
+    let bottom = (y as i64 + h as i64).clamp(0, height as i64) as u32;
+    let clipped_w = right.saturating_sub(x0);
+    let clipped_h = bottom.saturating_sub(y0);
+    (
+        x0 as GLint,
+        (height - clipped_h - y0) as GLint,
+        clipped_w as GLsizei,
+        clipped_h as GLsizei,
+    )
+}
+
+/// Straight RGBA8 to premultiplied RGBA8 — the source convention the window
+/// path's `(ONE, ONE_MINUS_SRC_ALPHA)` blend needs, and what X Render and
+/// `GLX_EXT_texture_from_pixmap` already hand us for redirected windows.
+///
+/// Alpha is carried through untouched and each colour channel is scaled by
+/// it and rounded to nearest, because alpha is what the blend later reads to
+/// decide how much of the destination survives. The result holds one texel
+/// per input pixel, so its length is the input's: `glTexImage2D` is handed
+/// this buffer and reads `w * h * 4` bytes out of it.
+fn premultiply_rgba(data: &[u8]) -> Vec<u8> {
+    let mut premult = Vec::with_capacity(data.len());
+    for chunk in data.chunks_exact(4) {
+        let r = chunk[0] as u32;
+        let g = chunk[1] as u32;
+        let b = chunk[2] as u32;
+        let a = chunk[3] as u32;
+        premult.extend_from_slice(&[
+            ((r * a + 127) / 255) as u8,
+            ((g * a + 127) / 255) as u8,
+            ((b * a + 127) / 255) as u8,
+            a as u8,
+        ]);
+    }
+    premult
 }
 
 pub struct Renderer {
@@ -743,16 +849,15 @@ impl Renderer {
 
         let win_cfg = choose_window_fbconfig(&glx, d, screen, root_format)?;
 
-        let ctx_attribs: [c_int; 7] = [
-            GLX_CONTEXT_MAJOR_VERSION_ARB,
-            3,
-            GLX_CONTEXT_MINOR_VERSION_ARB,
-            3,
-            GLX_CONTEXT_PROFILE_MASK_ARB,
-            GLX_CONTEXT_CORE_PROFILE_BIT_ARB,
-            0,
-        ];
-        let ctx = unsafe { create_ctx(d, win_cfg, std::ptr::null_mut(), 1, ctx_attribs.as_ptr()) };
+        let ctx = unsafe {
+            create_ctx(
+                d,
+                win_cfg,
+                std::ptr::null_mut(),
+                1,
+                GLX_CTX_ATTRIBS.as_ptr(),
+            )
+        };
         // The context request is asynchronous; sync so a GLXBadFBConfig has
         // landed (and been swallowed by our silent handler) before we test.
         dpy.sync();
@@ -1017,21 +1122,11 @@ impl Renderer {
     /// (y grows downward); GL's scissor origin is bottom-left, so the y is
     /// flipped against `height`.
     pub fn set_scissor(&mut self, x: i32, y: i32, w: u32, h: u32, width: u32, height: u32) {
-        let x0 = x.clamp(0, width as i32) as u32;
-        let y0 = y.clamp(0, height as i32) as u32;
-        let right = (x as i64 + w as i64).clamp(0, width as i64) as u32;
-        let bottom = (y as i64 + h as i64).clamp(0, height as i64) as u32;
-        let clipped_w = right.saturating_sub(x0);
-        let clipped_h = bottom.saturating_sub(y0);
+        let (sx, sy, sw, sh) = scissor_box(x, y, w, h, width, height);
         let gl = &self.gl;
         unsafe {
             (gl.glEnable)(GL_SCISSOR_TEST);
-            (gl.glScissor)(
-                x0 as GLint,
-                (height - clipped_h - y0) as GLint,
-                clipped_w as GLsizei,
-                clipped_h as GLsizei,
-            );
+            (gl.glScissor)(sx, sy, sw, sh);
         }
     }
 
@@ -1346,19 +1441,7 @@ impl Renderer {
         }
         // Premultiply straight RGBA → premultiplied (the compositor's blend is
         // (ONE, ONE_MINUS_SRC_ALPHA) and expects premultiplied source).
-        let mut premult = Vec::with_capacity(img.data.len());
-        for chunk in img.data.chunks_exact(4) {
-            let r = chunk[0] as u32;
-            let g = chunk[1] as u32;
-            let b = chunk[2] as u32;
-            let a = chunk[3] as u32;
-            premult.extend_from_slice(&[
-                ((r * a + 127) / 255) as u8,
-                ((g * a + 127) / 255) as u8,
-                ((b * a + 127) / 255) as u8,
-                a as u8,
-            ]);
-        }
+        let premult = premultiply_rgba(&img.data);
         unsafe {
             (gl.glBindTexture)(GL_TEXTURE_2D, tex);
             (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1817,7 +1900,6 @@ fn choose_tfp_fbconfig(
         return Err("glXGetFBConfigs returned no fbconfig at all".into());
     }
     let configs = unsafe { std::slice::from_raw_parts(list, n as usize) };
-    let want_alpha = want.has_alpha();
     let mut why = Rejects::default();
     let mut best: Option<(i32, TfpConfig)> = None;
 
@@ -1859,11 +1941,7 @@ fn choose_tfp_fbconfig(
                     score,
                     TfpConfig {
                         cfg,
-                        format: if want_alpha {
-                            GLX_TEXTURE_FORMAT_RGBA_EXT
-                        } else {
-                            GLX_TEXTURE_FORMAT_RGB_EXT
-                        },
+                        format: tfp_texture_format(want),
                         // `GLX_Y_INVERTED_EXT == TRUE` means the *top* of the
                         // drawable is at texture coordinate `t = 0` — the
                         // extension spec's own usage example spells it out:
@@ -1879,7 +1957,7 @@ fn choose_tfp_fbconfig(
                         // out-of-spec `-1` (`GLX_DONT_CARE`) is treated as the
                         // common TRUE case, which is what such servers
                         // measurably do.
-                        flip: fb.y_inverted == Some(0),
+                        flip: tfp_flip(fb.y_inverted),
                         visual: fb.visual,
                         buffer_size: fb.buffer_size,
                         rgba: fb.rgba,
@@ -2201,5 +2279,734 @@ mod tests {
         assert_eq!(Filter::Nearest.to_gl(), GL_NEAREST);
         assert_eq!(Filter::Linear.to_gl(), GL_LINEAR);
         assert_eq!(Filter::default(), Filter::Nearest);
+    }
+}
+
+/// Properties of the decisions that have to hold for *any* visual, fbconfig
+/// or pixel buffer, and not only for the handful a real screen happens to
+/// offer: which fbconfig may serve which visual and how they rank, the
+/// arithmetic of the damage clip, the premultiply the blend depends on, and
+/// the shape of the lists handed across the FFI boundary.
+///
+/// Every input here is a plain value. Nothing in this module needs a GL
+/// context, a GLX connection or an X display, which is the only reason these
+/// invariants can be checked at all on a build machine.
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A flag a working screen mostly sets, so generated configs do not spend
+    /// every case on a rejection the interesting rules never reach.
+    fn likely() -> impl Strategy<Value = bool> {
+        prop_oneof![9 => Just(true), 1 => Just(false)]
+    }
+
+    /// A flag a real screen is genuinely split on.
+    fn evenly() -> impl Strategy<Value = bool> {
+        any::<bool>()
+    }
+
+    /// A screen dimension. `i32::MAX` is in because it is the largest size the
+    /// scissor clamp's narrowing to `i32` still describes, and 0 because a
+    /// compositor is handed an empty screen before the first monitor is known.
+    fn screen_dim() -> impl Strategy<Value = u32> {
+        prop_oneof![
+            Just(0),
+            Just(1),
+            2u32..=16384,
+            0x7FFF_FF00u32..=i32::MAX as u32
+        ]
+    }
+
+    /// A client-supplied coordinate, including the extremes a resize produces:
+    /// a window leaving a larger screen has negative coordinates, and one
+    /// arriving from off-screen can be at any distance.
+    fn coord() -> impl Strategy<Value = i32> {
+        prop_oneof![
+            Just(i32::MIN),
+            Just(i32::MAX),
+            Just(-1),
+            Just(0),
+            Just(1),
+            -1_000_000i32..=1_000_000
+        ]
+    }
+
+    /// A client-supplied extent, where `u32::MAX` stands in for the "as big as
+    /// the damage rect will ever be" a compositor computes with an
+    /// underflowing subtraction.
+    fn extent() -> impl Strategy<Value = u32> {
+        prop_oneof![Just(0), Just(1), Just(u32::MAX), 0u32..=1_000_000]
+    }
+
+    /// Whole RGBA texels, which is the only shape `upload_rgba` is given: an
+    /// `Rgba8` whose buffer holds exactly `w * h * 4` bytes.
+    fn arb_pixels() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(prop::array::uniform4(any::<u8>()), 0..=16)
+            .prop_map(|pixels| pixels.into_iter().flatten().collect())
+    }
+
+    proptest! {
+        /// Whatever the damage rect, the box handed to `glScissor` lies
+        /// inside the viewport.
+        ///
+        /// This is the one thing that must never break: a scissor box that
+        /// leaves the viewport is a GL error, and a box that is merely wrong
+        /// leaves the undamaged part of the previous frame on screen, which
+        /// reads as a compositor that "forgets" to repaint. The rects reach
+        /// `set_scissor` straight from client geometry during a resize, so
+        /// clipping rather than trusting the caller is what keeps the box in
+        /// range — including for the rect of a screen that no longer exists.
+        #[test]
+        fn scissor_box_never_leaves_the_viewport(
+            width in screen_dim(),
+            height in screen_dim(),
+            x in coord(),
+            y in coord(),
+            w in extent(),
+            h in extent(),
+        ) {
+            let (sx, sy, sw, sh) = scissor_box(x, y, w, h, width, height);
+            prop_assert!(sx >= 0, "x origin {sx} is left of the screen");
+            prop_assert!(sy >= 0, "y origin {sy} is below the screen");
+            prop_assert!(sw >= 0 && sh >= 0, "negative size ({sw}, {sh})");
+            prop_assert!(
+                i64::from(sx) + i64::from(sw) <= i64::from(width),
+                "x extent {} overruns a {width}-wide screen",
+                i64::from(sx) + i64::from(sw)
+            );
+            prop_assert!(
+                i64::from(sy) + i64::from(sh) <= i64::from(height),
+                "y extent {} overruns a {height}-tall screen",
+                i64::from(sy) + i64::from(sh)
+            );
+        }
+
+        /// A damage rect that is already inside the screen reaches GL
+        /// unchanged, y origin included.
+        ///
+        /// Clipping may only shrink a rect, never move it, and a partial
+        /// redraw has to clear exactly the rows the rect named. The y flip is
+        /// the part that fails silently: the compositor counts damage from the
+        /// top and GL scissors from the bottom, and an origin one row off
+        /// leaves a band of the previous frame behind with no error anywhere.
+        #[test]
+        fn scissor_box_passes_an_interior_damage_rect_through_unchanged(
+            x in 0i32..=4096,
+            y in 0i32..=4096,
+            w in 0u32..=4096,
+            h in 0u32..=4096,
+            spare_x in 0u32..=64,
+            spare_y in 0u32..=64,
+        ) {
+            // The screen is grown past the rect, so it is interior by
+            // construction and clipping has nothing left to do.
+            let width = x as u32 + w + spare_x;
+            let height = y as u32 + h + spare_y;
+            prop_assert_eq!(
+                scissor_box(x, y, w, h, width, height),
+                (
+                    x,
+                    height as GLint - y as GLint - h as GLint,
+                    w as GLsizei,
+                    h as GLsizei,
+                )
+            );
+        }
+
+        /// Asking for a bigger damaged region never clips down to a smaller
+        /// one, on any screen.
+        ///
+        /// The compositor derives the damage rect of a resize from the union
+        /// of the old and the new geometry and relies on the clip being
+        /// monotonic to clear that whole union in one pass. A box that shrank
+        /// as the request grew would leave the new part of a window showing
+        /// the frame before it moved.
+        #[test]
+        fn scissor_box_never_shrinks_as_the_damage_grows(
+            width in screen_dim(),
+            height in screen_dim(),
+            x in coord(),
+            y in coord(),
+            w in extent(),
+            h in extent(),
+            grow in extent(),
+            grow_h in extent(),
+        ) {
+            let (bx, by, bw, bh) = scissor_box(x, y, w, h, width, height);
+            let (wx, _, ww, _) =
+                scissor_box(x, y, w.saturating_add(grow), h, width, height);
+            let (_, ty, _, th) = scissor_box(x, y, w, h.saturating_add(grow_h), width, height);
+            prop_assert!(ww >= bw, "clip width fell for a wider request");
+            prop_assert!(th >= bh, "clip height fell for a taller request");
+            // The left edge does not move, and the top edge (GL's origin plus
+            // its height, since GL counts from the bottom) never moves up: a
+            // growing request may only ever claim more rows.
+            prop_assert_eq!(wx, bx, "the left edge moved for a wider request");
+            prop_assert!(ty as i64 + th as i64 >= by as i64 + bh as i64, "the top edge moved up");
+            // A bigger screen can only leave more of the request intact. The
+            // grown size stays inside the range the clamp narrows to, or the
+            // screen itself would be out of what this accepts.
+            let (_, _, sw, sh) = scissor_box(
+                x,
+                y,
+                w,
+                h,
+                width.saturating_add(grow).min(i32::MAX as u32),
+                height.saturating_add(grow_h).min(i32::MAX as u32),
+            );
+            prop_assert!(sw >= bw && sh >= bh, "a bigger screen clipped more");
+        }
+
+        /// A visual reports the sum of the channel widths it actually carries,
+        /// wide enough to hold three of them.
+        ///
+        /// The figure is what the compositor compares a client's declared depth
+        /// against, and a sum that wrapped in `u8` would claim an ARGB visual
+        /// has 8 colour bits and turn down every configuration on the screen.
+        #[test]
+        fn visual_colour_bits_are_the_wide_sum_of_its_channels(
+            r in any::<u8>(),
+            g in any::<u8>(),
+            b in any::<u8>(),
+            a in any::<u8>(),
+        ) {
+            let v = VisualFormat {
+                id: 0x21,
+                depth: 24,
+                red_bits: r,
+                green_bits: g,
+                blue_bits: b,
+                alpha_bits: a,
+                direct: true,
+            };
+            prop_assert_eq!(v.color_bits(), u32::from(r) + u32::from(g) + u32::from(b));
+            prop_assert!(v.color_bits() <= 3 * 255, "more colour than three 8-bit channels");
+            prop_assert_eq!(v.has_alpha(), a > 0);
+        }
+    }
+
+    /// The channel width one component of a visual carries: the sizes X really
+    /// reports, from a stub entry with none to a 16-bit-per-channel screen.
+    fn channel_width() -> impl Strategy<Value = u8> {
+        prop_oneof![0u8..=1, 4u8..=6, 8u8..=10, 15u8..=16, 32u8..=32]
+    }
+
+    /// A visual the X `Setup` could really report: `depth` consistent with the
+    /// channel widths, as `alpha_bits = depth - (r + g + b)` documents. The
+    /// widths are the sizes X actually uses, so the comparisons in
+    /// [`rate_fbconfig`] run across the whole range instead of only at 8/8/8.
+    fn arb_visual() -> impl Strategy<Value = VisualFormat> {
+        (
+            channel_width(),
+            channel_width(),
+            channel_width(),
+            prop_oneof![0u8..=1, 8u8..=8, 10u8..=10, 16u8..=16],
+            any::<u32>(),
+        )
+            .prop_map(|(r, g, b, a, id)| VisualFormat {
+                id,
+                depth: r + g + b + a,
+                red_bits: r,
+                green_bits: g,
+                blue_bits: b,
+                alpha_bits: a,
+                direct: true,
+            })
+    }
+
+    /// The channel width a real fbconfig reports where the visual needs
+    /// `bits`: often exactly that, sometimes another. Widths above the
+    /// visual's are generated too, because a wider config is one the driver
+    /// widens rather than invents, and that case has to keep being accepted.
+    fn arb_width_for(bits: u8) -> impl Strategy<Value = c_int> {
+        prop_oneof![3 => Just(c_int::from(bits)), 2 => 0..=48]
+    }
+
+    /// A visual paired with an fbconfig, drawn so that "this config serves
+    /// this visual" and "it does not" are both common: a real screen offers a
+    /// mix of both, and the decision has to come out right in either
+    /// direction — too strict and every window vanishes, too lax and its
+    /// colours are reinterpreted.
+    fn arb_pair() -> impl Strategy<Value = (VisualFormat, FbAttrs)> {
+        arb_visual().prop_flat_map(|want| {
+            let other_depth = (0u8..=112).prop_filter("a depth of its own", {
+                let taken = want.depth;
+                move |d| *d != taken
+            });
+            let depth = prop_oneof![
+                6 => Just(Some(want.depth)),
+                2 => Just(None),
+                2 => other_depth.prop_map(Some)
+            ];
+            let widths = (
+                arb_width_for(want.red_bits),
+                arb_width_for(want.green_bits),
+                arb_width_for(want.blue_bits),
+                arb_width_for(want.alpha_bits),
+            );
+            // Pixmap-renderable, RGBA-renderable, bind RGB, bind RGBA, 2D
+            // target, caveat-free.
+            let caps = (likely(), likely(), evenly(), evenly(), likely(), evenly());
+            (depth, widths, caps).prop_map(move |(visual_depth, (r, g, b, a), caps)| {
+                let rgba = [r, g, b, a];
+                let fb = FbAttrs {
+                    visual: want.id,
+                    visual_depth,
+                    pixmap_renderable: caps.0,
+                    rgba_render: caps.1,
+                    rgba,
+                    // Deliberately the sum of the channel widths, i.e. what
+                    // GLX_BUFFER_SIZE reports for a real config — including the
+                    // depth-24 visual served by a 32-bit buffer, which is the
+                    // case a `buffer_size == depth` rule would turn down.
+                    buffer_size: rgba.iter().sum(),
+                    bind_rgb: caps.2,
+                    bind_rgba: caps.3,
+                    target_2d: caps.4,
+                    caveat_free: caps.5,
+                    y_inverted: Some(1),
+                };
+                (want, fb)
+            })
+        })
+    }
+
+    /// The five things a config can match the visual on, in the order the
+    /// rules rank them: the visual itself, then its depth, then the exact
+    /// colour widths, then alpha, then the absence of a rendering caveat.
+    fn match_key(fb: &FbAttrs, want: VisualFormat) -> [bool; 5] {
+        [
+            fb.visual == want.id,
+            fb.visual_depth == Some(want.depth),
+            fb.rgba[0] == c_int::from(want.red_bits)
+                && fb.rgba[1] == c_int::from(want.green_bits)
+                && fb.rgba[2] == c_int::from(want.blue_bits),
+            fb.rgba[3] == c_int::from(want.alpha_bits),
+            fb.caveat_free,
+        ]
+    }
+
+    /// A config accepted for `want` whatever the ranking says of it: the
+    /// visual's own channel widths widened by at most 8 bits each, a depth
+    /// that is either the visual's own or absent, and the bind capability the
+    /// visual needs. These are the shapes one screen's GLX list really has.
+    fn arb_acceptable(want: VisualFormat) -> impl Strategy<Value = FbAttrs> {
+        let alpha_needed = want.has_alpha();
+        let parts = (
+            prop_oneof![4 => Just(want.id), 1 => 0u32..=u32::MAX],
+            prop_oneof![4 => Just(Some(want.depth)), 1 => Just(None)],
+            (0u8..=8, 0u8..=8, 0u8..=8, 0u8..=8),
+            evenly(),
+        );
+        parts.prop_map(move |(visual, visual_depth, (dr, dg, db, da), caveat)| {
+            FbAttrs {
+                visual,
+                visual_depth,
+                pixmap_renderable: true,
+                rgba_render: true,
+                rgba: [
+                    c_int::from(want.red_bits) + c_int::from(dr),
+                    c_int::from(want.green_bits) + c_int::from(dg),
+                    c_int::from(want.blue_bits) + c_int::from(db),
+                    c_int::from(want.alpha_bits) + c_int::from(da),
+                ],
+                buffer_size: 32,
+                // A real config advertises whichever formats it can bind; the
+                // one this visual needs is always among them, the other is
+                // what actually varies between drivers.
+                bind_rgb: !alpha_needed,
+                bind_rgba: alpha_needed,
+                target_2d: true,
+                caveat_free: caveat,
+                y_inverted: Some(1),
+            }
+        })
+    }
+
+    /// What an fbconfig reports for `GLX_Y_INVERTED_EXT`: nothing, the two
+    /// documented values, the out-of-spec `GLX_DONT_CARE` such servers really
+    /// answer, and anything else a driver might invent.
+    fn arb_y_inverted() -> impl Strategy<Value = Option<c_int>> {
+        prop_oneof![
+            1 => Just(None),
+            3 => Just(Some(0)),
+            3 => Just(Some(1)),
+            2 => Just(Some(GLX_DONT_CARE)),
+            2 => Just(Some(-2)),
+            2 => any::<c_int>().prop_map(Some)
+        ]
+    }
+
+    /// One visual and two configs that can both serve it, for the ranking.
+    fn arb_ranking() -> impl Strategy<Value = (VisualFormat, FbAttrs, FbAttrs)> {
+        arb_visual().prop_flat_map(|want| {
+            (arb_acceptable(want), arb_acceptable(want)).prop_map(move |(a, b)| (want, a, b))
+        })
+    }
+
+    proptest! {
+        /// A config is accepted exactly when it can carry the visual: it must
+        /// be able to render a pixmap as RGBA, offer at least the visual's
+        /// colour bits (and its alpha, when it has any), not disagree with
+        /// its own visual's depth, be bindable in the format the pixmap will be
+        /// requested in, and offer a `GL_TEXTURE_2D` target.
+        ///
+        /// Both directions are contractual. Accepting too much quantises every
+        /// window or reinterprets its channels; rejecting too much is the
+        /// failure this function exists to avoid — a depth-24 visual on a
+        /// driver whose only configs are 32-bit finds *nothing*, and then
+        /// every ordinary window silently vanishes from the frame.
+        #[test]
+        fn fbconfig_acceptance_is_exactly_what_the_visual_requires(pair in arb_pair()) {
+            let (want, fb) = pair;
+            let can_carry = fb.pixmap_renderable
+                && fb.rgba_render
+                && fb.rgba[0] >= c_int::from(want.red_bits)
+                && fb.rgba[1] >= c_int::from(want.green_bits)
+                && fb.rgba[2] >= c_int::from(want.blue_bits)
+                && (!want.has_alpha() || fb.rgba[3] >= c_int::from(want.alpha_bits))
+                && fb.visual_depth.is_none_or(|d| d == want.depth)
+                && fb.target_2d
+                && (if tfp_texture_format(want) == GLX_TEXTURE_FORMAT_RGBA_EXT {
+                    fb.bind_rgba
+                } else {
+                    fb.bind_rgb
+                });
+            prop_assert_eq!(
+                rate_fbconfig(want, &fb).is_ok(),
+                can_carry,
+                "visual {} against {:?}", want, fb
+            );
+        }
+
+        /// Of two configs that can both serve the visual, the better match
+        /// always scores higher, and two matching equally well score the same.
+        ///
+        /// The bonus weights exist for this: each is worth more than all the
+        /// ones below it together, so the documented order of preference
+        /// survives no matter what the two configs differ in besides. Lose it
+        /// and the compositor stops preferring the visual it was handed, and
+        /// takes a neighbouring one whose channel layout then reinterprets
+        /// every colour of every window on that visual.
+        #[test]
+        fn accepted_fbconfigs_rank_by_how_well_they_match(
+            (want, a, b) in arb_ranking()
+        ) {
+            let sa = rate_fbconfig(want, &a).expect("generated an acceptable config");
+            let sb = rate_fbconfig(want, &b).expect("generated an acceptable config");
+            let ka = match_key(&a, want);
+            let kb = match_key(&b, want);
+            prop_assert!(sa >= 0, "a usable config never scores below zero");
+            // `[bool; 5]` compares in the documented order of preference, so
+            // this says the score ranks two configs exactly the way the rules
+            // say they should rank, and that two matching equally well score
+            // the same. A weight that lost its place would show up here as a
+            // disagreement between the two orders.
+            prop_assert_eq!(
+                ka.cmp(&kb),
+                sa.cmp(&sb),
+                "{:?} against {:?} ranked the other way round: {} against {}", ka, kb, sa, sb
+            );
+        }
+
+        /// Whatever the ranking picks is bindable in the format the pixmap
+        /// attribute list will ask for.
+        ///
+        /// The two live apart: `texture_from_pixmap` builds
+        /// `[GLX_TEXTURE_TARGET_EXT, …, GLX_TEXTURE_FORMAT_EXT, format, 0]`
+        /// from the *visual*, while the config is chosen from what it
+        /// advertises. If the two ever disagree about the format an ARGB
+        /// visual needs, every compositing client is bound through a config
+        /// that cannot serve the request — unbindable, not merely wrong.
+        #[test]
+        fn a_pixmap_is_only_ever_bound_in_a_format_its_config_can_bind(
+            pair in arb_pair()
+        ) {
+            let (want, fb) = pair;
+            let format = tfp_texture_format(want);
+            prop_assert!(
+                matches!(format, GLX_TEXTURE_FORMAT_RGB_EXT | GLX_TEXTURE_FORMAT_RGBA_EXT),
+                "asked for format {format}, which is not a TFP texture format"
+            );
+            if rate_fbconfig(want, &fb).is_ok() {
+                if format == GLX_TEXTURE_FORMAT_RGBA_EXT {
+                    prop_assert!(fb.bind_rgba, "asked RGBA of a config that only binds RGB");
+                } else {
+                    prop_assert!(fb.bind_rgb, "asked RGB of a config that only binds RGBA");
+                }
+            }
+        }
+
+        /// Only an fbconfig that reports `GLX_Y_INVERTED_EXT` as FALSE needs
+        /// its texture sampled y-flipped.
+        ///
+        /// TRUE puts the top of the drawable at `t = 0`, which is already how
+        /// the vertex shader measures its source rect, so flipping there
+        /// renders every window upside down. A server answering the
+        /// out-of-spec `GLX_DONT_CARE` (-1) is treated as the common TRUE
+        /// case, because testing for "not TRUE" instead flips every window on
+        /// exactly those servers.
+        #[test]
+        fn only_y_inverted_false_needs_a_flip(y in arb_y_inverted()) {
+            prop_assert_eq!(tfp_flip(y), y == Some(0));
+        }
+
+        /// The tally behind "no fbconfig binds this visual" reports every
+        /// reason that was found, once, with its count, and nothing for a
+        /// reason that was not.
+        ///
+        /// This string is the only thing a user sees when compositing is off,
+        /// so a counter wired to the wrong reason sends them after a colour
+        /// problem they do not have, and a reason missing from the list reads
+        /// as "none" on a screen that was full of them.
+        #[test]
+        fn reject_tally_reports_each_found_reason_with_its_count(
+            picks in prop::collection::vec(0usize..7, 1..24)
+        ) {
+            const ALL: [Reject; 7] = [
+                Reject::NotPixmap,
+                Reject::NotRgba,
+                Reject::TooFewBits,
+                Reject::NoAlpha,
+                Reject::DepthMismatch,
+                Reject::NotBindable,
+                Reject::No2dTarget,
+            ];
+            let mut tally = Rejects::default();
+            for i in &picks {
+                tally.note(ALL[*i]);
+            }
+            // Each reason paired with the count the report must show for it.
+            let labelled: [(&str, usize); 7] = [
+                ("not pixmap-renderable", tally.not_pixmap),
+                ("not RGBA", tally.not_rgba),
+                ("fewer colour bits than the visual", tally.too_few_bits),
+                ("no alpha channel", tally.no_alpha),
+                ("wrong visual depth", tally.depth_mismatch),
+                ("not bindable as a texture", tally.not_bindable),
+                ("no GL_TEXTURE_2D target", tally.no_2d_target),
+            ];
+            let report = tally.to_string();
+            let mut listed = 0;
+            for (label, n) in labelled {
+                prop_assert_eq!(
+                    report.contains(&format!("{n} {label}")),
+                    n > 0,
+                    "{} was recorded {} times but the report reads {:?}", label, n, report
+                );
+                listed += usize::from(n > 0);
+            }
+            prop_assert_eq!(
+                report.split(", ").count(),
+                listed.max(1),
+                "wrong number of reasons in {:?}", report
+            );
+            prop_assert_eq!(listed == 0, report == "none", "an empty tally reads {:?}", report);
+        }
+
+        /// The premultiply keeps one texel per pixel and carries alpha
+        /// through untouched.
+        ///
+        /// `glTexImage2D` is handed this buffer and reads exactly `w * h * 4`
+        /// bytes out of it, so a buffer of the wrong length is a read past its
+        /// end or a frame of garbage. Alpha is the channel the blend later
+        /// reads to decide how much of the destination survives, so it has to
+        /// arrive unchanged: premultiplying it as well would darken the window
+        /// twice over.
+        #[test]
+        fn premultiplied_upload_keeps_one_texel_per_pixel_and_the_source_alpha(
+            data in arb_pixels()
+        ) {
+            let out = premultiply_rgba(&data);
+            prop_assert_eq!(out.len(), data.len());
+            for (i, px) in data.chunks_exact(4).enumerate() {
+                prop_assert_eq!(out[i * 4 + 3], px[3], "alpha was scaled at pixel {}", i);
+            }
+        }
+
+        /// No premultiplied channel is brighter than the alpha it was scaled
+        /// by, and an opaque source survives untouched.
+        ///
+        /// The blend is `dst = src + dst * (1 - src.a)`, which assumes colour
+        /// is already counted inside alpha: a channel above its own alpha is
+        /// brighter than fully covered and haloes every edge. Opaque is the
+        /// identity case, because X Render's unpremultiply is the inverse —
+        /// a premultiply that altered it would round-trip a solid colour into
+        /// a different one.
+        #[test]
+        fn premultiplied_channels_never_exceed_their_alpha(data in arb_pixels()) {
+            let out = premultiply_rgba(&data);
+            for (i, px) in data.chunks_exact(4).enumerate() {
+                for c in 0..3 {
+                    prop_assert!(
+                        out[i * 4 + c] <= out[i * 4 + 3],
+                        "pixel {} channel {}: {} is brighter than its alpha {}",
+                        i,
+                        c,
+                        out[i * 4 + c],
+                        out[i * 4 + 3]
+                    );
+                }
+                if px[3] == u8::MAX {
+                    for c in 0..3 {
+                        prop_assert_eq!(
+                            out[i * 4 + c],
+                            px[c],
+                            "an opaque pixel must survive premultiplying"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// Each premultiplied channel is the nearest integer to
+        /// `channel * alpha / 255`, and never goes down as either factor goes
+        /// up.
+        ///
+        /// The quantisation a premultiply introduces is part of what a
+        /// compositor's independent look is calibrated against: truncating
+        /// instead of rounding biases every semi-transparent pixel a half-step
+        /// dark, and a scale that is not monotone in the channel bands smooth
+        /// gradients the caller passed in untouched.
+        #[test]
+        fn premultiplied_channels_are_rounded_to_nearest_and_monotone(
+            a in any::<u8>(),
+            c0 in any::<u8>(),
+        ) {
+            let channel = |c: u8, a: u8| premultiply_rgba(&[c, c, c, a])[0];
+            for c in 0..=u8::MAX {
+                let p = channel(c, a);
+                let exact = f64::from(c) * f64::from(a) / 255.0;
+                prop_assert!(
+                    (f64::from(p) - exact).abs() <= 0.5,
+                    "channel {c} at alpha {a}: {p} is not the nearest to {exact}"
+                );
+                if c > 0 {
+                    prop_assert!(p >= channel(c - 1, a), "channel {c} is darker than {}", c - 1);
+                }
+            }
+            for al in 0..=u8::MAX {
+                let p = channel(c0, al);
+                if al > 0 {
+                    prop_assert!(
+                        p >= channel(c0, al - 1),
+                        "alpha {al} darkened channel {c0}"
+                    );
+                }
+            }
+        }
+
+        /// A CPU-uploaded texture is nothing but the handle it was given: no
+        /// GLX pixmap behind it, no y-flip, not bound, and a filter cache that
+        /// agrees with the `GL_LINEAR` `upload_rgba` set on the object.
+        ///
+        /// `destroy_texture` releases a GLX pixmap unconditionally and every
+        /// damage event releases before binding, so a CPU texture claiming to
+        /// have one has the renderer free an X resource it never created — and
+        /// a flip it does not need turns the wallpaper upside down. The filter
+        /// cache matters just as quietly: it is compared against the filter a
+        /// draw asks for, so a cache that disagrees makes the first draw skip
+        /// the `glTexParameteri` the driver still needs.
+        #[test]
+        fn a_cpu_texture_is_only_the_handle_it_was_given(
+            tex in any::<u32>(),
+            w in any::<u16>(),
+            h in any::<u16>(),
+        ) {
+            let t = Texture::new_cpu(tex, w, h);
+            prop_assert_eq!(t.handle(), TextureHandle(tex));
+            prop_assert_eq!(t.tex, tex);
+            prop_assert_eq!(t.glx_pixmap, 0, "a CPU texture owns no X pixmap");
+            prop_assert!(!t.flip, "CPU image data is already top-down");
+            prop_assert!(!t.is_bound());
+            prop_assert_eq!(t.width, w);
+            prop_assert_eq!(t.height, h);
+            prop_assert_eq!(t.filter, Filter::Linear, "must match the uploaded GL_LINEAR");
+        }
+
+    }
+
+    /// The context request is a 0-terminated list of attribute/value pairs,
+    /// every one of them asking for an attribute the driver knows by name.
+    ///
+    /// GLX reads the array up to the 0, so a missing terminator has the
+    /// driver walk off the end of it and an interior 0 silently truncates the
+    /// request — and neither is reported as an error: the compositor would
+    /// just come up on a context nobody asked for. The list is a constant, so
+    /// this is a scan of all of it rather than a generated case.
+    #[test]
+    fn glx_context_attribute_list_is_paired_and_zero_terminated() {
+        let list = GLX_CTX_ATTRIBS;
+        assert_eq!(
+            *list.last().expect("the list is not empty"),
+            0,
+            "the request must end on its terminator"
+        );
+        let body = &list[..list.len() - 1];
+        assert_eq!(body.len() % 2, 0, "every attribute needs a value");
+        for (i, slot) in body.iter().enumerate() {
+            assert_ne!(*slot, 0, "slot {i} ends the request early");
+        }
+        // Every even slot names a context attribute, so no value can end up
+        // paired with the wrong key.
+        for (i, key) in body.iter().step_by(2).enumerate() {
+            assert!(
+                [
+                    GLX_CONTEXT_MAJOR_VERSION_ARB,
+                    GLX_CONTEXT_MINOR_VERSION_ARB,
+                    GLX_CONTEXT_PROFILE_MASK_ARB,
+                ]
+                .contains(key),
+                "attribute {i} is 0x{key:x}, which no context attribute uses"
+            );
+        }
+    }
+
+    /// The context is never older than the GLSL the built-in shaders declare.
+    ///
+    /// GLSL only versions downwards: a `#version 330 core` shader on a 3.1
+    /// context fails to compile on the driver, the program fails to link, and
+    /// the window manager comes up with a compositor that draws nothing and
+    /// reports no error. Asking for *more* than the shaders need is harmless,
+    /// so only the unsafe direction is required.
+    #[test]
+    fn glx_context_is_new_enough_for_the_builtin_shaders() {
+        let (major, minor) = (GLX_CTX_ATTRIBS[1] as u32, GLX_CTX_ATTRIBS[3] as u32);
+        assert_eq!(GLX_CTX_ATTRIBS[0], GLX_CONTEXT_MAJOR_VERSION_ARB);
+        assert_eq!(GLX_CTX_ATTRIBS[2], GLX_CONTEXT_MINOR_VERSION_ARB);
+        assert_eq!(GLX_CTX_ATTRIBS[4], GLX_CONTEXT_PROFILE_MASK_ARB);
+        for src in [VERTEX_SRC, FRAGMENT_SRC] {
+            let decl = src
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .expect("a shader starts with its #version");
+            let number: u32 = decl
+                .trim()
+                .trim_start_matches("#version")
+                .split_whitespace()
+                .next()
+                .expect("a version follows #version")
+                .parse()
+                .expect("a numeric GLSL version");
+            // GLSL numbers its version `330` where GL numbers the same one
+            // `3.3`, so both are compared as hundredths of a major version.
+            let glsl = number / 10;
+            let requested = major * 10 + minor;
+            assert!(
+                requested >= glsl,
+                "GL {major}.{minor} cannot compile a #version {number} shader"
+            );
+            // The shaders use core-profile constructs (explicit attribute
+            // locations, `texture()`), so the request must ask for core.
+            if decl.contains("core") {
+                assert_ne!(
+                    GLX_CTX_ATTRIBS[5] & GLX_CONTEXT_CORE_PROFILE_BIT_ARB,
+                    0,
+                    "a core-profile shader needs a core-profile context"
+                );
+            }
+        }
     }
 }
