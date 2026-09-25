@@ -415,8 +415,10 @@ fn serde_free_json(info: &InstanceInfo) -> io::Result<String> {
 
 /// Parse our minimal JSON ficha back into `InstanceInfo` (lenient: missing
 /// fields default to empty/0). Enough for our own format, not a general parser.
-/// Never panics: all slicing uses `str::get` (returns `None` on
-/// non-char-boundary) so a hostile ficha with multibyte UTF-8 cannot DoS us.
+/// String values are unescaped, so a field the writer had to escape (a quote, a
+/// backslash, a control byte) comes back as it was written. Never panics: all
+/// slicing uses `str::get` (returns `None` on non-char-boundary) so a hostile
+/// ficha with multibyte UTF-8 cannot DoS us.
 fn parse_meta(json: &str) -> Option<InstanceInfo> {
     let mut info = InstanceInfo {
         name: String::new(),
@@ -470,11 +472,16 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
             i += 1;
         }
         // Read value: either a quoted string or a bare token until next ',' or '}'
-        let val = if i < len && bytes[i] == b'"' {
+        // `quoted` records which of the two was read: a quoted value is bounded
+        // exactly by the scan below, a bare token still needs its own delimiters
+        // peeled (see `unquote`).
+        let (raw, quoted) = if i < len && bytes[i] == b'"' {
             i += 1;
             let start = i;
             while i < len {
                 if bytes[i] == b'\\' {
+                    // Consume the whole escape: an escaped quote is payload, not
+                    // the end of the value, so a `"\""` must not be split in two.
                     i += 2;
                     continue;
                 }
@@ -487,13 +494,13 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
             if i < len {
                 i += 1;
             }
-            v
+            (v, true)
         } else {
             let start = i;
             while i < len && bytes[i] != b',' && bytes[i] != b'}' {
                 i += 1;
             }
-            body.get(start..i).unwrap_or("").trim()
+            (body.get(start..i).unwrap_or("").trim(), false)
         };
         // Strip exactly one pair of surrounding quotes, not all of them:
         // `trim_matches` would peel `"a"` -> `a` but also `""a""` -> `a`.
@@ -502,16 +509,16 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
             .and_then(|k| k.strip_suffix('"'))
             .unwrap_or(key);
         match key {
-            "name" => info.name = unquote(val),
-            "session_id" => info.session_id = unquote(val),
-            "pid" => info.pid = val.parse().unwrap_or(0),
-            "display" => info.display = unquote(val),
-            "tty_nr" => info.tty_nr = val.parse().unwrap_or(0),
-            "x_server_identity" => info.x_server_identity = unquote(val),
-            "start_time" => info.start_time = val.parse().unwrap_or(0),
-            "exe" => info.exe = unquote(val),
-            "started_at" => info.started_at = val.parse().unwrap_or(0),
-            "alive" => info.alive = val == "true",
+            "name" => info.name = unquote(raw, quoted),
+            "session_id" => info.session_id = unquote(raw, quoted),
+            "pid" => info.pid = raw.parse().unwrap_or(0),
+            "display" => info.display = unquote(raw, quoted),
+            "tty_nr" => info.tty_nr = raw.parse().unwrap_or(0),
+            "x_server_identity" => info.x_server_identity = unquote(raw, quoted),
+            "start_time" => info.start_time = raw.parse().unwrap_or(0),
+            "exe" => info.exe = unquote(raw, quoted),
+            "started_at" => info.started_at = raw.parse().unwrap_or(0),
+            "alive" => info.alive = raw == "true",
             _ => {}
         }
     }
@@ -522,11 +529,25 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
     }
 }
 
-fn unquote(s: &str) -> String {
-    let t = s.trim();
-    let t = t.strip_prefix('"').unwrap_or(t);
-    let t = t.strip_suffix('"').unwrap_or(t);
-    crate::json::json_unescape(t)
+/// Turn a scanned JSON value into the text it stands for.
+///
+/// A quoted value's delimiters were already consumed by the scan in
+/// [`parse_meta`], so only its escapes are decoded: the raw bytes cannot simply
+/// be copied, or the name written `"name":"\""` would reach discovery as the two
+/// characters `\` and `"`. Trimming is just as wrong — a `display` of `" "` is a
+/// value and not padding, and losing it makes two instances on different
+/// displays indistinguishable, which is the field discovery relies on. Peeling a
+/// second pair of quotes would eat the `"` of `\"`; only a bare token
+/// (pretty-printed input, whose newline the scan's whitespace skip does not
+/// cover) still carries delimiters of its own.
+fn unquote(raw: &str, quoted: bool) -> String {
+    let body = if quoted {
+        raw
+    } else {
+        let t = raw.strip_prefix('"').unwrap_or(raw);
+        t.strip_suffix('"').unwrap_or(t)
+    };
+    crate::json::json_unescape(body)
 }
 
 /// Build the `InstanceInfo` for the current process under `name` (human label).
@@ -786,10 +807,6 @@ mod ficha_props {
     proptest! {
         #![proptest_config(config())]
         #[test]
-        #[ignore = "known defect: parse_meta neither unescapes JSON string escapes nor \
-                    preserves whitespace-only values, so a name holding a quote or a \
-                    backslash comes back corrupted and a display of \" \" comes back \
-                    empty. Reported, not fixed."]
         fn a_written_ficha_reads_back_identically(
             session_id in "[A-Za-z0-9_-]{1,64}",
             name in text(),
@@ -837,5 +854,102 @@ mod ficha_props {
                 );
             }
         }
+    }
+
+    /// A ficha carrying only the string fields an escape test varies; the
+    /// numeric and boolean fields are pinned because the reader is not being
+    /// exercised on them.
+    fn ficha(session_id: &str, name: &str, display: &str, exe: &str) -> InstanceInfo {
+        InstanceInfo {
+            name: name.to_string(),
+            session_id: session_id.to_string(),
+            pid: 1234,
+            display: display.to_string(),
+            tty_nr: 0x8800,
+            x_server_identity: "?".to_string(),
+            start_time: 99_999,
+            exe: exe.to_string(),
+            started_at: 1_700_000_000,
+            alive: true,
+        }
+    }
+
+    /// The escape forms are a small fixed set, so they are pinned here rather
+    /// than left to the property above: random text rarely lands on the shapes
+    /// that break a hand-rolled reader, and each of these asserts the exact
+    /// bytes on the wire so a test cannot pass for the wrong reason (a writer
+    /// that stopped escaping would satisfy the round trip either way).
+    #[test]
+    fn an_escaped_quote_survives_the_roundtrip() {
+        let info = ficha("sid-quote", "\"quoted\"", ":0", "/usr/bin/maverick");
+        let json = serde_free_json(&info).expect("serialization does not fail");
+        assert!(
+            json.contains(r#""name":"\"quoted\"""#),
+            "writer must escape the quotes: {json}"
+        );
+        assert_eq!(parse_meta(&json).expect("own ficha parses"), info);
+    }
+
+    #[test]
+    fn an_escaped_backslash_survives_the_roundtrip() {
+        let info = ficha("sid-backslash", "a\\b\\c", ":0", "/opt/bin\\maverick");
+        let json = serde_free_json(&info).expect("serialization does not fail");
+        assert!(
+            json.contains(r#""name":"a\\b\\c""#),
+            "writer must escape the backslashes: {json}"
+        );
+        let back = parse_meta(&json).expect("own ficha parses");
+        assert_eq!(back.name, "a\\b\\c");
+        assert_eq!(back.exe, "/opt/bin\\maverick");
+    }
+
+    /// A backslash as the last character of a value puts the writer's `\\`
+    /// immediately before the closing quote, the position where a reader that
+    /// strips one pair of quotes mistakes the pair for a delimiter.
+    #[test]
+    fn a_value_ending_in_a_backslash_survives_the_roundtrip() {
+        let info = ficha("sid-trailing", "\\", ":0\\", "/usr/bin/maverick");
+        let json = serde_free_json(&info).expect("serialization does not fail");
+        assert!(
+            json.contains(r#""display":":0\\""#),
+            "writer must escape the trailing backslash: {json}"
+        );
+        let back = parse_meta(&json).expect("own ficha parses");
+        assert_eq!(back.name, "\\");
+        assert_eq!(back.display, ":0\\");
+    }
+
+    /// `display` is what tells two instances on different X displays apart, so
+    /// a value made only of whitespace has to survive as itself.
+    #[test]
+    fn a_whitespace_only_value_survives_the_roundtrip() {
+        let info = ficha("sid-blank", " ", " ", " ");
+        let json = serde_free_json(&info).expect("serialization does not fail");
+        assert!(
+            json.contains(r#""display":" ""#),
+            "writer must not elide the value: {json}"
+        );
+        let back = parse_meta(&json).expect("own ficha parses");
+        assert_eq!(back.name, " ");
+        assert_eq!(back.display, " ");
+        assert_eq!(back.exe, " ");
+    }
+
+    /// A record from an older or slightly different build need not carry every
+    /// field; the reader stays lenient and fills the gaps instead of rejecting
+    /// the instance or inventing a value for it.
+    #[test]
+    fn an_absent_field_defaults_instead_of_failing() {
+        let doc = r#"{"session_id":"abc123","pid":7,"alive":true}"#;
+        let info = parse_meta(doc).expect("a partial ficha is still a ficha");
+        assert_eq!(info.session_id, "abc123");
+        assert_eq!(info.pid, 7);
+        assert!(info.alive);
+        assert_eq!(info.name, "");
+        assert_eq!(info.display, "");
+        assert_eq!(info.exe, "");
+        assert_eq!(info.tty_nr, 0);
+        assert_eq!(info.start_time, 0);
+        assert_eq!(info.started_at, 0);
     }
 }
