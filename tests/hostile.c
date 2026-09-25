@@ -1,5 +1,5 @@
 // Controllable, stdin-driven "hostile" X11 client for Maverick real-client
-// compatibility (Fase 1/3/4/5/6 of the compatibility plan).
+// compatibility.
 //
 // Unlike stress.c (which loops argv-driven KIND/ITER), this client maps ONE
 // window and then reads a command per line from stdin, so a shell harness
@@ -41,7 +41,7 @@
 //   spam-active N                  N _NET_ACTIVE_WINDOW messages
 //   spam-fullscreen N              N FULLSCREEN toggles
 //
-// Example transient chain across processes (Fase 6):
+// Example transient chain across processes:
 //   /tmp/hostile <<< $'create\n' &            # process A → prints WINIDA
 //   /tmp/hostile <<< $'transient WINIDA\ncreate\n' &   # process B → child of A
 

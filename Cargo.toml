@@ -63,7 +63,7 @@ default = ["compositor-opengl"]
 input-trace = []
 # Diagnostic build: emits a structured "WINDOW-TRACE" log on every
 # reconcile/focus boundary so the desired→applied→real→x11_focus pipeline can be
-# confirmed live in Xephyr (Fase 8 of the real-client compatibility plan). Off by
+# confirmed live in Xephyr against a real client. Off by
 # default (no runtime cost, no extra deps). Enabled with
 # `cargo build --features window-trace`.
 window-trace = []
