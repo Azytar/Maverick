@@ -2567,4 +2567,758 @@ mod tests {
         c.float_client_authority = false;
         assert!(reclaim_float_to_workarea(&mut c, wa).is_none());
     }
+
+    // Property coverage for this module's own geometry and for the projection
+    // chain it drives. The examples above pin named shapes; the properties
+    // below pin the contracts over the whole input domain: the Shape mask must
+    // never leave the frame, the parking spot must never come back on screen,
+    // the bounded transient walk must agree with the reachability it claims,
+    // the float authority seal must not survive a workarea change, and the
+    // render list must be total, deterministic and convergent.
+    use crate::backend::x11::reconciler::AppliedState;
+    use crate::config::Cfg;
+    use crate::core::layout::{arrange, LayoutRegistry, Placements, RibbonScratch};
+    use proptest::prelude::*;
+
+    /// Screen geometry as a real output reports it: any origin (a second
+    /// monitor to the left of the primary has a negative x) and at least one
+    /// pixel on each axis, from a typical panel down to an output the border
+    /// width alone covers.
+    fn prop_output_rect() -> impl Strategy<Value = Rect> {
+        prop_oneof![
+            (-4096i32..=4096, -4096i32..=4096, 1u32..=4096, 1u32..=4096),
+            (-4096i32..=4096, -4096i32..=4096, 1u32..=8, 1u32..=8),
+        ]
+        .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
+    }
+
+    /// Float geometry as a client may ask for it: any position (including far
+    /// off-screen and negative) and any size, degenerate and absurd included.
+    fn prop_requested_rect() -> impl Strategy<Value = Rect> {
+        (any::<i32>(), any::<i32>(), any::<u32>(), any::<u32>())
+            .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
+    }
+
+    /// One generated window: what it is, where it sits and how it is placed.
+    /// Placement kind, flags, geometry and border are drawn independently, so a
+    /// single run mixes ribbon tiles, floats, exclusive fullscreen and maximized
+    /// overlays.
+    #[derive(Debug)]
+    struct WinSpec {
+        tiled: bool,
+        /// Referenced by the workspace but absent from `State::clients`: the
+        /// projection has to skip such a window instead of configuring an XID
+        /// the WM has no client for.
+        dangling: bool,
+        weight: f32,
+        fullscreen: bool,
+        /// `FullscreenPolicy::True` — the exclusive fullscreen that leaves the
+        /// ribbon and is presented as an overlay covering `mon.screen`.
+        exclusive: bool,
+        maximized: (bool, bool),
+        geom: Rect,
+        border_w: u32,
+        /// Publish an increment-grid size hint, the constraint set that makes
+        /// the float projection settle onto a grid.
+        grid_hints: bool,
+    }
+
+    fn prop_win() -> impl Strategy<Value = WinSpec> {
+        (
+            any::<bool>(),
+            any::<bool>(),
+            0.1f32..=1.0,
+            any::<bool>(),
+            any::<bool>(),
+            (any::<bool>(), any::<bool>()),
+            prop_requested_rect(),
+            0u32..=8,
+            any::<bool>(),
+        )
+            .prop_map(
+                |(
+                    tiled,
+                    dangling,
+                    weight,
+                    fullscreen,
+                    exclusive,
+                    maximized,
+                    geom,
+                    border_w,
+                    grid_hints,
+                )| WinSpec {
+                    tiled,
+                    dangling,
+                    weight,
+                    fullscreen,
+                    exclusive,
+                    maximized,
+                    geom,
+                    border_w,
+                    grid_hints,
+                },
+            )
+    }
+
+    /// Build a one-monitor session from generated parameters: the screen and
+    /// its workarea, the windows, the camera/zoom state and the config knobs
+    /// the projection reads. Windows are numbered from 1 in strategy order, so
+    /// a shrunk counterexample names the exact window.
+    #[allow(clippy::too_many_arguments)]
+    fn scenario(
+        screen: Rect,
+        workarea: Rect,
+        wins: Vec<WinSpec>,
+        cam: (f32, f32),
+        zoom: (f32, f32),
+        page_zoom: (f32, f32),
+        overview: bool,
+        gaps: (u32, u32),
+        border: u32,
+        smart_gaps: bool,
+        boost: f32,
+    ) -> (State, Cfg) {
+        let cfg = Cfg {
+            border_w: border,
+            gaps_inner: gaps.0,
+            gaps_outer: gaps.1,
+            smart_gaps,
+            accordion_boost: boost,
+            ..Cfg::default()
+        };
+
+        let mut mon = Monitor::new(screen, 1);
+        mon.workarea = workarea;
+        {
+            let ws = &mut mon.workspaces[0];
+            ws.camera.position = cam.0;
+            ws.camera.target = cam.1;
+            ws.zoom = zoom.0;
+            ws.zoom_target = zoom.1;
+            ws.page_zoom = page_zoom.0;
+            ws.page_zoom_target = page_zoom.1;
+            ws.overview = overview;
+        }
+        let mut state = State::new();
+        let mut focus: Option<WindowId> = None;
+        for (i, spec) in wins.iter().enumerate() {
+            let win = i as WindowId + 1;
+            let ws = &mut mon.workspaces[0];
+            if spec.dangling {
+                // Left in the workspace on purpose: the window died without the
+                // tree being rewritten yet.
+                if spec.tiled {
+                    ws.add_tiled(win, spec.weight);
+                } else {
+                    ws.floats.push(win);
+                }
+                continue;
+            }
+            let mut c = Client::new(win, 0, 0);
+            c.geom = spec.geom;
+            c.saved_geom = spec.geom;
+            c.border_w = spec.border_w;
+            c.hints = if spec.grid_hints {
+                SizeHints {
+                    min_w: 100,
+                    min_h: 100,
+                    inc_w: 10,
+                    inc_h: 10,
+                    valid: true,
+                    ..SizeHints::default()
+                }
+            } else {
+                SizeHints::default()
+            };
+            if spec.fullscreen {
+                c.flags.set(WinFlags::FULLSCREEN);
+            }
+            if spec.exclusive {
+                c.fullscreen_policy = crate::types::FullscreenPolicy::True;
+            }
+            if spec.maximized.0 {
+                c.flags.set(WinFlags::MAXIMIZED_V);
+            }
+            if spec.maximized.1 {
+                c.flags.set(WinFlags::MAXIMIZED_H);
+            }
+            if spec.tiled {
+                ws.add_tiled(win, spec.weight);
+                focus.get_or_insert(win);
+            } else {
+                c.flags.set(WinFlags::FLOAT);
+                ws.floats.push(win);
+            }
+            state.add_client(c);
+        }
+        mon.focused = focus;
+        state.monitors.push(mon);
+        // `presented_maximize` is derived state; the projection reads it, so it
+        // has to be in the state a real focus change would have left behind.
+        state.sync_presented_maximize(0);
+        (state, cfg)
+    }
+
+    /// One arrange cycle's render list, built exactly the way
+    /// `arrange_full_phase` builds it: the layout projection, then the
+    /// presentation overlay. `None` for a monitor index the state does not
+    /// have, which the caller must treat as "nothing to place".
+    fn projected(state: &State, cfg: &Cfg, mon_idx: usize) -> Option<(Placements, Vec<WindowId>)> {
+        let mon = state.monitors.get(mon_idx)?;
+        let mut placements = Placements::new();
+        arrange(
+            state,
+            mon_idx,
+            cfg,
+            &LayoutRegistry::new(),
+            Phase::Live,
+            &mut placements,
+            &mut RibbonScratch::default(),
+        );
+        let mut raise = Vec::new();
+        present_into(state, mon, &mut placements, &mut raise);
+        Some((placements, raise))
+    }
+
+    /// The `ConfigureWindow` calls a reconcile would issue, as plain data so a
+    /// failing assertion can name the window and the rect it would poke.
+    fn configures(effects: Vec<GeometryEffect>) -> Vec<(WindowId, Rect, u32)> {
+        effects
+            .into_iter()
+            .map(|e| match e {
+                GeometryEffect::Configure { win, rect, border } => (win, rect, border),
+            })
+            .collect()
+    }
+
+    proptest! {
+        /// The Shape mask is a union of X11 rectangles handed to the server: a
+        /// rectangle that reaches outside `[0,w) x [0,h)` clips content the WM
+        /// promised to show, and a zero-area rectangle in the rounded path is a
+        /// malformed arc row. The mask must therefore stay inside the frame and
+        /// still cover the frame's bounding box, for every radius a caller can
+        /// pass — including the negative and larger-than-half radii the clamp
+        /// exists to absorb.
+        #[test]
+        fn prop_rounded_mask_stays_inside_the_frame(
+            (w, h) in (0i32..=2048, 0i32..=2048),
+            r in -32i32..=4096,
+        ) {
+            let rects = rounded_rectangles(w, h, r);
+            prop_assert!(!rects.is_empty(), "a mask always has at least one rectangle");
+            // More than one rectangle means the arc rows are in play; the
+            // square fallback is a single full-frame rectangle that is allowed
+            // to be degenerate for a degenerate frame.
+            let arc_rows = rects.len() > 1;
+            for rect in &rects {
+                let (x, y) = (i32::from(rect.x), i32::from(rect.y));
+                let (rw, rh) = (i32::from(rect.width), i32::from(rect.height));
+                prop_assert!(
+                    x >= 0 && y >= 0,
+                    "mask starts outside the frame at ({}, {}) for w={} h={} r={}",
+                    x, y, w, h, r
+                );
+                prop_assert!(
+                    x + rw <= w,
+                    "mask is {}px wider than the frame for w={} h={} r={}",
+                    x + rw - w, w, h, r
+                );
+                prop_assert!(
+                    y + rh <= h,
+                    "mask is {}px taller than the frame for w={} h={} r={}",
+                    y + rh - h, w, h, r
+                );
+                if arc_rows {
+                    prop_assert!(
+                        rw >= 1 && rh >= 1,
+                        "an arc row must cover at least one pixel for w={} h={} r={}: ({}, {}, {}, {})",
+                        w, h, r, x, y, rw, rh
+                    );
+                }
+            }
+            prop_assert_eq!(
+                mask_extents(&rects),
+                (0, 0, w, h),
+                "the mask must cover the frame's bounding box for w={} h={} r={}",
+                w, h, r
+            );
+        }
+
+        /// The mask is anchored at the window's *outer* top-left corner, so
+        /// every corner row has to leave the same inset on the left as on the
+        /// right and the middle band has to span the full width. An asymmetric
+        /// arc eats one side of the frame, which is exactly the defect the -bw
+        /// anchoring in `round_corners` exists to keep fixed.
+        #[test]
+        fn prop_rounded_mask_is_symmetric_about_both_sides(
+            (w, h) in (1i32..=2048, 1i32..=2048),
+            r in 0i32..=4096,
+        ) {
+            let rects = rounded_rectangles(w, h, r);
+            let band = rects[0];
+            prop_assert_eq!(i32::from(band.x), 0, "the middle band starts at the frame's left edge");
+            prop_assert_eq!(
+                i32::from(band.width),
+                w,
+                "the middle band spans the full width for w={} h={} r={}",
+                w, h, r
+            );
+            prop_assert!(i32::from(band.height) >= 1, "the middle band always covers a row");
+            for row in &rects[1..] {
+                let left = i32::from(row.x);
+                let right_edge = i32::from(row.x) + i32::from(row.width);
+                // A chord of zero (`2 * inset == w` — the arc's tangent row,
+                // only reachable once the radius is half the frame's width)
+                // leaves the row nothing to give, and the minimum-area floor
+                // then covers a single pixel to the right of the inset instead
+                // of centring it. Every other row must be exactly symmetric.
+                if 2 * left != w {
+                    prop_assert_eq!(
+                        left,
+                        w - right_edge,
+                        "row y={} leaves unequal insets for w={} h={} r={}",
+                        row.y, w, h, r
+                    );
+                }
+                prop_assert_eq!(
+                    i32::from(row.height),
+                    1,
+                    "corner rows are one pixel tall for w={} h={} r={}",
+                    w, h, r
+                );
+            }
+        }
+
+        /// The server paints the border as BOUNDING minus CLIP, so the client
+        /// clip mask must measure exactly the client area — the outer frame
+        /// inset by the border width on every side. A larger clip swallows the
+        /// curved border (the focus ring disappears), a smaller one leaves
+        /// content clipped under the frame, and a clip that leaves the frame
+        /// once lifted by `bw` punches a hole in the window.
+        #[test]
+        fn prop_client_clip_measures_exactly_the_inset_frame(
+            (w, h) in (0u32..=2048, 0u32..=2048),
+            r in -32i32..=4096,
+            bw in 0u32..=16,
+        ) {
+            let (outer, inner) = rounded_frame_regions(w, h, r, bw);
+            prop_assert_eq!(
+                mask_extents(&outer),
+                (0, 0, w as i32, h as i32),
+                "the bounding mask is the whole outer frame for w={} h={} r={} bw={}",
+                w, h, r, bw
+            );
+            prop_assert_eq!(
+                mask_extents(&inner),
+                (
+                    0,
+                    0,
+                    w.saturating_sub(2 * bw) as i32,
+                    h.saturating_sub(2 * bw) as i32
+                ),
+                "the clip mask is the client area for w={} h={} r={} bw={}",
+                w, h, r, bw
+            );
+            // Lifting the clip into frame coordinates only means something when
+            // the client area is not degenerate: with `2 * bw` already covering
+            // the frame the clip is empty and there is no hole to punch.
+            let frame_fits = w > 2 * bw && h > 2 * bw;
+            for rect in &inner {
+                let x = i32::from(rect.x) + bw as i32;
+                let y = i32::from(rect.y) + bw as i32;
+                let inside = x >= 0
+                    && y >= 0
+                    && x + i32::from(rect.width) <= w as i32
+                    && y + i32::from(rect.height) <= h as i32;
+                prop_assert!(
+                    !frame_fits || inside,
+                    "clip rectangle ({}, {}, {}, {}) leaves the frame once lifted by bw={} for w={} h={} r={}",
+                    i32::from(rect.x), i32::from(rect.y), rect.width, rect.height, bw, w, h, r
+                );
+            }
+        }
+
+        /// The parking spot is the single definition of "hidden": every sink
+        /// that parks a window re-parks it with this function, so a client that
+        /// moves or resizes itself while parked can never come back on screen.
+        /// The origin must stay left of x=0 for *every* width — including the
+        /// saturating `u32::MAX` case the implementation comments call out,
+        /// where a wrapping negation would park the window at a visible
+        /// coordinate — and it must not depend on the rect's own x, so
+        /// re-parking lands on the same spot. The right edge is measured against
+        /// the width the server actually receives, because `emit_geometry`
+        /// clamps the wire width to `u16::MAX` and a four-billion-pixel window
+        /// cannot exist on the wire.
+        #[test]
+        fn prop_parked_rect_is_off_screen_and_stable(
+            (w, h) in (0u32..=u32::MAX, 0u32..=u32::MAX),
+            y in any::<i32>(),
+        ) {
+            let parked = parked_rect(Rect::new(4321, y, w, h));
+            prop_assert!(parked.x < 0, "a parked window must sit left of the origin: x={}", parked.x);
+            prop_assert!(
+                parked.y == y && parked.w == w && parked.h == h,
+                "parking moves a window, it does not resize it: {:?}",
+                parked
+            );
+            let wire_right = i64::from(parked.x) + i64::from(w.min(u16::MAX as u32));
+            prop_assert!(wire_right <= 0, "a parked window must not reach x=0: right={}", wire_right);
+            prop_assert_eq!(
+                parked_rect(Rect::new(-9999, y, w, h)),
+                parked,
+                "the parking spot must not depend on the rect's own x"
+            );
+            prop_assert_eq!(
+                parked_rect(parked),
+                parked,
+                "re-parking a parked window must not move it"
+            );
+        }
+
+        /// `WM_TRANSIENT_FOR` is unvalidated client input — a client can point
+        /// a window at itself or two windows at each other — so the ownership
+        /// walk is bounded and fail-safe. Both obligations are checked against
+        /// an independent breadth-first search over the same graph rather than
+        /// against the walk's own loop counter: a window may only be reported
+        /// owned by a root it can actually reach (never raise a popup above an
+        /// unrelated overlay), and every root within `MAX_TRANSIENT_DEPTH`
+        /// links must be recognised (never drop a real dialog-of-dialog).
+        #[test]
+        fn prop_transient_ownership_matches_bounded_reachability(
+            (parents, win, roots) in prop_transient_graph(),
+        ) {
+            let mut clients = std::collections::HashMap::new();
+            for (i, &p) in parents.iter().enumerate() {
+                let w = i as WindowId + 1;
+                let mut c = Client::new(w, 0, 0);
+                c.transient_parent = if p == 0 { None } else { Some(p) };
+                clients.insert(w, c);
+            }
+            prop_assert_eq!(
+                transient_chain_reaches(&clients, win, &roots),
+                root_within_depth(&clients, win, &roots),
+                "win={} roots={:?} parents={:?}",
+                win,
+                roots,
+                parents
+            );
+        }
+
+        /// A workarea change re-decides every float it visits, so the client's
+        /// authority over its own rect cannot survive it. The contract is an
+        /// equivalence rather than a case list: a rect is handed back exactly
+        /// when the workarea wants it elsewhere *or* the client still held the
+        /// seal, and whatever comes back is never degenerate and never escapes
+        /// the workarea with its frame — a `ConfigureWindow` with a zero
+        /// dimension is a `BadValue` the server drops, which leaves `Applied`
+        /// permanently ahead of reality.
+        #[test]
+        fn prop_reclaim_re_decides_exactly_when_it_must(
+            requested in prop_requested_rect(),
+            already_settled in any::<bool>(),
+            (wa_w, wa_h) in (64u32..=2048, 64u32..=2048),
+            bw in 0u32..=8,
+            (min_w, inc_w, min_h, inc_h) in (0i32..=200, 0i32..=16, 0i32..=200, 0i32..=16),
+            authority in any::<bool>(),
+        ) {
+            let wa = Rect::new(0, 0, wa_w, wa_h);
+            // A float the client has already put where the workarea wants it is
+            // the only way the "nothing to decide" path is reachable — a random
+            // request is essentially never already settled — and that path is
+            // the one the seal exists for. It carries no size hints, so the
+            // projection is a pure workarea clamp and the rect is a fixed point.
+            let (geom, hints) = if already_settled {
+                (
+                    clamp_float_geom(requested, wa, bw),
+                    SizeHints::default(),
+                )
+            } else {
+                (
+                    requested,
+                    SizeHints {
+                        min_w,
+                        min_h,
+                        inc_w,
+                        inc_h,
+                        valid: true,
+                        ..SizeHints::default()
+                    },
+                )
+            };
+            let mut c = Client::new(1, 0, 0);
+            c.flags.set(WinFlags::FLOAT);
+            c.geom = geom;
+            c.saved_geom = geom;
+            c.hints = hints;
+            c.border_w = bw;
+            c.float_client_authority = authority;
+
+            if let Some(settled) = reclaim_float_to_workarea(&mut c, wa) {
+                prop_assert!(
+                    !c.float_client_authority,
+                    "the WM re-decided this rect, so the client is no longer its authority: {:?}",
+                    settled
+                );
+                prop_assert!(
+                    settled.w >= 1 && settled.h >= 1,
+                    "a reclaimed float must never be 0x0: {:?}",
+                    settled
+                );
+                let frame = 2 * bw as i32;
+                prop_assert!(
+                    settled.x >= wa.x
+                        && settled.y >= wa.y
+                        && settled.x + settled.w as i32 + frame <= wa.x + wa.w as i32
+                        && settled.y + settled.h as i32 + frame <= wa.y + wa.h as i32,
+                    "reclaimed float {:?} escapes the workarea {:?} with frame {}",
+                    settled, wa, frame
+                );
+            } else {
+                prop_assert!(
+                    !authority,
+                    "only an unsealed float can be left in silence: geom={:?} wa={:?}",
+                    geom, wa
+                );
+                prop_assert_eq!(c.geom, geom, "a silent reclaim must not move the window");
+            }
+        }
+    }
+
+    /// A random `WM_TRANSIENT_FOR` graph: `parents[i]` is the parent of client
+    /// `i + 1`, `0` meaning "no parent". Parent ids are drawn from the clients
+    /// that actually exist, so chains reach the depth bound instead of dying on
+    /// a dangling id; `0` still produces short chains, and a self-reference or
+    /// a longer cycle is always available.
+    fn prop_transient_graph() -> impl Strategy<Value = (Vec<u32>, u32, Vec<u32>)> {
+        (1usize..=8).prop_flat_map(|n| {
+            (
+                proptest::collection::vec(0u32..=n as u32, n),
+                1u32..=n as u32,
+                // Roots may name windows that are not clients at all.
+                proptest::collection::vec(1u32..=10, 0..=4),
+            )
+        })
+    }
+
+    /// Independent reference for the ownership question: a level-synchronous
+    /// breadth-first walk over the parent graph, visited-set guarded so a cycle
+    /// terminates, asking whether any root lies within `MAX_TRANSIENT_DEPTH`
+    /// links of `win`. Derived from the documented contract, not from
+    /// `transient_chain_reaches`'s loop.
+    fn root_within_depth(
+        clients: &std::collections::HashMap<WindowId, Client>,
+        win: WindowId,
+        roots: &[WindowId],
+    ) -> bool {
+        let mut frontier = vec![win];
+        let mut seen: std::collections::HashSet<WindowId> = std::collections::HashSet::from([win]);
+        for _ in 0..MAX_TRANSIENT_DEPTH {
+            let mut next = Vec::new();
+            for w in frontier {
+                // A link naming a window that is no longer a client ends the
+                // walk: a destroyed parent is always "no parent".
+                let Some(parent) = clients.get(&w).and_then(|c| c.transient_parent) else {
+                    continue;
+                };
+                if roots.contains(&parent) {
+                    return true;
+                }
+                if seen.insert(parent) {
+                    next.push(parent);
+                }
+            }
+            if next.is_empty() {
+                return false;
+            }
+            frontier = next;
+        }
+        false
+    }
+
+    proptest! {
+        /// Render-list totality. For every monitor index — including the stale
+        /// ones a hotplug leaves behind — one projection must complete without
+        /// panicking, and it may only name windows the WM actually has a client
+        /// for, each exactly once, with a rect the protocol accepts. A phantom
+        /// window is a `ConfigureWindow` to an XID nobody manages, a repeated
+        /// window is two configures fighting over one window in a single frame,
+        /// and a zero-area rect is a `BadValue` the server silently drops,
+        /// leaving `Applied` ahead of reality forever.
+        #[test]
+        fn prop_render_list_is_total_and_names_only_real_windows(
+            screen in prop_output_rect(),
+            workarea in prop_output_rect(),
+            wins in proptest::collection::vec(prop_win(), 0..=8),
+            cam in (-4000.0f32..4000.0, -4000.0f32..4000.0),
+            zoom in (0.05f32..=2.0, 0.05f32..=2.0),
+            page_zoom in (0.05f32..=2.0, 0.05f32..=2.0),
+            overview in any::<bool>(),
+            gaps in (0u32..=200, 0u32..=200),
+            border in 0u32..=8,
+            smart_gaps in any::<bool>(),
+            boost in 0.0f32..=1.0,
+        ) {
+            let (state, cfg) = scenario(
+                screen,
+                workarea,
+                wins,
+                cam,
+                zoom,
+                page_zoom,
+                overview,
+                gaps,
+                border,
+                smart_gaps,
+                boost,
+            );
+            let monitors = state.monitors.len();
+            // One past the last index is the stale-index case `arrange` has to
+            // absorb rather than panic on.
+            for mon_idx in 0..=monitors {
+                let Some((placements, _raise)) = projected(&state, &cfg, mon_idx) else {
+                    prop_assert!(
+                        mon_idx >= monitors,
+                        "monitor {} exists but produced no render list",
+                        mon_idx
+                    );
+                    continue;
+                };
+                let mut placed: Vec<WindowId> = Vec::new();
+                for (win, rect, _bw) in &placements {
+                    prop_assert!(
+                        state.clients.contains_key(win),
+                        "render list names window {:#x}, which has no client",
+                        win
+                    );
+                    prop_assert!(
+                        !placed.contains(win),
+                        "window {:#x} appears twice in one render list",
+                        win
+                    );
+                    placed.push(*win);
+                    prop_assert!(
+                        rect.w >= 1 && rect.h >= 1,
+                        "degenerate rect for window {:#x} reaches X11 as BadValue: {:?}",
+                        win,
+                        rect
+                    );
+                }
+            }
+        }
+
+        /// Render-list determinism. The projection is documented as a pure
+        /// function of `State` + `Cfg` + `Phase` and is re-run for the same
+        /// monitor several times per frame (once per animating monitor, plus
+        /// the compositor's live pass). A render list whose order or contents
+        /// varied between two identical runs would make the presentation
+        /// overlay's `raise` order — and therefore the stacking the user sees —
+        /// depend on hash iteration order.
+        #[test]
+        fn prop_render_list_is_deterministic(
+            screen in prop_output_rect(),
+            workarea in prop_output_rect(),
+            wins in proptest::collection::vec(prop_win(), 0..=8),
+            cam in (-4000.0f32..4000.0, -4000.0f32..4000.0),
+            zoom in (0.05f32..=2.0, 0.05f32..=2.0),
+            page_zoom in (0.05f32..=2.0, 0.05f32..=2.0),
+            overview in any::<bool>(),
+            gaps in (0u32..=200, 0u32..=200),
+            border in 0u32..=8,
+            smart_gaps in any::<bool>(),
+            boost in 0.0f32..=1.0,
+        ) {
+            let (state, cfg) = scenario(
+                screen,
+                workarea,
+                wins,
+                cam,
+                zoom,
+                page_zoom,
+                overview,
+                gaps,
+                border,
+                smart_gaps,
+                boost,
+            );
+            prop_assert_eq!(
+                projected(&state, &cfg, 0),
+                projected(&state, &cfg, 0),
+                "the render list must be a pure function of State + Cfg"
+            );
+        }
+
+        /// Render-list convergence under the pipeline's own write-back. A
+        /// `ConfigureWindow` is echoed back as a `ConfigureNotify` and
+        /// `emit_geometry` writes the applied rect and border into the client,
+        /// so the next cycle starts from the geometry the WM itself just asked
+        /// for. The projection has to want exactly that back: the second cycle
+        /// must emit nothing. Re-asking for a rect it was just given is a
+        /// permanent configure storm on the X server, and a toolkit that
+        /// answers every configure with a `ConfigureRequest` turns the storm
+        /// into a visible fight.
+        #[test]
+        fn prop_applied_geometry_is_what_the_next_cycle_wants(
+            screen in prop_output_rect(),
+            workarea in prop_output_rect(),
+            wins in proptest::collection::vec(prop_win(), 0..=8),
+            cam in (-4000.0f32..4000.0, -4000.0f32..4000.0),
+            zoom in (0.05f32..=2.0, 0.05f32..=2.0),
+            page_zoom in (0.05f32..=2.0, 0.05f32..=2.0),
+            overview in any::<bool>(),
+            gaps in (0u32..=200, 0u32..=200),
+            border in 0u32..=8,
+            smart_gaps in any::<bool>(),
+            boost in 0.0f32..=1.0,
+        ) {
+            let (mut state, cfg) = scenario(
+                screen,
+                workarea,
+                wins,
+                cam,
+                zoom,
+                page_zoom,
+                overview,
+                gaps,
+                border,
+                smart_gaps,
+                boost,
+            );
+            let mut applied = AppliedState::default();
+            let first = projected(&state, &cfg, 0);
+            let placed = first.as_ref().map_or(0, |(p, _)| p.len());
+            let emitted = first.as_ref().map(|(placements, raise)| {
+                let desired = DesiredState::from_placements(placements, raise);
+                configures(reconcile(&desired, &state, &mut applied))
+            });
+            // Nothing is lost on the way there either: a window X11 has never
+            // been told about is configured exactly once, so the second cycle
+            // has nothing to redo.
+            prop_assert_eq!(
+                emitted.as_ref().map_or(0, Vec::len),
+                placed,
+                "every placed window is configured exactly once on the first cycle"
+            );
+
+            // The write-back `emit_geometry` performs once the requests are on
+            // the wire: the client now really has this rect and this border.
+            if let Some((placements, _raise)) = &first {
+                for (win, rect, bw) in placements {
+                    if let Some(c) = state.clients.get_mut(win) {
+                        c.geom = *rect;
+                        c.border_w = *bw;
+                        c.last_reported = Some(*rect);
+                    }
+                }
+            }
+            let reemitted = projected(&state, &cfg, 0).map(|(placements, raise)| {
+                let desired = DesiredState::from_placements(&placements, &raise);
+                configures(reconcile(&desired, &state, &mut applied))
+            });
+            prop_assert!(
+                reemitted.as_ref().is_none_or(Vec::is_empty),
+                "the projection must want back the geometry it just applied, got {:?}",
+                reemitted
+            );
+        }
+    }
 }
