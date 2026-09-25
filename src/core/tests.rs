@@ -7770,7 +7770,6 @@ mod unit_tests {
                             || ws.presented_maximize == Some(*win);
                         if !is_overlay {
                             let wa = mon.workarea;
-                            let g = c.geom;
                             assert!(
                                 drect.x >= wa.x
                                     && drect.y >= wa.y
@@ -7846,9 +7845,6 @@ mod unit_tests {
     }
 
     #[test]
-    #[ignore = "test-contract defect: the float projection check compared a float's
-                // frame (Desired) against the client area the model records, asserting a
-                // border of zero. Being corrected."]
     fn property_realistic_client_resistance() {
         const SEEDS: [u64; 5] = [
             0x0000_0000_9999_9999,
