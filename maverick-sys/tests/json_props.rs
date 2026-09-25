@@ -60,9 +60,10 @@ proptest! {
     }
 }
 
-// `json_quote` is the form the wire actually uses, and the readers strip the
-// two delimiter quotes before unescaping (`identity::unquote`), so the token
-// must keep its payload intact between them.
+// `json_quote` is the form the wire actually uses, and a reader that takes the
+// token's interior verbatim must unescape it to recover the payload
+// (`identity::unquote` decodes escapes for exactly this reason), so the token
+// must keep its payload intact between the delimiter quotes.
 proptest! {
     #[test]
     fn quoted_token_delimits_and_roundtrips_its_payload(s in json_text()) {
