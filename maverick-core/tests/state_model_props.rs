@@ -403,11 +403,6 @@ proptest! {
 // build.
 proptest! {
     #[test]
-    #[ignore = "known defect: State::apply_move_dir splits a column at a fixed 0.5 ratio \
-                and does not re-clamp to the documented [0.05, 1.0] band, so splitting a \
-                column already at the 0.05 minimum yields 0.025. This is the source of \
-                the weight violation the core command-sequence property also hits. \
-                Reported, not fixed."]
     fn splitting_a_column_keeps_every_weight_inside_the_documented_band(
         width in prop_oneof![0.05f32..=1.0, Just(0.1), Just(0.05)],
         windows in 1usize..=8,

@@ -306,7 +306,8 @@ impl SizeHints {
 /// # Invariants
 ///
 /// - `weight` is finite and within `[0.05, 1.0]`; repaired by
-///   `Workspace::rebalance_weights`.
+///   `Workspace::rebalance_weights`, and kept inside the band by
+///   [`band_weight`] on every path that derives a weight from another one.
 /// - `focused < windows.len()` when non-empty; `boost` within `[0.0, 1.0]`.
 #[derive(Debug, Clone)]
 pub struct Column {
@@ -322,6 +323,29 @@ pub struct Column {
     /// single global scalar can only animate when the layout mode itself
     /// changes, which would make every focus change a one-frame jump.
     pub boost: f32,
+}
+
+/// The documented `Column::weight` band (crate invariant F), in one place: the
+/// lower bound keeps a column usable after a chain of splits, the upper one is
+/// the full workarea width.
+const MIN_COLUMN_WEIGHT: f32 = 0.05;
+const MAX_COLUMN_WEIGHT: f32 = 1.0;
+
+/// Clamp a *derived* weight — one computed from another column's weight, as the
+/// split does — into the documented band, the way the paths that take a weight
+/// from the caller already do.
+///
+/// A non-finite weight cannot come out of the arithmetic that produces these
+/// (a finite source weight times a finite ratio is finite), so this only has to
+/// bound the two ends; `NaN` is mapped to the floor anyway, because
+/// `f32::clamp` returns `NaN` unchanged and a poisoned width is exactly what
+/// `Workspace::rebalance_weights` and `add_tiled` exist to keep out of the tree.
+#[inline]
+fn band_weight(weight: f32) -> f32 {
+    if weight.is_nan() {
+        return MIN_COLUMN_WEIGHT;
+    }
+    weight.clamp(MIN_COLUMN_WEIGHT, MAX_COLUMN_WEIGHT)
 }
 
 impl Column {
@@ -1926,9 +1950,20 @@ impl State {
                     let index_in_ws = if dir == Dir::Left { ci } else { ci + 1 };
                     let insert_pos = index_in_ws.min(ws.columns.len());
                     // Spring-split the source column: it keeps `ratio` of its
-                    // weight, the extracted window takes the rest.
-                    ws.columns[insert_pos.min(ci)].weight = src_w * ratio;
-                    let mut new_col = Column::new(src_w * (1.0 - ratio));
+                    // weight, the extracted window takes the rest. Both halves
+                    // are re-clamped into the documented band, because a split is
+                    // a *derived* write like any other and the band binds every
+                    // stored column — halving a column already at the 0.05
+                    // minimum would otherwise store 0.025 on both halves, and
+                    // the `check_invariants` that runs after the next command
+                    // would abort a debug build. The clamp belongs here rather
+                    // than in `rebalance_weights`, whose repair is deliberately a
+                    // no-op on a healthy weight: 0.025 is a healthy positive
+                    // number as far as it is concerned, so it would pass through
+                    // untouched. A chain of splits can only ever push a column
+                    // down to the floor, never below it.
+                    ws.columns[insert_pos.min(ci)].weight = band_weight(src_w * ratio);
+                    let mut new_col = Column::new(band_weight(src_w * (1.0 - ratio)));
                     new_col.windows.push(focused);
                     new_col.focused = 0;
                     ws.columns.insert(insert_pos, new_col);
@@ -2187,10 +2222,11 @@ impl State {
         //     must be able to fill the whole workarea, and any ceiling below 1.0
         //     would make a full-width second column impossible. The 1e-6 slack
         //     absorbs float drift from the weight arithmetic.
+        let in_band = (MIN_COLUMN_WEIGHT - 1e-6)..=(MAX_COLUMN_WEIGHT + 1e-6);
         for (mi, mon) in self.monitors.iter().enumerate() {
             for (ws_i, ws) in mon.workspaces.iter().enumerate() {
                 for (ci, col) in ws.columns.iter().enumerate() {
-                    if !(0.05 - 1e-6..=1.0 + 1e-6).contains(&col.weight) {
+                    if !in_band.contains(&col.weight) {
                         v.push(format!(
                             "monitor {mi} ws {ws_i} col {ci}: weight {} fuera de [0.05, 1.0]",
                             col.weight
@@ -2608,6 +2644,94 @@ mod rect_tests {
         assert!(big.contains_rect(Rect::new(0, 0, 10, 10)));
         // Partial overlap is not containment.
         assert!(!big.contains_rect(Rect::new(150, 150, 100, 100)));
+    }
+}
+
+#[cfg(test)]
+mod column_weight_tests {
+    use super::*;
+
+    /// A state whose only column holds three windows and weighs `weight` — the
+    /// shape `MoveWindow` splits, since a split needs a column with more than one
+    /// window to take one out of.
+    fn stacked_column(weight: f32) -> State {
+        let mut st = State::new();
+        st.monitors
+            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 1));
+        for i in 0..3u32 {
+            let mut c = Client::new(0x300 + i, 0, 0);
+            c.flags.clear(WinFlags::MAXIMIZED);
+            st.add_client(c);
+            st.monitors[0].workspaces[0].add_tiled(0x300 + i, 0.5);
+        }
+        // Merge the two later windows into the first column, then point the focus
+        // and the monitor's focus at its leading window, as a focus command would.
+        let ws = &mut st.monitors[0].workspaces[0];
+        for win in 0x301..0x303u32 {
+            ws.remove_window(win);
+        }
+        for win in 0x301..0x303u32 {
+            let pos = ws.columns[0].windows.len();
+            ws.drop_into_column(0, win, pos);
+        }
+        ws.columns[0].weight = weight;
+        ws.focus.column_idx = 0;
+        ws.columns[0].focused = 0;
+        st.monitors[0].focused = Some(0x300);
+        st
+    }
+
+    fn weights(st: &State) -> Vec<f32> {
+        st.monitors[0].workspaces[0]
+            .columns
+            .iter()
+            .map(|c| c.weight)
+            .collect()
+    }
+
+    /// A split hands each half `src_w * 0.5`, so a column already at the 0.05
+    /// floor would yield 0.025 halves — outside the band the checker enforces
+    /// after the very next command. Splitting has to clamp, not just divide.
+    #[test]
+    fn splitting_a_column_at_the_band_floor_keeps_every_half_in_band() {
+        let mut st = stacked_column(MIN_COLUMN_WEIGHT);
+        // Two splits in a row: the first leaves the source column weighing the
+        // clamped halves, the second splits that column again.
+        assert!(
+            st.apply_move_dir(Dir::Right),
+            "the first split did not happen"
+        );
+        // The first split moved the focus to the extracted window's own column,
+        // which holds a single window; point it back at the source column, which
+        // still holds two, the way a focus command would.
+        let ws = &mut st.monitors[0].workspaces[0];
+        ws.focus.column_idx = 0;
+        ws.columns[0].focused = 0;
+        st.monitors[0].focused = Some(ws.columns[0].windows[0]);
+        assert!(
+            st.apply_move_dir(Dir::Right),
+            "the second split did not happen"
+        );
+        for w in weights(&st) {
+            assert!(
+                (MIN_COLUMN_WEIGHT..=MAX_COLUMN_WEIGHT).contains(&w),
+                "a split produced the out-of-band weight {w}"
+            );
+        }
+        let checked = st.check_invariants();
+        assert!(checked.is_ok(), "splitting broke the model: {checked:?}");
+    }
+
+    /// The clamp only exists to stop the split leaving the band; a column with
+    /// room to spare must still be divided, or every split would collapse to the
+    /// floor and the ribbon would stop responding to `MoveWindow`.
+    #[test]
+    fn splitting_a_column_with_room_still_divides_it_evenly() {
+        let mut st = stacked_column(1.0);
+        assert!(st.apply_move_dir(Dir::Left), "the split did not happen");
+        assert_eq!(weights(&st), vec![0.5, 0.5]);
+        let checked = st.check_invariants();
+        assert!(checked.is_ok(), "splitting broke the model: {checked:?}");
     }
 }
 
