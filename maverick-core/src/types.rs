@@ -464,13 +464,13 @@ pub(crate) const MAX_SPRING: f32 = 62_500.0;
 /// Smallest tolerated stiffness. `Camera::step` re-clamps on every step, so
 /// even a caller that bypasses `sanitize_spring` cannot disable restoration.
 pub(crate) const MIN_STIFFNESS: f32 = 1.0;
-/// Smallest tolerated damping. A positive damper is required for the settle
-/// predicate to be reachable for every supported configuration.
+/// Smallest tolerated damping. This is a numerical safety floor, not a
+/// guaranteed visual settle-time bound: the underdamped decay envelope is
+/// `exp(-c*t/2)`, so a very low positive damper can still settle slowly.
 pub(crate) const MIN_DAMPING: f32 = 0.1;
-/// Bound the slow pole of an overdamped spring. Without a ratio bound, a
-/// finite but enormous damping value makes the exact solution physically
-/// converge over minutes even though the compositor has no more useful visual
-/// work to perform.
+/// Bound `c / sqrt(stiffness)` for the overdamped branch. This prevents a
+/// numerically finite but extremely slow slow-pole; it does not bound the
+/// underdamped envelope.
 const MAX_DAMPING_RATIO: f32 = 10.0;
 const CAMERA_SETTLE_POSITION: f32 = 0.5;
 const CAMERA_SETTLE_VELOCITY: f32 = 0.01;
@@ -478,6 +478,7 @@ const CAMERA_SETTLE_VELOCITY: f32 = 0.01;
 #[inline]
 fn bounded_damping(stiffness: f32, damping: f32) -> f32 {
     let max = (MAX_DAMPING_RATIO * stiffness.max(MIN_STIFFNESS).sqrt()).min(MAX_SPRING);
+    let damping = if damping.is_finite() { damping } else { 30.0 };
     damping.clamp(MIN_DAMPING, max)
 }
 
@@ -534,16 +535,17 @@ impl Camera {
     /// interval is partitioned into render frames, while retaining the existing
     /// stiffness/damping configuration and explicit target changes.
     pub fn step(&mut self, dt: f32) -> bool {
-        if !dt.is_finite() || dt <= 0.0 {
+        if !dt.is_finite() {
             return false;
         }
         if !self.position.is_finite() || !self.target.is_finite() || !self.velocity.is_finite() {
             self.snap(self.target);
-            if !self.target.is_finite() {
-                self.target = 0.0;
-                self.position = 0.0;
-            }
             return false;
+        }
+        if dt <= 0.0 {
+            // A zero/negative elapsed interval makes no progress, but a
+            // pending transition must not be reported as settled.
+            return self.needs_update();
         }
 
         // If the state is already inside the visual settle envelope, install
@@ -2394,8 +2396,11 @@ pub fn spring_smooth(cur: &mut f32, target: f32, dt: f32) -> bool {
     if !dt.is_finite() {
         return false;
     }
+    if !cur.is_finite() {
+        *cur = if target.is_finite() { target } else { 0.0 };
+    }
     if dt <= 0.0 {
-        return target.is_finite() && (!cur.is_finite() || (*cur - target).abs() > 0.001);
+        return target.is_finite() && (*cur - target).abs() > 0.001;
     }
     if !target.is_finite() {
         // Never chase a non-finite target; if `cur` is already poisoned,
@@ -2433,9 +2438,12 @@ pub fn sanitize_spring(stiffness: f32, damping: f32) -> (f32, f32) {
     let damping = if !damping.is_finite() || damping <= 0.0 {
         30.0
     } else {
-        bounded_damping(stiffness, damping)
+        damping
     };
-    (stiffness, damping)
+    // Apply the same relative bound to fallbacks as to user values. This keeps
+    // `sanitize_spring` inside the effective domain D for every input and
+    // makes sanitization idempotent even for tiny stiffness + invalid damping.
+    (stiffness, bounded_damping(stiffness, damping))
 }
 
 impl Default for State {
@@ -2602,9 +2610,27 @@ mod spring_hardening_tests {
     }
 
     #[test]
+    fn sanitize_spring_is_idempotent_for_invalid_damping() {
+        let (k, c) = sanitize_spring(1.0, f32::INFINITY);
+        assert!((k - 1.0).abs() < 1e-6);
+        assert!((c - 10.0).abs() < 1e-6);
+        let (k2, c2) = sanitize_spring(k, c);
+        assert!((k2 - k).abs() < 1e-6);
+        assert!((c2 - c).abs() < 1e-6);
+        let mut cam = Camera::new(0.0);
+        cam.stiffness = 62_500.0;
+        cam.damping = f32::NAN;
+        cam.target = 1_000.0;
+        assert!(cam.step(1.0 / 60.0));
+        assert!(cam.position.is_finite());
+        assert!(cam.velocity.is_finite());
+    }
+
+    #[test]
     fn damping_extreme_is_bounded_relative_to_stiffness() {
         // A finite overdamped value is accepted, but its slow pole is bounded
-        // so the exact transition cannot spend minutes below pixel precision.
+        // relative to sqrt(stiffness). Low-damping underdamped springs remain
+        // mathematically stable but can still have a long visual settle.
         let (k, c) = sanitize_spring(500.0, 10_000.0);
         assert!((k - 500.0).abs() < 1e-6);
         assert!(c > 0.0 && c < 10_000.0);
@@ -2612,6 +2638,45 @@ mod spring_hardening_tests {
         let (k, c) = sanitize_spring(1.0e9, 1.0e9);
         assert!((k - 62_500.0).abs() < 1e-6);
         assert!(c.is_finite() && c > 0.0 && c <= 2_500.0);
+    }
+
+    #[test]
+    fn camera_analytic_regimes_finite_and_convergent() {
+        for (label, k, c) in [
+            ("under", 1_000.0, 5.0),
+            ("critical", 1_000.0, 63.245_555),
+            ("over", 1_000.0, 100.0),
+            ("extreme", 62_500.0, 30.0),
+            ("max-damping", 1.0, 10.0),
+        ] {
+            let mut cam = Camera::new(0.0);
+            cam.stiffness = k;
+            cam.damping = c;
+            cam.target = 500.0;
+            let mut settled = false;
+            for _ in 0..20_000 {
+                settled = !cam.step(1.0 / 60.0);
+                assert!(cam.position.is_finite(), "{label} position");
+                assert!(cam.velocity.is_finite(), "{label} velocity");
+                if settled {
+                    break;
+                }
+            }
+            assert!(settled, "{label} did not settle");
+            assert!((cam.position - cam.target).abs() < 1e-6, "{label} position");
+            assert!(cam.velocity.abs() < 1e-6, "{label} velocity");
+        }
+    }
+
+    #[test]
+    fn camera_snap_is_exact_even_with_tiny_dt() {
+        let mut cam = Camera::new(0.0);
+        cam.target = 100.5;
+        cam.position = 100.1;
+        cam.velocity = 0.0;
+        assert!(!cam.step(1.0e-9));
+        assert!((cam.position - cam.target).abs() < 1e-6);
+        assert!(cam.velocity.abs() < 1e-6);
     }
 
     #[test]
@@ -2673,7 +2738,8 @@ mod spring_hardening_tests {
     fn camera_snap_and_zero_delta_are_not_motion() {
         let mut cam = Camera::new(0.0);
         cam.target = 100.0;
-        assert!(!cam.step(0.0));
+        assert!(cam.step(0.0));
+        assert!(cam.step(-1.0));
         assert!(
             cam.needs_update(),
             "a pending retarget must keep scheduling"
@@ -2767,6 +2833,9 @@ mod spring_hardening_tests {
 
     #[test]
     fn spring_smooth_zero_dt_keeps_pending_state_and_snaps_endpoint() {
+        let mut cur = f32::NAN;
+        assert!(!spring_smooth(&mut cur, 1.0, 0.0));
+        assert!((cur - 1.0).abs() < 1e-6);
         let mut cur = 0.0;
         assert!(spring_smooth(&mut cur, 1.0, 0.0));
         assert!(cur.abs() < 1e-6);
