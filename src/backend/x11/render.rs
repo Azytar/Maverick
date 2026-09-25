@@ -3322,3 +3322,42 @@ mod tests {
         }
     }
 }
+/// Reduced, deterministic reproducer for a reported defect rather than a
+/// property. The property above has to carve out the tangent row, because
+/// the defect lives exactly there and nowhere else.
+///
+/// When the corner radius is exactly half the frame width the circle is
+/// tangent to the frame at a single pixel, and the row is forced to a
+/// minimum area of one pixel *to the right of* the inset rather than
+/// centred on it. The frame's own centre for an even width sits between two
+/// pixels, so the tangent row comes out one pixel asymmetric on both the top
+/// and the bottom edge.
+///
+/// Reachable whenever `corner_radius` equals half a window's width --
+/// `corner_radius 10` on a 20px-wide window, `corner_radius 69` on a 138px
+/// one. The existing `rounded_mask_is_horizontally_symmetric` example uses
+/// (8, 6, 2), whose radius is a quarter of the width, so it never reaches it.
+#[test]
+#[ignore = "known defect: rounded_rectangles is 1px asymmetric on the tangent row \
+                when 2 * radius == width. Reported, not fixed."]
+fn known_violation_tangent_row_is_one_pixel_asymmetric() {
+    // A radius strictly inside the half-width domain is symmetric ...
+    assert!(rounded_rectangles(138, 138, 68).iter().skip(1).all(|row| {
+        let left = i32::from(row.x);
+        left == 138 - (left + i32::from(row.width))
+    }));
+    // ... and one exactly at it is not, on both edges.
+    let rects = rounded_rectangles(138, 138, 69);
+    let tangent: Vec<_> = rects
+        .iter()
+        .skip(1)
+        .filter(|row| row.y == 0 || row.y == 137)
+        .collect();
+    assert!(
+        tangent.iter().any(|row| {
+            let left = i32::from(row.x);
+            left != 138 - (left + i32::from(row.width))
+        }),
+        "expected the tangent row to be asymmetric"
+    );
+}
