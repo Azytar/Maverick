@@ -1,19 +1,16 @@
 //! Desired vs. applied — the pure intent layer of the render pipeline.
 //!
-//! What owns: `DesiredWindow` / `DesiredState` — the explicit, per-monitor
-//! snapshot of where every managed window *should* be after `layout::arrange`
-//! and `present::present_into`. Pure data: `WindowId` + `Rect` + border + raise
+//! `DesiredWindow`/`DesiredState` are the explicit, per-monitor snapshot of
+//! where every managed window *should* be after `layout::arrange` and
+//! `present::present_into`. Pure data: `WindowId` + `Rect` + border + raise
 //! order. No X11 handles, GL state, or `&State` references.
 //!
-//! Exposes: `DesiredWindow` (one window's intent), `DesiredState` (monitor
-//! snapshot + stacking order), and `DesiredState::from_placements` — the sole
-//! conversion from the internal `Placements` tuple-vec into the explicit form.
+//! The reconciler owns the other half of the split: it diffs `DesiredState`
+//! against `AppliedState` (what X11 actually has) and emits only the
+//! `ConfigureWindow` deltas. The backend owns `AppliedState` and all X11/GL
+//! application.
 //!
-//! Leaves to others: the reconciler diffs `DesiredState` against `AppliedState`
-//! (what X11 actually has) and emits only the `ConfigureWindow` deltas; the
-//! backend owns `AppliedState` and all X11/GL application.
-//!
-//! Invariants: every entry is `mapped = true` today; `from_placements` is the
+//! Invariants: every entry is `mapped = true`, and `from_placements` is the
 //! only path that builds the explicit form, so the pipeline stays greppable.
 
 use crate::types::{Rect, WindowId};
@@ -29,7 +26,8 @@ pub struct DesiredWindow {
     pub window: WindowId,
     pub rect: Rect,
     pub border: u32,
-    /// WM wants this window visible at `rect`. True for all arrange-produced windows today.
+    /// WM wants this window visible at `rect`. Always `true` for entries built
+    /// by `from_placements`, which only receives arrange output.
     pub mapped: bool,
 }
 

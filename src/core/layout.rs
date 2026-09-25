@@ -1,25 +1,23 @@
 //! Columnar layout engine (niri-style) — pure coordinate computation.
 //!
-//! What owns: `Layout` trait, `LayoutRegistry`, `Phase` (`Live` vs `Settled`),
+//! Owns the `Layout` trait and its registry, `Phase` (`Live` vs `Settled`),
 //! `RibbonScratch`/`RibbonGeom`, `FsCtx`, and the `arrange`/`arrange_columns`
-//! projection. Coordinates are *computed*, never stored — `arrange` is a pure
-//! function over `State` + `Cfg` + `Phase`.
+//! projection. Geometry is *computed*, never stored: `arrange` is a pure
+//! function of `State` + `Cfg` + `Phase` with no I/O, no X11 and no wall-clock,
+//! which is what makes the layout testable without a display.
 //!
-//! Exposes: `Layout` (pluggable strategy), `LayoutRegistry` (kind → impl),
-//! `Phase::Live`/`Phase::Settled` (GPU-transform vs X-rest geometry),
-//! `Placements` (scratch tuple-vec), `RibbonScratch` (zero-alloc reuse), and
-//! `ribbon_geom` / `ideal_scroll` / `column_screen_extents` — all derived from
-//! the single `ribbon_geom` source of truth so renderer, camera, and hit-test
-//! can never drift apart.
+//! `ribbon_geom` is the single geometry source: the arrange loop, the camera
+//! target (`ideal_scroll`) and the hit-test extents (`column_screen_extents`)
+//! all read the same table, so renderer, camera and hit-test cannot drift.
 //!
-//! Leaves to others: presentation overlays (`present::present_into` rewrites
-//! placements after layout), reconciler/`AppliedState`, and backend X11/GL.
+//! `Phase::Live` reads `camera.position`/`boost`/`zoom` (what the compositor
+//! draws this frame); `Phase::Settled` reads `camera.target`/`zoom_target` and
+//! the boost targets (where X rests once the animation is over). Both run the
+//! identical projection.
 //!
-//! Invariants: `ribbon_geom` is the sole geometry source; `Live` reads
-//! `camera.position`/`boost`/`zoom` (what the compositor draws each frame),
-//! `Settled` reads `camera.target`/`zoom_target`/boost targets (where X rests
-//! at animation end). Float clamping and `SizeHints` snapping share one
-//! projection.
+//! Not owned here: the presentation overlay (`present::present_into` rewrites
+//! placements after layout), the reconciler and `AppliedState`, and backend
+//! X11/GL.
 
 use std::collections::HashMap;
 
@@ -60,14 +58,9 @@ impl Phase {
     }
 }
 
-// ─── Layout trait ─────────────────────────────────────────────────────────────
-//
 // A `Layout` is a pluggable arrangement strategy. The core never matches on
-// `LayoutKind` — it asks the registry for the layout's `arrange()` method.
-// This means adding a new layout never touches `types.rs`, `engine.rs`, or
-// `render.rs`: implement `Layout`, register it, and it works everywhere.
-// (The old per-layout `handle_action` hook was never invoked — actions are
-// mapped to typed `Command`s by `Engine::dispatch` instead.)
+// `LayoutKind` — it asks the registry for the strategy's `arrange()` — so
+// arrangement is the one concern a new layout can change on its own.
 
 pub trait Layout: Send + Sync {
     fn name(&self) -> &'static str;
@@ -137,11 +130,8 @@ impl Layout for ColumnLayout {
     }
 }
 
-// ─── LayoutRegistry ───────────────────────────────────────────────────────────
-//
-// Maps `LayoutKind` → `Box<dyn Layout>`. Built once at startup from
-// `compiled_config()`; external layouts can register themselves before the
-// first arrange call.
+// Maps `LayoutKind` → `Box<dyn Layout>`. The backend builds one instance and
+// shares it with every arrange caller.
 
 pub struct LayoutRegistry {
     layouts: HashMap<LayoutKind, Box<dyn Layout>>,
@@ -179,34 +169,32 @@ impl Default for LayoutRegistry {
     }
 }
 
-// NOTE: `arrange` computes ONLY the logical layout geometry (layout_rect).
-// It is intentionally unaware of the *maximized* presentation overlay — that
-// is applied afterwards by `core::present::present`. Fullscreen is a normal
-// participant of the scrolling ribbon (niri-style), not an overlay. The
-// fullscreen window becomes one column of the ribbon whose single tile
-// measures `mon.screen`; it scrolls with the camera and leaves the screen
-// when focus moves to a neighbour, instead of being a pinned always-on-top
-// overlay. This is driven entirely by `FsCtx` — a derived descriptor (never
-// stored) passed through `ribbon_geom`, `arrange_columns`, `ideal_scroll` and
-// `column_screen_extents` so all four agree on where the fullscreen column
-// sits.
+// `arrange` knows only logical layout geometry (the layout rect). The
+// *maximized* presentation overlay is applied afterwards by
+// `core::present::present_into`. Fullscreen is not a pinned always-on-top
+// overlay: a non-exclusive fullscreen window becomes one column of the scrolling
+// ribbon whose single tile measures `mon.screen`, so it scrolls with the camera
+// and leaves the screen when focus moves to a neighbour. This is driven entirely
+// by `FsCtx` — a derived descriptor (never stored) passed through
+// `ribbon_geom`, `arrange_columns`, `ideal_scroll` and `column_screen_extents`
+// so all four agree on where the fullscreen column sits.
 
 /// Count the number of tiled (non-floating) windows on a workspace.
 fn count_tiled(ws: &Workspace) -> usize {
     ws.columns.iter().map(|c| c.windows.len()).sum()
 }
 
-/// A derived descriptor of the (single) fullscreen column on a workspace, if
-/// any. It is NEVER stored in `State` — it is recomputed at every call site
-/// that needs ribbon geometry, so `ribbon_geom`, `ideal_scroll` and
+/// A derived descriptor of the fullscreen columns on a workspace, if any. It
+/// is NEVER stored in `State` — it is recomputed at every call site that needs
+/// ribbon geometry, so `ribbon_geom`, `ideal_scroll` and
 /// `column_screen_extents` can share one consistent view of where the
-/// fullscreen tile lives without violating the borrow checker (those helpers
+/// fullscreen tiles live without violating the borrow checker (those helpers
 /// receive `&Workspace`, not `&State`).
 ///
 /// The fullscreen window of a column is the FIRST window in that column with
 /// the `FULLSCREEN` flag. Several columns may be fullscreen at once (niri-style:
-/// each is a screen-filling ribbon column you scroll between with h/l). In
-/// `LayoutKind::Grid` (no scroll ribbon to join) and in Overview (the
+/// each is a screen-filling ribbon column you scroll between with h/l). In a
+/// non-`Column` layout (no scroll ribbon to join) and in Overview (the
 /// fullscreen tile is shown scaled, like any other tile) `cols`/`wins` are
 /// empty and the windows fall back to their normal tile slots.
 ///
@@ -281,7 +269,6 @@ pub fn fs_ctx(
 /// Ceiling for user-configured gaps at the u32→i32 boundary
 /// (see `effective_gaps`). Any value above this is already "all gap" on any
 /// real display; the ordering of user intent below it is preserved.
-/// Shared with `grid.rs`, which has its own `effective_gaps` copy.
 pub(crate) const MAX_CFG_GAP: i32 = 1_000_000;
 
 /// Resolve the effective inner/outer gaps for this workspace, applying
@@ -289,11 +276,11 @@ pub(crate) const MAX_CFG_GAP: i32 = 1_000_000;
 ///
 /// This is also the u32→i32 representation boundary for user config: a raw
 /// `gaps_outer` above `i32::MAX` would wrap negative here and drive the
-/// workarea in the *wrong* direction (the audited extreme-gaps bug, fix #3).
-/// Clamping to [`MAX_CFG_GAP`] is not a behavior change — beyond ~1M px a gap
-/// already exceeds any display — but it keeps the numbers sane so the
-/// workarea-aware gap reduction in `arrange_columns` can do its real job:
-/// preserve the user's intent (big gaps) while guaranteeing valid geometry.
+/// workarea in the *wrong* direction. Clamping to [`MAX_CFG_GAP`] is not a
+/// behavior change — beyond ~1M px a gap already exceeds any display — but it
+/// keeps the numbers sane so the workarea-aware gap reduction in
+/// `arrange_columns` can do its real job: preserve the user's intent (big gaps)
+/// while guaranteeing valid geometry.
 fn effective_gaps(ws: &Workspace, cfg: &Cfg) -> (i32, i32) {
     if cfg.smart_gaps && count_tiled(ws) <= 1 && ws.floats.is_empty() {
         return (0, 0);
@@ -304,11 +291,12 @@ fn effective_gaps(ws: &Workspace, cfg: &Cfg) -> (i32, i32) {
     )
 }
 
-/// P10: Clear and refill `out` instead of allocating a new Vec each call.
-//
-// `phase` selects whether the window rests at its settled (target) geometry or
-// is drawn at the live (current) geometry — see [`Phase`]. `arrange` keeps the
-// historical default (live geometry: what you see today, no compositor).
+/// Project `mon_idx`'s active workspace into `out`. Idempotent by contract: the
+/// buffer is cleared and refilled, never appended to and never reallocated, so a
+/// caller may run this once per monitor per frame over a reused buffer.
+///
+/// `phase` selects whether the window rests at its settled (target) geometry or
+/// is drawn at the live (current) geometry — see [`Phase`].
 pub fn arrange(
     state: &State,
     mon_idx: usize,
@@ -329,28 +317,24 @@ pub fn arrange(
         return;
     };
     let layout = registry.get(ws.layout);
-    // Always produce a fresh placement set. `out` is the WM's *shared* `desired`
-    // buffer, which the compositor animation path also writes into
-    // (see `compositor::live_placements`). Without this clear, the previous
-    // frame's live placements leak in here, get re-applied by `apply_geom`,
-    // and physically re-show windows that `hide_offscreen` just moved
-    // off-screen (a fullscreen window on the now-inactive workspace would
-    // reappear covering the new workspace).
+    // `out` is the WM's *shared* `desired` buffer, which the compositor
+    // animation path also writes into (`compositor::live_placements`). Without
+    // this clear the previous frame's live placements leak in here, get
+    // re-applied by `apply_geom`, and physically re-show windows that
+    // `hide_offscreen` just moved off-screen — a fullscreen window on the
+    // previously active workspace would reappear covering the current one.
     out.clear();
     layout.arrange(state, mon, cfg, phase, out, scratch);
 }
 
-// ─── Column layout ────────────────────────────────────────────────────────────
-//
-// Each column sits at a fixed x position (derived from sum of prior
-// column widths + gaps). Windows within a column split vertically into
-// uniformly-sized rows: focus never changes a window's geometry (no reflow
-// on Up/Down navigation), it is marked with border/color only.
+// Each column sits at a fixed x position (derived from the sum of prior column
+// widths + gaps). Windows within a column split vertically into uniformly-sized
+// rows: focus never changes a window's geometry (no reflow on Up/Down
+// navigation), it is marked with border/color only.
 
-/// Single source of truth for the column-ribbon geometry. The renderer
-/// (`arrange_columns`), the camera target (`ideal_scroll`) and
-/// `column_screen_extents` all derive their numbers from this one function
-/// so they can never drift apart again.
+/// The column-ribbon geometry every consumer derives its numbers from. The
+/// renderer (`arrange_columns`), the camera target (`ideal_scroll`) and
+/// `column_screen_extents` all read this one table, so they cannot drift.
 pub(crate) struct RibbonGeom<'a> {
     /// Workarea inset by `gaps_outer` on all four edges.
     pub wa: Rect,
@@ -419,14 +403,13 @@ pub(crate) fn ribbon_geom_into<'s>(
     cols: &'s mut Vec<(f32, f32)>,
 ) -> RibbonGeom<'s> {
     let (gap, gap_outer) = effective_gaps(ws, cfg);
-    // P2 (audit fix #3): the outer gap insets the workarea on all four edges —
-    // unlike the scrollable horizontal ribbon, it anchors real geometry. A gap
-    // larger than half the workarea pushes the inset area off-monitor
-    // (saturating to a zero-area workarea *anchored outside the screen*, e.g.
-    // a window at y=5000 on a 1080 px display). Clamp to the largest gap that
-    // keeps the inset inside the workarea — Option C policy: the user's "huge
-    // gap" intent still yields the maximum possible inset, and the geometry
-    // stays valid.
+    // The outer gap insets the workarea on all four edges — unlike the
+    // scrollable horizontal ribbon, it anchors real geometry. A gap larger
+    // than half the workarea pushes the inset area off-monitor (saturating to a
+    // zero-area workarea *anchored outside the screen*, e.g. a window at y=5000
+    // on a 1080 px display), so clamp to the largest gap that keeps the inset
+    // inside the workarea: a "huge gap" still yields the maximum possible
+    // inset and the geometry stays valid.
     let gap_outer = gap_outer
         .min(workarea.w as i32 / 2)
         .min(workarea.h as i32 / 2)
@@ -439,11 +422,11 @@ pub(crate) fn ribbon_geom_into<'s>(
     );
 
     let alpha = (if settled { ws.zoom_target } else { ws.zoom }).max(0.05);
-    // Viewport Zoom (Fase 9): when the workspace is in `Zoomed` mode the zoom
-    // factor is `page_zoom` (which may be > 1 to *enlarge* the ribbon), not the
-    // Overview `zoom`. They are kept separate on purpose — Overview zooms out
-    // (`alpha < 1`), Viewport zooms in (`alpha > 1`). `ribbon_geom` already has
-    // no upper clamp on `alpha`, so the enlargement falls out for free.
+    // Viewport zoom: when the workspace is in `Zoomed` mode the zoom factor is
+    // `page_zoom` (which may be > 1 to *enlarge* the ribbon), not the Overview
+    // `zoom`. They are kept separate on purpose — Overview zooms out
+    // (`alpha < 1`), Viewport zooms in (`alpha > 1`). `ribbon_geom` has no
+    // upper clamp on `alpha`, so the enlargement falls out for free.
     let alpha = if ws.viewport_mode == ViewportMode::Zoomed {
         if settled {
             ws.page_zoom_target
@@ -458,15 +441,15 @@ pub(crate) fn ribbon_geom_into<'s>(
     let cy = (wa.h as f32 * (1.0 - alpha)) / 2.0;
     let gap_f = gap as f32;
     // Each column's width is a fraction of the FULL workarea width, *independent
-    // of how many columns exist* (bug C16): adding a column no longer shrinks
-    // the others. The ribbon simply grows and the camera scrolls (niri-style).
+    // of how many columns exist*: adding a column must not shrink the others.
+    // The ribbon simply grows and the camera scrolls (niri-style).
     let usable_w = wa.w as f32;
 
     // Per-column accordion boost: the focused column eases toward 1.0 and the
     // others toward 0.0 (see `Workspace::tick_animations`), so changing focus
-    // makes the widths *glide* instead of snapping (bug C10). In Overview the
-    // boost is forced to 0 so every column sits at its base width and the strip
-    // fits all of them.
+    // makes the widths *glide* instead of snapping. In Overview the boost is
+    // forced to 0 so every column sits at its base width and the strip fits all
+    // of them.
     let total_boost = cfg.accordion_boost.clamp(0.0, 0.9);
     let focus_i = ws.focus.column_idx;
 
@@ -477,11 +460,10 @@ pub(crate) fn ribbon_geom_into<'s>(
             0.0
         } else if settled {
             // The settled boost is the *target* of the animation: the focused
-            // column eases to 1.0 and every other column to 0.0, so the window
-            // comes to rest at its final width — the camera has a fixed point to
-            // ease toward (this is the "ideal_scroll" fix in the compositor plan:
-            // reading the live boost made the camera target drift during the
-            // accordion animation, which read as a residual slowness).
+            // column rests at 1.0 and every other column at 0.0. The camera
+            // eases toward this projection, so it needs a fixed point; reading
+            // the live boost here would make the target track the animation it
+            // drives, which reads as residual slowness.
             if i == focus_i {
                 1.0
             } else {
@@ -533,11 +515,10 @@ fn arrange_columns(
     let fs = fs_ctx(&state.clients, ws, mon.screen);
 
     // Single source of truth: the ribbon geometry for the requested phase.
-    // NOTE: `ribbon_geom_into` takes `settled` (targets) — pass
-    // `is_settled()`, NOT `is_live()`. A previous revision passed `is_live()`,
-    // swapping both animations at once: one-shot arranges read mid-flight
-    // springs (viewport zoom seemingly not applying) while live frames jumped
-    // straight to targets (accordion/zoom glides snapping).
+    // `ribbon_geom_into` takes `settled` (targets) — pass `is_settled()`, NOT
+    // `is_live()`: those are independent animations, and inverting this one
+    // inverts both (one-shot arranges read mid-flight springs, while live
+    // frames jump straight to targets and every glide snaps).
     let g = scratch.ribbon_geom(ws, cfg, full_wa, phase.is_settled(), &fs);
     let wa = g.wa;
 
@@ -602,13 +583,16 @@ fn arrange_columns(
 
         // In X11, ConfigureWindow's x/y already mark the outer (border-
         // inclusive) top-left corner, and width/height are content-only —
-        // so bw is subtracted from the content width here.
+        // so bw is subtracted from the content width here. The `.max(1.0)`
+        // floor is the protocol minimum: a `ConfigureWindow` with width or
+        // height 0 is `BadValue` and the server silently drops the request,
+        // leaving `Applied` ahead of reality.
         let inner_w = ((col_w_world * alpha) - 2.0 * bw as f32).max(1.0) as u32;
         // Only the (n-1) gaps *between* rows are reserved; top/bottom edges
         // sit flush with `wa`. Vertical also scales by `alpha` in Overview.
-        // P2 hardening: clamp the vertical gap so the windows always have at
-        // least 1px of vertical space, preventing `total_h` from going negative
-        // and pushing windows entirely out of the workarea.
+        // Clamp the vertical gap so the windows always have at least 1px of
+        // vertical space, preventing `total_h` from going negative and
+        // pushing windows entirely out of the workarea.
         let max_total_gaps = (wa.h as f32 - n as f32).max(0.0);
         let max_gap = if n > 1 {
             max_total_gaps / (n as f32 - 1.0)
@@ -618,11 +602,10 @@ fn arrange_columns(
         let gap_f_v = gap_f.min(max_gap);
         let total_h = wa.h as f32 - (n as f32 - 1.0) * gap_f_v;
 
-        // ── Row geometry (uniform rows) ───────────────────────────────────
-        // The last row absorbs any remainder so the column always fills
-        // `total_h` exactly; focus never resizes rows. Computed inline per row
-        // rather than collected into a `Vec`, so the per-frame projection
-        // allocates nothing.
+        // Uniform rows: the last row absorbs any remainder so the column always
+        // fills `total_h` exactly; focus never resizes rows. Computed inline
+        // per row rather than collected into a `Vec`, so the per-frame
+        // projection allocates nothing.
         let base_h = if n > 1 { total_h / n as f32 } else { total_h };
         let extra_last = if n > 1 {
             total_h - base_h * n as f32
@@ -634,6 +617,11 @@ fn arrange_columns(
         // coords: scale by `alpha` around the workarea center (cx/cy), then
         // subtract the camera scroll. At alpha = 1 this is exactly the
         // original niri-style mapping.
+        //
+        // Round here, at the integer X11 boundary, and nowhere earlier: world
+        // coords stay fractional through layout so a fractional camera offset
+        // does not accumulate per-column rounding error across the gap
+        // sequence and make adjacent columns drift apart mid-scroll.
         let screen_col_x = (wa.x as f32 + (world_x - cam) * alpha + cx).round() as i32;
 
         for (ri, &win) in col.windows.iter().enumerate() {
@@ -661,20 +649,23 @@ fn arrange_columns(
         }
     }
 
-    // ── floating windows ── keep existing geom, normalized to workarea ──
-    // Autoridad unica de flotantes (ver `normalize_float_geom`): el arrange es
-    // una proyeccion pura — nunca muta `client.geom` — y normaliza con la
-    // misma funcion idempotente que usan drag / `ConfigureRequest` /
-    // `MoveResize`. Asi el `Desired` de un flotante quieto es bit a bit igual a
-    // su `Applied` y el reconciliador no emite `ConfigureWindow` espurios.
+    // Floating windows keep their existing geometry, normalized to the
+    // workarea.
     //
-    // Excepcion — `float_client_authority`: el WM adopto el rect del cliente
-    // verbatim (sink de `ConfigureRequest`). Re-normalizarlo aqui reescribiria
-    // lo prometido y reabriria el ping-pong (cliente re-pide → WM re-escribe:
-    // el "flotante que salta solo"). Mientras el sello vive, la proyeccion es
-    // el rect adoptado con solo la sanidad de protocolo. El sello se limpia
-    // cuando el WM vuelve a decidir (drag, reglas, `ToggleFloat`, cambio de
-    // workarea/monitor — `settle_float_in_workarea`).
+    // Single authority for floats (see `normalize_float_geom`): arrange is a
+    // pure projection — it never mutates `client.geom` — and normalizes with
+    // the same idempotent function that drag / `ConfigureRequest` /
+    // `MoveResize` use. A float that has not moved therefore has a `Desired`
+    // bit-for-bit equal to its `Applied`, and the reconciler emits no spurious
+    // `ConfigureWindow`.
+    //
+    // Exception — `float_client_authority`: the WM adopted the client's rect
+    // verbatim (it is the `ConfigureRequest` sink). Re-normalizing it here
+    // would rewrite what was promised and reopen the ping-pong (client re-asks
+    // → WM re-writes: the "float that jumps on its own"). While the seal
+    // lives, the projection is the adopted rect with only protocol-level
+    // sanity applied. The seal is cleared when the WM decides again (drag,
+    // rules, `ToggleFloat`, workarea/monitor change — `settle_float_in_workarea`).
     for &win in &ws.floats {
         let client = match state.clients.get(&win) {
             Some(c) => c,
@@ -686,13 +677,13 @@ fn arrange_columns(
         } else {
             normalize_float_geom(client.geom, client.hints, full_wa, bw)
         };
-        // Use the client's own border_w so Rule::border_w overrides take effect
-        // for floating windows.
+        // The client's own border width, so a `Rule::border_w` override takes
+        // effect for floating windows.
         out.push((win, g, bw));
     }
 }
 
-// ─── Scroll helpers ───────────────────────────────────────────────────────────
+// Camera/hit-test helpers, all reading the same `ribbon_geom` table.
 
 /// Horizontal extents (in SCREEN space) of each column, using the exact same
 /// projection as `arrange_columns`. Used by the Mod4+wheel camera step to know
@@ -782,26 +773,27 @@ pub fn ideal_scroll(ws: &Workspace, cfg: &Cfg, workarea: Rect, fs: FsCtx) -> f32
     }
 }
 
-/// Normaliza un rect flotante que **el WM ha decidido** (colocacion inicial,
-/// reglas, drag/resize, `ToggleFloat`, cambio de monitor) contra `SizeHints` +
-/// workarea, de forma idempotente (`f(f(x)) == f(x)`).
+/// Normalize a floating rect **the WM decided** (initial placement, rules,
+/// drag/resize, `ToggleFloat`, monitor change) against `SizeHints` +
+/// workarea, idempotently (`f(f(x)) == f(x)`).
 ///
-/// Orden canonico: `snap_float_to_hints` -> `clamp_float_geom` -> `settle_to_grid`.
-/// El clamp intermedio garantiza que el grid nunca empuje fuera del workarea y
-/// el `settle` final solo encoge dentro de `[min, clamped]`, asi que la
-/// respuesta cae en la rejilla que el propio cliente declara y no le queda nada
-/// que corregir (un flotante quieto no genera `ConfigureWindow` espurios).
+/// Canonical order: `snap_float_to_hints` -> `clamp_float_geom` ->
+/// `settle_to_grid`. The middle clamp guarantees the grid can never push the
+/// rect outside the workarea, and the final settle only shrinks within
+/// `[min, clamped]`, so the answer lands on the grid the client itself declares
+/// and there is nothing left for it to correct (a float that does not move
+/// generates no spurious `ConfigureWindow`).
 ///
-/// # Autoridad: NO usar sobre un rect que el cliente ha pedido
+/// # Authority: never apply this to a rect the client asked for
 ///
-/// Esta funcion *reescribe* el rect que recibe. Es correcto cuando el rect es
-/// una eleccion del WM (nadie mas va a reclamarlo) y es exactamente el error que
-/// produce el ping-pong cuando se aplica a una peticion del cliente: el cliente
-/// vuelve a pedir su rect y el WM vuelve a reescribirlo, indefinidamente. Para
-/// el rect que llega por `ConfigureRequest` (el cliente es la autoridad) usar
+/// This function *rewrites* the rect it is given. That is correct when the rect
+/// is a WM choice (nobody else will claim it) and is exactly the error that
+/// produces the ping-pong when applied to a client request: the client asks
+/// again and the WM rewrites again, forever. For a rect arriving from
+/// `ConfigureRequest` (the client is the authority) use
 /// [`adopt_client_float_geometry`].
 ///
-/// Puro sobre `(Rect, SizeHints, Rect, u32)`: sin X11, sin `&State`.
+/// Pure over `(Rect, SizeHints, Rect, u32)`: no X11, no `&State`.
 pub fn normalize_float_geom(g: Rect, hints: SizeHints, wa: Rect, border_w: u32) -> Rect {
     settle_to_grid(
         clamp_float_geom(snap_float_to_hints(g, hints), wa, border_w),
@@ -809,24 +801,24 @@ pub fn normalize_float_geom(g: Rect, hints: SizeHints, wa: Rect, border_w: u32) 
     )
 }
 
-/// Re-asienta un flotante como punto fijo de la normalizacion del WM contra el
-/// workarea de `mi` (helper unico para "el flotante adquirio un contexto
-/// nuevo": `ToggleFloat`, cambio de workspace/monitor, des-promocion desde
-/// fullscreen, refresco de `WM_NORMAL_HINTS`).
+/// Re-settle a float as a fixed point of the WM's normalization against the
+/// workarea of `mi` — the single helper for "the float acquired a new context":
+/// `ToggleFloat`, workspace/monitor change, de-promotion from fullscreen, a
+/// `WM_NORMAL_HINTS` refresh.
 ///
-/// Por que existe: un flotante insertado en un workarea distinto del que moldeo
-/// su rect llega con un geom que NO es punto fijo de la proyeccion (grid de
-/// hints del nuevo contexto, clamp al nuevo workarea). Sin re-asentarlo, el
-/// primer `arrange` lo corrige — un salto visible *despues* del cambio — y si
-/// el cliente reclama su rect, el ping-pong vuelve. Normalizar aqui (una vez,
-/// al adquirir el contexto) hace que el primer arrange ya no tenga nada que
-/// corregir: un configure, cero saltos.
+/// Why it exists: a float inserted into a workarea other than the one that
+/// shaped its rect arrives with a `geom` that is NOT a fixed point of the
+/// projection (the new context's hint grid, the new workarea clamp). Without
+/// re-settling it, the first `arrange` corrects it — a visible jump *after* the
+/// change — and if the client then claims its rect, the ping-pong returns.
+/// Normalizing once here, at the moment the context is acquired, leaves the
+/// first arrange nothing to correct: one configure, zero jumps.
 ///
-/// Limpia el sello `float_client_authority`: el WM vuelve a ser quien decide
-/// (el rect que re-asienta es una eleccion del WM, ya en la rejilla del
-/// cliente). Idempotente por construccion (`normalize_float_geom` lo es).
+/// Also clears the `float_client_authority` seal: the WM is deciding again (the
+/// rect it settles is a WM choice, already on the client's grid). Idempotent by
+/// construction, since `normalize_float_geom` is.
 ///
-/// Puro sobre `&mut State`: sin X11, sin `&mut Cfg`.
+/// Pure over `&mut State`: no X11, no `&mut Cfg`.
 pub fn settle_float_in_workarea(state: &mut State, mi: usize, win: WindowId) {
     let Some(c) = state.clients.get_mut(&win) else {
         return;
@@ -847,31 +839,31 @@ pub fn settle_float_in_workarea(state: &mut State, mi: usize, win: WindowId) {
     c.float_client_authority = false;
 }
 
-/// Adopta el rect flotante que **el cliente ha pedido**: la autoridad es el
-/// cliente, el WM solo se queda con lo que la X ya no puede representar.
+/// Adopt the floating rect **the client asked for**: the client is the
+/// authority and the WM only keeps what X can no longer represent.
 ///
-/// Esta es la mitad *pliant* de la politica de flotantes y la razon por la que
-/// un flotante es estable: `f(x) == x` para todo rect representable, asi que la
-/// funcion de correccion del cliente (el `ConfigureRequest`/`XResizeWindow` que
-/// un toolkit reenvia cuando cree que su geometria no fue respetada) tiene su
-/// punto fijo en la *primera* peticion. Un WM que reescribe la peticion (snap a
-/// la rejilla, clamp al workarea) crea el bucle: cliente pide A, WM contesta B,
-/// cliente vuelve a pedir A, ... — el flotante "baila" y el WM quema CPU.
+/// This is the *compliant* half of the float policy, and the reason a float is
+/// stable: `f(x) == x` for every representable rect, so the client's
+/// correction function (the `ConfigureRequest`/`XResizeWindow` a toolkit
+/// re-sends when it believes its geometry was not honoured) has its fixed
+/// point on the *first* request. A WM that rewrites the request (snaps to the
+/// grid, clamps to the workarea) creates the loop: client asks for A, WM answers
+/// B, client asks for A again … — the float "dances" and the WM burns CPU.
 ///
-/// Solo se sanean los valores que el protocolo no puede expresar:
-/// * `w`/`h` a `1..=u16::MAX` (un `ConfigureWindow` con 0 es `BadValue`, y el
-///   servidor rechaza la peticion dejando `Applied` por delante de la realidad);
-/// * `x`/`y` al rango `i16` que el evento `ConfigureNotify` transporta.
+/// Only the values the protocol cannot express are sanitized:
+/// * `w`/`h` into `1..=u16::MAX` (a `ConfigureWindow` with 0 is `BadValue`, and
+///   the server drops the request, leaving `Applied` ahead of reality);
+/// * `x`/`y` into the `i16` range that `ConfigureNotify` transports.
 ///
-/// No hay snap a hints, no hay clamp al workarea y no hay settle: nada de eso
-/// puede mejorar un rect que el cliente eligio, y cualquiera de los tres puede
-/// empeorarlo. La posicion *puede* quedar parcialmente fuera del workarea (un
-/// workarea con struts es invisible para el cliente que se centra en la
-/// pantalla); el WM garantiza que la ventana se pueda alcanzar colocando los
-/// flotantes nuevos dentro (`normalize_float_geom`) y reclamando el trabajo
-/// completo al cambiar el workarea (`reposition_floats`).
+/// No snap to hints, no workarea clamp, no settle: none of those can improve a
+/// rect the client chose, and any of them can make it worse. The *position* may
+/// legitimately land partly outside the workarea (a strut-inset workarea is
+/// invisible to a client that centres itself on the screen); the WM guarantees
+/// reachability instead, by placing new floats inside
+/// (`normalize_float_geom`) and by reclaiming the full workarea when it changes
+/// (`reposition_floats`).
 ///
-/// Puro sobre `Rect`: sin X11, sin `&State`.
+/// Pure over `Rect`: no X11, no `&State`.
 pub fn adopt_client_float_geometry(g: Rect) -> Rect {
     let clamp_i16 = |v: i32| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX));
     Rect::new(
@@ -882,13 +874,13 @@ pub fn adopt_client_float_geometry(g: Rect) -> Rect {
     )
 }
 
-/// Recorta un rect flotante al workarea reservando el marco `2 * border_w`.
+/// Clip a floating rect to the workarea, reserving the `2 * border_w` frame.
 ///
-/// Tamano antes que posicion, idempotente, nunca degenerado (`w/h >= 1`).
-/// Es la mitad X11-libre del antiguo `render::clamp_float_to_workarea`: el
-/// backend lo reexporta como adaptador fino para no bifurcar la politica.
+/// Size before position, idempotent, never degenerate (`w`/`h >= 1`). The
+/// backend re-exports it as a thin adapter (`render::clamp_float_to_workarea`)
+/// so the float policy is not forked in two places.
 ///
-/// Puro sobre `(Rect, Rect, u32)`: sin X11, sin `&State`.
+/// Pure over `(Rect, Rect, u32)`: no X11, no `&State`.
 pub fn clamp_float_geom(mut g: Rect, wa: Rect, border_w: u32) -> Rect {
     let frame = i64::from(border_w) * 2;
     let max_w = (i64::from(wa.w) - frame).clamp(1, i64::from(u16::MAX)) as u32;
@@ -923,15 +915,15 @@ pub fn clamp_float_geom(mut g: Rect, wa: Rect, border_w: u32) -> Rect {
 /// resize storm terminates in exactly one configure per distinct size.
 ///
 /// Order matters: min/max clamp, increment round-snap (nearest multiple of
-/// `(size - base)`, the same rounding the drag path historically used), then
-/// min/max clamp again as the final word. Hard `[min, max]` bounds win over
+/// `(size - base)`, the rounding the drag path uses), then min/max clamp again
+/// as the final word. Hard `[min, max]` bounds win over
 /// the increment grid because a toolkit always accepts its own min/max, so
 /// the result is a fixed point of the client's correction function even when
 /// the hints themselves are not increment-aligned (pathological).
 ///
 /// `!valid` (or all-zero) hints mean "no constraint" and return `g`
-/// unchanged, preserving the old pass-through behaviour for clients without
-/// hints. Position is never touched — only `w`/`h`.
+/// unchanged, so clients without hints keep pass-through semantics. Position
+/// is never touched — only `w`/`h`.
 ///
 /// Note: the result may still need a workarea clamp afterwards (see
 /// `normalize_float_request` in `backend::x11::render`): the screen is a
@@ -1068,7 +1060,7 @@ pub(crate) fn parse_wm_normal_hints(v: &[u32]) -> Option<SizeHints> {
     }
     if f & SizeHints::P_ASPECT != 0 {
         // Each aspect ratio is `x / y`; a zero denominator is meaningless, so
-        // it is neutralised to 1 (the old code guarded with `.max(1)`).
+        // it is neutralised to 1.
         h.min_aspect = v[11] as f32 / (v[12].max(1)) as f32;
         h.max_aspect = v[13] as f32 / (v[14].max(1)) as f32;
     }
@@ -1297,12 +1289,10 @@ mod tests {
         assert_eq!(out[0].0, 1, "the sibling is hidden, not placed");
     }
 
-    // ─── Regression: the three ribbon functions must agree for a fullscreen
-    // column (plan invariant: `ribbon_geom` is the single source of truth). ───
-
-    /// Two columns, col 0 fullscreen, focused on col 0. The placement's left
-    /// edge, `column_screen_extents`' left edge and the centered/aligned camera
-    /// must all be consistent.
+    /// The three ribbon consumers must agree for a fullscreen column: two
+    /// columns, col 0 fullscreen and focused. The placement's left edge,
+    /// `column_screen_extents`' left edge and the centered/aligned camera all
+    /// derive from `ribbon_geom`, the single geometry source of truth.
     #[test]
     fn ribbon_invariants_hold_with_fullscreen() {
         let cfg = Cfg::default();
@@ -1383,13 +1373,10 @@ mod tests {
             rect.x
         );
     }
-    // ── P2: extreme layout inputs (giant gaps, tiny workarea, many columns) ──
-    //
-    // Invariant: the produced geometry must never be invalid — `width >= 0`,
-    // `height >= 0` (guaranteed by the u32 type) and, critically, no i32/f32
-    // overflow or negative projection coordinates escaping `saturating` math.
-    // The layout must survive degenerate inputs without panicking and without
-    // producing NaN/inf.
+    // Extreme layout inputs (giant gaps, tiny workarea, many columns) must
+    // still produce valid geometry: no overflow, no negative projection
+    // coordinates escaping the saturating math, no NaN/inf. The layout has to
+    // survive degenerate inputs without panicking and without absurd rects.
 
     /// Build a state with `n` single-window columns on a `screen` monitor.
     fn many_columns_state(n: usize) -> State {
@@ -1457,7 +1444,7 @@ mod tests {
     }
 
     /// Build a state with `cols` columns × `rows` windows per column on a
-    /// `w`×`h` monitor (the exact shapes mandated by the final audit).
+    /// `w`×`h` monitor.
     fn grid_state(w: u32, h: u32, cols: usize, rows: usize) -> State {
         let mut state = State::new();
         state.monitors.push(Monitor::new(Rect::new(0, 0, w, h), 9));
@@ -1484,13 +1471,13 @@ mod tests {
         state
     }
 
-    /// The audit's geometry-validity predicate, stronger than
-    /// `assert_geometry_sane`: finite/reasonable coordinates, non-degenerate
-    /// sizes, per-window fit inside the workarea, and vertical stacking that
-    /// stays inside the workarea (or within the unavoidable 1px-per-window
-    /// floor when the workarea is smaller than the row count — n windows of
-    /// ≥ 1 px each simply cannot fit into fewer than n pixels; the layout
-    /// must then stay valid and *bounded*, not escape to absurdity).
+    /// A geometry-validity predicate stronger than `assert_geometry_sane`:
+    /// finite/reasonable coordinates, non-degenerate sizes, per-window fit
+    /// inside the workarea, and vertical stacking that stays inside the
+    /// workarea (or within the unavoidable 1px-per-window floor when the
+    /// workarea is smaller than the row count — n windows of ≥ 1 px each
+    /// simply cannot fit into fewer than n pixels; the layout must then stay
+    /// valid and *bounded*, not escape to absurdity).
     ///
     /// Horizontal containment is intentionally NOT asserted: the column
     /// ribbon is scrollable by design, so a column lying outside the workarea
@@ -1522,9 +1509,9 @@ mod tests {
         }
     }
 
-    /// 1x1 workarea + 2 clients + huge gap (audit-mandated): the most
-    /// degenerate shape. Validity and a bounded, documented 1px-per-row
-    /// floor are the only possible guarantees here.
+    /// 1x1 workarea + 2 clients + huge gap: the most degenerate shape.
+    /// Validity and a bounded, documented 1px-per-row floor are the only
+    /// possible guarantees here.
     #[test]
     fn one_by_one_workarea_two_clients_huge_gap_stay_valid() {
         let cfg = Cfg {
@@ -1536,9 +1523,9 @@ mod tests {
         assert_gaps_geometry_within_workarea(&mut state, &cfg, 2);
     }
 
-    /// 100x100 workarea + 100 clients + huge gap (audit-mandated): exactly
-    /// one pixel per row — the vertical gap clamp must collapse to 0 and
-    /// every row must land precisely inside the workarea.
+    /// 100x100 workarea + 100 clients + huge gap: exactly one pixel per row —
+    /// the vertical gap clamp must collapse to 0 and every row must land
+    /// precisely inside the workarea.
     #[test]
     fn hundred_square_workarea_hundred_clients_huge_gap_stay_valid() {
         let cfg = Cfg {
@@ -1550,8 +1537,8 @@ mod tests {
         assert_gaps_geometry_within_workarea(&mut state, &cfg, 100);
     }
 
-    /// 1920x1080 + 3 clients + huge gap (audit-mandated): a real monitor
-    /// consumed entirely by gaps must clamp, not produce absurd rectangles.
+    /// 1920x1080 + 3 clients + huge gap: a real monitor consumed entirely by
+    /// gaps must clamp, not produce absurd rectangles.
     #[test]
     fn full_hd_three_clients_huge_gap_stay_valid() {
         let cfg = Cfg {
@@ -1564,8 +1551,8 @@ mod tests {
     }
 
     /// Gap sweep: 0, the normal default, the clamp ceiling, and values above
-    /// `i32::MAX` that would wrap NEGATIVE in the u32→i32 conversion (the
-    /// audited wrap bug that pushed the workarea in the wrong direction).
+    /// `i32::MAX` that would wrap NEGATIVE in the u32→i32 conversion and push
+    /// the workarea in the wrong direction.
     #[test]
     fn gap_sweep_zero_normal_ceiling_and_beyond_i32_stay_valid() {
         for (inner, outer) in [

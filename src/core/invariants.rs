@@ -1,29 +1,26 @@
-//! Regression suite for the fullscreen+mouse focus contract (`#[cfg(test)]` only).
+//! End-state contract between the focus pipeline and the pointer (`#[cfg(test)]`
+//! only): after focus settles, `client.geom` — the rect X11 hit-tests against —
+//! must be the same rect the layout projected. Divergence means a click lands on
+//! the wrong window.
 //!
-//! What owns: the pure harness (`apply_settled`, `snap_all`, `settle_on_column`,
-//! `focus_step`) and the `#[test]` cases that pin invariant A–F. No production
-//! code — compiled out of the shipped binary.
-//!
-//! Exposes: nothing to production; test helpers assert the end-state contract
-//! that `Backend::focus() → arrange` must uphold.
-//!
-//! Leaves to others: the actual `Backend::focus()` → `arrange` wiring (the fix
-//! lives there); `layout::arrange` + `present::present`; X11 hit-testing and
-//! pointer warp (`client.geom` readers).
+//! The harness below is pure: it replays the layout + presentation the backend
+//! performs (`arrange` → `present` → write `client.geom`) and snaps the animated
+//! factors instead of integrating them. What it cannot prove is the wiring
+//! itself (does `Backend::focus()` really re-arrange?); that is covered
+//! end-to-end by `tests/xephyr-suite.sh`.
 //!
 //! Invariants (the contract under test):
-//! - A: at rest (`camera.position == camera.target`) `client.geom ==`
-//!   `projection(camera.target, layout_state)`. Divergence means a click goes
-//!   to the wrong window (the audited mouse-focus bug).
-//! - B: settled projection reads `camera.target` (snapped to `position` at rest).
-//! - C: `present()` overlays fullscreen/maximized on the settled projection.
-//! - D: `border_w` is part of geometry.
+//! - A: at rest (`camera.position == camera.target`) every projected window's
+//!   `client.geom` equals the settled projection.
+//! - B: the settled projection reads `camera.target` (equal to `position` at
+//!   rest).
+//! - C: the presentation overlay (fullscreen/maximize) is applied on top of
+//!   the settled projection with `fullscreen > maximized` precedence, and
+//!   maximize follows the focused window (see `core::present`).
+//! - D: `border_w` is part of the geometry contract.
 //! - E: `Live` may differ mid-animation; `Live == Settled == projection(target)`
-//!   after `Camera::step` converges.
-//! - F: mouse / keyboard / EWMH focus paths converge to the same `client.geom`.
-//!
-//! SCOPE: only the `focus() → arrange` fix (already landed); no further
-//! production changes here. End-to-end wiring is covered by `tests/xephyr-suite.sh`.
+//!   once `Camera::step` converges.
+//! - F: mouse, keyboard and EWMH focus paths converge to the same `client.geom`.
 
 use crate::config::Cfg;
 use crate::core::commands::{
@@ -75,11 +72,10 @@ fn setup_engine() -> Engine {
     engine
 }
 
-// ─── projection harness ─────────────────────────────────────────────────────
-
 /// Run the exact pure layout + presentation the backend uses inside
 /// `arrange()` → `apply_geom`, then write the resulting rect/border back into
-/// `client.geom` / `client.border_w` (what X11 then reads for input).
+/// `client.geom` / `client.border_w` (what X11 then reads for input). Returns
+/// the pre-overlay projection, which is what the backend writes every frame.
 fn apply_settled(
     engine: &mut Engine,
     mi: usize,
@@ -95,10 +91,9 @@ fn apply_settled(
         &mut placements,
         &mut RibbonScratch::default(),
     );
-    // Capture the projection BEFORE `present`: `present` mutates `camera.target`
-    // (it calls `scroll_to_focused` to keep an exclusive fullscreen pinned), so
-    // any later `arrange` would read a different target. The backend writes
-    // `client.geom` from exactly this projection each frame, so assert against it.
+    // Capture the projection BEFORE `present`, which rewrites placements in
+    // place: the overlay rects are the ones under test separately, and a later
+    // `arrange` would report the post-overlay numbers.
     let projected: std::collections::HashMap<WindowId, (Rect, u32)> =
         placements.iter().map(|(w, r, b)| (*w, (*r, *b))).collect();
     present(&engine.state, &engine.state.monitors[mi], &mut placements);
@@ -238,8 +233,6 @@ fn focus_step(
     std::collections::HashMap::new()
 }
 
-// ─── assertions ─────────────────────────────────────────────────────────────
-
 fn rect_eq(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() <= 2
         && (a.y - b.y).abs() <= 2
@@ -259,7 +252,8 @@ fn inside_wa(engine: &Engine, mi: usize, r: Rect) -> bool {
         && r.y + r.h as i32 <= wa.y + wa.h as i32 + 2
 }
 
-/// Invariant A: every *tiled* client's `geom` equals the settled projection.
+/// Invariant A: every window in the projection has `client.geom` equal to the
+/// settled projection it was written from.
 fn assert_all_tiled_match_settled(
     engine: &Engine,
     mi: usize,
@@ -287,8 +281,6 @@ fn focus_window(
         registry,
     )
 }
-
-// ─── tests ──────────────────────────────────────────────────────────────────
 
 #[test]
 fn h_l_focus_keeps_settled_geometry() {
@@ -367,8 +359,8 @@ fn fullscreen_then_neighbor_settled_geometry() {
         "focused fullscreen column must fill the screen: got {ga:?} want {screen:?}"
     );
 
-    // focus B → B's geom equals the settled projection. Input must resolve to
-    // B at this rect (the original bug: B was clickable at A's stale rect).
+    // focus B → B's geom equals the settled projection, so input must resolve
+    // to B at this rect and never at A's stale one.
     let proj = settle_on_column(&mut engine, mi, ws_i, 1, &registry);
     let gb = geom_of(&engine, b);
     assert_all_tiled_match_settled(&engine, mi, &proj);
@@ -833,7 +825,8 @@ fn focus_none_is_safe() {
             &mut placements,
             &mut RibbonScratch::default(),
         );
-        // Capture the projection before `present` mutates the camera target.
+        // Capture the projection before `present` overlays the presentation
+        // rects into `placements`.
         let proj: std::collections::HashMap<WindowId, (Rect, u32)> =
             placements.iter().map(|(w, r, b)| (*w, (*r, *b))).collect();
         let raised = present(&engine.state, &engine.state.monitors[mi], &mut placements);
@@ -905,11 +898,9 @@ fn border_w_is_part_of_geom() {
 #[test]
 fn mouse_and_keyboard_focus_converge() {
     // The pure suite proves the two *core* geometry paths produce the same
-    // end-state. The keyboard FocusDirection path and the EWMH/EnterNotify
+    // end-state: the keyboard focus command and the EWMH/EnterNotify
     // `Backend::focus` path (which emits `Effect::FocusWindow`) must both leave
-    // `client.geom` at the same settled projection. The actual wiring gap
-    // (does `Backend::focus` really re-arrange?) is covered end-to-end by the
-    // Xephyr scenario in tests/xephyr-suite.sh; here we lock the contract.
+    // `client.geom` at the same settled projection.
     let registry = default_registry();
 
     // Keyboard/EWMH path: focus window 2 via the command the backend emits.
@@ -1015,8 +1006,6 @@ fn input_hittest_matches_settled_geom() {
     }
 }
 
-// ─── shared builders ────────────────────────────────────────────────────────
-
 fn engine_with_columns(n_cols: usize, rows: usize) -> Engine {
     let mut engine = setup_engine();
     let mi = engine.state.sel_mon;
@@ -1057,12 +1046,10 @@ fn retarget_and_settle(
     apply_settled(engine, mi, registry)
 }
 
-// ─── lifecycle / focus-pointer regression tests ─────────────────────────────
-
-/// The original bug: closing a window *before* the focused window left
-/// `Workspace::focus.column_idx` pointing at a different column, so the camera
-/// centred on a neighbour and `best_focus()`/`focused_win()` stole input from
-/// the logical focus (`mon.focused`).
+/// Closing a window *before* the focused window must shift
+/// `Workspace::focus.column_idx` left by the number of removed columns, so the
+/// camera still centres on the logical focus and `best_focus()`/`focused_win()`
+/// cannot steal input from `mon.focused`.
 #[test]
 fn close_window_before_focus_realigns_pointer_and_geometry() {
     let registry = default_registry();

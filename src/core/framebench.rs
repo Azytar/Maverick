@@ -1,22 +1,15 @@
-//! Per-thread heap-allocation counter — measuring instrument, not a feature.
+//! Per-thread heap-allocation counter — a measuring instrument, not a feature.
 //!
-//! What owns: `Counting` (`#[global_allocator]` shim), `ALLOCS`/`ARMED`
-//! thread-locals, and `CountAllocs` guard (`start`/`finish`). `#[cfg(test)]`
-//! only — compiled out of the shipped binary; production cost is zero.
-//!
-//! Exposes: `Counting` (global allocator) and `CountAllocs` (arm for the live
-//! guard, `finish` returns allocations) plus self-tests and
-//! `frame_alloc_tests::an_animation_frame_allocates_nothing`.
-//!
-//! Leaves to others: the per-frame projection it measures (`layout::arrange` →
+//! `#[cfg(test)]` only: the shipped binary carries no counting cost. The
+//! measured subject is the per-frame projection (`layout::arrange` →
 //! `present::present_into` via `compositor::live_placements`), which is pure
-//! over `State` so it needs no X/GL. Rendering and X application stay in the
+//! over `State` and so needs no X/GL; rendering and X application stay in the
 //! backend.
 //!
-//! Invariants: thread-local counting (so `cargo test` parallelism doesn't make
-//! measurements flaky); `realloc` counts; `ALLOCS` is `const`-initialized to
-//! avoid allocating inside the allocator. Warm-up allocations are excluded by
-//! calling `CountAllocs::start` after buffers reach steady-state capacity.
+//! Invariants: counting is thread-local, so `cargo test` parallelism cannot
+//! make a measurement flaky; `realloc` counts. Warm-up allocations are excluded
+//! by calling `CountAllocs::start` once the buffers have reached steady-state
+//! capacity.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -199,8 +192,8 @@ mod frame_alloc_tests {
         total.div_ceil(16)
     }
 
-    /// The headline invariant from the compositor plan: a normal animation
-    /// frame must not touch the heap.
+    /// The headline compositor invariant: a normal animation frame must not
+    /// touch the heap.
     ///
     /// This is the whole justification for the projection buffers being
     /// caller-owned. If it ever fails, some buffer went back to being built

@@ -39,7 +39,8 @@
 //! - `layout` — columnar layout engine (coordinates only, never stored).
 //! - `present` — presentation overlay: fullscreen/maximize geometry rewrites.
 //! - `wallpaper` — re-exports + GPU abstraction for the compositor.
-//! - `invariants` — debug-only regression suite for fullscreen+mouse focus.
+//! - `invariants` — debug-only end-state contract between the focus pipeline
+//!   and the pointer.
 //! - `framebench` — test-only heap-allocation counter (allocation-free proof).
 //! - `session` — session persistence/recovery (logical topology only).
 

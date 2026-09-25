@@ -1,19 +1,14 @@
 //! Wallpaper domain + GPU seam.
 //!
-//! What owns: re-exports of the pure model from `maverick-core` (`WallpaperMode`,
-//! `WallpaperSource`/`WallpaperSpec`, `GpuImage`, helpers) and the `WallpaperGpu`
-//! trait (GL abstraction). Exercises no X11 itself.
+//! Re-exports of the pure model from `maverick-core` (`WallpaperMode`,
+//! `WallpaperSource`/`WallpaperSpec`, `GpuImage`, `compute_wallpaper_rects`,
+//! `shader_is_animated`) plus the `WallpaperGpu` trait — the GL abstraction the
+//! core calls instead of speaking GL. No X11 here: parsing and geometry stay in
+//! `maverick-core`, and all GL calls and shader compilation live in the x11/GL
+//! backend (`GlWallpaper`); a future Vulkan backend implements the same trait.
 //!
-//! Exposes: `WallpaperMode`/`WallpaperSource`/`WallpaperSpec`/`GpuImage`,
-//! `compute_wallpaper_rects`/`shader_is_animated`, and (with `compositor-opengl`)
-//! `WallpaperGpu` (`upload_image`, `compile_shader`, `draw_image`/`draw_shader`).
-//!
-//! Leaves to others: the pure parsing/geometry stays in `maverick-core`; all GL
-//! calls and shader compilation live in the `x11/GL` backend (`GlWallpaper`); a
-//! future Vulkan backend implements the same `WallpaperGpu`.
-//!
-//! Invariants: core never speaks GL directly; `ShaderId` is opaque and
-//! backend-owned. Re-export shim only — no state duplicated here.
+//! Invariants: `ShaderId` is opaque and backend-owned; this module duplicates
+//! no state.
 
 pub use maverick_core::wallpaper::WallpaperMode as _WallpaperModeCheck;
 /// Re-exported pure helpers/types from `maverick-core`.

@@ -1,14 +1,11 @@
-//! Presentation overlay — rewrites layout geometry into final X geometry.
+//! Presentation overlay — turns layout geometry into final X geometry.
 //!
-//! What owns: `present_into` / `present` (in-place rewrite of `Placements` plus
-//! `raise` stacking order) and `maximized_rect` per-axis logic.
-//!
-//! Exposes: `present_into(state, mon, placements, raise)` — the single
-//! place that turns `layout_rect` (from `layout::arrange`) into
-//! `rendered_rect` (what the reconciler applies to X11).
-//!
-//! Leaves to others: coordinate computation (`layout::arrange` + `ribbon_geom`),
-//! reconciler diff vs `AppliedState`, and backend `ConfigureWindow`/restack.
+//! `present_into` is the single place that rewrites `layout::arrange`'s
+//! `layout_rect` into the `rendered_rect` the reconciler applies to X11 — in
+//! place, plus the `raise` order the caller restacks in. Coordinate computation
+//! (`layout::arrange` + `ribbon_geom`), the reconciler diff against
+//! `AppliedState`, and the backend `ConfigureWindow`/restack calls all live
+//! elsewhere.
 //!
 //! Invariants: `fullscreen > maximized` — fullscreen (checked via
 //! `is_fullscreen_overlay`) covers `mon.screen` with border 0 and wins if both
@@ -18,6 +15,10 @@
 //! participant, not a pinned overlay (see `layout::FsCtx`); exclusive
 //! `FullscreenPolicy::True` is always an overlay. Tiles underneath are still
 //! computed unchanged, so exiting the overlay restores the workspace exactly.
+//!
+//! "Presented" means the rect the reconciler writes and the raise order it
+//! restacks in. It does not promise *when* the server has processed either, nor
+//! anything about stacking relative to the dock or other overlays.
 
 use crate::core::layout::Placements;
 use crate::types::{Monitor, Rect, State, WindowId};
@@ -35,11 +36,10 @@ use crate::core::layout::RibbonScratch;
 /// and wins if both flags are set; otherwise `presented_maximize` rewrites via
 /// `maximized_rect` (per-axis, workarea, border 0).
 ///
-/// `raise` is caller-owned rather than returned because the two production
-/// callers (`arrange_full_phase` and the compositor's `live_placements`) both
-/// discard it, and `live_placements` runs once per animating monitor *per
-/// frame*. Returning a fresh `Vec` there was a heap allocation on every frame
-/// of every scroll, for a value nobody read.
+/// `raise` is caller-owned rather than returned because the per-frame paths
+/// reuse a buffer: the compositor's `live_placements` runs once per animating
+/// monitor *per frame*, so returning a fresh `Vec` there would be a heap
+/// allocation on every frame of every scroll.
 pub fn present_into(
     state: &State,
     mon: &Monitor,
@@ -55,10 +55,10 @@ pub fn present_into(
         };
         // (target rect, target border). Fullscreen wins over maximized.
         let present_rect: Option<(Rect, u32)> = if client.is_fullscreen_overlay() {
-            // In the `Column` layout a fullscreen window is a *participant of the
-            // scrolling ribbon* (laid out by `core::layout`), not a pinned
-            // overlay — so it is only presented as an overlay in `Grid`, where
-            // there is no ribbon for it to join.
+            // A fullscreen window is a *participant of the scrolling ribbon*
+            // (laid out by `core::layout`), not a pinned overlay, so it only
+            // presents as an overlay in a non-`Column` layout, which has no
+            // ribbon for it to join.
             //
             // The exception is `FullscreenPolicy::True` (games): that fullscreen
             // is exclusive by definition, covers the screen in *any* layout, and
@@ -129,8 +129,10 @@ mod tests {
         let mut state = State::new();
         let mut mon = Monitor::new(Rect::new(0, 0, 800, 600), 1);
         mon.workarea = Rect::new(0, 0, 800, 600);
-        // Fullscreen is only a pinned overlay in `Grid` (in `Column` it joins the
-        // scrolling ribbon), so these overlay tests run in `Grid`.
+        // These are overlay tests, and the overlay tests below only reach the
+        // overlay path by asking for exclusive fullscreen
+        // (`FullscreenPolicy::True`, set per test) — so the layout stays
+        // `Column` and a non-exclusive fullscreen would join the ribbon.
         mon.workspaces[0].layout = LayoutKind::Column;
         state.monitors.push(mon);
         (state, Cfg::default())
@@ -331,8 +333,6 @@ mod tests {
         );
         assert_eq!(bw, 0);
     }
-
-    // ── Fase 3: the two EWMH maximize axes are independent ────────────────
 
     /// Present window 1 with the given axis flags and return (tile, presented).
     fn present_axes(v: bool, h: bool) -> (Rect, Rect, Rect) {

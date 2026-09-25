@@ -1,18 +1,13 @@
 //! Effect vocabulary — the semantic contract between core and backend.
 //!
-//! What owns: `Effect` — the enum the core uses to tell the backend what must
-//! happen in the outside world as a consequence of a domain decision. It is
-//! deliberately semantic, not a bag of X11 primitives.
+//! `Effect` is the enum the core uses to tell the backend what must happen in
+//! the outside world as a consequence of a domain decision. It is deliberately
+//! semantic, not a bag of X11 primitives, and it is the single vocabulary
+//! `Engine::dispatch`/`Engine::execute` return and `Backend::execute` consumes.
 //!
-//! Exposes: `Effect` variants (`ArrangeMonitor`, `FocusWindow`, `ConfigureWindow`,
-//! `SetFullscreen`/`SetMaximized`, `SyncWindowPrefs`, etc.) — the single
-//! vocabulary `Engine::dispatch`/`Engine::execute` return and `Backend::execute`
-//! consumes.
-//!
-//! Leaves to others: *how* each effect is carried out (which X11/GL calls,
-//! ordering, error handling). The core decides *what*; the backend decides *how*.
-//! A future Wayland backend implements the same `execute` against the same
-//! effects without core changes.
+//! The core decides *what*; the backend decides *how* (which X11/GL calls, in
+//! what order, and how errors are handled). A future Wayland backend implements
+//! the same `execute` against the same effects without core changes.
 //!
 //! Invariants: coarse granularity is intentional — e.g. `FocusWindow(id)` is one
 //! effect even though the X11 backend expands it into ~8 calls (input focus,
@@ -42,7 +37,7 @@ pub enum Effect {
     /// (used when leaving a monitor before focusing on the new one).
     Unfocus(WindowId),
     /// Place a single window at an absolute rect with the given border width.
-    /// (This is the old `MoveResize`; emitted by the layout arrange loop.)
+    /// Emitted by the layout arrange loop.
     ConfigureWindow {
         win: WindowId,
         geom: Rect,
@@ -81,6 +76,6 @@ pub enum Effect {
     PublishIpcState,
     /// Apply the engine's current `state.wallpaper` to the compositor: decode +
     /// upload (or compile a shader) and request one full repaint. Emitted by
-    /// `SetWallpaper`; the backend decides HOW (GL calls stay in x11/GL).
+    /// `SetWallpaper`; the backend decides how (the GL calls stay in x11/GL).
     SetWallpaper,
 }

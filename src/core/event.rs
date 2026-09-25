@@ -1,39 +1,25 @@
-//! `EventBus` tipado: el pegamento entre el dominio y sus observadores.
+//! Typed `EventBus`: the glue between the domain and its observers.
 //!
-//! What owns: `Event` (domain facts), `CommandReport` (`Effect`s + optional
-//! `Event`), `EventHandler` trait, and `EventBus` (publish/subscribe).
+//! Flow: `Command → Domain Event → Effect`.
 //!
-//! Exposes: `Event` variants (`WindowMapped`, `FocusChanged`,
-//! `WorkspaceChanged`, …), `CommandReport::new`/`with_event`, `EventHandler`,
-//! `EventBus::subscribe`/`publish`.
+//! - A `Command` mutates `State`/`Cfg`, produces the `Effect`s the backend will
+//!   execute, and *declares* (optionally) the domain event that represents what
+//!   it did. The command knows its own event, never its consumers.
+//! - The `Engine` publishes that event on the `EventBus`.
+//! - Anyone may subscribe — renderer, IPC, future bars, hooks, logs, tests. A
+//!   consumer reacts to the fact without knowing which command caused it.
 //!
-//! Leaves to others: mutation (`Command::execute`) and X11/GL (`Effect`
-//! execution). Handlers never mutate back into the command path.
-//!
-//! Invariants: `Command → Event → Effect` ordering; a `Command` declares its
-//! own `Event` but never knows its consumers; `Event`s are semantic (not X11
-//! calls). Exists to make extension cheap: new consumers subscribe instead of
-//! polling `State`.
-//!
-//! Modelo (según la auditoría): `Command → Domain Event → Effect`.
-//!
-//! - Un `Command` muta `State`/`Cfg`, produce los `Effect` que el backend
-//!   ejecutará, Y declara (opcionalmente) el **evento de dominio** que
-//!   representa. El comando conoce SU evento, pero jamás a sus consumidores.
-//! - El `Engine` publica ese evento en el `EventBus`.
-//! - Cualquiera puede suscribirse: renderer, IPC, futuras barras, hooks,
-//!   logs, tests. Los consumidores no saben qué comando lo originó; solo
-//!   reaccionan al hecho.
-//!
-//! Regla del compás: solo existe porque reduce el coste de extender. Un
-//! consumidor nuevo (p. ej. una barra) se suscribe y recibe cambios
-//! incrementales en lugar de tener que sondear el estado completo.
+//! Events are semantic facts, not X11 calls, and handlers never mutate state
+//! back into the command path. The bus exists to make extension cheap: a new
+//! consumer subscribes instead of polling `State`. It is the only reason the
+//! indirection is worth it, so a component that cannot be phrased as a
+//! "something happened" fact does not get an event.
 
 use crate::core::effect::Effect;
 use crate::types::WindowId;
 
-/// Eventos de dominio. Son hechos observables del estado del WM, NO llamadas
-/// a X11. Granularidad semántica (no imperativa).
+/// Domain events: observable facts about WM state, NOT X11 calls. Granularity
+/// is semantic, never imperative.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// A window just entered the managed set (`MapRequest` handled).
@@ -73,8 +59,8 @@ pub enum Event {
     WallpaperChanged,
 }
 
-/// Lo que devuelve `Command::execute`: los efectos para el backend y el
-/// (opcional) evento de dominio que se debe publicar.
+/// What `Command::execute` returns: the effects for the backend plus the
+/// optional domain event to publish.
 #[derive(Debug)]
 pub struct CommandReport {
     pub effects: Vec<Effect>,
@@ -97,7 +83,7 @@ impl CommandReport {
     }
 }
 
-/// A suscriber of domain events. Consumers implement this and react to the
+/// A subscriber of domain events. Consumers implement this and react to the
 /// facts they care about; they never mutate state back into the command path.
 pub trait EventHandler {
     fn on_event(&mut self, event: &Event);
@@ -118,6 +104,7 @@ impl EventBus {
         self.handlers.push(handler);
     }
 
+    /// Notify every handler, in subscription order, on the publishing thread.
     pub fn publish(&mut self, event: &Event) {
         for h in &mut self.handlers {
             h.on_event(event);
