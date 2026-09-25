@@ -1,11 +1,11 @@
-// maverick-gl/src/gl.rs
 // Hand-written OpenGL 3.3 core FFI — only the entry points the compositor
 // actually calls, resolved at runtime through `glXGetProcAddressARB`.
 //
 // There is no `gl` / `glow` / `gl_generator` dependency on purpose: the whole
-// surface used by a single-quad, single-program compositor is ~35 functions,
-// and writing them out keeps `maverick` at zero new third-party crates (see the
-// plan's decision #3).
+// surface a single-quad, single-program compositor needs is a few dozen
+// functions, and writing them out keeps the dependency set unchanged. Every
+// declaration is core-profile 3.3; anything extension-based reaches GL through
+// GLX (`glx.rs`), not here.
 
 use crate::dl::Lib;
 use std::os::raw::{c_char, c_float, c_int, c_uchar, c_uint, c_void};
@@ -61,6 +61,11 @@ pub const GL_INFO_LOG_LENGTH: GLenum = 0x8B84;
 
 /// Declares the `Gl` struct (one field per entry point) plus its loader, so a
 /// new GL call is one line here and nothing else.
+///
+/// Every field is an `unsafe extern "C"` pointer resolved through
+/// `glXGetProcAddressARB` (or `dlsym` for core symbols): calling one requires
+/// a context current on the calling thread, and the pointer stays valid only
+/// while the libGL that produced it remains mapped.
 macro_rules! gl_api {
     ( $( fn $name:ident ( $($arg:ident : $argty:ty),* $(,)? ) $(-> $ret:ty)? ; )+ ) => {
         #[allow(non_snake_case)]
@@ -183,8 +188,9 @@ impl Gl {
             .into_owned()
     }
 
-    /// Drain and return the pending GL error, if any. Used after initialization,
-    /// TFP binds, and frame submission so a failed draw cannot stay hidden.
+    /// Return the next pending GL error flag, clearing it, or `GL_NO_ERROR` when
+    /// the queue is empty. Used after initialization, TFP binds, and frame
+    /// submission so a failed draw cannot stay hidden.
     pub fn take_error(&self) -> GLenum {
         unsafe { (self.glGetError)() }
     }

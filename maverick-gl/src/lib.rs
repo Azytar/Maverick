@@ -1,31 +1,36 @@
-//! X-connection bootstrap and OpenGL renderer — single Xlib/XCB socket shared
-//! between the window manager and GLX.
+//! OpenGL renderer for the compositor, on a single X socket shared with the
+//! window manager.
 //!
-//! The window manager speaks pure XCB through `x11rb`. GLX, the only way to get
-//! an OpenGL context and hardware vsync on X11, is an *Xlib* API. Running two
-//! connections would mean two sockets, two sequence-number spaces, two event
-//! queues, and races between "the WM already destroyed this window" and "the
-//! compositor is still drawing it".
+//! The WM speaks pure XCB through `x11rb`; GLX — the only way to get an OpenGL
+//! context and hardware vsync on X11 — is an *Xlib* API. Two connections would
+//! mean two sockets, two sequence-number spaces, two event queues, and races
+//! between "the WM already destroyed this window" and "the compositor is still
+//! drawing it".
 //!
 //! libX11 solves this: open the display with Xlib, hand the event queue over to
 //! XCB with `XSetEventQueueOwner(XCB_OWNS_EVENT_QUEUE)`, fetch the underlying
 //! `xcb_connection_t*` with `XGetXCBConnection`, and wrap it in
 //! `x11rb::xcb_ffi::XCBConnection` with `should_drop = false`. One socket, one
 //! queue, one sequence space — x11rb issues every request and reads every
-//! event, GLX only ever renders. `libGL.so.1` is `dlopen`ed at runtime, so a
-//! machine with no GL driver still runs the window manager — it just falls back
-//! to the non-composited path.
+//! event, GLX only ever renders.
+//!
+//! `libX11`/`libX11-xcb` are linked (any X11 session has them). `libGL.so.1` is
+//! `dlopen`ed at runtime instead, so a machine with no GL driver still starts
+//! the window manager: the load fails, [`probe`] reports it, and the caller
+//! stays on the non-composited path. Everything else is hand-written
+//! `extern "C"`, in the same spirit as `maverick-sys` — no binding-generator
+//! crate, no GL loader.
 //!
 //! # Ownership
 //!
-//! `XDisplay` wraps the `Display*` and is deliberately not `Drop`. The
+//! [`XDisplay`] wraps the `Display*` and is deliberately not `Drop`. The
 //! `XCBConnection` returned by [`open_x`] borrows that `Display*`'s
 //! `xcb_connection_t*` with `should_drop = false`; closing the display first
 //! would leave the connection dangling. Both live for the whole process and, in
 //! the window manager, the connection is shared as `Rc<XConn>` between the WM
 //! core and the compositor. The kernel closes the socket at exit. What this
 //! crate does not own: window-management state (`maverick-core`), the X event
-//! loop, or the compositor frame schedule — it only owns the GL context and
+//! loop, or the compositor frame schedule — it owns the GL context and the
 //! textures derived from X pixmaps.
 //!
 //! # The golden rule
@@ -33,14 +38,7 @@
 //! After [`open_x`], **never** call an Xlib event function (`XNextEvent`,
 //! `XPending`, `XPeekEvent`, ...). XCB owns the queue; Xlib would either block
 //! forever or steal events the window manager needs. Only GLX entry points and
-//! x11rb are allowed. `XSync` is fine (it flushes, it does not dequeue).
-//!
-//! # Zero new third-party crates
-//!
-//! Everything below is hand-written `extern "C"`, in the same spirit as
-//! `maverick-sys`. `libX11`/`libX11-xcb` are linked (any X11 session has them);
-//! `libGL.so.1` is `dlopen`ed at runtime, so a machine with no GL driver still
-//! runs the window manager — it just falls back to the non-composited path.
+//! x11rb are allowed. `XSync` is fine: it flushes, it does not dequeue.
 //!
 //! # Safety
 //!

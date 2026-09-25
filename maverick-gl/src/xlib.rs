@@ -1,20 +1,14 @@
-// maverick-gl/src/xlib.rs
-// Hand-written FFI for the small slice of Xlib / libX11-xcb that Maverick
-// needs. Same philosophy as `maverick-sys`: no binding-generator crates, only
-// the exact symbols the code calls, each with the prototype copied from the
-// system headers.
+// Hand-written FFI for the small slice of Xlib / libX11-xcb that the compositor
+// needs: no binding-generator crates, only the exact symbols the code calls,
+// each with the prototype copied from the system headers.
 //
-// Why Xlib at all in an otherwise pure-XCB window manager: GLX *is* an Xlib
-// API. `glXMakeCurrent`, `glXSwapBuffers` and `glXBindTexImageEXT` all take a
-// `Display*`, and there is no XCB equivalent that libGL will accept. The
-// solution libX11 ships for exactly this case is `XGetXCBConnection`: open the
-// display with Xlib, hand the *event queue* to XCB with `XSetEventQueueOwner`,
-// and then drive every X request from x11rb over the same socket. That way
-// there is one connection, one sequence-number space and one event queue.
-//
-// Golden rule enforced by this module's public API: after `open_x()` nobody
-// may call an Xlib *event* function (`XNextEvent`, `XPending`, ...). Only GLX
-// entry points and x11rb.
+// Xlib is unavoidable in an otherwise pure-XCB window manager because GLX *is*
+// an Xlib API — `glXMakeCurrent`, `glXSwapBuffers` and `glXBindTexImageEXT` all
+// take a `Display*`, and libGL accepts no XCB equivalent. The one-connection
+// arrangement that reconciles that with an XCB-based WM is documented at the
+// crate root; what this module's public API enforces is that after `open_x()`
+// only GLX entry points and x11rb may touch the connection — no Xlib *event*
+// function (`XNextEvent`, `XPending`, ...) may ever run.
 
 use std::cell::Cell;
 use std::os::raw::{c_char, c_int, c_uchar, c_ulong, c_void};
@@ -76,11 +70,11 @@ thread_local! {
 }
 
 /// Swallow every asynchronous X error Xlib would otherwise route to its default
-/// handler — which *prints and calls `exit(1)`*. A compositor races the client
-/// constantly (a window can be destroyed between the `QueryTree` that listed it
-/// and the `NameWindowPixmap` that redirects it), so `BadWindow`/`BadMatch`/
+/// handler, which prints it and calls `exit(1)`. A compositor races the client
+/// constantly — a window can be destroyed between the `QueryTree` that listed it
+/// and the `NameWindowPixmap` that redirects it — so `BadWindow`/`BadMatch`/
 /// `BadDrawable` are normal traffic, not bugs. x11rb sees the same errors on
-/// the shared queue and our dispatcher ignores them there too.
+/// the shared queue and the WM's dispatcher ignores them there too.
 ///
 /// The code is recorded in [`LAST_X_ERROR`] so a caller that *can* tell a real
 /// mistake from a race is able to look.
@@ -137,7 +131,7 @@ pub fn x_error_name(code: u8) -> &'static str {
 
 /// Owned handle to the Xlib `Display*`.
 ///
-/// Deliberately **not** `Drop`: the `XCBConnection` handed out by [`open_x`]
+/// Deliberately **not** `Drop`: the `XCBConnection` handed out by [`crate::open_x`]
 /// borrows this display's `xcb_connection_t*` with `should_drop = false`, so
 /// closing the display first would leave that connection dangling. The window
 /// manager holds both for the whole process lifetime and the kernel closes the
@@ -174,10 +168,12 @@ impl XDisplay {
         self.0.is_null()
     }
 
-    /// Round-trip to the server, discarding queued events.
+    /// Round-trip to the server and wait for its reply.
     ///
-    /// Safe to call while XCB owns the queue: `XSync` only flushes and waits,
-    /// it does not dequeue into Xlib's own buffer when `discard` is false.
+    /// Safe to call while XCB owns the queue, but only because `discard` is
+    /// `0`: `XSync` then flushes and waits without touching the connection's
+    /// event queue, so nothing the WM still needs is thrown away.
+    /// `XSync(dpy, 1)` would silently drop those events.
     pub fn sync(self) {
         unsafe { XSync(self.0, 0) };
     }
@@ -194,7 +190,7 @@ impl XDisplay {
     }
 }
 
-/// Install the silent X error handler. Idempotent; called by [`open_x`].
+/// Install the silent X error handler. Idempotent; called by [`crate::open_x`].
 pub fn install_silent_error_handler() {
     unsafe { XSetErrorHandler(Some(silent_error_handler)) };
 }

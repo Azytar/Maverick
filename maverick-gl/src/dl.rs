@@ -1,6 +1,3 @@
-// maverick-gl/src/dl.rs
-// Minimal `dlopen`/`dlsym` wrapper.
-//
 // `libGL.so.1` is loaded at *runtime*, never linked, so `maverick` keeps
 // starting on a machine with no GL driver at all (a VM, a broken Mesa install,
 // an `LD_PRELOAD` that hides libGL): the load simply fails, `probe()` reports
@@ -15,8 +12,7 @@ use std::os::raw::{c_char, c_uchar, c_void};
 ///
 /// Never closed: GL function pointers, the GLX context and every texture we
 /// created stay valid only while libGL is mapped, and the compositor can be
-/// disabled (but not "un-initialised") at runtime. The handle lives for the
-/// process, which is exactly the lifetime we want.
+/// disabled (but not "un-initialised") at runtime.
 pub struct Lib {
     handle: *mut c_void,
     /// `glXGetProcAddressARB` — the only correct way to resolve GL/GLX

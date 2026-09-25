@@ -1,6 +1,5 @@
-// maverick-gl/src/renderer.rs
-// The GPU side of Maverick's compositor: one GLX context on the Composite
-// overlay window, one shader program, one unit quad.
+// The GPU side of the compositor: one GLX context on the Composite overlay
+// window, one shader program, one unit quad.
 //
 // Everything here is deliberately tiny. A compositor for a tiling WM never has
 // to blend hundreds of layers — it draws the wallpaper plus at most a few dozen
@@ -13,6 +12,10 @@
 // Composite produce and what `GLX_EXT_texture_from_pixmap` hands us. The blend
 // func is therefore `(ONE, ONE_MINUS_SRC_ALPHA)` and the fragment shader scales
 // the whole `vec4` (rgb *and* a) by coverage, never just the alpha.
+//
+// Every method here runs on the thread that called `glXMakeCurrent` on the
+// overlay drawable. `Renderer` holds the `GLXContext` as a raw pointer, so it
+// is neither `Send` nor `Sync` and the compiler enforces the affinity.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CString};
@@ -43,9 +46,9 @@ use crate::gl::*;
 use crate::glx::*;
 use crate::xlib::{XDisplay, XID};
 
-/// OPT-IN DIAGNOSTIC: when `MAV_GLX_TRACE` is set, the renderer logs each
-/// GLX texture lifecycle op (create/bind/release/destroy) with the GLXPixmap and
-/// texture ids. Off by default and a no-op when unset — never changes rendering.
+/// Opt-in diagnostic: when `MAV_GLX_TRACE` is set, log every GLX texture
+/// lifecycle op (create/bind/release/destroy) with the GLXPixmap and texture
+/// ids. Off by default and a no-op when unset — never changes rendering.
 fn glx_trace_enabled() -> bool {
     static C: OnceLock<bool> = OnceLock::new();
     *C.get_or_init(|| std::env::var_os("MAV_GLX_TRACE").is_some())
@@ -112,8 +115,8 @@ void main() {
 /// `GLX_EXT_texture_from_pixmap`.
 ///
 /// Not `Drop`: freeing it needs the `Display*` and a current GL context, so the
-/// owner must hand it back to [`Renderer::destroy_texture`]. The compositor
-/// does that from exactly three places (unmap, destroy, resize).
+/// owner must hand it back to [`Renderer::destroy_texture`] rather than let it
+/// go out of scope.
 pub struct Texture {
     pub glx_pixmap: GLXPixmap,
     pub(crate) tex: GLuint,
@@ -287,7 +290,9 @@ impl fmt::Display for RendererBackend {
     }
 }
 
-/// VSync mode for the compositor (P0 configurable).
+/// VSync mode the compositor asks GLX for at renderer construction. Adaptive
+/// needs `GLX_EXT_swap_control_tear`; the other two are honoured by every
+/// swap-control extension `enable_vsync` knows about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VsyncMode {
     On,
@@ -360,7 +365,7 @@ struct TfpConfig {
     /// `GLX_TEXTURE_FORMAT_RGB_EXT` or `GLX_TEXTURE_FORMAT_RGBA_EXT`.
     format: c_int,
     flip: bool,
-    // ── kept for the startup report; never read by the draw path ──
+    // Reported in the startup report only; the draw path never reads them.
     /// The fbconfig's own `GLX_VISUAL_ID` (0 when it has no X visual).
     visual: u32,
     buffer_size: c_int,
@@ -440,24 +445,25 @@ enum Reject {
 /// Score `fb` as a texture source for a pixmap of visual `want`, or say why it
 /// cannot be one. Higher is better; only the relative order matters.
 ///
-/// This is where the compositor is made *screen-aware*, and where it used to be
-/// wrong. The rules, and the bug each one prevents:
+/// This is where the compositor is made *screen-aware*: nothing about colour
+/// depth or channel layout is assumed, all of it is read back from the X
+/// `Setup` and the fbconfig. The rules, each with the failure it prevents:
 ///
 ///   * **Depth comes from the X visual table, never from `GLX_BUFFER_SIZE`.**
 ///     A depth-24 visual is stored as `x8r8g8b8`, so its fbconfig reports a
 ///     32-bit buffer with 8 alpha bits. Requiring `buffer_size == depth` finds
-///     nothing on such a driver and *every ordinary window silently vanishes
-///     from the frame*.
+///     nothing on such a driver, and every ordinary window then silently
+///     vanishes from the frame.
 ///   * **Channel widths must be at least the visual's, and are ranked on how
 ///     exactly they match.** `buffer_size == 32 && alpha != 0` also matches
 ///     `R10G10B10A2`, and binding an 8-bit-per-channel ARGB pixmap through a
 ///     10-bit config reinterprets the bits across channel boundaries: orange
-///     `(255,128,64)` comes back as `(255,247,16)`. That is the colour bug.
+///     `(255,128,64)` comes back as `(255,247,16)`.
 ///   * **Alpha bits on the *config* are not alpha in the *visual*.** For a
-///     depth-24 visual we ask for `GLX_TEXTURE_FORMAT_RGB_EXT` and the TFP spec
+///     depth-24 visual we ask for `GLX_TEXTURE_FORMAT_RGB_EXT`, and the TFP spec
 ///     guarantees the sampler returns `a = 1.0` whatever the config carries, so
-///     rejecting configs that merely *have* an alpha channel is what left
-///     24-bit windows unbindable on the drivers that only expose 32-bit ones.
+///     rejecting configs that merely *have* an alpha channel would leave
+///     24-bit windows unbindable on drivers that only expose 32-bit ones.
 ///   * **Never fewer colour bits than the visual.** A narrower config would
 ///     quantise every window: banding and posterised gradients. Wider is fine —
 ///     the driver widens the value, it does not invent one.
@@ -632,9 +638,10 @@ pub struct Renderer {
     /// Whether vsync (swap interval 1) is actually in effect.
     pub vsync: bool,
     /// Whether `GLX_SGI_video_sync` is available. Retained purely as an
-    /// instrumentation signal (C1): its counter can measure missed vblanks. It
-    /// no longer drives pacing — swap interval 1 (see `vsync`) is the only
-    /// synchroniser.
+    /// instrumentation signal: its counter can measure missed vblanks. It must
+    /// not drive pacing — swap interval 1 (see `vsync`) is the only
+    /// synchroniser, and asking for a retrace on top of it would skip every
+    /// other vblank.
     pub video_sync: bool,
     /// Structured renderer info for the compositor's startup log.
     pub info: RendererInfo,
@@ -673,6 +680,11 @@ impl Renderer {
         )
     }
 
+    /// Like [`Renderer::new`] but with an explicit vsync mode.
+    ///
+    /// On success the new context is current on `overlay` for the calling
+    /// thread and the swap interval has already been applied to that drawable;
+    /// every other method here assumes both.
     pub fn new_with_vsync(
         dpy: XDisplay,
         screen: i32,
@@ -700,7 +712,6 @@ impl Renderer {
             ));
         }
 
-        // ── GLX availability ────────────────────────────────────────────────
         let (mut eb, mut ev) = (0, 0);
         if unsafe { (glx.glXQueryExtension)(d, &mut eb, &mut ev) } == 0 {
             return Err("server has no GLX extension".into());
@@ -730,10 +741,8 @@ impl Renderer {
             .glXCreateContextAttribsARB
             .ok_or("libGL exports no glXCreateContextAttribsARB")?;
 
-        // ── fbconfig for the overlay window: must use the ROOT visual ───────
         let win_cfg = choose_window_fbconfig(&glx, d, screen, root_format)?;
 
-        // ── OpenGL 3.3 core context ─────────────────────────────────────────
         let ctx_attribs: [c_int; 7] = [
             GLX_CONTEXT_MAJOR_VERSION_ARB,
             3,
@@ -783,18 +792,16 @@ impl Renderer {
             }
         };
 
-        // ── vsync ───────────────────────────────────────────────────────────
         // `glXSwapBuffers` with swap interval 1 blocks until the vertical blank,
         // so a frame lands exactly once per refresh — no tearing on the moving
         // edge, and the loop paces itself for free (no spinning, no 16 ms guess).
-        // This is the *single* synchroniser: nothing else must set a conflicting
-        // interval, or the loop would skip vblanks (B1).
+        // This is the *single* synchroniser: nothing else may set a conflicting
+        // interval, or the loop would skip vblanks.
         let vsync = enable_vsync(&glx, d, screen, glx_win, &exts, vsync_mode);
 
-        // `GLX_SGI_video_sync` is kept purely as an instrumentation signal (C1):
-        // its counter can measure missed vblanks. It no longer drives pacing —
-        // the swap-interval-1 path above is the only synchroniser, so we must
-        // NOT zero the interval here (that used to undo `enable_vsync`).
+        // `GLX_SGI_video_sync` stays purely an instrumentation signal: its
+        // counter can measure missed vblanks. The interval must not be touched
+        // here — zeroing it would undo `enable_vsync` above.
         let video_sync = has_extension(&exts, "GLX_SGI_video_sync");
 
         let has_buffer_age =
@@ -962,8 +969,6 @@ impl Renderer {
         }
         Ok(())
     }
-
-    // ── frame ───────────────────────────────────────────────────────────────
 
     /// Start a frame: set the viewport to the whole overlay. When `full_clear`
     /// is true the screen is cleared to transparent black and scissor is
@@ -1133,11 +1138,12 @@ impl Renderer {
         self.gl.take_error() == GL_NO_ERROR
     }
 
-    /// Block until the next vertical retrace (`GLX_SGI_video_sync`). Retained for
-    /// instrumentation only (C1): it reads the vblank counter and can be used to
-    /// measure missed retraces. It is no longer called from the frame loop — the
-    /// swap-interval-1 path in `end_frame` is the sole synchroniser, so calling
-    /// this *and* relying on `glXSwapBuffers` to pace would skip every other
+    /// Block until the next vertical retrace (`GLX_SGI_video_sync`).
+    ///
+    /// Instrumentation only: it reads the vblank counter so a caller can
+    /// measure missed retraces. It must not be used to pace the frame loop —
+    /// the swap-interval-1 path in [`Renderer::end_frame`] is the sole
+    /// synchroniser, and waiting on a retrace *as well* would skip every other
     /// vblank. Returns `false` when the extension is unavailable.
     pub fn wait_vblank(&self) -> bool {
         let (Some(get), Some(wait)) = (self.glx.glXGetVideoSyncSGI, self.glx.glXWaitVideoSyncSGI)
@@ -1150,8 +1156,6 @@ impl Renderer {
             (wait)(1, 0, &mut count) == 0
         }
     }
-
-    // ── textures ────────────────────────────────────────────────────────────
 
     /// Wrap an X pixmap (a redirected window's off-screen storage, or the root
     /// wallpaper pixmap) as a GL texture.
@@ -1321,8 +1325,9 @@ impl Renderer {
     /// the window-path premultiplied blend is already correct). Returns the
     /// texture handle; the caller owns it and must `destroy_raw` it. Errors (driver
     /// rejection, oversized) return `Err` with a clear message and free the
-    /// half-created texture. Respects `GL_MAX_TEXTURE_SIZE` (the plan's risk note:
-    /// reject, never silently downscale).
+    /// half-created texture. An image larger than `GL_MAX_TEXTURE_SIZE` is
+    /// rejected, never silently downscaled: the caller has to decide what the
+    /// wallpaper should look like at that size.
     pub fn upload_rgba(&mut self, img: &Rgba8) -> Result<TextureHandle, String> {
         let gl = &self.gl;
         let max_size = self.max_texture_size();
@@ -1433,8 +1438,9 @@ impl Renderer {
         Ok(ShaderId(prog))
     }
 
-    /// Query `GL_MAX_TEXTURE_SIZE` once (cached lazily). Returns a sane default if
-    /// the query is unavailable.
+    /// `GL_MAX_TEXTURE_SIZE` as the driver reports it; a driver that answers
+    /// nonsense (0 or negative) gets a conservative 4096 so the caller's
+    /// oversize check still rejects something absurd.
     fn max_texture_size(&self) -> u32 {
         let mut v: GLint = 0;
         unsafe { (self.gl.glGetIntegerv)(GL_MAX_TEXTURE_SIZE, &mut v) };
@@ -1448,6 +1454,13 @@ impl Renderer {
     /// Draw the wallpaper shader filling `out` (screen px) for `time`/`dt`. The
     /// shader fills the quad; per-output `u_resolution` lets it know its own pixel
     /// dimensions. No texture is sampled.
+    ///
+    /// `s` must be the program this renderer currently holds — the one
+    /// [`Renderer::compile_fragment`] linked last and
+    /// [`Renderer::destroy_shader`] has not since dropped. The uniform locations
+    /// are cached per program, so an earlier, already-replaced `ShaderId` would
+    /// write its uniforms into whichever locations that program's own layout
+    /// happened to leave at the cached indices.
     pub fn draw_shader(&mut self, s: ShaderId, out: Rect, time: f32, dt: f32) {
         let gl = &self.gl;
         unsafe {
@@ -1487,6 +1500,10 @@ impl Renderer {
         }
     }
 
+    /// Release a bound pixmap texture: `glXReleaseTexImageEXT` if it is still
+    /// bound, then the GLX pixmap, then the GL texture name. The X pixmap the
+    /// GLXPixmap was created from is *not* touched — the caller frees that.
+    /// Requires the renderer's context to still be current.
     pub fn destroy_texture(&mut self, mut t: Texture) {
         let d = self.dpy.as_ptr();
         if glx_trace_enabled() {
@@ -1524,13 +1541,12 @@ impl Renderer {
     }
 
     fn tfp_config(&mut self, visual: VisualFormat) -> Result<TfpConfig, String> {
-        // NOTE: a *failed* lookup is intentionally NOT cached. A visual whose
-        // fbconfig negotiation fails once (a transient `BadMatch`, an X server
-        // that was still initialising, a GLX race during a resize storm) must
-        // be retried on the next pixmap, not frozen into a permanent negative
-        // cache that silently drops every window of that visual (which is what
-        // a cached `Err` would do — see the compositor retry path in
-        // `Compositor::rename_and_bind`). Only a *successful* config is cached.
+        // A *failed* lookup is deliberately not cached. A visual whose fbconfig
+        // negotiation fails once (a transient `BadMatch`, an X server still
+        // initialising, a GLX race during a resize storm) must be retried on the
+        // next pixmap, not frozen into a permanent negative cache that would
+        // silently drop every window of that visual for the rest of the session.
+        // Only a successful config is cached.
         if let Some(Ok(hit)) = self.tfp_cache.get(&visual.id) {
             return Ok(*hit);
         }
@@ -1546,8 +1562,6 @@ impl Renderer {
         }
         found
     }
-
-    // ── self-check / diagnostics ────────────────────────────────────────────
 
     /// The visual the final framebuffer uses — i.e. what the screen can
     /// actually display, however deep the client's own windows are.
@@ -1622,11 +1636,14 @@ impl Renderer {
         out
     }
 
-    // ── teardown ────────────────────────────────────────────────────────────
-
     /// Drop the GL context and its drawable. Called when the compositor is
     /// disabled at runtime (a GL failure) and on shutdown. Textures must have
     /// been destroyed first.
+    ///
+    /// The order is load-bearing: the programs, VBO and VAO are deleted while
+    /// the context is still current, and only then is the context released and
+    /// destroyed — `glXDestroyContext` rejects a context that is still current
+    /// on any drawable.
     pub fn destroy(&mut self) {
         let d = self.dpy.as_ptr();
         unsafe {
@@ -1655,8 +1672,11 @@ impl Renderer {
     }
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-
+/// Apply `mode` to `drawable` and report whether vsync ends up in effect.
+///
+/// Only extensions actually present in `exts` (the server's GLX extension
+/// string) are used: a non-`None` [`Glx`] field merely means libGL exported the
+/// symbol.
 fn enable_vsync(
     glx: &Glx,
     d: *mut crate::xlib::Display,
@@ -1722,10 +1742,10 @@ fn enable_vsync(
 /// because the Composite overlay is created with the root visual and X requires
 /// drawable and fbconfig to agree.
 ///
-/// Deliberately **not** `glXChooseFBConfig`: the attribute list used to ask for
-/// `GLX_RED_SIZE >= 8, GLX_GREEN_SIZE >= 8`, which excludes every fbconfig on a
-/// 15- or 16-bit screen (`R5G6B5`) and made the compositor refuse to start
-/// there for no reason. The only hard requirement is the visual id, so we
+/// Deliberately **not** `glXChooseFBConfig`: its "at least" attribute form
+/// (`GLX_RED_SIZE >= 8, GLX_GREEN_SIZE >= 8, ...`) excludes every fbconfig on a
+/// 15- or 16-bit screen (`R5G6B5`) and would make the compositor refuse to
+/// start there for no reason. The only hard requirement is the visual id, so we
 /// enumerate and filter on that, and report precisely what was missing.
 fn choose_window_fbconfig(
     glx: &Glx,
@@ -1854,12 +1874,11 @@ fn choose_tfp_fbconfig(
                         // The vertex shader already measures `u_src.y`
                         // top-down, i.e. it samples `t = 0` at the top of the
                         // quad, so TRUE is precisely the case that needs **no**
-                        // flip and FALSE is the one that does. Testing for
-                        // `== 1` (as this used to) renders every window upside
-                        // down on any driver that answers TRUE — which is most
-                        // of them. Servers that answer the out-of-spec `-1`
-                        // (`GLX_DONT_CARE`) are treated as the common TRUE
-                        // case, which is what they measurably do.
+                        // flip and FALSE is the one that does: test for `0`,
+                        // not for "not TRUE". A server that answers the
+                        // out-of-spec `-1` (`GLX_DONT_CARE`) is treated as the
+                        // common TRUE case, which is what such servers
+                        // measurably do.
                         flip: fb.y_inverted == Some(0),
                         visual: fb.visual,
                         buffer_size: fb.buffer_size,
@@ -1940,8 +1959,6 @@ pub type GlxXid = XID;
 mod tests {
     use super::*;
 
-    // ── the screen's side: what X says it can show ──────────────────────────
-
     /// The ordinary opaque visual: depth 24 stored as `x8r8g8b8`.
     const RGB24: VisualFormat = VisualFormat {
         id: 0x102,
@@ -1973,8 +1990,6 @@ mod tests {
         direct: true,
     };
 
-    // ── the driver's side: fbconfigs, as measured from real servers ─────────
-
     fn fb(visual: u32, visual_depth: Option<u8>, rgba: [c_int; 4]) -> FbAttrs {
         FbAttrs {
             visual,
@@ -1999,14 +2014,15 @@ mod tests {
             .map(|(_, name)| name)
     }
 
-    /// The bug the user saw. On a driver that also exposes a 10-bit config,
+    /// A 10-bit config must never serve an 8-bit-per-channel ARGB visual.
     /// `GLX_BUFFER_SIZE == 32 && alpha != 0` matches `R10G10B10A2` — 10+10+10+2
-    /// is also 32 — and an 8-bit ARGB window bound through it comes back with
-    /// its channels reinterpreted: orange (255,128,64) reads as (255,247,16).
+    /// is also 32 — and binding through it reinterprets the bits across channel
+    /// boundaries: orange (255,128,64) reads back as (255,247,16).
     #[test]
     fn argb32_never_binds_through_a_10bit_config() {
         let configs = [
-            // Mesa lists the deep-colour, visual-less config first.
+            // Mesa lists the deep-colour, visual-less config first, so the wrong
+            // one is offered before the right one and must still lose.
             ("rgb10a2", fb(0, None, [10, 10, 10, 2])),
             ("rgba8", fb(ARGB32.id, Some(32), [8, 8, 8, 8])),
         ];
@@ -2018,11 +2034,11 @@ mod tests {
         );
     }
 
-    /// The other half of the bug: a depth-24 visual's fbconfig reports a
-    /// **32-bit** buffer with 8 alpha bits, because `x8r8g8b8` is how the
-    /// server stores it. Requiring `buffer_size == depth`, or refusing configs
-    /// that merely have an alpha channel, finds nothing at all — and every
-    /// ordinary window then silently disappears from the frame.
+    /// A depth-24 visual's fbconfig legitimately reports a **32-bit** buffer
+    /// with 8 alpha bits, because `x8r8g8b8` is how the server stores it.
+    /// Requiring `buffer_size == depth`, or refusing configs that merely have
+    /// an alpha channel, finds nothing at all — and every ordinary window then
+    /// silently disappears from the frame.
     #[test]
     fn rgb24_binds_through_a_32bit_buffer_with_alpha_bits() {
         let cfg = fb(RGB24.id, Some(24), [8, 8, 8, 8]);
@@ -2075,14 +2091,16 @@ mod tests {
         assert_eq!(best(RGB16, &configs), Some("native-565"));
     }
 
-    /// Some servers answer `GLX_DONT_CARE` (-1) for the bind targets. Reading
-    /// that as "no GL_TEXTURE_2D" disables compositing on them entirely.
+    /// `GLX_DONT_CARE` (-1) for the bind targets means "unspecified", not
+    /// "no GL_TEXTURE_2D": reading it as the latter disables compositing on
+    /// those servers entirely.
     #[test]
     fn dont_care_bind_targets_are_usable() {
         let mut cfg = fb(RGB24.id, Some(24), [8, 8, 8, 8]);
-        cfg.target_2d = true; // what the reader derives from -1 / unsupported
+        // What `choose_tfp_fbconfig` derives from -1 / no answer at all.
+        cfg.target_2d = true;
         assert!(rate_fbconfig(RGB24, &cfg).is_ok());
-        cfg.target_2d = false; // a server that really says "no 2D"
+        cfg.target_2d = false; // a server that really does say "no 2D"
         assert_eq!(rate_fbconfig(RGB24, &cfg), Err(Reject::No2dTarget));
     }
 
@@ -2112,8 +2130,6 @@ mod tests {
         assert_eq!(rate_fbconfig(RGB24, &cfg), Err(Reject::NotPixmap));
     }
 
-    // ── acceleration classification (pure, no X/GPU) ─────────────────────────
-
     #[test]
     fn software_rasterizers_classify_as_software() {
         assert_eq!(
@@ -2139,19 +2155,19 @@ mod tests {
         );
     }
 
+    /// No vendor-name guessing: the classification keys off software-renderer
+    /// markers only, so every real GPU reports `Gpu` whatever it is called.
     #[test]
     fn real_gpus_classify_as_gpu_regardless_of_vendor() {
-        // Intel is NOT assumed software — the i5-7300HQ diagnostic case.
+        // Intel iGPUs in particular must not be taken for llvmpipe.
         assert_eq!(
             classify_acceleration("Intel", "Mesa Intel(R) HD Graphics 630 (KBL GT2)"),
             Acceleration::Gpu
         );
-        // NVIDIA gets no software heuristic either.
         assert_eq!(
             classify_acceleration("NVIDIA Corporation", "NVIDIA GeForce GTX 1060/PCIe/SSE2"),
             Acceleration::Gpu
         );
-        // AMD keeps behaving exactly as before.
         assert_eq!(
             classify_acceleration("X.Org", "AMD Radeon RX 580 (POLARIS10, DRM 3.49)"),
             Acceleration::Gpu

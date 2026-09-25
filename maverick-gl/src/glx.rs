@@ -1,12 +1,11 @@
-// maverick-gl/src/glx.rs
 // Hand-written GLX 1.4 + `GLX_EXT_texture_from_pixmap` +
 // `GLX_ARB_create_context` + swap-control FFI.
 //
 // GLX is the bridge between the X server's drawables and OpenGL: it turns the
 // off-screen pixmap Composite gives us for a redirected window into a texture
 // (`glXBindTexImageEXT`) with **zero copies**, and it is what gives us real
-// vblank synchronisation (`glXSwapIntervalEXT` + `glXSwapBuffers`) instead of
-// the current 16 ms rate cap.
+// vblank synchronisation (`glXSwapBuffers` at swap interval 1) instead of a
+// fixed sleep between frames.
 
 use crate::dl::Lib;
 use crate::xlib::{Display, XID};
@@ -20,7 +19,6 @@ pub type GLXPixmap = XID;
 /// Xlib's `Bool` (`int`, 0/1).
 pub type Bool = c_int;
 
-// ── fbconfig attributes (GL/glx.h) ────────────────────────────────────────────
 pub const GLX_BUFFER_SIZE: c_int = 2;
 pub const GLX_DOUBLEBUFFER: c_int = 5;
 pub const GLX_RED_SIZE: c_int = 8;
@@ -42,7 +40,6 @@ pub const GLX_WINDOW_BIT: c_int = 0x0000_0001;
 pub const GLX_PIXMAP_BIT: c_int = 0x0000_0002;
 pub const GLX_RGBA_BIT: c_int = 0x0000_0001;
 
-// ── GLX_EXT_texture_from_pixmap ───────────────────────────────────────────────
 pub const GLX_BIND_TO_TEXTURE_RGB_EXT: c_int = 0x20D0;
 pub const GLX_BIND_TO_TEXTURE_RGBA_EXT: c_int = 0x20D1;
 pub const GLX_BIND_TO_TEXTURE_TARGETS_EXT: c_int = 0x20D3;
@@ -56,18 +53,24 @@ pub const GLX_TEXTURE_2D_BIT_EXT: c_int = 0x0000_0002;
 pub const GLX_TEXTURE_2D_EXT: c_int = 0x20DC;
 pub const GLX_FRONT_LEFT_EXT: c_int = 0x20DE;
 
-// ── GLX_ARB_create_context / _profile ─────────────────────────────────────────
 pub const GLX_CONTEXT_MAJOR_VERSION_ARB: c_int = 0x2091;
 pub const GLX_CONTEXT_MINOR_VERSION_ARB: c_int = 0x2092;
 pub const GLX_CONTEXT_PROFILE_MASK_ARB: c_int = 0x9126;
 pub const GLX_CONTEXT_CORE_PROFILE_BIT_ARB: c_int = 0x0000_0001;
 
-// ── GLX_EXT_buffer_age ───────────────────────────────────────────────────────
 /// Query `glXQueryDrawable` with this attribute to learn how many frames old
 /// the back buffer's contents are. `0` means "undefined" (full repaint); `1`
 /// means it holds the last frame we presented, so a partial redraw is safe.
 pub const GLX_BACK_BUFFER_AGE_EXT: c_int = 0x20F4;
 
+/// Declares the `Glx` struct (one field per entry point) plus its loader.
+///
+/// `required` entry points fail `load` when the symbol is missing, because the
+/// compositor cannot run without them. `optional` entry points are extension
+/// functions and load to `None`; `None` is *not* proof that the extension is
+/// absent — a driver is free to export a non-null stub for something it does
+/// not implement — so callers must additionally match the extension token
+/// against `glXQueryExtensionsString` (see [`has_extension`]) before using one.
 macro_rules! glx_api {
     (
         required { $( fn $rname:ident ( $($rarg:ident : $rargty:ty),* $(,)? ) $(-> $rret:ty)? ; )+ }
@@ -119,8 +122,8 @@ glx_api! {
         fn glXSwapIntervalEXT(dpy: *mut Display, drawable: GLXDrawable, interval: c_int);
         fn glXSwapIntervalMESA(interval: c_uint) -> c_int;
         fn glXSwapIntervalSGI(interval: c_int) -> c_int;
-        // `GLX_SGI_video_sync`: block the thread until the next retrace so the
-        // frame loop can pace to the real vblank instead of a fixed timer.
+        // `GLX_SGI_video_sync`: block the thread until the next retrace, so a
+        // caller can pace to the real vblank instead of a fixed timer.
         fn glXGetVideoSyncSGI(count: *mut c_uint) -> c_int;
         fn glXWaitVideoSyncSGI(divisor: c_int, remainder: c_int, count: *mut c_uint) -> c_int;
         // `GLX_EXT_buffer_age`: how many frames stale the back buffer is. Drives
@@ -131,10 +134,9 @@ glx_api! {
 }
 
 impl Glx {
-    /// The server's GLX extension string for `screen`, as a Rust `String`.
-    ///
-    /// `pub(crate)`: it takes a raw `Display*`, so it is only safe to call from
-    /// inside this crate, where the pointer provenance is known.
+    /// The server's GLX extension string for `screen`, as a Rust `String`
+    /// (empty when the server answers NULL, which makes every token test fail
+    /// and therefore disables every optional path).
     pub(crate) fn extensions(&self, dpy: *mut Display, screen: c_int) -> String {
         let p = unsafe { (self.glXQueryExtensionsString)(dpy, screen) };
         if p.is_null() {
