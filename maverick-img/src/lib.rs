@@ -1,55 +1,50 @@
 //! Dependency-free image decode for wallpapers.
 //!
-//! Returns [`Rgba8`] (8-bit RGBA, row-major, top-left) without runtime
-//! dependencies. Native decoders: PNG from scratch (zlib/DEFLATE inflater +
-//! filters + all bit-depths/colour-types), plus trivial PPM/PNM (P6), QOI,
-//! BMP (24/32-bit `BI_RGB`), and farbfeld (16-bit → 8-bit). Anything else
-//! (JPEG/WebP/AVIF/…) is delegated to [`decode_external`].
+//! Returns [`Rgba8`] (8-bit RGBA, row-major, top-left origin). Native decoders:
+//! PNG (zlib/DEFLATE inflater, filters, all bit depths and colour types) plus
+//! PPM/PNM (P6), QOI, BMP (24/32-bit `BI_RGB`) and farbfeld (16 → 8 bit).
+//! Anything else (JPEG/WebP/AVIF/…) is delegated to [`decode_external`].
 //!
-//! PNG path: parses `IHDR`/`PLTE`/`tRNS`/`IDAT`/`IEND`, inflates the
-//! zlib-wrapped DEFLATE stream via [`inflate`] (port of Mark Adler's `puff.c`;
-//! handles stored/fixed/dynamic blocks, Huffman construction, length/distance
-//! codes and back-references), then unfilters scanlines (`None`/`Sub`/`Up`/
-//! `Average`/`Paeth` where [`paeth`] implements the PNG Paeth predictor on
-//! `a=left, b=above, c=upper-left`), unpacks bit depths 1/2/4/8/16 and colour
-//! types 0/2/3/4/6 with `tRNS` handling, and emits RGBA.
+//! The PNG path parses `IHDR`/`PLTE`/`tRNS`/`IDAT`/`IEND`, inflates the
+//! zlib-wrapped DEFLATE stream ([`inflate`], a port of Mark Adler's `puff.c`),
+//! unfilters the scanlines (`None`/`Sub`/`Up`/`Average`/`Paeth`, with `a` =
+//! left, `b` = above, `c` = upper-left), unpacks bit depths 1/2/4/8/16 and
+//! colour types 0/2/3/4/6 including `tRNS`, and emits RGBA.
 //!
-//! Dispatch: [`decode`] infers format from the lowercased file extension; on
-//! unknown extension or any native error it falls back to `decode_external`,
-//! which probes `ffmpeg`/`convert`/`magick` via `which` and parses their PPM
-//! output through `ppm_from_bytes`. [`Rgba8::is_valid`] checks
-//! `data.len() == w*h*4`.
+//! [`decode`] picks the decoder from the lowercased file extension and falls
+//! back to [`decode_external`] on an unknown extension or any native error.
+//! `decode_external` resolves `ffmpeg`/`convert`/`magick` against `PATH`
+//! itself (no `which` subprocess) and parses their PPM output through
+//! `ppm_from_bytes`. [`Rgba8::is_valid`] checks `data.len() == w*h*4`.
 //!
 //! # Invariants
 //!
-//! `inflate` rejects over-subscribed Huffman trees, invalid codes, bad
-//! length/distance symbols, and back-references past start. QOI uses wrapping
-//! arithmetic for `DIFF`/`LUMA` per spec. PPM/farbfeld/BMP validate magic,
-//! dimensions, and truncation before emitting.
-//!
-//! # Safety
-//!
-//! The inflater is `unsafe`-free; QOI `LUMA` wrapping is intentional. External
-//! converters are spawned as child processes and their PPM output is trusted
-//! only after header validation.
+//! Every decoder validates magic, dimensions and truncation before emitting
+//! anything, and no dimension is multiplied before it is bounds- and
+//! overflow-checked. `inflate` rejects over-subscribed Huffman trees, invalid
+//! codes, bad length/distance symbols, and back-references past the start of
+//! the output. QOI uses the wrapping arithmetic `DIFF`/`LUMA` require.
+//! External converters run as child processes; their output is bounded and
+//! only parsed after header validation.
 //!
 //! # Errors
 //!
-//! All decoders return `Err(String)` on malformed input. `decode` returns a
-//! clear error only when every path failed.
+//! Malformed input is always `Err(String)`. [`decode`] only reports an error
+//! once every decoder, native and external, has failed.
 
 use std::path::Path;
 
-/// Hard caps to turn hostile dimension headers into clean `Err` instead of
-/// wrap-around allocs or OOM aborts. 16384px per side is far beyond any
-/// wallpaper use; 64M pixels (256 MiB RGBA) bounds total allocation.
+/// Hard caps that turn hostile dimension headers into a clean `Err` instead of
+/// a wrap-around allocation or an OOM abort. 16384px per side is far beyond any
+/// wallpaper; 64M pixels (256 MiB of RGBA) bounds the total allocation.
 pub const MAX_DIM: usize = 16_384;
 pub const MAX_PIXELS: usize = 64_000_000;
-/// Cap for external-converter stdout (PPM bytes) — same pixel budget * 3 + slack.
+/// Byte budget for anything read from outside the file format itself: a
+/// converter's stdout, one PNG chunk, the accumulated `IDAT`, and the inflated
+/// stream. Sized as the PPM pixel budget times 3 plus slack.
 const MAX_EXTERNAL_BYTES: usize = 200_000_000;
 
-/// Validate `w x h` against [`MAX_DIM`]/[`MAX_PIXELS`] using checked math.
-/// Returns `(w, h)` as usize on success.
+/// Validate `w x h` against [`MAX_DIM`]/[`MAX_PIXELS`] with checked math.
 fn check_dims(w: usize, h: usize) -> Result<(usize, usize), String> {
     if w == 0 || h == 0 {
         return Err("zero dimension".into());
@@ -63,16 +58,16 @@ fn check_dims(w: usize, h: usize) -> Result<(usize, usize), String> {
         .ok_or_else(|| format!("pixel count too large: {w}x{h}"))
 }
 
-/// `w as usize * h as usize * n` with overflow check.
+/// `w * h * n` with an overflow check, reported under `what`.
 fn checked_buf(w: usize, h: usize, n: usize, what: &str) -> Result<usize, String> {
     w.checked_mul(h)
         .and_then(|p| p.checked_mul(n))
         .ok_or_else(|| format!("{what}: size overflow"))
 }
 
-/// Convert a parsed `i64` header int to a bounded dimension. Rejects
-/// negatives BEFORE the `as u32` cast (`-1 as u32 == 4294967295` would
-/// otherwise pass the `w > 0` check and trigger a giant alloc).
+/// Convert a parsed `i64` header int to a bounded dimension. Negatives are
+/// rejected *before* the `usize` cast: `-1` would otherwise wrap to a huge
+/// value and still pass the `> 0` style checks, driving a giant allocation.
 fn dim_from_i64(v: i64, what: &str) -> Result<usize, String> {
     if v <= 0 || v as u64 > MAX_DIM as u64 {
         return Err(format!("{what}: bad dimension {v}"));
@@ -121,8 +116,6 @@ pub fn decode(path: &Path) -> Result<Rgba8, String> {
     decode_external(path)
 }
 
-// ─── trivial formats ────────────────────────────────────────────────────────
-
 fn decode_ppm(path: &Path) -> Result<Rgba8, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("ppm: {e}"))?;
     let mut i = 2usize;
@@ -130,7 +123,7 @@ fn decode_ppm(path: &Path) -> Result<Rgba8, String> {
         return Err("ppm: not a P6 file".into());
     }
     let read_int = |i: &mut usize| -> Result<i64, String> {
-        // skip whitespace and comments
+        // PPM headers allow `#` comments between any two tokens.
         while *i < bytes.len() {
             let c = bytes[*i];
             if c == b'#' {
@@ -146,8 +139,8 @@ fn decode_ppm(path: &Path) -> Result<Rgba8, String> {
         let start = *i;
         while *i < bytes.len() && bytes[*i].is_ascii_digit() {
             *i += 1;
-            // Bound digit run: i64 has at most 19 digits; longer runs are
-            // hostile headers trying to burn CPU in BigInt-ish parse paths.
+            // Bound the digit run: `i64` holds at most 19 digits, so a longer
+            // one is a hostile header burning CPU in the parse path.
             if *i - start > 19 {
                 return Err("ppm: bad int".into());
             }
@@ -167,7 +160,9 @@ fn decode_ppm(path: &Path) -> Result<Rgba8, String> {
     let w = dim_from_i64(w_raw, "ppm").map_err(|e| format!("ppm: {e}"))?;
     let h = dim_from_i64(h_raw, "ppm").map_err(|e| format!("ppm: {e}"))?;
     check_dims(w, h).map_err(|e| format!("ppm: {e}"))?;
-    // single whitespace after maxval, then binary data.
+    // Exactly one whitespace byte separates the header from the binary
+    // samples; the spec allows only a single delimiter, and pixel data may
+    // itself start with whitespace bytes.
     if i >= bytes.len() || !bytes[i].is_ascii_whitespace() {
         return Err("ppm: missing separator before data".into());
     }
@@ -222,8 +217,6 @@ fn decode_farbfeld(path: &Path) -> Result<Rgba8, String> {
     })
 }
 
-// ─── QOI ────────────────────────────────────────────────────────────────────
-
 fn decode_qoi(path: &Path) -> Result<Rgba8, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("qoi: {e}"))?;
     if bytes.len() < 14 || &bytes[0..4] != b"qoif" {
@@ -243,8 +236,11 @@ fn decode_qoi(path: &Path) -> Result<Rgba8, String> {
     let mut index = [[0u8; 4]; 64];
     let mut out = Vec::with_capacity(total);
     let mut o = 14;
+    // `end` stops 8 bytes short of the file: the QOI end marker is 7 zero
+    // bytes plus a `0x01`, and the loop must not read into it.
     let end = bytes.len().saturating_sub(8);
-    // Helper: ensure `n` bytes available at `o` (and before `end`).
+    // Bail out unless `n` more bytes are readable at `o` and still before
+    // `end`.
     macro_rules! need {
         ($n:expr) => {
             if o + ($n) > end || o + ($n) > bytes.len() {
@@ -299,7 +295,9 @@ fn decode_qoi(path: &Path) -> Result<Rgba8, String> {
                         out.extend_from_slice(&px);
                     }
                 }
-                // index update for the repeated pixel
+                // RUN repeats `px`; the spec does not require the index to be
+                // refreshed here, but keeping every op consistent costs one
+                // store and cannot change a conforming stream's output.
                 index[(px[0] as usize * 3
                     + px[1] as usize * 5
                     + px[2] as usize * 7
@@ -329,8 +327,6 @@ fn decode_qoi(path: &Path) -> Result<Rgba8, String> {
     })
 }
 
-// ─── BMP (24/32-bit BI_RGB) ──────────────────────────────────────────────────
-
 fn decode_bmp(path: &Path) -> Result<Rgba8, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("bmp: {e}"))?;
     if bytes.len() < 54 || &bytes[0..2] != b"BM" {
@@ -350,7 +346,9 @@ fn decode_bmp(path: &Path) -> Result<Rgba8, String> {
     if w <= 0 || h == 0 {
         return Err("bmp: bad dimensions".into());
     }
-    // u32 headers can claim 2G x 2G; bound before any multiplication.
+    // A negative height means the rows are stored top-down. A negative width
+    // would mean a mirrored image; it is accepted but not un-mirrored.
+    // Headers can claim 2G x 2G, so bound before any multiplication.
     let bw_us = w.unsigned_abs() as usize;
     let bh_us = h.unsigned_abs() as usize;
     check_dims(bw_us, bh_us).map_err(|e| format!("bmp: {e}"))?;
@@ -371,14 +369,14 @@ fn decode_bmp(path: &Path) -> Result<Rgba8, String> {
         .and_then(|r| r.checked_add(3))
         .map(|r| r & !3)
         .ok_or_else(|| "bmp: size overflow".to_string())?;
-    // data_offset comes from the file: must point inside headers..eof and
-    // leave room for the pixel array (checked, no wrap).
+    // `data_offset` is attacker-controlled: it must sit past the headers and
+    // inside the file, and every index derived from it is checked.
     if data_offset < 54 || data_offset > bytes.len() {
         return Err("bmp: bad data offset".into());
     }
-    // Require only the last pixel byte to exist, not full padding:
-    // some writers omit trailing row padding (e.g. 1x1 24-bit with 3
-    // bytes instead of 4). Padding bytes are simply skipped when present.
+    // Only the last pixel byte has to exist, not the trailing row padding:
+    // some writers omit it (e.g. a 1x1 24-bit image stored as 3 bytes). The
+    // per-pixel bounds check below skips padding whenever it is present.
     let row_data = bw.checked_mul(channels).ok_or("bmp: size overflow")?;
     let last_row_off = (bh - 1)
         .checked_mul(row_bytes)
@@ -402,8 +400,8 @@ fn decode_bmp(path: &Path) -> Result<Rgba8, String> {
             let p = base
                 .checked_add(col.checked_mul(channels).ok_or("bmp: size overflow")?)
                 .ok_or("bmp: size overflow")?;
-            // Need `channels` bytes; for 24bpp the 4th byte read below
-            // is guarded by `channels == 4`.
+            // Bound the row before reading it: for 24bpp `channels == 3` and
+            // the alpha read below is never taken, so this is the whole span.
             if p.checked_add(channels).is_none_or(|e| e > bytes.len()) {
                 return Err("bmp: truncated".into());
             }
@@ -421,8 +419,6 @@ fn decode_bmp(path: &Path) -> Result<Rgba8, String> {
     })
 }
 
-// ─── PNG (native, from scratch) ──────────────────────────────────────────────
-
 fn decode_png(path: &Path) -> Result<Rgba8, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("png: {e}"))?;
     if bytes.len() < 8 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
@@ -438,15 +434,16 @@ fn decode_png(path: &Path) -> Result<Rgba8, String> {
     let mut trns: Vec<u8> = Vec::new();
     while i + 8 <= bytes.len() {
         let len = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
-        // Bound single-chunk growth: a 2 GiB `len` would otherwise drive
-        // `extend_from_slice` OOM before the overrun check below.
+        // Bound the chunk before extending from it: a 2 GiB `len` would drive
+        // `extend_from_slice` to OOM before the overrun check below runs.
         if len > MAX_EXTERNAL_BYTES {
             return Err("png: chunk too large".into());
         }
         let typ = &bytes[i + 4..i + 8];
         let data_start = i.checked_add(8).ok_or("png: size overflow")?;
         let data_end = data_start.checked_add(len).ok_or("png: size overflow")?;
-        // `+4` CRC must also fit; checked to avoid wrap-around bypass.
+        // The 4 CRC bytes must fit too; checking the sum instead of the data
+        // range keeps a near-2^32 length from wrapping past the test below.
         let next = data_end.checked_add(4).ok_or("png: size overflow")?;
         if data_end > bytes.len() || next > bytes.len().saturating_add(4) {
             return Err("png: chunk overruns file".into());
@@ -521,6 +518,9 @@ fn decode_png(path: &Path) -> Result<Rgba8, String> {
     let w = width as usize;
     let h = height as usize;
     let bd = bit_depth as usize;
+    // `bpp` is the filter predictor distance in bytes (rounded up, and at
+    // least 1 for sub-byte depths); `stride` is one whole scanline. Neither is
+    // the BMP decoder's "bits per pixel".
     let bpp = channels
         .checked_mul(bd)
         .map(|n| n.div_ceil(8))
@@ -530,15 +530,15 @@ fn decode_png(path: &Path) -> Result<Rgba8, String> {
         .and_then(|n| n.checked_mul(bd))
         .map(|n| n.div_ceil(8))
         .ok_or("png: size overflow")?;
-    // Bound decompressed buffers before allocating: `h * stride` and
-    // `w * h * 4` for the RGBA output.
+    // Bound the decompressed plane and the RGBA output before allocating either.
     let plane = h.checked_mul(stride).ok_or("png: size overflow")?;
     if plane > MAX_PIXELS * 4 + h {
         return Err("png: image too large".into());
     }
     let _ = checked_buf(w, h, 4, "png")?;
 
-    // Unfilter byte-by-byte into a per-row byte buffer.
+    // Unfilter in place: `a`/`b`/`c` are the already-reconstructed left, above
+    // and upper-left bytes, so the current row is read back as it is written.
     let mut unfiltered = vec![0u8; plane];
     let mut prev = vec![0u8; stride];
     let mut pos = 0usize;
@@ -574,7 +574,7 @@ fn decode_png(path: &Path) -> Result<Rgba8, String> {
         prev.copy_from_slice(cur);
     }
 
-    // Unpack samples (handles bit depths) then map to RGBA.
+    // Expand one scanline to 8-bit samples, then map those to RGBA below.
     let samples_per_row = w.checked_mul(channels).ok_or("png: size overflow")?;
     let mut out = Vec::with_capacity(checked_buf(w, h, 4, "png")?);
     for y in 0..h {
@@ -584,6 +584,8 @@ fn decode_png(path: &Path) -> Result<Rgba8, String> {
             .ok_or("png: truncated image data")?;
         let mut samples = Vec::with_capacity(samples_per_row);
         if bd == 16 {
+            // Keep the high byte: PNG 16-bit samples are big-endian, and
+            // dropping the low byte is the usual 16 → 8 truncation.
             for p in 0..samples_per_row {
                 let off = p * 2;
                 let v = if off + 1 < row.len() {
@@ -598,7 +600,8 @@ fn decode_png(path: &Path) -> Result<Rgba8, String> {
                 samples.push(*row.get(p).unwrap_or(&0));
             }
         } else {
-            // Packed bit depths (1/2/4): pull `bd` MSB-first bits per sample.
+            // Packed bit depths (1/2/4): `bd` bits per sample, MSB first in the
+            // row, rescaled to 0..255 with round-half-up.
             let max = (1u32 << bd) - 1;
             let mut bit_pos = 0usize;
             for _ in 0..samples_per_row {
@@ -679,8 +682,6 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
         c as u8
     }
 }
-
-// ─── zlib/DEFLATE inflater (puff.c-style, public-domain port) ─────────────────
 
 mod inflate {
     //! Minimal inflation of a raw DEFLATE stream (no zlib/CRC dependency).
@@ -807,7 +808,8 @@ mod inflate {
         out: &mut Vec<u8>,
     ) -> Result<(), String> {
         loop {
-            // Zip-bomb guard: DEFLATE can expand ~1000x; bound output before push.
+            // Zip-bomb guard: DEFLATE expands by ~1000x, so the output budget
+            // is checked before every push, not once at the end.
             if out.len() > super::MAX_EXTERNAL_BYTES {
                 return Err("inflate: output too large".into());
             }
@@ -947,7 +949,8 @@ mod inflate {
             let last = bits.take(1)? == 1;
             let btype = bits.take(2)?;
             if btype == 0 {
-                // Stored: align to byte, then LEN/NLEN + LEN bytes.
+                // Stored block: drop the bit buffer to reach a byte boundary,
+                // then LEN/NLEN (little-endian) and LEN raw bytes.
                 bits.buf = 0;
                 bits.cnt = 0;
                 let mut read_byte = || -> Result<u8, String> {
@@ -984,18 +987,15 @@ fn inflate(data: &[u8]) -> Result<Vec<u8>, String> {
     inflate::inflate(data)
 }
 
-// ─── external converter fallback (hybrid path) ───────────────────────────────
-
-/// Try an external converter (ffmpeg/convert) and parse its PPM output to RGBA.
+/// Run one of the external converters and parse its PPM output as RGBA.
 /// Used when no native decoder applies (JPEG/WebP/AVIF/…) or the native one
-/// errored. Returns `Err` only when every converter is unavailable or fails.
+/// failed; `Err` only when every converter is missing or fails.
 fn decode_external(path: &Path) -> Result<Rgba8, String> {
     let path_str = path.to_string_lossy().into_owned();
     let mut last_err = String::from("no external image converter found");
     for cmd in ["ffmpeg", "convert", "magick"] {
-        // Resolve to an absolute path once and exec it directly: avoids the
-        // `which` + `Command::new(cmd)` TOCTOU where PATH changes between
-        // probe and exec, and rejects non-executable files.
+        // Resolve once and exec the absolute path: no `which` probe to race
+        // against, and a non-executable match is rejected instead of run.
         let bin = match resolve_exec(cmd) {
             Some(b) => b,
             None => continue,
@@ -1021,8 +1021,8 @@ fn decode_external(path: &Path) -> Result<Rgba8, String> {
         };
         match output {
             Ok(out) if out.status.success() && !out.stdout.is_empty() => {
-                // Bound stdout before parsing: a compromised converter must
-                // not OOM us via unbounded pipe output.
+                // Bound stdout before parsing: a hostile or broken converter
+                // must not OOM us through an unbounded pipe.
                 if out.stdout.len() > MAX_EXTERNAL_BYTES {
                     last_err = format!("{cmd}: output too large");
                     continue;
@@ -1048,8 +1048,9 @@ fn decode_external(path: &Path) -> Result<Rgba8, String> {
     Err(format!("maverick-img: {last_err}"))
 }
 
-/// Resolve `bin` via PATH to an absolute executable path (no exec of bare
-/// names, no `which` subprocess). Returns `None` if not found/executable.
+/// Resolve `bin` against `PATH` to an absolute executable path, without
+/// spawning `which` and without ever exec'ing a bare name. `None` when the
+/// name is not found or is not executable.
 fn resolve_exec(bin: &str) -> Option<std::path::PathBuf> {
     if bin.is_empty() || bin.contains('/') {
         return None;
@@ -1079,7 +1080,9 @@ fn resolve_exec(bin: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// Parse a P6 PPM byte stream (as produced by the external converters).
+/// Parse a P6 PPM byte stream into RGBA, as emitted by the external
+/// converters. The stream is untrusted output, so it gets the same dimension,
+/// overflow and truncation checks as a PPM read from disk.
 fn ppm_from_bytes(bytes: &[u8]) -> Result<Rgba8, String> {
     if bytes.len() < 2 || &bytes[0..2] != b"P6" {
         return Err("external PPM: not P6".into());
@@ -1274,7 +1277,7 @@ mod tests {
         b.extend_from_slice(b"farbfeld");
         b.extend_from_slice(&1u32.to_be_bytes());
         b.extend_from_slice(&1u32.to_be_bytes());
-        b.extend_from_slice(&[0x10u8, 0, 0x20, 0, 0x30, 0, 0x40, 0]); // 16-bit → 0x10,0x20,0x30,0x40
+        b.extend_from_slice(&[0x10u8, 0, 0x20, 0, 0x30, 0, 0x40, 0]); // 16-bit BE
         let tmp = std::env::temp_dir().join("maverick-img-test.ff");
         std::fs::write(&tmp, &b).unwrap();
         let img = decode(&tmp).unwrap();
