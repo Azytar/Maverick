@@ -166,17 +166,11 @@ pub fn create(name: &SessionName, spec: Spec) -> Result<Session, SessionError> {
     // successful start has to leave a name that the reaper can clean up.
     write_record(&session)?;
     match launch(&mut session) {
+        // The rollback and the reason live in `launch`, which is the only
+        // function that knows what it started. Duplicating them here is what
+        // left every other caller unprotected.
         Ok(()) => Ok(session),
-        Err(e) => {
-            // A half-started session is worse than none: an X server nobody
-            // stops, holding a display. Tear down whatever came up and record
-            // why, so the failure is visible in `session list` afterwards.
-            teardown(&mut session, StopMode::Hard);
-            session.state = SessionState::Stopped;
-            session.exit_reason = e.to_string();
-            let _ = write_record(&session);
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
 }
 
@@ -325,8 +319,17 @@ fn reap_one(session: &mut Session) {
     // The window manager is gone. What it leaves behind is the X server it was
     // started for, which has nothing left to serve and holds a display
     // hostage, so it is stopped here rather than by a watcher.
+    //
+    // The stop runs whenever the record *names* an X server, not only when that
+    // process is still alive. `XServer::stop` already handles a server that is
+    // gone by going straight to releasing the display, and gating the call on
+    // liveness made that branch unreachable — so a display whose X server was
+    // `SIGKILL`ed kept its lock and its socket, `display_is_free` stayed false
+    // for that number forever, and no later command could reclaim it. That is
+    // a permanent, machine-wide loss of a display number from a single unclean
+    // exit, and it is invisible: the record is stamped stopped with no pid.
     let crashed = session.state == SessionState::Running;
-    if session.xserver_is_up() {
+    if session.xserver.is_some() {
         let server = xserver::XServer {
             display: session.display,
             backend: session.spec.backend,
@@ -359,18 +362,46 @@ fn reap_one(session: &mut Session) {
 }
 
 /// Start everything a session needs and record the result.
+///
+/// A failed launch always leaves nothing behind. This function is the only
+/// place that knows which X server the current generation started, so it is
+/// also the only place that can undo that: `create` used to carry the rollback,
+/// but only on the branch taken when the session name was new, so every other
+/// route — `start`, `restart`, and a re-`create` over an existing record —
+/// arrived here with no cleanup arm and left a live X server holding a display
+/// under a record that said `starting`. One failure path, for every caller.
 fn launch(session: &mut Session) -> Result<(), SessionError> {
     // A new generation owns nothing yet. Without this, a restart would carry
     // the previous generation's pgids into the new record, and the new session
     // would claim process groups that belonged to processes it never started.
     session.pgrps.clear();
+    match launch_inner(session) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Recorded before the teardown, which only fills in a reason of its
+            // own when there is none: the specific failure is more useful than
+            // "killed", and it is the only thing that tells a user why their
+            // session is not there.
+            if session.exit_reason.is_empty() {
+                session.exit_reason = e.to_string();
+            }
+            // A no-op for a failure that happened before anything was spawned,
+            // which is what makes it safe to call unconditionally.
+            teardown(session, StopMode::Hard);
+            session.state = SessionState::Stopped;
+            let _ = write_record(session);
+            Err(e)
+        }
+    }
+}
+
+fn launch_inner(session: &mut Session) -> Result<(), SessionError> {
     // A fresh cookie per start: a new X server is a new secret, and reusing one
     // would mean a cookie that outlives the server it authenticated.
     let cookie = xserver::generate_cookie()?;
     let dir = session_dir(&session.name);
     std::fs::create_dir_all(&dir)?;
     identity::set_private_dir(&dir)?;
-    xserver::write_xauth(&session.xauth_path(), session.display, &cookie)?;
 
     // Pick a display. The recorded one is preferred so a restart lands where it
     // did, but it is only used if it is actually free — a display left claimed
@@ -381,16 +412,27 @@ fn launch(session: &mut Session) -> Result<(), SessionError> {
         xserver::allocate_display(1)?
     };
     session.display = display;
+    // The cookie is written for the display the session actually got, not the
+    // one it hoped for. Written before allocation it named display 0 for every
+    // new session, and only the wildcard entry could then authenticate anything.
+    xserver::write_xauth(&session.xauth_path(), display, &cookie)?;
 
-    let server = start_xserver(session, display)?;
+    let server = spawn_xserver(session, display)?;
+    // From here the X server is a live process holding a display, so the record
+    // has to name it *before* anything else can happen — including this process
+    // being killed. The window between the spawn and this write used to contain
+    // the entire readiness wait, up to `START_TIMEOUT`, and a creator killed in
+    // it left a server that no record named: not findable by `list`, not
+    // stoppable by `stop`, and holding its display for the rest of the login.
     session.xserver = server.proc;
     session.state = SessionState::Starting;
     session.exit_reason.clear();
-    // Written before the WM starts: a crash in the window between the two has
-    // to leave a record naming the X server, or it becomes an orphan nothing
-    // knows about.
     write_record(session)?;
 
+    // Only now is it safe to wait: if this process dies mid-wait the record
+    // already names the server, so the next command that touches the session
+    // can stop it.
+    await_xserver(&server, session)?;
     let wm = start_maverick(session)?;
     session.wm = wm;
     session.state = SessionState::Running;
@@ -398,8 +440,10 @@ fn launch(session: &mut Session) -> Result<(), SessionError> {
     Ok(())
 }
 
-/// Start the session's X server and wait for it to accept connections.
-fn start_xserver(session: &Session, display: Display) -> Result<xserver::XServer, SessionError> {
+/// Spawn the session's X server without waiting for it.
+///
+/// Split from the wait so the caller can record the resulting pid in between.
+fn spawn_xserver(session: &Session, display: Display) -> Result<xserver::XServer, SessionError> {
     let spec = XServerSpec {
         backend: session.spec.backend,
         display,
@@ -417,16 +461,20 @@ fn start_xserver(session: &Session, display: Display) -> Result<xserver::XServer
             reason: "not found on $PATH".to_string(),
         });
     }
-    let server = xserver::spawn(&spec).map_err(|e| match e.kind() {
+    xserver::spawn(&spec).map_err(|e| match e.kind() {
         io::ErrorKind::AlreadyExists => SessionError::Io(format!(
             "X display {display} was taken by another session while starting"
         )),
         _ => SessionError::Io(format!("could not start {}: {e}", spec.backend.binary())),
-    })?;
+    })
+}
 
+/// Wait for a spawned X server to accept connections.
+fn await_xserver(server: &xserver::XServer, session: &Session) -> Result<(), SessionError> {
+    let display = server.display;
     let proc_ref = server.proc;
-    match xserver::wait_ready(display, START_TIMEOUT, || proc_ref.is_alive()) {
-        Ok(()) => Ok(server),
+    match xserver::wait_ready(display, START_TIMEOUT, || proc::is_running(&proc_ref)) {
+        Ok(()) => Ok(()),
         Err(e) => {
             server.stop(STOP_GRACE);
             Err(SessionError::Io(format!(
@@ -576,7 +624,11 @@ fn teardown(session: &mut Session, mode: StopMode) {
     // Its socket and ficha go with it, so the name can be reused immediately.
     identity::cleanup_meta(session.name.as_str());
 
-    if session.xserver.is_alive() {
+    // As in `reap_one`: releasing the display is owed whenever the record names
+    // an X server, because a server that is already dead still owns the claim
+    // files that make the number look taken. `XServer::stop` no-ops on a live
+    // foreign server, so this cannot disarm a session that is still working.
+    if session.xserver.is_some() {
         let server = xserver::XServer {
             display: session.display,
             backend: session.spec.backend,
