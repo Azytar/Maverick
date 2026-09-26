@@ -446,6 +446,60 @@ else
     bad "process kill refused but the process died anyway"
 fi
 
+# Defence in depth, made observable: a record that kept a process group it has
+# no live root for must still authorise nothing. `stop` clears the groups, so
+# the only way to reach this state is a record that never went through teardown
+# — hand-edited, written by an older build, or left by a crash. Without this
+# the "only while a live root exists" rule could be deleted and every assertion
+# above would still pass, because this session's group list is empty.
+OWN2=ownq2
+"$MAVERICKCTL_BIN" session remove "$OWN2" --force >/dev/null 2>&1
+"$MAVERICKCTL_BIN" session create "$OWN2" --binary "$MAVERICK_BIN" --resolution 640x480 >/dev/null 2>&1
+"$MAVERICKCTL_BIN" session stop "$OWN2" >/dev/null 2>&1
+OWN2_RECORD="$XDG_RUNTIME_DIR/maverick/$OWN2/session.json"
+export OWN2_RECORD
+# Plant the sacrifice's process group in a record that names no live process.
+PGID_OF_SACRIFICE="$(ps -o pgid= -p "$SACRIFICE" 2>/dev/null | tr -d ' ')"
+if [ -z "$PGID_OF_SACRIFICE" ]; then
+    bad "could not read the sacrifice's process group"
+else
+    PGID_OF_SACRIFICE="$PGID_OF_SACRIFICE" python3 -c '
+import json, os
+path = os.environ["OWN2_RECORD"]
+with open(path) as f:
+    rec = json.load(f)
+rec["wm_pid"] = 0
+rec["wm_start_time"] = 0
+rec["x_pid"] = 0
+rec["x_start_time"] = 0
+rec["state"] = "stopped"
+rec["pgrps"] = [int(os.environ["PGID_OF_SACRIFICE"])]
+with open(path, "w") as f:
+    json.dump(rec, f)
+' 2>/dev/null
+    PLANTED="$("$MAVERICKCTL_BIN" process list "$OWN2" --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    print(len(json.load(sys.stdin)["processes"]))
+except Exception:
+    print(-1)' 2>/dev/null)"
+    [ "$PLANTED" = "0" ] \
+        && ok "a record with a stale process group and no live root owns nothing" \
+        || bad "a planted process group put $PLANTED process(es) back in the session"
+    if "$MAVERICKCTL_BIN" process kill "$OWN2" "$SACRIFICE" >/dev/null 2>&1; then
+        bad "a planted process group authorised a signal"
+    else
+        ok "a planted process group cannot authorise a signal"
+    fi
+    sleep 0.3
+    if kill -0 "$SACRIFICE" 2>/dev/null; then
+        ok "the process named by the planted group is still running"
+    else
+        bad "the planted process group killed an unrelated process"
+    fi
+fi
+"$MAVERICKCTL_BIN" session remove "$OWN2" --force >/dev/null 2>&1
+
 # `remove` must not leave a record that still claims anything.
 "$MAVERICKCTL_BIN" session remove "$OWN_SESS" --force >/dev/null 2>&1
 if "$MAVERICKCTL_BIN" process list "$OWN_SESS" >/dev/null 2>&1; then
