@@ -210,6 +210,13 @@ fn window_obj(s: &mut String, id: WindowId, state: &State) {
     )
     .unwrap();
     if let Some(c) = c {
+        // The window → process link (`_NET_WM_PID`), `null` when the client
+        // never set it. Lets `maverickctl process`/`window inspect` tie a window
+        // to `/proc/<pid>` without walking the display's process tree.
+        match c.pid {
+            Some(p) => write!(s, "\"pid\":{p},").unwrap(),
+            None => s.push_str("\"pid\":null,"),
+        }
         write!(s, "\"monitor\":{},", c.monitor).unwrap();
         write!(s, "\"workspace\":{},", c.workspace).unwrap();
         write!(s, "\"float\":{},", c.is_float()).unwrap();

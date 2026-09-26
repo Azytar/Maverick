@@ -1044,6 +1044,12 @@ pub struct Client {
     /// absent), Some(1)=force compositor ON, Some(2)=force bypass. Updated on
     /// `PropertyNotify` and read by `compositor_policy::bypass_candidate`.
     pub bypass_hint: Option<u32>,
+    /// Client process id from `_NET_WM_PID`, captured at manage time. `None`
+    /// when the client never set it (not all toolkit setups do). Never used for
+    /// any WM decision — it is the window → process link that lets external
+    /// tools tie a window to `/proc/<pid>`, so it is read-only observability
+    /// like `last_desired`/`last_reported`.
+    pub pid: Option<u32>,
     /// True while the float's geometry was last claimed by the *client* (a
     /// `ConfigureRequest` this WM adopted verbatim).
     ///
@@ -1094,6 +1100,7 @@ impl Client {
             fs_snapshot: None,
             fullscreen_policy: FullscreenPolicy::Normal,
             bypass_hint: None,
+            pid: None,
             float_client_authority: false,
         }
     }

@@ -196,6 +196,18 @@ impl WindowManager {
                 0,
                 9,
             )?;
+            // `_NET_WM_PID` is a single CARD32: the client's own process id. It
+            // is read once here and never re-read — a client that changes it
+            // after mapping is not something any tool needs to follow, and
+            // manage time is the moment the window→process link is defined.
+            let c_pid = self.conn.get_property(
+                false,
+                win,
+                self.atoms.net_wm_pid,
+                AtomEnum::CARDINAL,
+                0,
+                1,
+            )?;
             let c_size = self.conn.get_property(
                 false,
                 win,
@@ -229,6 +241,18 @@ impl WindowManager {
                 let mut parts = s.split('\0');
                 client.instance = parts.next().unwrap_or("").to_string();
                 client.class = parts.next().unwrap_or("").to_string();
+            }
+
+            // `value32()` yields nothing when the property is absent or not
+            // 32-bit aligned, which is how "no `_NET_WM_PID`" and "garbage
+            // `_NET_WM_PID`" both arrive. A recorded pid of 0 means "no process"
+            // to every consumer (`kill(0, …)` would signal the whole group), so
+            // it is normalized to `None` here rather than at each read site.
+            if let Ok(ref prop) = c_pid.reply() {
+                client.pid = prop
+                    .value32()
+                    .and_then(|mut ids| ids.next())
+                    .filter(|&p| p != 0);
             }
 
             if let Ok(ref prop) = c_wtype.reply() {

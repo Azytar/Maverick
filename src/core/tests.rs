@@ -772,6 +772,31 @@ mod unit_tests {
         );
     }
 
+    // `query tree` carries the client PID so a tool can go window → process.
+    // Absent `_NET_WM_PID` must serialize as JSON `null`, never as `0` (a pid of
+    // 0 is a live "signal my whole process group" to every consumer).
+    #[test]
+    fn query_tree_reports_client_pid() {
+        let mut engine = seed_engine_with_window();
+        engine.state.clients.get_mut(&42).unwrap().pid = Some(18_251);
+        let json = crate::core::ipc::query_json(&engine.state, &engine.cfg, "tree");
+        assert!(
+            json.contains("\"pid\":18251"),
+            "tree must carry the client pid: {json}"
+        );
+
+        engine.state.clients.get_mut(&42).unwrap().pid = None;
+        let json = crate::core::ipc::query_json(&engine.state, &engine.cfg, "tree");
+        assert!(
+            json.contains("\"pid\":null"),
+            "a window without _NET_WM_PID must report pid:null: {json}"
+        );
+        assert!(
+            !json.contains("\"pid\":0"),
+            "pid must never be reported as 0: {json}"
+        );
+    }
+
     #[test]
     fn test_query_visible_windows_and_info() {
         let engine = seed_engine_with_window();

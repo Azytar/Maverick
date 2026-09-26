@@ -58,6 +58,12 @@ pub struct Atoms {
     pub net_close_window: u32,
     pub net_frame_extents: u32,
     pub net_wm_bypass_compositor: u32,
+    /// `_NET_WM_PID`: set by the client (EWMH makes writing it the client's
+    /// obligation), read here to tie a window to its process. Read-only for the
+    /// WM, so it is deliberately not in `supported_list` — advertising an atom
+    /// only tells clients the WM *honours* it, and there is no WM behaviour
+    /// behind this one beyond reporting the value back over IPC.
+    pub net_wm_pid: u32,
 
     // Maverick-private persistence atoms (across `--replace` / restart).
     // `_MAVERICK_FLOAT` is 1 when the window was floating, `_MAVERICK_GEOM`
@@ -122,6 +128,7 @@ impl Atoms {
         let r_net_close = intern!("_NET_CLOSE_WINDOW")?;
         let r_net_frame_ext = intern!("_NET_FRAME_EXTENTS")?;
         let r_net_bypass_comp = intern!("_NET_WM_BYPASS_COMPOSITOR")?;
+        let r_net_wm_pid = intern!("_NET_WM_PID")?;
 
         let r_maverick_float = intern!("_MAVERICK_FLOAT")?;
         let r_maverick_geom = intern!("_MAVERICK_GEOM")?;
@@ -166,6 +173,7 @@ impl Atoms {
             net_close_window: r_net_close.reply()?.atom,
             net_frame_extents: r_net_frame_ext.reply()?.atom,
             net_wm_bypass_compositor: r_net_bypass_comp.reply()?.atom,
+            net_wm_pid: r_net_wm_pid.reply()?.atom,
             maverick_float: r_maverick_float.reply()?.atom,
             maverick_geom: r_maverick_geom.reply()?.atom,
             utf8_string: r_utf8_string.reply()?.atom,
