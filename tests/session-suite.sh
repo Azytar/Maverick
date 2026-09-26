@@ -402,6 +402,7 @@ except Exception:
 
 for transition in stop kill; do
     "$MAVERICKCTL_BIN" session "$transition" "$OWN_SESS" >/dev/null 2>&1
+    export OWN_RECORD="$XDG_RUNTIME_DIR/maverick/$OWN_SESS/session.json"
     OWNED="$("$MAVERICKCTL_BIN" process list "$OWN_SESS" --json 2>/dev/null | python3 -c '
 import json, sys
 try:
@@ -413,6 +414,23 @@ else:
     N="${OWNED%% *}"
     [ "$N" = "0" ] && ok "after '$transition' the session owns no processes" \
                     || bad "after '$transition' it still claims $N processes ($OWNED)"
+    # The record itself must have let go, not merely been outvoted by the
+    # ownership gate. Without this the clearing could be deleted and every
+    # assertion above would still pass. Read the record rather than
+    # `session status --json`: the view deliberately carries no `pgrps` field,
+    # so asking for it there would always answer zero.
+    LEFT="$(python3 -c '
+import json, os
+try:
+    with open(os.environ["OWN_RECORD"]) as f:
+        print(len(json.load(f).get("pgrps", [])))
+except Exception:
+    print(-1)' 2>/dev/null)"
+    case "$LEFT" in
+        0) ok "after '$transition' the record retains no process groups" ;;
+        -1) bad "could not read the session record to check its process groups" ;;
+        *) bad "after '$transition' the record still lists $LEFT process group(s)" ;;
+    esac
 done
 
 # The decisive one: the signal must not be sent.
