@@ -587,7 +587,20 @@ pub fn send_command(name: &str, cmd: &str) -> std::io::Result<String> {
             "reply too long",
         ));
     }
-    Ok(reply.trim_end_matches(['\n', '\r']).to_string())
+    let reply = reply.trim_end_matches(['\n', '\r']).to_string();
+    // The protocol owes exactly one line per request: every arm of
+    // `dispatch_line` returns one, and the server writes it before closing. The
+    // shortest real reply is `ok`, so a zero-byte read means the peer went away
+    // mid-exchange — not an empty answer. Reporting that as `Ok("")` made a
+    // silent exit 0 with a bare newline on stdout and nothing on stderr, which
+    // is worse than a refused socket: that already fails.
+    if reply.is_empty() {
+        return Err(std::io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "no reply from the instance",
+        ));
+    }
+    Ok(reply)
 }
 
 /// Probe a running instance: connect, `ping`, and confirm it answers.
