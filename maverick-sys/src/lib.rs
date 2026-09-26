@@ -24,8 +24,14 @@
 //!   `session_dir`/`sock_path`/`meta_path` (0700, fixed `control.sock` under
 //!   `SUN_LEN`), `/proc/<pid>/stat`/`environ`/`exe` readers, and minimal JSON
 //!   ficha I/O without `serde`.
-//! - [`json`] — canonical `json_escape`/`json_quote`/`json_unescape` used by
-//!   `identity` and `control`; single copy, no `serde`.
+//! - [`json`] — canonical `json_escape`/`json_quote`/`json_unescape` plus the
+//!   flat-object codec `scan_object` used by `identity` and `session`; single
+//!   copy, no `serde`.
+//! - [`session`] — the Maverick Session model: a named, reproducible graphical
+//!   unit (X server + Maverick + applications) with its own runtime directory,
+//!   cookie, logs and lifecycle. Owns display allocation, the nested X server
+//!   backend, the process tree and the session record. Still no control-plane
+//!   policy: that is `ctl`.
 //! - [`ctl`] — shared CLI engine for `maverickctl`/`maverick-msg`: instance
 //!   selection (`--session`/`--name`/`$MAVERICK_INSTANCE`/DISPLAY+TTY
 //!   context/singleton), `list`/`state`/`query`/`msg`/`subscribe`/`quit`/
@@ -304,10 +310,12 @@ pub mod discover;
 pub mod hub;
 pub mod identity;
 pub mod json;
+pub mod session;
 
 pub use control::ControlServer;
 pub use hub::{ControlCommand, ControlHub};
 pub use identity::{self_info, InstanceInfo, DEFAULT_NAME};
+pub use session::{Session, SessionName, SessionState};
 
 /// Shared pieces for the property tests that are compiled into the library
 /// because the functions they cover are private.

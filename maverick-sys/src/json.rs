@@ -97,8 +97,9 @@ pub enum Value<'a> {
     Str(&'a str),
     /// A bare token: number, `true`, `false`, `null`, or anything unrecognised.
     Raw(&'a str),
-    /// An array, holding its elements' raw texts in order. A quoted element
-    /// keeps its quotes, so an element holding a comma stays one element.
+    /// An array, holding its elements' texts in order. A quoted element has
+    /// already had its delimiters removed by the scan, so an element is only
+    /// ever unescaped once, by the caller — the same rule a `Str` follows.
     Array(Vec<&'a str>),
 }
 
@@ -146,18 +147,13 @@ impl Field<'_> {
     }
     /// The array elements as text, decoding each element's escapes. `None` when
     /// the value is not an array, so a caller can tell "absent" from "empty".
+    ///
+    /// No quote stripping happens here: the scan already consumed a quoted
+    /// element's delimiters, and peeling a second pair would eat the closing
+    /// quote of an element that *ends* in an escaped one.
     pub fn as_str_array(&self) -> Option<Vec<String>> {
         match &self.value {
-            Value::Array(items) => Some(
-                items
-                    .iter()
-                    .map(|raw| {
-                        let t = raw.strip_prefix('"').unwrap_or(raw);
-                        let t = t.strip_suffix('"').unwrap_or(t);
-                        json_unescape(t)
-                    })
-                    .collect(),
-            ),
+            Value::Array(items) => Some(items.iter().map(|raw| json_unescape(raw)).collect()),
             _ => None,
         }
     }
@@ -421,6 +417,18 @@ mod tests {
                 r#"q"q"#.to_string()
             ])
         );
+    }
+
+    /// An element that *ends* in an escaped quote is the shape that breaks a
+    /// reader which strips a second pair of delimiters: the scan already
+    /// consumed the real closing quote, so peeling one more would eat the
+    /// escaped one. This is a real shape — a session record stores the
+    /// arguments a user typed after `--`.
+    #[test]
+    fn an_array_element_ending_in_an_escaped_quote_survives() {
+        let items = [r#"--log "x,y""#.to_string(), r#"tail\"#.to_string()];
+        let doc = format!("{{\"args\":{}}}", quote_array(&items));
+        assert_eq!(field(&doc, "args").as_str_array(), Some(items.to_vec()));
     }
 
     /// An empty array and an absent field must stay distinguishable: an empty

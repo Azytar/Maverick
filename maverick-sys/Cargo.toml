@@ -23,3 +23,7 @@ path = "src/bin/maverick-msg.rs"
 [dev-dependencies]
 # Property-based coverage for this crate's pure deterministic logic.
 proptest.workspace = true
+# The session tests write real `.Xauthority` files and records into a
+# throwaway directory, so they need a private one that cleans itself up rather
+# than a hand-rolled name that collides under parallel execution.
+tempfile.workspace = true
