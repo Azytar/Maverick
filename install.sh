@@ -103,6 +103,16 @@ PREFIX="$(realpath -m -- "$PREFIX")"
 cd "$APP_DIR"
 
 BIN_DIR="$PREFIX/bin"
+
+# The runtime binaries this installer installs, in one place.
+#
+# Every count in the installer is derived from this list rather than written
+# out: the three places that used to say "4" and the one that said "3" were
+# already inconsistent with each other, and when the list shrank they made the
+# final verification reject an installation it had just performed correctly.
+# A literal next to a list is a second source of truth waiting to be wrong.
+RUNTIME_BINS=(maverick maverickctl)
+RUNTIME_BIN_COUNT="${#RUNTIME_BINS[@]}"
 XS_DIR="$PREFIX/share/xsessions"
 # Display managers normally search here, not /usr/local/share/xsessions.
 if [[ "$PREFIX" == /usr/local || "$PREFIX" == /usr ]]; then
@@ -276,7 +286,6 @@ t() {
             s_config)        echo "config" ;;
             s_mode)          echo "modo" ;;
             s_time)          echo "tiempo" ;;
-            four_bins)       echo "4 binarios" ;;
             installed)       echo "instalado" ;;
             not_in_path)     echo "no está en PATH — añade:" ;;
             checks_ok)       echo "todos los sistemas listos" ;;
@@ -344,7 +353,6 @@ t() {
             s_config)        echo "config" ;;
             s_mode)          echo "mode" ;;
             s_time)          echo "time" ;;
-            four_bins)       echo "4 binaries" ;;
             installed)       echo "installed" ;;
             not_in_path)     echo "not in PATH — add:" ;;
             checks_ok)       echo "all systems go" ;;
@@ -927,7 +935,7 @@ _panel_draw() {
     printf '  %s│%s  %s✓%s  %s%s%s%s│%s\n' \
         "$GREY" "$RESET" "$GREEN" "$RESET" "$BOLD" "$t_pad" "$RESET" "$GREY" "$RESET"
     printf '  %s├%s┤%s\n' "$GREY" "$h" "$RESET"
-    _panel_row "$(t s_binaries)" "$BIN_DIR · $(t four_bins)"
+    _panel_row "$(t s_binaries)" "$BIN_DIR · $RUNTIME_BIN_COUNT"
     _nap 0.05
     _panel_row "$(t s_session)"  "${SESSION_VALUE:-$(t skipped_word)}"
     _nap 0.05
@@ -1312,7 +1320,7 @@ fi
 # ── fase 2 · binarios ────────────────────────────────────────────────────────
 _phase_begin 2 ""
 # Check the complete artifact set before replacing any installed binary.
-for bin in maverick maverickctl; do
+for bin in "${RUNTIME_BINS[@]}"; do
     [[ -f "$CARGO_TARGET_DIR/release/$bin" && -x "$CARGO_TARGET_DIR/release/$bin" ]] ||
         die "missing executable $CARGO_TARGET_DIR/release/$bin (run without --no-build)"
 done
@@ -1320,7 +1328,7 @@ done
 install_command mkdir -p -- "$BIN_DIR" || die "$(t no_write): $BIN_DIR"
 _animate 70 "$BIN_DIR"
 n_ok=0
-for bin in maverick maverickctl; do
+for bin in "${RUNTIME_BINS[@]}"; do
     # A same-directory rename avoids truncating a running executable (ETXTBSY).
     staged="$(install_command mktemp "$BIN_DIR/.${bin}.XXXXXX")"
     if ! install_command install -m 0755 -- "$CARGO_TARGET_DIR/release/$bin" "$staged" \
@@ -1333,8 +1341,8 @@ for bin in maverick maverickctl; do
     _render "$bin"
     _nap 0.05
 done
-_animate 80 "$n_ok/4"
-_phase_end 2 "$n_ok/4 · $(t installed)"
+_animate 80 "$n_ok/$RUNTIME_BIN_COUNT"
+_phase_end 2 "$n_ok/$RUNTIME_BIN_COUNT · $(t installed)"
 
 # ── fase 3 · sesión X11 ──────────────────────────────────────────────────────
 _phase_begin 3 ""
@@ -1426,20 +1434,23 @@ esac
 _phase_begin 5 ""
 checks=0
 verify_detail=""
-for bin in maverick maverickctl; do
+for bin in "${RUNTIME_BINS[@]}"; do
     if [[ -x "$BIN_DIR/$bin" ]]; then
         checks=$(( checks + 1 ))
     fi
 done
 
-# FIX: Real post-install verification — execute maverick --version
-if [[ "$checks" -ne 3 ]] || ! "$BIN_DIR/maverick" --version >/dev/null 2>&1; then
+# Real post-install verification: every declared binary is present, and the
+# window manager actually runs. The count is compared against the list, not a
+# literal, so adding or removing a binary cannot leave this accepting an
+# incomplete install or rejecting a complete one.
+if [[ "$checks" -ne "$RUNTIME_BIN_COUNT" ]] || ! "$BIN_DIR/maverick" --version >/dev/null 2>&1; then
     die "$(t verify_fail): $BIN_DIR/maverick"
 fi
 verify_detail="$(t verify_ok)"
 
 _animate 100 "$(t checks_ok)"
-_phase_end 5 "$checks/3 ✓ · $verify_detail"
+_phase_end 5 "$checks/$RUNTIME_BIN_COUNT ✓ · $verify_detail"
 _nap 0.35
 
 # ── cerrar el bloque ─────────────────────────────────────────────────────────

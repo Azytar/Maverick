@@ -52,9 +52,8 @@ const INSTANCE_WORDING: [&str; 26] = [
     "camera",
 ];
 
-/// Every word that is *also* a handled command but not an instance word, i.e.
-/// the read-only verbs that only print.
-const LOCAL_VERBS: [&str; 3] = ["resize", "layout", "inspect"];
+/// The groups that own a session-scoped command tree.
+const GROUPS: [&str; 3] = ["session", "window", "process"];
 
 /// A word the admin tool can be given that decides its exit code without
 /// leaving the process: the help forms, and anything it does not know.
@@ -88,5 +87,32 @@ proptest! {
 
         // No command at all is the documented failure, not a silent success.
         prop_assert_eq!(main_with_args("maverickctl", vec![]), ExitCode::FAILURE);
+    }
+}
+
+/// Every command group answers `--help` with usage and success.
+///
+/// This is the one hermetic check that actually *discriminates* a handled verb
+/// from a forwarded one: `maverickctl session --help` prints usage and succeeds,
+/// whereas a group name that fell through to the verbatim path would try to
+/// forward it, find no instance in the isolated runtime directory, and fail.
+/// The property suite above cannot make that distinction — both are FAILURE —
+/// so it lives here, where success is only reachable by having handled the word.
+#[test]
+fn every_command_group_handles_its_own_help() {
+    common::isolate_runtime_dir();
+    for group in GROUPS {
+        assert_eq!(
+            main_with_args("maverickctl", vec![group.to_string(), "--help".to_string()]),
+            ExitCode::SUCCESS,
+            "`{group} --help` must print its usage and succeed, not be forwarded"
+        );
+    }
+    for help in ["-h", "--help", "help", "h"] {
+        assert_eq!(
+            main_with_args("maverickctl", vec![help.to_string()]),
+            ExitCode::SUCCESS,
+            "`{help}` must print the top-level usage and succeed"
+        );
     }
 }
