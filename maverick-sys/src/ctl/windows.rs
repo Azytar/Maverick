@@ -291,7 +291,9 @@ pub fn run(c: &mut Ctl, args: &[String]) -> Result<bool, String> {
     let verb = args.first().map(String::as_str).unwrap_or("list");
     let rest = if args.is_empty() { &[][..] } else { &args[1..] };
     match verb {
-        "list" | "ls" => window_list(c, rest),
+        "list" | "ls" => {
+            window_list(c, rest)?;
+        }
         "inspect" | "info" => window_inspect(c, rest)?,
         "focus" => act(c, rest, "focus", WindowOp::Focus)?,
         "close" | "kill" => act(c, rest, "close", WindowOp::Close)?,
@@ -310,14 +312,14 @@ pub fn run(c: &mut Ctl, args: &[String]) -> Result<bool, String> {
 }
 
 /// `maverickctl window list <session>`
-fn window_list(c: &Ctl, args: &[String]) {
-    let (sid, windows) = match windows_of(c, args) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("{e}");
-            return;
-        }
-    };
+///
+/// Returns the error rather than printing it: a command that cannot produce the
+/// data it was asked for has failed, and only the caller's exit status can say
+/// so. The sibling verbs below already propagate, and a listing that reported
+/// "session 'x' does not exist" with status 0 made `--json` a silent empty
+/// stream that a script could not distinguish from a session with no windows.
+fn window_list(c: &Ctl, args: &[String]) -> Result<bool, String> {
+    let (sid, windows) = windows_of(c, args)?;
     if c.json {
         let items: Vec<String> = windows.iter().map(window_json).collect();
         println!(
@@ -325,11 +327,11 @@ fn window_list(c: &Ctl, args: &[String]) {
             crate::json::json_quote(&sid),
             items.join(",")
         );
-        return;
+        return Ok(true);
     }
     if windows.is_empty() {
         println!("No managed windows in session '{sid}'.");
-        return;
+        return Ok(true);
     }
     println!(
         "{:<12} {:<8} {:<16} {:<5} {:<5} {:<4} TITLE",
@@ -348,6 +350,7 @@ fn window_list(c: &Ctl, args: &[String]) {
         );
     }
     println!("\n{} window(s).", windows.len());
+    Ok(true)
 }
 
 fn window_json(w: &WindowInfo) -> String {

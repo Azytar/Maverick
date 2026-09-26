@@ -364,8 +364,83 @@ else
 fi
 echo
 
-# ── 11. maverick-msg is gone ──────────────────────────────────────────────────
-echo "11. one control binary"
+# ── 11. a session only owns the processes it can prove it started ─────────────
+echo "11. process ownership"
+# Each down-transition must leave the session owning nothing. Before this was
+# enforced, a stopped session's roots were `ProcRef::default()` — pid 0 — and
+# `closure` seeded from it, which adopts pid 1 (whose `ppid` is literally 0) and
+# then the whole process table. `process list` reported every process on the
+# machine and `process kill` signalled any of them.
+OWN_SESS=ownq
+"$MAVERICKCTL_BIN" session remove "$OWN_SESS" --force >/dev/null 2>&1
+"$MAVERICKCTL_BIN" session create "$OWN_SESS" --binary "$MAVERICK_BIN" --resolution 640x480 >/dev/null 2>&1 \
+    && ok "ownership session created" || bad "could not create the ownership session"
+
+# An unrelated process of our own, in its own process group, that the session
+# has never seen. If it ever shows up as owned, the predicate is too wide.
+setsid sleep 300 & SACRIFICE=$!
+sleep 0.3
+
+# A live session owns the two processes it started, and nothing else.
+LIVE_N="$("$MAVERICKCTL_BIN" process list "$OWN_SESS" --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    print(len(json.load(sys.stdin)["processes"]))
+except Exception:
+    print(-1)' 2>/dev/null)"
+[ "$LIVE_N" = "2" ] && ok "a live session owns exactly its two processes" \
+                    || bad "a live session reported $LIVE_N processes, expected 2"
+HAS_SAC="$("$MAVERICKCTL_BIN" process list "$OWN_SESS" --json 2>/dev/null | SACRIFICE="$SACRIFICE" python3 -c '
+import json, os, sys
+try:
+    wanted = int(os.environ["SACRIFICE"])
+    print(1 if any(p["pid"] == wanted for p in json.load(sys.stdin)["processes"]) else 0)
+except Exception:
+    print(-1)' 2>/dev/null)"
+[ "$HAS_SAC" = "0" ] && ok "an unrelated process is never reported as owned" \
+                     || bad "a live session claimed the unrelated pid $SACRIFICE"
+
+for transition in stop kill; do
+    "$MAVERICKCTL_BIN" session "$transition" "$OWN_SESS" >/dev/null 2>&1
+    OWNED="$("$MAVERICKCTL_BIN" process list "$OWN_SESS" --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    ps = json.load(sys.stdin)["processes"]
+except Exception:
+    print("-1 0")
+else:
+    print(len(ps), 1 if any(p["pid"] == 1 for p in ps) else 0)' 2>/dev/null)"
+    N="${OWNED%% *}"
+    [ "$N" = "0" ] && ok "after '$transition' the session owns no processes" \
+                    || bad "after '$transition' it still claims $N processes ($OWNED)"
+done
+
+# The decisive one: the signal must not be sent.
+if "$MAVERICKCTL_BIN" process kill "$OWN_SESS" "$SACRIFICE" >/dev/null 2>&1; then
+    bad "process kill accepted an unowned pid"
+else
+    ok "process kill refuses an unowned pid"
+fi
+sleep 0.3
+if kill -0 "$SACRIFICE" 2>/dev/null; then
+    ok "the refused process is still running — no signal was sent"
+else
+    bad "process kill refused but the process died anyway"
+fi
+
+# `remove` must not leave a record that still claims anything.
+"$MAVERICKCTL_BIN" session remove "$OWN_SESS" --force >/dev/null 2>&1
+if "$MAVERICKCTL_BIN" process list "$OWN_SESS" >/dev/null 2>&1; then
+    bad "process list on a removed session reported success"
+else
+    ok "a removed session cannot be listed at all"
+fi
+kill -9 "$SACRIFICE" 2>/dev/null
+wait "$SACRIFICE" 2>/dev/null
+echo
+
+# ── 12. maverick-msg is gone ──────────────────────────────────────────────────
+echo "12. one control binary"
 # Check the *manifest*, not just the build output: a stale binary in a target
 # directory says nothing about whether the source still produces one.
 if grep -q 'name = "maverick-msg"' "$REPO_ROOT/maverick-sys/Cargo.toml" 2>/dev/null ||

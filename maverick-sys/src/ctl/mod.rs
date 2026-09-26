@@ -654,6 +654,20 @@ fn cmd_list(_tool: &str) -> ExitCode {
 /// appropriate [`ExitCode`]. Used by `state`/`query`/`msg` passthrough.
 fn print_json<E: std::error::Error + 'static>(tool: &str, res: Result<String, E>) -> ExitCode {
     match res {
+        // A server-side refusal arrives as a successful transport carrying an
+        // `error …` payload, so it has to be classified here rather than
+        // printed as data. Every legitimate reply is a JSON document (each
+        // success arm in `query_json` opens its buffer with `{`) or a short
+        // `ok`/`pong` token, so this cannot misread a successful response —
+        // and `msg` already applies the same rule to the same protocol.
+        //
+        // This is the single home for the check because `query` and the
+        // forwarded `query <topic>` both end here; checking at the call sites
+        // would have left the other one unclassified.
+        Ok(reply) if reply.starts_with(ERROR_PREFIX) => {
+            eprintln!("{tool}: {}", reply.trim_end());
+            ExitCode::FAILURE
+        }
         Ok(json) => {
             println!("{json}");
             ExitCode::SUCCESS
@@ -664,6 +678,12 @@ fn print_json<E: std::error::Error + 'static>(tool: &str, res: Result<String, E>
         }
     }
 }
+
+/// The marker every control-protocol refusal begins with.
+///
+/// The server writes it first and never after any other byte of a successful
+/// reply, so `starts_with` is the whole test.
+const ERROR_PREFIX: &str = "error ";
 
 /// `state` → full snapshot; `query <topic>` → a single structured query (or a
 /// bare action line passed through as a dispatcher).
