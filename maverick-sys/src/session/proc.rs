@@ -579,6 +579,40 @@ mod tests {
         assert_eq!(table.in_groups(&[0, 100]), HashSet::from([100]));
     }
 
+    /// A zombie is the same process, and is not a running one.
+    ///
+    /// Both halves matter and they pull in opposite directions. `pid_is` must
+    /// keep answering `true` for a zombie, because it is an identity check and
+    /// the process really is the one that was recorded — `process kill` and
+    /// `Session::owned_roots` depend on that reading. `is_running` must answer
+    /// `false`, because the X server readiness wait is asking something else
+    /// entirely, and `xserver::spawn` never reaps its child, so the server it
+    /// just started is a zombie for the whole wait.
+    #[test]
+    fn a_zombie_is_the_same_process_but_not_a_running_one() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn");
+        let proc_ref = super::super::ProcRef::of(child.id());
+        // Not reaped: the test is about the state, so it must not wait it away.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            pid_is(proc_ref.pid, proc_ref.start_time),
+            "an unreaped child keeps its /proc entry, so the identity still holds"
+        );
+        assert!(
+            !is_running(&proc_ref),
+            "but it has exited, and nothing that asks 'is it still running' should be told otherwise"
+        );
+        let _ = child.wait();
+        assert!(
+            !proc_ref.is_alive(),
+            "once reaped, the identity is gone too"
+        );
+    }
+
     #[test]
     fn cpu_percent_is_bounded_by_the_process_lifetime() {
         let mut p = read(std::process::id()).expect("self");

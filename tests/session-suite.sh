@@ -511,6 +511,128 @@ kill -9 "$SACRIFICE" 2>/dev/null
 wait "$SACRIFICE" 2>/dev/null
 echo
 
+# ── 12. a session never leaves a resource nothing owns ────────────────────────
+echo "12. resource ownership across lifecycle transitions"
+LC=lifecycleq
+"$MAVERICKCTL_BIN" session remove "$LC" --force >/dev/null 2>&1
+
+# A failed start must leave nothing running. `--cwd` naming a file is the only
+# deterministic way to fail *after* the X server is up: the check sits in the
+# window manager stage, which is the stage that owns the display.
+"$MAVERICKCTL_BIN" session create "$LC" --binary "$MAVERICK_BIN" --resolution 640x480 \
+    --cwd /etc/hostname >/dev/null 2>&1
+"$MAVERICKCTL_BIN" session start "$LC" >/dev/null 2>&1
+export LC_RECORD="$XDG_RUNTIME_DIR/maverick/$LC/session.json"
+LC_STATE=$(python3 -c '
+import json, os
+try:
+    d = json.load(open(os.environ["LC_RECORD"]))
+    print(d["state"], d["x_pid"])
+except Exception:
+    print("unreadable -")' 2>/dev/null)
+LC_XPID="${LC_STATE##* }"
+if [ "$LC_STATE" = "unreadable -" ]; then
+    bad "the record could not be read after a failed start"
+elif [ "$LC_XPID" != "0" ] && kill -0 "$LC_XPID" 2>/dev/null; then
+    bad "a failed start left X server $LC_XPID running"
+else
+    ok "a failed start leaves no X server running"
+fi
+case "$LC_STATE" in
+    stopped*) ok "a failed start records the session as stopped" ;;
+    *) bad "after a failed start the record reads '$LC_STATE'" ;;
+esac
+# The reason is what tells a user why their session is not there.
+LC_WHY=$(python3 -c '
+import json, os
+print(json.load(open(os.environ["LC_RECORD"])).get("exit_reason", ""))' 2>/dev/null)
+[ -n "$LC_WHY" ] && ok "a failed start records why ($LC_WHY)" \
+                 || bad "a failed start recorded no reason"
+"$MAVERICKCTL_BIN" session remove "$LC" --force >/dev/null 2>&1
+
+# A clean quit must take the X server with it, and say so truthfully.
+"$MAVERICKCTL_BIN" session create "$LC" --binary "$MAVERICK_BIN" --resolution 640x480 >/dev/null 2>&1
+LC_X=$("$MAVERICKCTL_BIN" session list --json | python3 -c "
+import json,sys
+print(next((s['x_pid'] or 0) for s in json.load(sys.stdin)['sessions'] if s['name']=='$LC'))")
+"$MAVERICKCTL_BIN" quit --session "$LC" >/dev/null 2>&1
+sleep 0.5
+if [ "$LC_X" != "0" ] && kill -0 "$LC_X" 2>/dev/null; then
+    bad "quit left X server $LC_X running"
+else
+    ok "quit reaps the session's X server"
+fi
+LC_Q=$("$MAVERICKCTL_BIN" session list --json | python3 -c "
+import json,sys
+ss=[s for s in json.load(sys.stdin)['sessions'] if s['name']=='$LC']
+print(ss[0]['state'] if ss else 'gone')" 2>/dev/null)
+case "$LC_Q" in
+    stopped|gone) ok "after quit the record is truthful ($LC_Q)" ;;
+    *) bad "after quit the record reads '$LC_Q'" ;;
+esac
+"$MAVERICKCTL_BIN" session remove "$LC" --force >/dev/null 2>&1
+
+# A display whose X server was killed uncleanly must be reclaimable. Both
+# `/tmp/.X<n>-lock` and `/tmp/.X11-unix/X<n>` have to go, or `display_is_free`
+# stays false for that number for the life of the machine.
+"$MAVERICKCTL_BIN" session create "$LC" --binary "$MAVERICK_BIN" --resolution 640x480 >/dev/null 2>&1
+LC_D=$("$MAVERICKCTL_BIN" session list --json | python3 -c "
+import json,sys
+print(next(s['display'] for s in json.load(sys.stdin)['sessions'] if s['name']=='$LC'))")
+LC_X=$("$MAVERICKCTL_BIN" session list --json | python3 -c "
+import json,sys
+print(next((s['x_pid'] or 0) for s in json.load(sys.stdin)['sessions'] if s['name']=='$LC'))")
+kill -9 "$LC_X" 2>/dev/null; sleep 0.5
+"$MAVERICKCTL_BIN" session stop "$LC" >/dev/null 2>&1
+LC_N=${LC_D#:}
+if [ -e "/tmp/.X${LC_N}-lock" ] || [ -e "/tmp/.X11-unix/X${LC_N}" ]; then
+    bad "display $LC_D stayed claimed after its server was killed and the session stopped"
+else
+    ok "a display whose server was killed uncleanly is released"
+fi
+"$MAVERICKCTL_BIN" session remove "$LC" --force >/dev/null 2>&1
+
+# Concurrent creates must each get their own display. Asserted on the final
+# state, never on a duration: the property holds however the interleaving fell.
+RC_NAMES=""
+for i in 1 2 3 4; do RC_NAMES="$RC_NAMES rc$i"; done
+for n in $RC_NAMES; do
+    "$MAVERICKCTL_BIN" session create "$n" --binary "$MAVERICK_BIN" --backend Xvfb \
+        --resolution 320x240 >/dev/null 2>&1 &
+done
+wait
+export RC_RT="$XDG_RUNTIME_DIR"
+export RC_NAMES="rc1 rc2 rc3 rc4"
+RC_OUT=$(python3 -c '
+import json, os, collections
+names = os.environ["RC_NAMES"].split()
+recs = []
+for n in names:
+    try:
+        recs.append(json.load(open(os.path.join(
+            os.environ["RC_RT"], "maverick", n, "session.json"))))
+    except Exception:
+        pass
+by = collections.Counter(r.get("display") for r in recs)
+dupes = {d: c for d, c in by.items() if c > 1}
+# A record that names a dead X server and is not stopped is the lie the race
+# used to produce.
+lying = [r["name"] for r in recs
+         if r.get("x_pid") and r.get("state") in ("running", "starting")
+         and not os.path.exists("/proc/%d" % r["x_pid"])]
+print("%d records, %d distinct displays, dupes=%s, dead-but-not-stopped=%s"
+      % (len(recs), len(by), dupes or "none", lying or "none"))' 2>/dev/null)
+case "$RC_OUT" in
+    *"dupes=none"*) ok "concurrent creates each get their own display ($RC_OUT)" ;;
+    *) bad "concurrent creates collided: $RC_OUT" ;;
+esac
+case "$RC_OUT" in
+    *"dead-but-not-stopped=none"*) ok "no concurrent create left a record naming a dead X server" ;;
+    *) bad "a concurrent create recorded a dead X server: $RC_OUT" ;;
+esac
+for n in $RC_NAMES; do "$MAVERICKCTL_BIN" session remove "$n" --force >/dev/null 2>&1; done
+echo
+
 # ── 12. maverick-msg is gone ──────────────────────────────────────────────────
 echo "12. one control binary"
 # Check the *manifest*, not just the build output: a stale binary in a target

@@ -872,8 +872,103 @@ mod tests {
         );
     }
 
-    /// A display that is already claimed must be refused, not hijacked: this is
-    /// the check that stops two sessions landing on one display.
+    /// The whole readiness defect in one test: a display that *is* being served,
+    /// and a server that is not running.
+    ///
+    /// The test above cannot catch this, because it uses a display nothing is
+    /// listening on — where a listening socket, whoever's, adds nothing. During
+    /// a create race the display *is* serving, by the session that won the
+    /// number, and asking about it first is what let the loser record a dead
+    /// pid. Nothing here needs an X server: a plain listener is a listener.
+    #[test]
+    fn a_dead_server_is_not_ready_just_because_its_display_is_serving() {
+        use std::os::unix::net::UnixListener;
+        let free = allocate_display(320).expect("a free display");
+        let _listener = UnixListener::bind(socket_path(free)).expect("stand in for a winner");
+        assert!(is_listening(free), "the display must be serving");
+        let start = std::time::Instant::now();
+        let err = wait_ready(free, Duration::from_secs(30), || false)
+            .expect_err("our server is not running, so it is not ready");
+        assert_eq!(
+            err,
+            WaitError::ProcessDied,
+            "a serving display must not make our own dead server look ready"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "it must be reported at once, not after the timeout"
+        );
+    }
+
+    /// A healthy server is still reported ready, and still immediately.
+    ///
+    /// The counterpart to the test above, so the reordering cannot be "fixed"
+    /// by never reporting readiness at all.
+    #[test]
+    fn a_live_server_on_a_serving_display_is_ready_at_once() {
+        use std::os::unix::net::UnixListener;
+        let free = allocate_display(321).expect("a free display");
+        let _listener = UnixListener::bind(socket_path(free)).expect("stand in for a winner");
+        let start = std::time::Instant::now();
+        wait_ready(free, Duration::from_secs(5), || true).expect("live and serving");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "a live server must not pay the poll interval for a display that is up"
+        );
+    }
+
+    /// Exactly one holder at a time, decided by the kernel rather than by a
+    /// sleep. Sixteen contenders is well past the two that would show a
+    /// check-then-act bug.
+    #[test]
+    fn only_one_creator_holds_a_display_claim() {
+        let mine = DisplayClaim::try_acquire(Display(330))
+            .expect("open the claim file")
+            .expect("nothing else holds it");
+        let display = Display(330);
+        let taken = DisplayClaim::try_acquire(display).expect("a second open is not an error");
+        assert!(
+            taken.is_none(),
+            "a display already claimed must not be claimable again"
+        );
+        drop(mine);
+        assert!(
+            DisplayClaim::try_acquire(display)
+                .expect("reopen after release")
+                .is_some(),
+            "releasing the claim must make the display available again"
+        );
+    }
+
+    /// Releasing a display must not disturb a server that is still serving it.
+    ///
+    /// The ownership check, not the liveness of the handle: a creator that
+    /// lost a race holds a handle whose process is dead, and tearing that down
+    /// used to delete the *winner's* claim, disarming a working session.
+    #[test]
+    fn a_dead_handle_does_not_release_a_live_servers_display() {
+        use std::os::unix::net::UnixListener;
+        let free = allocate_display(340).expect("a free display");
+        let listener = UnixListener::bind(socket_path(free)).expect("a live server stands in");
+        // A handle whose pid is not running at all — the losing creator.
+        let dead = XServer {
+            display: free,
+            backend: super::Backend::Xvfb,
+            proc: super::ProcRef {
+                pid: u32::MAX - 1,
+                start_time: 1,
+            },
+            xauth_path: std::path::PathBuf::from("/nonexistent"),
+        };
+        dead.stop(Duration::from_millis(50));
+        assert!(
+            is_listening(free),
+            "another server owns this display and must be left alone"
+        );
+        drop(listener);
+    }
+
+    /// A display that is already claimed must be refused, not hijacked: this is    /// the check that stops two sessions landing on one display.
     #[test]
     fn spawning_onto_a_claimed_display_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
