@@ -588,9 +588,7 @@ pub fn load_config(path: Option<&Path>) -> Cfg {
 
 /// Named color-theme presets for `[general].theme` in the TOML config.
 /// Returns `(normal, focused, urgent)` as `0xRRGGBB`, or `None` for an unknown
-/// name (the caller then keeps the compiled colors and warns). The setup helper
-/// in `src/bin/maverick-setup.rs` hardcodes the same names, so both lists have to
-/// move together.
+/// name (the caller then keeps the compiled colors and warns).
 pub fn theme_palette(name: &str) -> Option<(u32, u32, u32)> {
     Some(match name.to_ascii_lowercase().as_str() {
         "catppuccin-mocha" => (0x45475a, 0x89b4fa, 0xf38ba8),
