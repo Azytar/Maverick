@@ -63,8 +63,14 @@ command the `Mod4+F` keybinding runs. A tool and a keypress cannot reach
 different code, so there is no second implementation of "float a window" to keep
 in step.
 
-What the session manager owns is the *lifecycle* — an X server, a process graph,
-a cookie, a display number — and none of that is window state.
+What the session manager owns is the *lifecycle* — an X server, a process
+graph, a cookie, a display number — and none of that is window state.
+
+The X server, the window manager and the display are fully accounted for: a
+session that loses any of them releases what it was holding, and no display
+number is left claimed by a process nothing owns. The process *graph* is
+narrower than the phrase suggests — see [Limitations](#limitations) for what
+`stop` does not reach.
 
 ## Commands
 
@@ -122,9 +128,12 @@ Everything after the program word is the program's, unfiltered:
 before the program word hands the rest over untouched.
 
 `exec` puts the program in its own process group and records that group in the
-session. That record is the only thing that keeps an `exec`ed program findable by
-`process list` after this one-shot CLI exits and the kernel reparents it to init,
-where a parent-pointer walk can no longer reach it.
+session. While the session is running, that record is the only thing that keeps
+an `exec`ed program findable by `process list` after this one-shot CLI exits and
+the kernel reparents it to init, where a parent-pointer walk can no longer reach
+it. It is actionable ownership state rather than history, so it is cleared when
+the session stops — see [Limitations](#limitations) for what that means for a
+program still running.
 
 A detached program's output goes to the session's `exec.log` by default rather
 than to the caller's terminal: a caller whose stdout is a pipe nobody reads
@@ -152,12 +161,14 @@ maverickctl process inspect <session> <pid> [--json]
 maverickctl process kill <session> <pid> [--force]
 ```
 
-The tree is the union of three cheap, exact sets, all read from
+The tree is the union of up to three cheap sets, all read from
 `/proc/<pid>/stat`: descendants of the X server, descendants of the window
-manager, and every process whose process group this session registered. The third
-is what catches `exec`ed programs. A process this session does not own is never
-signalled — `process kill` and `process list` agree on what a session contains,
-or one of them is lying about it.
+manager, and every process whose process group this session registered. The
+third is what catches `exec`ed programs, and it only applies while the session
+still owns a live root — a stopped session owns no processes, so it claims
+nothing, however many group ids its record carries. A process this session does
+not own is never signalled — `process kill` and `process list` derive both from
+one function, so they cannot disagree about what a session contains.
 
 ### Windows
 
@@ -235,12 +246,33 @@ window manager already is one.
 
 Read commands (`list`, `status`, `inspect`) never clean up. An agent that polls
 them must not be causing side effects, so they report the *derived* state and
-leave the session alone. `create`, `start`, `stop`, `restart`, `kill` and `remove`
-reap first.
+leave the session alone. `create`, `start`, `stop`, `restart` and `remove` reap
+first; `kill` tears down without reaping first, which reaches the same resources
+and additionally drops a crashed X server's claim. `quit` and `exec` also change
+things — `quit` stops a managed session through the same path as `stop` — and
+`exec` writes a process group into the record.
 
-The failure that matters is a window manager that died while its X server kept
-running: the server holds a display, nothing owns it any more, and the next
-session cannot use that display number. Reaping stops it and records why.
+The failure that matters is a component that died while the rest kept running:
+the orphaned X server holds a display that nothing owns, so the next session
+cannot use that number. Reaping stops it and records why. The mirror case — the
+X server killed uncleanly, leaving its lock and its socket behind — is released
+too, since `display_is_free` treats either file as a claim and neither the
+`SIGKILL` nor the escalation inside `XServer::stop` reaches the socket.
+
+A creator killed part-way through `create` used to be the worst case, because
+the record was written after the readiness wait and so named no server at all.
+The record is now written as soon as the pid is known, so the session stays
+findable and stoppable whatever kills the creator.
+
+Choosing a display is the one place two creators can collide, because X display
+numbers are a flat machine-wide namespace with no allocator. A candidate number
+is checked, and then claimed exclusively before anything is spawned, so two
+creators racing the same number cannot both proceed. The claim is held until the
+X server has published its own pid in `/tmp/.X<n>-lock` — the server telling us
+it won — rather than for a fixed interval, and the kernel releases it if the
+creator dies, so a crashed create cannot strand a number. The claim file is
+`/tmp/.X<n>-mav`, deliberately not the X server's own lock: that path is taken
+by the server itself, and pre-creating it makes every spawn fail.
 
 ```text
 $ maverickctl session list
@@ -309,6 +341,25 @@ readiness, liveness, teardown and cleanup are backend-independent, so a future
 
 ## Limitations
 
+- **`stop` does not reach programs started with `exec`.** `exec` puts each
+  program in its own process group, outside the window manager's group, so
+  teardown signals the manager and stops there. Those programs outlive the
+  session, and the record's list of their groups is cleared on the way down —
+  so `process list` then reports them as belonging to nobody and `process kill`
+  correctly refuses to signal them. They are not leaked silently: they keep
+  running, visibly, on a display that no longer exists. Making `stop` total
+  over the graph the record itself created is the obvious fix and is not done.
+- **A process group id is trusted while the session runs.** `pgrps` records a
+  number, not the identity of the group it named. If the kernel reissues that
+  number to an unrelated process *before* the session stops, the record would
+  authorise a signal it should not. Closing this means recording the group
+  leader's start time alongside the id, the same pairing `ProcRef` uses
+  everywhere else.
+- **`session create` on an existing name ignores the arguments it is given.**
+  The recorded spec is replayed verbatim, so a `create` naming a live session
+  is refused and a `create` naming a stopped one restarts the old
+  configuration rather than the new one. It is not an error, and nothing warns;
+  remove and recreate, or edit the record, to change a session's shape.
 - **`--refresh-rate`** is honoured by the Xephyr backend, whose `-screen` takes a
   `xDEPTHxFREQ` suffix. Xvfb has no such switch, so the value is recorded and
   reported as declared intent rather than faked.
@@ -322,6 +373,9 @@ readiness, liveness, teardown and cleanup are backend-independent, so a future
   what a user attaches to is the graphical session; the terminal's job is to be
   inside it. The interface leaves room for a real attacher without changing
   either `attach` or `shell`.
+- **`quit` needs a real answer at the prompt.** `--confirm` resolves through
+  zenity, kdialog or a TTY, and a confirmation dialog that is reachable but
+  unattended is treated as consent.
 - **The cross-user security test** needs a second local account. `main` is
   resolved by the caller's `DISPLAY`, so a caller with no `DISPLAY` and several
   running sessions is refused rather than guessed at.
