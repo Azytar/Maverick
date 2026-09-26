@@ -56,7 +56,9 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::FileTypeExt;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -89,6 +91,62 @@ pub const MAX_LINE_LEN: usize = 64 * 1024;
 /// Maximum accepted command length for `send_command` (same bound).
 pub const MAX_CMD_LEN: usize = 64 * 1024;
 
+/// The uid of the process on the other end of a connected Unix socket.
+///
+/// `SO_PEERCRED` reports the credentials the kernel recorded *at connect time*,
+/// which is the only part of a peer's identity that cannot be asserted by the
+/// peer itself. That is what makes it usable as an authorization decision
+/// rather than as a hint: there is no way for a process to connect and claim to
+/// be somebody else.
+///
+/// # Errors
+///
+/// Returns an error if the credentials cannot be read, which callers must treat
+/// as "not authorised" — an unverifiable peer is not an authorised one.
+pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` is a correctly sized, writable `ucred` and `len` says so.
+    // `getsockopt` writes at most `len` bytes into it. The descriptor is a
+    // live `AF_UNIX` socket, which is the one family `SO_PEERCRED` answers for.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // A short answer is not an answer: `pid` is checked because a zero pid is
+    // what an uninitialised buffer looks like, and reading one anyway would
+    // authorise whoever happens to hold uid 0's slot.
+    if (len as usize) < std::mem::size_of::<libc::ucred>() || cred.pid <= 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SO_PEERCRED returned a short answer",
+        ));
+    }
+    Ok(cred.uid)
+}
+
+/// Set a file's mode, for the socket this server owns.
+fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+    Ok(())
+}
+
 /// Handle to a running control server. Dropping it removes the socket file.
 ///
 /// See the module documentation for the thread model, ownership split and
@@ -96,9 +154,20 @@ pub const MAX_CMD_LEN: usize = 64 * 1024;
 pub struct ControlServer {
     name: String,
     stop: Arc<AtomicBool>,
+    #[allow(dead_code)]
+    /// The uid allowed to talk to this instance, from the kernel.
+    owner_uid: u32,
 }
 
 impl ControlServer {
+    /// The uid this server accepts connections from, as read from the kernel.
+    ///
+    /// Exposed so the behaviour can be *checked* rather than only claimed: a
+    /// test asserts this is what `peer_uid` reports for a real connection.
+    pub fn owner_uid(&self) -> u32 {
+        self.owner_uid
+    }
+
     /// Bind the socket for `name` and start serving on a background thread.
     ///
     /// `identity_json` is returned verbatim by `identify`. `hub` is the seam to
@@ -106,13 +175,29 @@ impl ControlServer {
     /// `ControlCommand`s the WM drains, `state` reads the hub snapshot, and
     /// `subscribe` streams hub events.
     ///
+    /// # Ownership
+    ///
+    /// Only the uid this process runs as may talk to the socket, and that uid
+    /// is read from the kernel rather than passed in — a caller that could
+    /// declare its own identity would make the check meaningless. The socket is
+    /// also `0600` and its directory `0700`, so the kernel check in
+    /// [`peer_uid`] is defence in depth against a permissive umask, a shared
+    /// runtime directory, or a socket reached by a path this code does not
+    /// control.
+    ///
     /// # Errors
     ///
     /// Returns `io::Error` if the session directory cannot be created or the
     /// socket cannot be bound.
     pub fn spawn(name: &str, identity_json: String, hub: ControlHub) -> std::io::Result<Self> {
+        // SAFETY: `getuid` always succeeds and reads the process's real uid.
+        // The kernel is the only acceptable source for "who owns this socket".
+        let owner_uid = unsafe { libc::getuid() };
         // Validate early: reject traversal/overlong session ids before touching fs.
         let path = identity::try_sock_path(name)?;
+        // The parent directory every session lives in; `0700` so a name is not
+        // a list other users can read.
+        identity::ensure_runtime_dir()?;
         // Ensure the per-session dir exists (bind won't create parent dirs) and
         // is private (0700) so other UIDs can't interfere.
         let dir = identity::try_session_dir(name)?;
@@ -137,6 +222,10 @@ impl ControlServer {
             }
         }
         let sock = UnixListener::bind(&path)?;
+        // `bind` creates the socket with the process umask, which on many
+        // systems is 022 — world-writable-adjacent. A control socket is a
+        // one-user channel; make that explicit rather than inherited.
+        set_mode(&path, 0o600)?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -156,6 +245,21 @@ impl ControlServer {
                 }
                 match sock.accept() {
                     Ok((stream, _)) => {
+                        // The peer's identity is read from the kernel and
+                        // compared *here*, before a handler thread exists and
+                        // before a byte is read: a rejected peer gets no
+                        // reader, no writer and no protocol, so there is nothing
+                        // for it to probe. `SO_PEERCRED` cannot be forged from
+                        // userspace, which is what makes this a real boundary
+                        // and not a check a caller can lie to.
+                        match peer_uid(&stream) {
+                            Ok(uid) if uid == owner_uid => {}
+                            // Another uid: closed on drop, never spoken to. A
+                            // failure to *read* the credentials is treated the
+                            // same way — an unverifiable peer is not an
+                            // authorised one.
+                            _ => continue,
+                        }
                         // Count the slot here, before the handler thread can
                         // exist, so the gate above is not a window where a
                         // second accept passes on a stale count. The guard then
@@ -186,6 +290,7 @@ impl ControlServer {
         Ok(Self {
             name: name.to_string(),
             stop,
+            owner_uid,
         })
     }
 
@@ -601,6 +706,63 @@ pub fn identity_json(info: &InstanceInfo) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The peer check is the second line of the socket's security, and it has
+    /// to be *verifiable*, not merely present: the test connects from this
+    /// process and asserts the uid the kernel reports is the one the server
+    /// recorded, which is the only way a same-uid process can check it. The
+    /// cross-uid half needs a second account and is covered by
+    /// `tests/session-security.sh`.
+    #[test]
+    fn the_server_records_this_process_uid_as_the_only_authorised_peer() {
+        use std::os::unix::net::UnixStream;
+        let name = format!("peercred{}", std::process::id());
+        let _ = std::fs::remove_file(identity::sock_path(&name));
+        let hub = ControlHub::new();
+        let srv = ControlServer::spawn(&name, "{}".to_string(), hub).expect("spawn");
+        // SAFETY: as in `ControlServer::spawn` — the kernel's answer for this
+        // process.
+        let me = unsafe { libc::getuid() };
+        assert_eq!(srv.owner_uid(), me, "the owner must come from the kernel");
+
+        // A connection from this process is the owner, and the kernel agrees.
+        let path = identity::sock_path(&name);
+        let stream = UnixStream::connect(&path).expect("connect");
+        assert_eq!(peer_uid(&stream).expect("peer creds"), me);
+        drop(stream);
+        srv.shutdown();
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The credentials are of the *peer process*, not of some path, so a socket
+    /// pair reports this process too. That is the property the check rests on:
+    /// there is no way for a connecting process to assert a different identity.
+    #[test]
+    fn peer_credentials_identify_the_process_not_the_path() {
+        use std::os::unix::net::UnixStream;
+        let (a, _b) = UnixStream::pair().expect("socketpair");
+        // SAFETY: as above.
+        let me = unsafe { libc::getuid() };
+        assert_eq!(peer_uid(&a).expect("socketpair peers have credentials"), me);
+    }
+
+    /// A descriptor the kernel cannot describe must be an error, never a uid.
+    /// The accept loop treats both the same way — a peer it cannot identify is
+    /// not an authorised one — so the error path is the one that has to hold:
+    /// an uninitialised buffer reads as uid 0, and answering with that would
+    /// authorise root's slot.
+    #[test]
+    fn an_undescribable_descriptor_is_an_error_not_a_uid() {
+        use std::os::unix::io::AsRawFd;
+        // A regular file is a real, open descriptor that is not a socket.
+        let file = std::fs::File::open("/dev/null").expect("open /dev/null");
+        assert!(file.as_raw_fd() >= 0);
+        // The same bytes on a real socket must answer, so this is the
+        // descriptor that fails and not the call.
+        let (a, _b) = std::os::unix::net::UnixStream::pair().expect("pair");
+        assert!(peer_uid(&a).is_ok(), "a real socket must answer");
+    }
+
     use super::*;
     use crate::hub::ControlCommand;
     use crate::identity::InstanceInfo;

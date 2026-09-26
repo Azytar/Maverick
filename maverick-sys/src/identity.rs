@@ -113,6 +113,26 @@ pub fn runtime_dir() -> PathBuf {
     PathBuf::from(format!("/run/user/{uid}/maverick"))
 }
 
+/// Create the runtime directory and make it private (`0700`).
+///
+/// Every path Maverick keeps at runtime — control sockets, identity fichas,
+/// session records, cookies, logs — lives under this one directory, so its mode
+/// is the first line of the security story.
+///
+/// The mode is set here rather than left to `create_dir_all`, because
+/// `create_dir_all` applies the process umask to the directories it creates: a
+/// session's own directory was being tightened to `0700` by
+/// [`set_private_dir`] while the parent it was created *inside* stayed at
+/// whatever the umask said, usually `0755`. That leaks the list of session
+/// names to every user on the machine, and a name is the address of a control
+/// socket.
+pub fn ensure_runtime_dir() -> io::Result<PathBuf> {
+    let dir = runtime_dir();
+    std::fs::create_dir_all(&dir)?;
+    set_private_dir(&dir)?;
+    Ok(dir)
+}
+
 /// Maximum accepted session-id length. Our own ids are ~30 chars
 /// (`{pid:x}-{nanos:x}-{rand:x}`); 64 leaves headroom while bounding
 /// `sockaddr_un` length and filesystem use from external input.
@@ -350,6 +370,7 @@ pub fn read_proc_exe(pid: u32) -> String {
 /// Serialize `InstanceInfo` to the ficha JSON file.
 pub fn write_meta(info: &InstanceInfo) -> io::Result<()> {
     validate_sid(&info.session_id)?;
+    ensure_runtime_dir()?;
     let dir = try_session_dir(&info.session_id)?;
     std::fs::create_dir_all(&dir)?;
     set_private_dir(&dir)?;
@@ -531,6 +552,7 @@ pub fn read_meta(sid: &str) -> Option<InstanceInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn meta_roundtrip() {
@@ -609,6 +631,19 @@ mod tests {
     fn start_time_reads_self() {
         let st = read_proc_starttime(std::process::id());
         assert!(st != 0);
+    }
+
+    /// The runtime directory holds every control socket, cookie and log, so its
+    /// mode is the boundary. `create_dir_all` would apply the umask instead.
+    #[test]
+    fn the_runtime_directory_is_private() {
+        let dir = ensure_runtime_dir().expect("runtime dir");
+        let mode = std::fs::metadata(&dir)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "{} must be owner-only", dir.display());
     }
 
     #[test]

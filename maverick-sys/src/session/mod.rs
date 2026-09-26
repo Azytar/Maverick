@@ -676,6 +676,7 @@ pub fn read_checked(name: &SessionName) -> Result<Session, SessionError> {
 /// directory is atomic, so a reader sees either the old record or the new one.
 pub fn write(session: &Session) -> io::Result<()> {
     let dir = session.dir();
+    identity::ensure_runtime_dir()?;
     std::fs::create_dir_all(&dir)?;
     // 0700 on the directory is the first line of the session's security: it is
     // what keeps another uid out of the socket, the cookie and the logs.
