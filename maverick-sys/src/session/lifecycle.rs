@@ -351,10 +351,19 @@ fn reap_one(session: &mut Session) {
     identity::cleanup_meta(session.name.as_str());
     session.wm = ProcRef::default();
     session.xserver = ProcRef::default();
+    // A crashed session owns nothing, for the same reason `teardown` clears
+    // them: the groups were actionable only while a process of this session
+    // was running. This branch is reached only after the `wm_is_up()` early
+    // return above, so a live session keeps its groups.
+    session.pgrps.clear();
 }
 
 /// Start everything a session needs and record the result.
 fn launch(session: &mut Session) -> Result<(), SessionError> {
+    // A new generation owns nothing yet. Without this, a restart would carry
+    // the previous generation's pgids into the new record, and the new session
+    // would claim process groups that belonged to processes it never started.
+    session.pgrps.clear();
     // A fresh cookie per start: a new X server is a new secret, and reusing one
     // would mean a cookie that outlives the server it authenticated.
     let cookie = xserver::generate_cookie()?;
@@ -578,6 +587,15 @@ fn teardown(session: &mut Session, mode: StopMode) {
     }
     session.wm = ProcRef::default();
     session.xserver = ProcRef::default();
+    // Registered pgids are actionable ownership state, not history: they exist
+    // so an `exec`ed program stays findable while the session runs. Once it
+    // stops, leaving them behind would let a record that no longer names a
+    // single live process authorise a signal — and a pgid the kernel has since
+    // reissued would be signalled as if it were ours. Nothing reads this list
+    // for reporting (`SessionView` has no such field), and the post-mortem
+    // trail lives in `exec.log` and the session logs, so clearing it destroys
+    // nothing a consumer reads.
+    session.pgrps.clear();
     if mode == StopMode::Hard && session.exit_reason.is_empty() {
         session.exit_reason = StopMode::Hard.label().to_string();
     }

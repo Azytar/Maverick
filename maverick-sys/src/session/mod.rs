@@ -404,6 +404,30 @@ impl Session {
         }
     }
 
+    /// The roots a process-ownership query may walk from, as pids.
+    ///
+    /// A root qualifies only if it is still the process the record named: a
+    /// non-zero pid is not enough, because a pid is not an identity, and a
+    /// record can carry `pid != 0` with `start_time == 0` — the pair
+    /// `is_alive` treats as unproven. Requiring `is_alive` is what applies the
+    /// pid-plus-start-time discipline to the roots, so a record naming a live
+    /// pid the session never started stops being a way to claim that pid's
+    /// whole subtree.
+    ///
+    /// The result is empty for a session that is not running, and empty is the
+    /// only correct answer there: a stopped session owns nothing, so it must
+    /// not be able to claim a process tree by accident. This is also why an
+    /// empty set is returned rather than a placeholder — a `0` handed back
+    /// downstream is indistinguishable from "walk from pid 0", which is how a
+    /// stopped session ended up owning every process on the machine.
+    pub fn owned_roots(&self) -> Vec<u32> {
+        [self.wm, self.xserver]
+            .into_iter()
+            .filter(|proc_ref| proc_ref.is_alive())
+            .map(|proc_ref| proc_ref.pid)
+            .collect()
+    }
+
     /// The session's directory.
     pub fn dir(&self) -> PathBuf {
         session_dir(&self.name)
@@ -1244,6 +1268,69 @@ pub fn tail(path: &Path, lines: usize) -> io::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ownership contract, stated once so a change has to argue with it.
+    ///
+    /// A session may only claim a process it can prove it started. The proof is
+    /// the recorded pid *and* start time still matching, so the two rules below
+    /// are the same rule applied to the two roots: a root is either a verified
+    /// live process or nothing at all.
+    #[test]
+    fn a_stopped_session_owns_nothing() {
+        let mut session = Session::new(
+            SessionName::parse("stopped").expect("name"),
+            Spec::default(),
+        );
+        assert!(session.owned_roots().is_empty());
+
+        // What `teardown` leaves behind: both roots defaulted.
+        session.wm = ProcRef::default();
+        session.xserver = ProcRef::default();
+        assert!(
+            session.owned_roots().is_empty(),
+            "a default ProcRef must not become a traversal root"
+        );
+
+        // A live root, then the same record after it goes away.
+        let pid = std::process::id();
+        session.wm = ProcRef::of(pid);
+        assert_eq!(session.owned_roots(), vec![pid]);
+        session.wm = ProcRef::default();
+        assert!(session.owned_roots().is_empty());
+    }
+
+    /// A pid is not an identity. The record can carry a non-zero pid with no
+    /// start time — `from_json` defaults a missing field to 0 — and such a ref
+    /// proves nothing, so it must not authorise a subtree walk.
+    #[test]
+    fn a_root_without_a_start_time_is_not_a_root() {
+        let mut session = Session::new(
+            SessionName::parse("unproven").expect("name"),
+            Spec::default(),
+        );
+        let pid = std::process::id();
+        session.wm = ProcRef { pid, start_time: 0 };
+        assert!(session.owned_roots().is_empty());
+
+        session.wm = ProcRef::of(pid);
+        assert_eq!(session.owned_roots(), vec![pid]);
+    }
+
+    /// Registered groups are actionable ownership state, so they are consulted
+    /// only while there is a live session to own them. A record that never
+    /// passed through teardown — hand-edited, left by an older build, written by
+    /// a crash — must not be able to authorise a signal on that basis.
+    #[test]
+    fn registered_groups_need_a_live_session() {
+        let mut session =
+            Session::new(SessionName::parse("groups").expect("name"), Spec::default());
+        session.pgrps = vec![555];
+        // No live root, so the groups are not actionable: the ownership
+        // computation drops the term entirely rather than trusting the record.
+        assert!(session.owned_roots().is_empty());
+        session.wm = ProcRef::of(std::process::id());
+        assert_eq!(session.owned_roots(), vec![std::process::id()]);
+    }
 
     #[test]
     fn resolution_round_trips_and_validates() {

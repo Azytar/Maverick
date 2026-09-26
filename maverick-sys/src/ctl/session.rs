@@ -796,10 +796,7 @@ pub fn process(c: &mut Ctl, args: &[String]) -> Result<bool, String> {
     let verb = args.first().map(String::as_str).unwrap_or("list");
     let rest = if args.is_empty() { &[][..] } else { &args[1..] };
     match verb {
-        "list" | "ls" => {
-            process_list(c, rest);
-            Ok(true)
-        }
+        "list" | "ls" => process_list(c, rest),
         "inspect" | "info" => {
             process_inspect(c, rest)?;
             Ok(true)
@@ -816,15 +813,34 @@ pub fn process(c: &mut Ctl, args: &[String]) -> Result<bool, String> {
     }
 }
 
-/// Every process in a session, in pid order.
+/// Every pid the session owns, from one definition.
 ///
-/// Three sources, unioned — see [`crate::session::proc`] for why a parent walk
-/// alone is not enough.
+/// Three sets, unioned — see [`crate::session::proc`] for why a parent walk
+/// alone is not enough. `process list` and `process kill` both go through this
+/// function, so the two cannot disagree about what a session contains; when
+/// they computed the union separately, one of them was always going to be the
+/// one lying.
+///
+/// The roots come from [`Session::owned_roots`], so a stopped session — whose
+/// roots are all `ProcRef::default()` — contributes nothing. The registered
+/// groups are consulted only while there is a live root to own them: they exist
+/// so an `exec`ed program stays findable while the session runs, and a record
+/// that names no live process owns nothing, however many group ids it carries.
+/// That also covers a record which never passed through teardown at all —
+/// hand-edited, left by an older build, or written by a crash.
+fn owned_pids(record: &Session, table: &proc::ProcTable) -> std::collections::HashSet<u32> {
+    let roots = record.owned_roots();
+    let mut pids = table.closure(&roots);
+    if !roots.is_empty() {
+        pids.extend(table.in_groups(&record.pgrps));
+    }
+    pids
+}
+
+/// Every process in a session, in pid order.
 fn processes(record: &Session) -> Vec<proc::ProcInfo> {
     let table = proc::ProcTable::scan();
-    let mut pids = table.closure(&[record.wm.pid, record.xserver.pid]);
-    pids.extend(table.in_groups(&record.pgrps));
-    pids.retain(|pid| *pid != 0);
+    let pids = owned_pids(record, &table);
 
     let mut out: Vec<proc::ProcInfo> = pids.iter().filter_map(|pid| proc::read(*pid)).collect();
     // The two roots first even though the table is pid-sorted: "is this the
@@ -856,21 +872,17 @@ fn role_of(p: &proc::ProcInfo, session: &Session) -> &'static str {
     }
 }
 
-fn process_list(c: &Ctl, args: &[String]) {
-    let name = session_target(c, args).unwrap_or_default();
+fn process_list(c: &Ctl, args: &[String]) -> Result<bool, String> {
+    // The resolution error is the answer, not a missing name. Defaulting it to
+    // "" reported "session '' does not exist" in an ambiguous context, where
+    // the useful message is the one `window list` gives: name one of these.
+    let name = session_target(c, args)?;
     let record = live_record(&name).ok_or_else(|| {
         format!(
             "session '{name}' does not exist\n\n{}",
             available_sessions()
         )
-    });
-    let record = match record {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("{e}");
-            return;
-        }
-    };
+    })?;
     let procs = processes(&record);
     if c.json {
         let items: Vec<String> = procs
@@ -882,11 +894,11 @@ fn process_list(c: &Ctl, args: &[String]) {
             crate::json::json_quote(&name),
             items.join(",")
         );
-        return;
+        return Ok(true);
     }
     if procs.is_empty() {
         println!("No processes found for session '{name}'.");
-        return;
+        return Ok(true);
     }
     println!(
         "{:<8} {:>6} {:>6} {:<12} {:<10} CMD",
@@ -904,6 +916,7 @@ fn process_list(c: &Ctl, args: &[String]) {
         );
     }
     println!("\n{} process(es).", procs.len());
+    Ok(true)
 }
 
 fn process_json(p: &proc::ProcInfo, role: &str) -> String {
@@ -1004,14 +1017,11 @@ fn process_kill(c: &Ctl, args: &[String]) -> Result<(), String> {
 
 /// True if `p` belongs to `session`.
 ///
-/// The same union the listing uses, so `process kill` can never signal
+/// Shares [`owned_pids`] with the listing, so `process kill` can never signal
 /// something `process list` would not have shown — the two must agree, or one
 /// of them is lying about what a session owns.
 fn is_in_session(p: &proc::ProcInfo, session: &Session) -> bool {
-    let table = proc::ProcTable::scan();
-    let mut pids = table.closure(&[session.wm.pid, session.xserver.pid]);
-    pids.extend(table.in_groups(&session.pgrps));
-    pids.contains(&p.pid)
+    owned_pids(session, &proc::ProcTable::scan()).contains(&p.pid)
 }
 
 // ── logs / debug / inspect ───────────────────────────────────────────────────

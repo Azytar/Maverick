@@ -21,10 +21,10 @@
 //! 2. descendants of the window-manager pid (its autostart children),
 //! 3. every process whose process-group id is one this session registered.
 //!
-//! (3) is what catches `exec`/`shell`: [`spawn_in_session`] puts each child in
-//! a fresh process group and records the id, so membership survives the CLI
-//! that spawned it exiting. A program that calls `setsid` itself leaves its
-//! group behind, which is why the environment also carries
+//! (3) is what catches `exec`/`shell`: [`crate::ctl::session`]'s `exec` puts
+//! each child in a fresh process group and records the id, so membership
+//! survives the CLI that spawned it exiting. A program that calls `setsid`
+//! itself leaves its group behind, which is why the environment also carries
 //! `MAVERICK_SESSION`; callers that need the widest possible net can sweep for
 //! it with [`marked_pids`].
 //!
@@ -170,8 +170,17 @@ impl ProcTable {
     /// is a forest, and a child can appear before its parent is reached
     /// (`/proc` enumeration order is by pid, not by tree depth), so a single
     /// pass would drop a whole subtree.
+    ///
+    /// A non-positive root is dropped rather than walked. Pid 0 is not a
+    /// process — it is the "nothing is running" sentinel of
+    /// [`crate::session::ProcRef`] — and `/proc/0` does not exist, so the only
+    /// way a 0 reaches the fixpoint is as a parent key: pid 1's `ppid` is
+    /// literally 0, so seeding from 0 adopts init and then the entire process
+    /// table. The caller is expected to pass only roots it has verified; this
+    /// is the backstop that keeps a future caller from turning "this session
+    /// owns nothing" into "this session owns everything".
     pub fn closure(&self, roots: &[u32]) -> HashSet<u32> {
-        let mut found: HashSet<u32> = roots.iter().copied().collect();
+        let mut found: HashSet<u32> = roots.iter().copied().filter(|pid| *pid > 0).collect();
         loop {
             let before = found.len();
             for (pid, ppid, ..) in &self.entries {
@@ -186,11 +195,15 @@ impl ProcTable {
     }
 
     /// Every process whose process-group id is in `pgids`.
+    ///
+    /// A zero id is dropped, and not only because pid 0 is not a process:
+    /// kernel threads are created with `pgrp == 0`, so matching 0 would report
+    /// every kthread on the machine as a member of whatever asked.
     pub fn in_groups(&self, pgids: &[u32]) -> HashSet<u32> {
-        if pgids.is_empty() {
+        let wanted: HashSet<u32> = pgids.iter().copied().filter(|pgid| *pgid > 0).collect();
+        if wanted.is_empty() {
             return HashSet::new();
         }
-        let wanted: HashSet<u32> = pgids.iter().copied().collect();
         self.entries
             .iter()
             .filter(|(_, _, pgid, _)| wanted.contains(pgid))
@@ -507,6 +520,38 @@ mod tests {
         let found = table.in_groups(&[555]);
         assert_eq!(found, HashSet::from([101]));
         assert!(table.in_groups(&[]).is_empty());
+    }
+
+    /// A stopped session records both roots as `ProcRef::default()`, so pid 0
+    /// reaches this call. Seeding from it would adopt pid 1 — whose `ppid` is
+    /// literally 0 — and then the whole process table, which is how a stopped
+    /// session came to own every process on the machine.
+    #[test]
+    fn a_zero_root_owns_nothing() {
+        // pid 1 with ppid 0, exactly as the kernel reports init.
+        let table = ProcTable {
+            entries: vec![(1, 0, 1, 1), (2, 1, 2, 1), (3, 2, 3, 1), (100, 1, 100, 1)],
+        };
+        assert_eq!(table.closure(&[0, 0]), HashSet::new());
+        assert_eq!(table.closure(&[0]), HashSet::new());
+        // A real root alongside a zero one still walks: the filter drops the
+        // sentinel, it does not disable the traversal.
+        assert_eq!(table.closure(&[0, 3]), HashSet::from([3]));
+    }
+
+    /// Kernel threads are created with `pgrp == 0`, so a zero group id would
+    /// report every kthread as a member of whatever asked for it.
+    #[test]
+    fn a_zero_group_owns_nothing() {
+        let table = ProcTable {
+            entries: vec![
+                (2, 0, 0, 1),     // kthreadd: pgrp 0
+                (3, 2, 0, 1),     // a kernel worker: pgrp 0
+                (100, 1, 100, 1), // an ordinary process
+            ],
+        };
+        assert_eq!(table.in_groups(&[0]), HashSet::new());
+        assert_eq!(table.in_groups(&[0, 100]), HashSet::from([100]));
     }
 
     #[test]

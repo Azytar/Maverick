@@ -5,6 +5,47 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A stopped session claimed every process on the machine.** `process list` on a
+  stopped session reported 200+ processes beginning at pid 1, and `process kill`
+  would terminate any of them, reporting success. Two independent causes, both
+  now closed:
+  - A stopped session's roots are `ProcRef::default()` — pid 0, documented as
+    "no process" — and the process-tree walk seeded from them. Since pid 1's
+    `ppid` is literally 0, walking from 0 adopted init and then the whole
+    process table. Roots now come from one accessor that requires the recorded
+    pid *and* start time to still match, so an unproven root contributes
+    nothing, and the walk itself refuses a non-positive root.
+  - Registered process groups (`pgrps`) survived `stop`, `kill` and `restart`,
+    so a session that named no live process could still authorise a signal
+    through a group id. They are now cleared on every down-transition and at
+    the start of each generation, and consulted only while a live root exists.
+
+  `process list` and `process kill` now derive ownership from a single shared
+  function, so the agreement `docs/sessions.md` describes is structural rather
+  than a convention two call sites have to keep matching.
+
+  Not claimed: a process group the kernel reissues *while the session is still
+  running* is still trusted. Closing that needs the group leader's start time
+  recorded alongside the id, which is a record-format change.
+
+- **`maverickctl window list` and `process list` reported failure with exit
+  status 0.** Both printed the error to stderr and returned, so the group
+  dispatcher saw success. Under `--json` they printed nothing at all and still
+  exited 0 — a silent empty stream a script could not distinguish from a
+  session with no windows. They now propagate, matching their own sibling
+  verbs, and `process list` no longer discards the reason a session name could
+  not be resolved.
+
+- **A server-side refusal was printed to stdout with exit status 0.**
+  `maverickctl query` for an unknown topic wrote `error unknown-query: …` to
+  stdout and exited 0, so the diagnostic was data rather than a failure. An
+  `error `-prefixed reply is now classified as a failure, on stderr, with a
+  non-zero status — the same rule `msg` already applied to the same protocol.
+  A peer that closes without answering is also now a failure rather than a
+  silent success.
+
 ### Changed
 
 - **The installer installs for the current user by default.** A bare
