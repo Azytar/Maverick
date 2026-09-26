@@ -135,7 +135,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "maverick"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "libc",
  "maverick-core",
@@ -152,14 +152,14 @@ dependencies = [
 
 [[package]]
 name = "maverick-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "maverick-gl"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "libc",
  "log",
@@ -171,21 +171,21 @@ dependencies = [
 
 [[package]]
 name = "maverick-img"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "maverick-render"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "maverick-sys"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "libc",
  "proptest",
@@ -194,14 +194,14 @@ dependencies = [
 
 [[package]]
 name = "maverick-toml"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "maverick-vk"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "ash",
  "maverick-gl",
@@ -211,7 +211,7 @@ dependencies = [
 
 [[package]]
 name = "maverick-x11"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "libc",
  "proptest",
