@@ -416,9 +416,10 @@ fn serde_free_json(info: &InstanceInfo) -> io::Result<String> {
 /// Parse our minimal JSON ficha back into `InstanceInfo` (lenient: missing
 /// fields default to empty/0). Enough for our own format, not a general parser.
 /// String values are unescaped, so a field the writer had to escape (a quote, a
-/// backslash, a control byte) comes back as it was written. Never panics: all
-/// slicing uses `str::get` (returns `None` on non-char-boundary) so a hostile
-/// ficha with multibyte UTF-8 cannot DoS us.
+/// backslash, a control byte) comes back as it was written. Never panics: the
+/// shared [`crate::json::scan_object`] cursor only ever yields `str::get`
+/// slices (which return `None` on a non-char-boundary), so a hostile ficha
+/// with multibyte UTF-8 cannot DoS us.
 fn parse_meta(json: &str) -> Option<InstanceInfo> {
     let mut info = InstanceInfo {
         name: String::new(),
@@ -432,93 +433,21 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
         started_at: 0,
         alive: false,
     };
-    // Walk the JSON body manually rather than splitting on ',' to correctly
-    // handle commas that appear inside quoted string values.
-    let body = json.trim().strip_prefix('{').unwrap_or(json.trim());
-    let body = body.strip_suffix('}').unwrap_or(body);
-    let bytes = body.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    while i < len {
-        // Skip whitespace and commas
-        while i < len && (bytes[i] == b' ' || bytes[i] == b'\t' || bytes[i] == b',') {
-            i += 1;
-        }
-        if i >= len {
-            break;
-        }
-        // Read key (unquoted or quoted)
-        let key = if bytes[i] == b'"' {
-            i += 1;
-            let start = i;
-            while i < len && bytes[i] != b'"' {
-                if bytes[i] == b'\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            let k = body.get(start..i.min(len)).unwrap_or("");
-            i += 1;
-            k
-        } else {
-            let start = i;
-            while i < len && bytes[i] != b':' && bytes[i] != b' ' {
-                i += 1;
-            }
-            body.get(start..i).unwrap_or("")
-        };
-        // Skip ':' and whitespace
-        while i < len && (bytes[i] == b':' || bytes[i] == b' ') {
-            i += 1;
-        }
-        // Read value: either a quoted string or a bare token until next ',' or '}'
-        // `quoted` records which of the two was read: a quoted value is bounded
-        // exactly by the scan below, a bare token still needs its own delimiters
-        // peeled (see `unquote`).
-        let (raw, quoted) = if i < len && bytes[i] == b'"' {
-            i += 1;
-            let start = i;
-            while i < len {
-                if bytes[i] == b'\\' {
-                    // Consume the whole escape: an escaped quote is payload, not
-                    // the end of the value, so a `"\""` must not be split in two.
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == b'"' {
-                    break;
-                }
-                i += 1;
-            }
-            let v = body.get(start..i.min(len)).unwrap_or("");
-            if i < len {
-                i += 1;
-            }
-            (v, true)
-        } else {
-            let start = i;
-            while i < len && bytes[i] != b',' && bytes[i] != b'}' {
-                i += 1;
-            }
-            (body.get(start..i).unwrap_or("").trim(), false)
-        };
-        // Strip exactly one pair of surrounding quotes, not all of them:
-        // `trim_matches` would peel `"a"` -> `a` but also `""a""` -> `a`.
-        let key = key
-            .strip_prefix('"')
-            .and_then(|k| k.strip_suffix('"'))
-            .unwrap_or(key);
-        match key {
-            "name" => info.name = unquote(raw, quoted),
-            "session_id" => info.session_id = unquote(raw, quoted),
-            "pid" => info.pid = raw.parse().unwrap_or(0),
-            "display" => info.display = unquote(raw, quoted),
-            "tty_nr" => info.tty_nr = raw.parse().unwrap_or(0),
-            "x_server_identity" => info.x_server_identity = unquote(raw, quoted),
-            "start_time" => info.start_time = raw.parse().unwrap_or(0),
-            "exe" => info.exe = unquote(raw, quoted),
-            "started_at" => info.started_at = raw.parse().unwrap_or(0),
-            "alive" => info.alive = raw == "true",
+    for field in crate::json::scan_object(json) {
+        // A field the writer emits as a string is read as text whether or not
+        // it arrived quoted: a hand-written or half-written ficha that left a
+        // number unquoted is still that field's value, not a reason to drop it.
+        match field.key {
+            "name" => info.name = field.text(),
+            "session_id" => info.session_id = field.text(),
+            "pid" => info.pid = field.as_u64().unwrap_or(0) as u32,
+            "display" => info.display = field.text(),
+            "tty_nr" => info.tty_nr = field.as_u64().unwrap_or(0),
+            "x_server_identity" => info.x_server_identity = field.text(),
+            "start_time" => info.start_time = field.as_u64().unwrap_or(0),
+            "exe" => info.exe = field.text(),
+            "started_at" => info.started_at = field.as_u64().unwrap_or(0),
+            "alive" => info.alive = field.as_bool().unwrap_or(false),
             _ => {}
         }
     }
@@ -527,27 +456,6 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
     } else {
         Some(info)
     }
-}
-
-/// Turn a scanned JSON value into the text it stands for.
-///
-/// A quoted value's delimiters were already consumed by the scan in
-/// [`parse_meta`], so only its escapes are decoded: the raw bytes cannot simply
-/// be copied, or the name written `"name":"\""` would reach discovery as the two
-/// characters `\` and `"`. Trimming is just as wrong — a `display` of `" "` is a
-/// value and not padding, and losing it makes two instances on different
-/// displays indistinguishable, which is the field discovery relies on. Peeling a
-/// second pair of quotes would eat the `"` of `\"`; only a bare token
-/// (pretty-printed input, whose newline the scan's whitespace skip does not
-/// cover) still carries delimiters of its own.
-fn unquote(raw: &str, quoted: bool) -> String {
-    let body = if quoted {
-        raw
-    } else {
-        let t = raw.strip_prefix('"').unwrap_or(raw);
-        t.strip_suffix('"').unwrap_or(t)
-    };
-    crate::json::json_unescape(body)
 }
 
 /// Build the `InstanceInfo` for the current process under `name` (human label).
