@@ -61,6 +61,7 @@
 
 use std::io;
 use std::io::Write;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -202,12 +203,23 @@ pub fn is_listening(display: Display) -> bool {
 
 /// Wait until `display` accepts connections, or `timeout` elapses.
 ///
-/// `proc_ok` is consulted between attempts so a server that died during
-/// startup reports *that* instead of a timeout: the distinction is the
-/// difference between "try again" and "the log is at <path>". It must answer
-/// "is it still running" — a server that is gone will never listen, and
-/// waiting out the full timeout to say so would report a permission error as a
-/// startup hang.
+/// `proc_ok` answers "is the server *we* started still running". It is
+/// consulted *first*, before the socket, and that ordering is the point: a
+/// listening socket is a statement about whoever owns the display, which during
+/// a race is the session that won it. Checking it first meant a server that had
+/// died on startup was reported ready — because the *other* session's X server
+/// was listening on the number both of them picked — and the record went on to
+/// name a dead pid.
+///
+/// That ordering only closes the hole with a predicate that can see a reap. The
+/// spawned child is never reaped here, so it is a zombie for the whole wait and
+/// still satisfies a pid-and-start-time identity check; see [`crate::session::proc::is_running`],
+/// which is what the caller must pass.
+///
+/// The two failure modes stay distinct: a server that is gone reports
+/// `ProcessDied` rather than waiting out the full timeout to say so, because the
+/// difference between the two is the difference between "try again" and "the log
+/// is at <path>".
 pub fn wait_ready(
     display: Display,
     timeout: Duration,
@@ -215,11 +227,11 @@ pub fn wait_ready(
 ) -> Result<(), WaitError> {
     let deadline = Instant::now() + timeout;
     loop {
-        if is_listening(display) {
-            return Ok(());
-        }
         if !proc_ok() {
             return Err(WaitError::ProcessDied);
+        }
+        if is_listening(display) {
+            return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(WaitError::Timeout);
@@ -514,16 +526,46 @@ impl XServer {
         self.cleanup_artifacts();
     }
 
-    /// Remove the lock file this server's display leaves behind.
+    /// Release this display: remove the claim files the X server left behind.
     ///
-    /// Only ever removes a *regular file* at the exact lock path, never
+    /// Both artefacts are removed, not just the lock. A `SIGKILL`ed server
+    /// skips its own cleanup and leaves `/tmp/.X<n>-lock` *and*
+    /// `/tmp/.X11-unix/X<n>` behind, and `display_is_free` treats either as
+    /// claimed — so reclaiming only the lock left the number permanently
+    /// unusable, with nothing able to free it.
+    ///
+    /// Nothing ever unlinked the socket before: `socket_path` was read only by
+    /// `is_listening` and `display_is_free`, so the sole cleanup authority for
+    /// `/tmp/.X11-unix/X<n>` was the X server's own exit handler, which
+    /// `SIGKILL` skips — including the escalation in `stop` above.
+    ///
+    /// A claim is only released when nobody is serving the display. A stale
+    /// claim is a file; a live one is a running server, and removing its
+    /// artefacts would disarm a session that is working perfectly well. That
+    /// check is also what keeps a losing creator's teardown from deleting the
+    /// winner's claim, which is exactly what happened when a create lost the
+    /// display race and then ran its error path.
+    ///
+    /// Each path is removed only if it is of the expected type and was not
     /// following a symlink: `/tmp` is world-writable, so an unlink that
     /// followed a link would let a planted link decide what gets deleted.
     fn cleanup_artifacts(&self) {
-        let path = lock_path(self.display);
-        if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if is_listening(self.display) {
+            return;
+        }
+        let lock = lock_path(self.display);
+        if let Ok(meta) = std::fs::symlink_metadata(&lock) {
             if meta.is_file() {
-                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(&lock);
+            }
+        }
+        let sock = socket_path(self.display);
+        if let Ok(meta) = std::fs::symlink_metadata(&sock) {
+            // A unix socket is a socket, not a regular file, and the type check
+            // is what distinguishes "a dead server's socket" from anything a
+            // planted symlink or regular file would present as.
+            if meta.file_type().is_socket() {
+                let _ = std::fs::remove_file(&sock);
             }
         }
     }
