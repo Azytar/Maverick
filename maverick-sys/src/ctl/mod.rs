@@ -1,4 +1,4 @@
-//! CLI control tools shared by the `maverickctl` and `maverick-msg` binaries.
+//! The `maverickctl` CLI engine: one binary for every control operation.
 //!
 //! The two binaries are the "everything the WM shouldn't do itself" tools:
 //! discover running instances, query their state, run structured queries, send
@@ -6,9 +6,11 @@
 //! control socket exposed by `maverick-sys`. The WM stays minimal; the policy
 //! lives here.
 //!
-//! `maverickctl` is the general-purpose admin tool; `maverick-msg` is the
-//! dwm-style variant that takes *any* line (action, `query <topic>`, or raw
-//! protocol word) and forwards it verbatim — same engine underneath.
+//! There is one binary. `maverickctl` is both the general-purpose admin tool
+//! and the dwm-style variant that takes *any* line (action, `query <topic>`, or
+//! raw protocol word) and forwards it verbatim: a second binary that does the
+//! same thing over the same socket was a second thing to document, install and
+//! remember, not a capability.
 //!
 //! # Instance-selection precedence
 //!
@@ -33,6 +35,11 @@ use std::process::ExitCode;
 use crate::identity::{current_display, current_tty_nr, InstanceInfo};
 use crate::{control, discover};
 
+pub mod session;
+pub mod windows;
+
+pub use windows::WindowInfo;
+
 /// Entry point shared by both control binaries.
 pub fn main_with_args(tool: &str, args: Vec<String>) -> ExitCode {
     if args.is_empty() {
@@ -48,6 +55,36 @@ pub fn main_with_args(tool: &str, args: Vec<String>) -> ExitCode {
             usage(tool);
             ExitCode::SUCCESS
         }
+        // ── sessions ──────────────────────────────────────────────────────
+        // A session is the whole graphical unit — an X server, a Maverick, the
+        // applications inside them — so these commands own a process graph
+        // rather than a socket. Everything else addresses one window manager.
+        "session" | "sessions" | "sess" => run_group(tool, rest, "session", session::run),
+        "exec" => run_group(tool, rest, "exec", |c, a| session::exec(c, a).map(|_| true)),
+        "shell" => run_group(tool, rest, "shell", |c, a| {
+            session::shell(c, a).map(|_| true)
+        }),
+        "attach" => run_group(tool, rest, "attach", |c, a| {
+            session::attach(c, a).map(|_| true)
+        }),
+        "logs" => run_group(tool, rest, "logs", |c, a| session::logs(c, a).map(|_| true)),
+        "debug" => run_group(tool, rest, "debug", |c, a| {
+            session::debug(c, a).map(|_| true)
+        }),
+        "inspect" => run_group(tool, rest, "inspect", |c, a| {
+            session::inspect(c, a).map(|_| true)
+        }),
+        "window" | "win" => run_group(tool, rest, "window", windows::run),
+        "process" | "proc" => run_group(tool, rest, "process", session::process),
+        "camera" => run_group(tool, rest, "camera", |c, a| {
+            windows::camera(c, a).map(|_| true)
+        }),
+        "resize" => run_group(tool, rest, "resize", |c, a| {
+            windows::resize(c, a).map(|_| true)
+        }),
+        "layout" => run_group(tool, rest, "layout", |c, a| {
+            windows::layout(c, a).map(|_| true)
+        }),
         "list" | "ls" => cmd_list(tool),
         "state" => cmd_state(tool, rest, true),
         "query" | "q" => cmd_state(tool, rest, false),
@@ -59,17 +96,317 @@ pub fn main_with_args(tool: &str, args: Vec<String>) -> ExitCode {
         "reload" => cmd_simple(tool, rest, "reload"),
         "prune" => cmd_prune(tool),
         other => {
-            if !tool.ends_with("msg") {
-                eprintln!("{tool}: unknown command '{other}'\n");
-                usage(tool);
-                return ExitCode::FAILURE;
-            }
-            // `maverick-msg` with a non-admin word: forward the whole line
-            // verbatim (dwm style). Structured queries become `query <topic>`,
-            // everything else is dispatched as an action.
+            // An unrecognised first word is forwarded verbatim, dwm style: it
+            // is either an action, a query topic, or a protocol word, and the
+            // window manager is the one that can tell. The window manager's
+            // answer is what the user sees, so a typo that happens to be a
+            // valid action is still a typo that does something — which is why
+            // every *documented* command is handled above and `usage` lists
+            // them all.
+            let _ = other;
             let line = args.join(" ");
             cmd_forward(tool, &line)
         }
+    }
+}
+
+/// The parsed, session-aware command line a subcommand sees.
+///
+/// The older commands take `&[String]` and their own `Opts`; the session-aware
+/// ones take this, because they need three things the old shape could not
+/// express: a `--json` mode that has to survive argument forwarding (a
+/// program launched with `maverickctl exec` must not inherit it), the
+/// distinction between *this tool's* flags and a command's own, and an explicit
+/// session target that may have come from a flag rather than a positional.
+pub struct Ctl {
+    /// `--json`: emit a machine-readable document instead of a table.
+    pub json: bool,
+    /// `--yes`: skip a confirmation prompt.
+    pub yes: bool,
+    /// The session named with `--session`, if any.
+    session: Option<String>,
+    /// The instance named with `--name`, if any.
+    name: Option<String>,
+    /// The arguments as given, so a flag a subcommand claimed for itself can
+    /// still be asked about without being re-parsed differently.
+    pub raw: Vec<String>,
+    /// The tool's own name, for messages.
+    tool: String,
+}
+
+/// This tool's own flags, anywhere on the line.
+///
+/// A command's own flags are *not* in this list, and that is the point: a
+/// program launched with `maverickctl exec session app --json` must get its
+/// `--json`. Only flags this tool claims are stripped before forwarding, and
+/// only as whole words.
+const OWN_FLAGS: &[&str] = &[
+    "--json",
+    "-j",
+    "--yes",
+    "-y",
+    "--session",
+    "-s",
+    "--name",
+    "-n",
+];
+
+impl Ctl {
+    /// Parse the arguments of a session-aware subcommand.
+    ///
+    /// `keep` lists flags the subcommand claims for itself, so they are neither
+    /// consumed as a global nor mistaken for a positional argument — `logs -n`
+    /// and `debug --window` both need this.
+    pub fn parse(tool: &str, args: &[String], keep: &[&str]) -> Self {
+        let mut c = Ctl {
+            raw: args.to_vec(),
+            json: false,
+            yes: false,
+            session: None,
+            name: None,
+            tool: tool.to_string(),
+        };
+        let mut i = 0;
+        while i < args.len() {
+            let arg = args[i].as_str();
+            if keep.contains(&arg) {
+                i += 1;
+                continue;
+            }
+            match arg {
+                "--json" | "-j" => c.json = true,
+                "--yes" | "-y" => c.yes = true,
+                "--session" | "-s" | "--name" | "-n" => {
+                    let value = args.get(i + 1).cloned();
+                    match arg {
+                        "--session" | "-s" => c.session = value,
+                        _ => c.name = value,
+                    }
+                    // Skip the value so it is not also read as a positional.
+                    i += 1;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        c
+    }
+
+    /// The tool's own name, for error messages.
+    pub fn tool(&self) -> &str {
+        &self.tool
+    }
+
+    /// True if this tool's flags contain `arg` exactly.
+    pub fn is_own_flag(&self, arg: &str) -> bool {
+        OWN_FLAGS.contains(&arg)
+    }
+
+    /// True if any of `names` appears on the command line.
+    pub fn flag(&self, names: &[&str]) -> bool {
+        self.raw.iter().any(|a| names.contains(&a.as_str()))
+    }
+
+    /// True if the command line names a session with a flag.
+    pub fn explicit_session(&self) -> Option<&str> {
+        self.session.as_deref().or(self.name.as_deref())
+    }
+
+    /// Whether stderr is a terminal, which is what makes a banner welcome
+    /// rather than noise in a script's log.
+    pub fn stderr_is_tty(&self) -> bool {
+        use std::io::IsTerminal;
+        std::io::stderr().is_terminal()
+    }
+}
+
+/// Run one of the session-aware subcommands, turning its `Result<bool, String>`
+/// into an exit code.
+///
+/// A `bool` of `false` means "not mine" — no subcommand ever returns that
+/// today, but the type says it, so a future verb that defers to the
+/// verbatim-forwarding path does not need a second dispatch arm.
+fn run_group(
+    tool: &str,
+    args: &[String],
+    group: &str,
+    handler: impl FnOnce(&mut Ctl, &[String]) -> Result<bool, String>,
+) -> ExitCode {
+    // A leading `--help` anywhere before the verb is the subcommand's own help.
+    let keep: &[&str] = match group {
+        "logs" => &["-n", "--xserver", "-x", "-f", "--follow"],
+        "debug" => &["--window", "-f", "--follow"],
+        "process" => &["--force", "-9"],
+        "session" => &["--force", "-f"],
+        _ => &[],
+    };
+    let mut c = Ctl::parse(tool, args, keep);
+    if args.first().is_some_and(|a| a == "--help") {
+        print_usage(usage_for(group));
+        return ExitCode::SUCCESS;
+    }
+    match handler(&mut c, args) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("{tool}: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The usage section a group name asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Usage {
+    /// The top-level list.
+    Top,
+    /// `session`, `exec`, `shell`, `attach`, `logs`, `debug`, `inspect`.
+    Sessions,
+    /// `window`, `camera`, `resize`, `layout`.
+    Windows,
+    /// `process`.
+    Process,
+}
+
+fn usage_for(group: &str) -> Usage {
+    match group {
+        "window" => Usage::Windows,
+        "process" => Usage::Process,
+        _ => Usage::Sessions,
+    }
+}
+
+/// Print a usage section to stdout.
+///
+/// The session sections go to stdout rather than stderr because they are the
+/// output of `maverickctl session --help` and nobody is expecting a diagnostic
+/// there.
+pub fn print_usage(which: Usage) {
+    match which {
+        Usage::Top => usage("maverickctl"),
+        Usage::Sessions => println!(
+            "\
+maverickctl sessions — whole graphical sessions (X server + Maverick + apps)
+
+SESSIONS
+    session list [--json]                Every session, with display, size, state
+    session create <name> [options]     Create and start a session
+    session status <name> [--json]      One session in detail
+    session start|stop|restart|kill|remove <name>
+
+    session create options
+        --resolution <WxH>     Screen size (default 1280x720)
+        --refresh-rate <Hz>    Requested refresh rate (Xephyr honours it)
+        --backend <xephyr|xvfb>  Nested X server (default xephyr: visible)
+        --binary <path>        Maverick binary to run (default: maverick on PATH)
+        --cwd <path>           Working directory for Maverick
+        --debug                Run at debug level (what `logs` is for)
+        --no-compositor        Run without the compositor, to compare
+        -- <args…>             Everything after -- is passed to Maverick
+
+RUNNING THINGS IN A SESSION
+    exec <session> <program> [args…]    Run a program in the session
+    exec <session> … --wait             …and wait for it, propagating its status
+    exec <session> … --log              …and append its output to the session log
+    shell <session> [command…]          A shell with the session's environment
+    attach <session> [command…]         As shell, announcing display and session
+    process list <session> [--json]     Every process in the session
+    process inspect <session> <pid>     One process in detail
+    process kill <session> <pid>        Signal a process in the session
+
+LOOKING INSIDE
+    inspect <session> [--json]          Session, windows, layout, compositor
+    logs <session> [-n N] [-f] [--xserver]  Tail a session's own log
+    debug <session> [--window <id>]     Live event stream + recent debug log
+
+A SESSION'S ENVIRONMENT
+    exec, shell and attach set DISPLAY, XAUTHORITY, MAVERICK_SESSION and
+    MAVERICK_INSTANCE, so a program needs no knowledge of the session.
+
+EXAMPLES
+    maverickctl session create debug --resolution 1280x720 --debug
+    maverickctl exec debug alacritty
+    maverickctl window list debug --json
+    maverickctl session stop debug"
+        ),
+        Usage::Windows => println!(
+            "\
+maverickctl windows — semantic window and layout control
+
+WINDOWS
+    window list <session> [--json]
+    window inspect <session> [<window>]
+    window focus <session> <window>
+    window close <session> <window>
+    window move <session> <window> <left|right|up|down>
+    window float <session> <window>
+    window fullscreen <session> <window>
+
+    A window is an X11 id (0x42003) or a name matched against the class, the
+    instance name and the title — exact before substring. An ambiguous name is
+    refused with the candidate ids rather than guessed.
+
+    Omit the window to act on the focused one.
+
+LAYOUT
+    camera <session> <left|right|up|down>   Move the camera (the scroll position)
+    resize <session> <+10%|40>              Resize the focused column
+    layout <session> <column>               Set the layout
+
+    Every one of these is dispatched as an action and goes through the same
+    state machine a keybinding does; none of them touches X11 directly.
+
+EXAMPLES
+    maverickctl window list debug
+    maverickctl window focus debug firefox
+    maverickctl window inspect debug 0x42003
+    maverickctl resize debug +10%"
+        ),
+        Usage::Process => println!(
+            "\
+maverickctl process — what is running inside a session
+
+    process list <session> [--json]
+    process inspect <session> <pid> [--json]
+    process kill <session> <pid> [--force]
+
+    A session is a graph: the X server, the window manager, whatever the window
+    manager autostarts, and everything `maverickctl exec` launched. All of it
+    is listed, each with the role it plays and — for a window's client — the
+    pid that `_NET_WM_PID` vouched for.
+
+    A process this session does not own is never signalled."
+        ),
+    }
+}
+
+/// The session name a session-scoped command means.
+///
+/// Resolution order: an explicit `--session`/`--name`, then the first
+/// positional, then the caller's own session, then the sole running one. So
+/// `maverickctl window list` inside a session just works, and
+/// `maverickctl window list debug` says which one it meant.
+pub fn session_target(c: &Ctl, args: &[String]) -> Result<String, String> {
+    if let Some(explicit) = c.explicit_session() {
+        return Ok(explicit.to_string());
+    }
+    if let Some(positional) = args.iter().find(|a| !a.starts_with('-')) {
+        return Ok(positional.clone());
+    }
+    crate::session::resolve_target(None)
+        .map(|v| v.name)
+        .map_err(|e| e.to_string())
+}
+
+/// Dispatch an action line to a session's window manager, for a subcommand
+/// that has already resolved its target.
+pub fn dispatch_to(view: &crate::session::SessionView, action: &str) -> Result<(), String> {
+    // The window manager answers with the action's own report; anything that is
+    // not a plain `ok` means it refused, and the refusal is the message the
+    // user needs — not "the command failed".
+    match control::dispatch(&view.sid, action) {
+        Ok(report) if report.trim() == "ok" => Ok(()),
+        Ok(report) => Err(report),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -425,7 +762,7 @@ fn cmd_prune(_tool: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `maverick-msg <any line>` passthrough: a single line may be a structured
+/// `maverickctl <any line>` passthrough: a single line may be a structured
 /// query ("query tree"), a raw protocol word ("state", "quit"), or an action
 /// ("focus-right", "view 3"). Resolution order: raw command words first, then
 /// `query <topic>` (structured), then fall back to dispatching.

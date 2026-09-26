@@ -799,9 +799,15 @@ pub fn list() -> Vec<SessionView> {
     // window manager has a ficha but no record, and `maverickctl window list
     // main` has to work. Its name is what it was launched with, and the
     // default `--name` reads as `main` so the common case needs no ceremony.
+    //
+    // Only *live* instances are listed. A dead instance with no record is not
+    // an addressable session — nothing answers on its socket — it is debris
+    // from a run that ended badly, and `maverickctl prune` is what removes
+    // that. Listing it here would make `session list` report sessions the user
+    // cannot act on.
     for inst in crate::discover::list_instances() {
         let already = out.iter().any(|v| v.sid == inst.session_id);
-        if already || inst.session_id.is_empty() {
+        if already || inst.session_id.is_empty() || !inst.alive {
             continue;
         }
         let default_name = inst.name == identity::DEFAULT_NAME;
