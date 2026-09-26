@@ -34,6 +34,22 @@
 //! Fallible methods return `Err(String)` for logging. A failure means the
 //! compositor falls back to the non-composited `ConfigureWindow` path, never
 //! that the window manager aborts.
+//!
+//! # Status
+//!
+//! This crate is a declared boundary, not a spanned one. The crate has no
+//! dependencies — that isolation is the point of it — and it carries its own
+//! contract test over the value types. No backend implements [`Renderer`] or
+//! [`Texture`] yet: `maverick_gl::Renderer` is a concrete struct that the
+//! compositor drives directly, and it does not implement these traits. Nothing
+//! in the workspace therefore depends on this crate except the re-export in
+//! `src/backend/renderer.rs`, which exists so the seam has one import root
+//! when the first backend targets it.
+//!
+//! It is kept for the same reason `maverick-vk` is kept: an unwired backend
+//! boundary that is exercised by its own tests is a deliberate piece of the
+//! architecture, whereas a module that nothing declares and nothing references
+//! is residue.
 
 #![allow(dead_code)]
 
