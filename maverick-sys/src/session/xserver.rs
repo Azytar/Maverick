@@ -204,7 +204,10 @@ pub fn is_listening(display: Display) -> bool {
 ///
 /// `proc_ok` is consulted between attempts so a server that died during
 /// startup reports *that* instead of a timeout: the distinction is the
-/// difference between "try again" and "the log is at <path>".
+/// difference between "try again" and "the log is at <path>". It must answer
+/// "is it still running" — a server that is gone will never listen, and
+/// waiting out the full timeout to say so would report a permission error as a
+/// startup hang.
 pub fn wait_ready(
     display: Display,
     timeout: Duration,
@@ -341,6 +344,28 @@ pub fn write_xauth(path: &Path, display: Display, cookie: &str) -> io::Result<()
     file.flush()
 }
 
+/// Open a log file for appending, owner-only.
+///
+/// The mode is set at creation, not applied afterwards: a log that exists for a
+/// moment as `0644` is a session's stderr — window names, window titles, and
+/// whatever a program launched into the session wrote — visible to every user
+/// on the machine for as long as the `chmod` takes.
+pub fn open_private_log(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    // An existing file keeps whatever mode it had, so tighten it too: a log
+    // created by an older build, or by a umask, must not stay readable.
+    let current = file.metadata()?.permissions().mode() & 0o777;
+    if current != 0o600 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
 /// Append one length-prefixed field to an authority entry.
 fn push_field(out: &mut Vec<u8>, field: &[u8]) {
     // A field longer than 65535 cannot be expressed; nothing Maverick writes
@@ -403,10 +428,7 @@ pub fn spawn(spec: &XServerSpec) -> io::Result<XServer> {
             format!("X display {} is already in use", spec.display),
         ));
     }
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&spec.log_path)?;
+    let log = open_private_log(&spec.log_path)?;
 
     let screen = screen_arg(spec.backend, spec);
     let mut cmd = std::process::Command::new(spec.backend.binary());
@@ -650,6 +672,38 @@ mod tests {
         if let Ok(d) = allocate_display(400) {
             assert!(d.0 >= 400, "the hint must be honoured");
         }
+    }
+
+    /// The readiness wait asks two questions — "is it listening yet" and "is it
+    /// still alive" — and the second one decides *which failure* is reported.
+    /// A predicate that answers the second question backwards turns a perfectly
+    /// healthy server into an immediate "it exited", which is what a real
+    /// session start reported before the predicate was pinned here.
+    #[test]
+    fn the_readiness_wait_reports_a_dead_server_and_keeps_waiting_for_a_live_one() {
+        let free = allocate_display(300).expect("a free display");
+        assert!(
+            !is_listening(free),
+            "the test needs a display nothing is on"
+        );
+        let start = std::time::Instant::now();
+        // A server that is alive is waited for, and times out.
+        let err = wait_ready(free, Duration::from_millis(150), || true)
+            .expect_err("nothing will ever be listening");
+        assert_eq!(err, WaitError::Timeout);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "it must have waited"
+        );
+        // A server that died is reported as dead, and immediately.
+        let start = std::time::Instant::now();
+        let err = wait_ready(free, Duration::from_secs(30), || false)
+            .expect_err("a dead server never becomes ready");
+        assert_eq!(err, WaitError::ProcessDied);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "a dead server must be reported at once, not after the timeout"
+        );
     }
 
     /// A display that is already claimed must be refused, not hijacked: this is

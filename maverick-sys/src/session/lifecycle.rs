@@ -416,7 +416,7 @@ fn start_xserver(session: &Session, display: Display) -> Result<xserver::XServer
     })?;
 
     let proc_ref = server.proc;
-    match xserver::wait_ready(display, START_TIMEOUT, || !proc_ref.is_alive()) {
+    match xserver::wait_ready(display, START_TIMEOUT, || proc_ref.is_alive()) {
         Ok(()) => Ok(server),
         Err(e) => {
             server.stop(STOP_GRACE);
@@ -437,10 +437,7 @@ fn start_xserver(session: &Session, display: Display) -> Result<xserver::XServer
 /// that fails the first thing an agent does with it.
 fn start_maverick(session: &mut Session) -> Result<ProcRef, SessionError> {
     let binary = resolve_binary(&session.spec.binary)?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(session.log_path())?;
+    let log = xserver::open_private_log(&session.log_path())?;
 
     let mut cmd = std::process::Command::new(&binary.path);
     // The session's own id, so the runtime directory, socket and ficha are all

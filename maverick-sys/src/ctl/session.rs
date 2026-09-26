@@ -641,10 +641,7 @@ fn launch_in_session(
     if to_log {
         // A detached program's output would otherwise be written to a pipe the
         // caller has already stopped reading, which is a hang, not a log.
-        let log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(session.dir().join("exec.log"))
+        let log = crate::session::xserver::open_private_log(&session.dir().join("exec.log"))
             .map_err(|e| format!("could not open the session log: {e}"))?;
         cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
         cmd.stderr(Stdio::from(log));
@@ -1335,14 +1332,19 @@ mod tests {
         assert!(CreateArgs::parse(&[]).is_err(), "a name is required");
     }
 
-    /// The listing must not be able to print a secret. The cookie lives in a
-    /// file whose *path* is useful to a client; its contents never appear in
-    /// any document this tool writes.
+    /// The listing must not be able to print a secret. The Xauthority *path* is
+    /// reported, because a client needs to be pointed at it; its contents never
+    /// appear in any document this tool writes.
+    ///
+    /// Checked as a property of the document rather than against a fixed value,
+    /// because the `xauth` field is a path only when a record exists on disk —
+    /// and a test that depended on that would be asserting on whatever the
+    /// machine happened to have in its runtime directory.
     #[test]
     fn the_session_view_carries_the_xauth_path_and_never_its_contents() {
         let view = SessionView {
-            name: "debug".into(),
-            sid: "debug".into(),
+            name: "secretprobe".into(),
+            sid: "secretprobe".into(),
             kind: "nested",
             state: SessionState::Running,
             display: ":1".into(),
@@ -1359,15 +1361,34 @@ mod tests {
             owner_uid: 1000,
         };
         let doc = view_json(&view);
-        // With no record on disk there is no path to report, and no key whose
-        // value could be a cookie.
-        assert!(doc.contains("\"xauth\":null"), "{doc}");
         assert!(
-            !doc.to_lowercase().contains("cookie"),
-            "the view must not mention cookies at all: {doc}"
+            doc.contains("\"xauth\""),
+            "the key is always present: {doc}"
         );
-        // And it must parse: it is the agent-facing contract.
-        crate::json::parse(&doc).expect("the view is valid JSON");
+        assert!(
+            crate::json::parse(&doc).is_some(),
+            "and it must be valid JSON"
+        );
+
+        // No 32-hex-digit run anywhere: that is the shape of an MIT-MAGIC
+        // cookie, and one appearing in a document is a credential leak. The
+        // pid-like numbers and the resolution cannot produce sixteen adjacent
+        // hex digits, so this is a real check rather than a formality.
+        let bytes = doc.as_bytes();
+        let mut run = 0;
+        for b in bytes {
+            if b.is_ascii_hexdigit() {
+                run += 1;
+                assert!(run < 16, "a cookie-shaped token leaked: {doc}");
+            } else {
+                run = 0;
+            }
+        }
+        // And no environment variable is reported at all, so nothing inherited
+        // by this process can ride along into a log or a JSON document.
+        for forbidden in ["DISPLAY=", "XAUTHORITY=", "MAVERICK_NO_COMPOSITOR="] {
+            assert!(!doc.contains(forbidden), "{forbidden} leaked: {doc}");
+        }
     }
 
     /// The listing and the kill guard must agree about what a session owns: a
