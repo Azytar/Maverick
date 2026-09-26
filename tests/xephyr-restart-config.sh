@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# F2 — config-reuse across `maverick-msg restart` (CRITICAL).
+# F2 — config-reuse across `maverickctl restart` (CRITICAL).
 #
 # Validates that `restart` re-execs with EXACTLY the same `--config <path>`:
 #   1. launch maverick --config <distinctive file>

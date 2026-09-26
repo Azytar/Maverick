@@ -2,7 +2,7 @@
 #
 # Maverick restart-survival harness (regression for the wallpaper/restart bug).
 #
-# Reproduces the reported failure: after `maverick-msg restart` (a re-exec), the
+# Reproduces the reported failure: after `maverickctl restart` (a re-exec), the
 # previous compositor's GPU context is gone, so every pre-existing window must
 # be re-adopted AND have its texture rebound — otherwise the renderer skips
 # windows with no texture and the tiles vanish (only the wallpaper, if any,
@@ -11,7 +11,7 @@
 # Scenario:
 #   1. open a solid-colour window, sample it (baseline: drawn).
 #   2. set a wallpaper (mirrors the user's "cambiar el fondo" step).
-#   3. maverick-msg restart.
+#   3. maverickctl restart.
 #   4. sample the SAME window again — must still show its colour (tiles survive).
 #
 # Requires: xephyr, x11-utils, ffmpeg, gcc. Helpers are built if missing.
@@ -23,11 +23,11 @@ SCREEN_W=1920
 SCREEN_H=1080
 XEPHYR_DISPLAY=":98"
 MAVERICK_BIN="${MAVERICK_BIN:-./target/debug/maverick}"
-MSG_BIN="${MSG_BIN:-./target/debug/maverick-msg}"
+MSG_BIN="${MSG_BIN:-./target/debug/maverickctl}"
 BINDIR="$(cd "$(dirname "$0")" && pwd)"
 # Short, explicit XDG_RUNTIME_DIR so the control-socket path stays under
 # SUN_LEN (the default can be too long in some sandboxes). Shared by the daemon
-# and the client tools (maverickctl/maverick-msg).
+# and the client tools (maverickctl/maverickctl).
 RTDIR="$(mktemp -d /tmp/mrt.XXXX)"
 export XDG_RUNTIME_DIR="$RTDIR"
 LOG="$(mktemp -t maverick-restart.XXXXXX.log)"

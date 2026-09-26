@@ -19,7 +19,7 @@ cd "$APP_DIR"
 
 MAVERICK_BIN="${MAVERICK_BIN:-./target/debug/maverick}"
 MAVERICK_CTL="${MAVERICK_CTL:-./target/debug/maverickctl}"
-MAVERICK_MSG="${MAVERICK_MSG:-./target/debug/maverick-msg}"
+MAVERICK_MSG="${MAVERICK_MSG:-./target/debug/maverickctl}"
 
 # Short, explicit XDG_RUNTIME_DIR so the control-socket path stays under
 # SUN_LEN (the default can be too long in some sandboxes).

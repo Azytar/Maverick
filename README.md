@@ -246,10 +246,10 @@ cargo build --release --no-default-features \
   -p maverick -p maverick-sys
 ```
 
-The normal runtime binaries are `maverick`, `maverickctl`, and
-`maverick-msg`, under `target/release/`. Cargo also discovers the separate
-`maverick-setup` utility in `src/bin/`; the shell installer installs the three
-runtime binaries, not that utility. No Rust installer crate is part of the workspace.
+The normal runtime binaries are `maverick` and `maverickctl`, under
+`target/release/`. Cargo also discovers the separate `maverick-setup` utility in
+`src/bin/`; the shell installer installs the two runtime binaries, not that
+utility. No Rust installer crate is part of the workspace.
 
 ### Install
 
@@ -441,8 +441,9 @@ maverickctl restart --name desktop
 maverickctl quit --name desktop --confirm
 ```
 
-`maverick-msg` also forwards action lines, for example `maverick-msg view 3` or
-`maverick-msg wallpaper clear`. Each instance has a private runtime directory and
+`maverickctl` also forwards action lines verbatim, for example
+`maverickctl view 3` or `maverickctl wallpaper clear`. Each instance has a
+private runtime directory and
 Unix socket under `$XDG_RUNTIME_DIR/maverick/<session-id>/`. Discovery checks
 process identity and socket liveness. Selection prefers `--session`, then `--name`,
 then inherited `MAVERICK_INSTANCE`, then display/TTY context; a global singleton
@@ -529,7 +530,7 @@ server that supports the required GLX path.
 | `src/backend/x11/` | Event handling, client management, input, EWMH, struts, reconciliation, frame scheduling, root wallpaper |
 | `src/config.rs`, `src/userconfig.rs` | Compiled defaults, config merging, validation |
 | `maverick-x11/` | Shared Xlib/XCB connection bootstrap |
-| `maverick-sys/` | Instance identity/discovery, control socket/hub, `maverickctl` and `maverick-msg` |
+| `maverick-sys/` | Instance identity/discovery, control socket/hub, the Maverick Session model, `maverickctl` |
 | `maverick-render/` | Renderer-facing types and trait; no in-tree backend implements `Renderer` yet |
 | `maverick-gl/` | OpenGL/GLX renderer and in-tree FFI/loading |
 | `maverick-vk/` | Experimental Vulkan device/surface/swapchain code, not integrated into the WM |

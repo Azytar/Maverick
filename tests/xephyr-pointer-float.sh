@@ -30,7 +30,7 @@ source tests/common.sh
 trap mav_cleanup EXIT ERR
 
 DISP="${DISP:-:99}"
-MSG_BIN="${MAVERICK_MSG:-./target/debug/maverick-msg}"
+MSG_BIN="${MAVERICK_MSG:-./target/debug/maverickctl}"
 HOSTILE="${HOSTILE:-/tmp/mv-hostile}"
 
 pass() { echo "PASS: $*"; }

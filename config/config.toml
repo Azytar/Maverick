@@ -125,8 +125,8 @@ urgent  = 0xf38ba8        # catppuccin-mocha red
 # the file extension: .png/.jpg/.jpeg/.webp/.avif/.bmp/.qoi/.ppm/.ff → image
 # (PNG decoded natively; the rest via ffmpeg); .glsl/.frag/.vert/.shader/.fs →
 # GLSL fragment shader (compiled on the GPU). `path = null` (default) disables
-# it. Applied at startup, or live via `maverick-msg wallpaper set <path>`,
-# `maverick-msg wallpaper clear`, `maverick-msg wallpaper mode <fill|fit|
+# it. Applied at startup, or live via `maverickctl wallpaper set <path>`,
+# `maverickctl wallpaper clear`, `maverickctl wallpaper mode <fill|fit|
 # stretch|center>`. A `~` in the path is expanded to $HOME.
 [wallpaper]
 # path = "~/Pictures/wallpaper.png"

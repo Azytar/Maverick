@@ -1,4 +1,4 @@
-//! Properties of the CLI entry point shared by `maverickctl` and `maverick-msg`.
+//! Properties of the `maverickctl` CLI entry point.
 //!
 //! Everything the tools do beyond argument parsing needs a live instance — a
 //! socket, a ficha, a WM thread — so this suite covers the one part that is
@@ -42,7 +42,7 @@ fn local_word() -> impl Strategy<Value = String> {
 // The entry point is total and stateless: any word is either a documented help
 // form or an unknown command that fails loudly, and the same argv always
 // decides the same way. An unknown word must never fall through to the
-// `maverick-msg` forwarding path, which would act on whatever instance the
+// verbatim-forwarding path, which would act on whatever instance the
 // context happens to resolve to.
 proptest! {
     #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]

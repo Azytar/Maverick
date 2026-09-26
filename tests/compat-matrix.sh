@@ -15,7 +15,7 @@
 #
 # Build prerequisites (standalone, NOT the cargo workspace):
 #   gcc tests/hostile.c -o /tmp/hostile -lX11
-#   cargo build --release        # provides ./target/release/maverick + maverick-msg
+#   cargo build --release        # provides ./target/release/maverick + maverickctl
 #
 # Notes:
 #   * Nested Xephyr is flaky in this environment — launched with
@@ -32,7 +32,7 @@ set -u
 XEPHYR_DISPLAY="${XEPHYR_DISPLAY:-:97}"
 MW=1280; MH=800; TOTAL_W=1280
 MAVERICK_BIN="${MAVERICK_BIN:-./target/release/maverick}"
-MSG_BIN="${MSG_BIN:-./target/release/maverick-msg}"
+MSG_BIN="${MSG_BIN:-./target/release/maverickctl}"
 HOSTILE="${HOSTILE:-/tmp/hostile}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/mvcm}"   # short -> avoids SUN_LEN
 export MAVERICK_NO_COMPOSITOR=1

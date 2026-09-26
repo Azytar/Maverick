@@ -22,7 +22,7 @@
 #   $XDG_RUNTIME_DIR/maverick/<sid>/<sid>.sock
 # With the default /run/user/1000 that path is 108 bytes -> one past SUN_LEN
 # (108 incl. NUL) -> "path must be shorter than SUN_LEN" and the socket never
-# binds. We therefore use a short XDG_RUNTIME_DIR so maverick-msg can talk to
+# binds. We therefore use a short XDG_RUNTIME_DIR so maverickctl can talk to
 # the instance. (This is an environment/test workaround; it does not change any
 # maverick source.)
 #
@@ -43,7 +43,7 @@ MW=1280          # monitor width
 MH=800           # monitor height
 TOTAL_W=2560     # MW*2
 MAVERICK_BIN="${MAVERICK_BIN:-./target/debug/maverick}"
-MSG_BIN="${MSG_BIN:-./target/debug/maverick-msg}"
+MSG_BIN="${MSG_BIN:-./target/debug/maverickctl}"
 # Private runtime dir (mktemp, like common.sh): never rm -rf the session's
 # $XDG_RUNTIME_DIR — a previous revision did exactly that when the variable
 # was already set, wiping the live user runtime dir. Short path avoids SUN_LEN.

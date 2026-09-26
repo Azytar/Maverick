@@ -530,7 +530,7 @@ pub fn dispatch(name: &str, action: &str) -> std::io::Result<String> {
 
 /// Run a structured `query <topic>` against a running instance ("workspaces",
 /// "tree", "focused", …). The WM answers from its live state; this blocks
-/// until the reply arrives. Used by `maverick-msg query …`.
+/// until the reply arrives. Used by `maverickctl query …`.
 pub fn query(name: &str, topic: &str) -> std::io::Result<String> {
     if topic.contains(['\n', '\r']) {
         return Err(std::io::Error::new(

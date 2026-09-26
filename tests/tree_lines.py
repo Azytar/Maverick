@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read `maverick-msg query tree` JSON from stdin, print one line per managed
+"""Read `maverickctl query tree` JSON from stdin, print one line per managed
 window: ID MON FS MX X Y W H TITLE.
 
 Split out of tests/xephyr-2mon.sh because a `tree | python3 - <<EOF` pipeline

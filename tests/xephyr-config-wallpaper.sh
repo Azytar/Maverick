@@ -16,7 +16,7 @@ SCREEN_H=1080
 XEPHYR_DISPLAY=":97"
 MAVERICK_BIN="${MAVERICK_BIN:-./target/debug/maverick}"
 CTL_BIN="${CTL_BIN:-./target/debug/maverickctl}"
-MSG_BIN="${MSG_BIN:-./target/debug/maverick-msg}"
+MSG_BIN="${MSG_BIN:-./target/debug/maverickctl}"
 BINDIR="$(cd "$(dirname "$0")" && pwd)"
 # Use a short, explicit XDG_RUNTIME_DIR so the control-socket path stays under
 # SUN_LEN (the default can be too long in some sandboxes), shared by the daemon

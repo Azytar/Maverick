@@ -277,10 +277,10 @@ cargo build --release --no-default-features \
   -p maverick -p maverick-sys
 ```
 
-Los binarios normales de runtime son `maverick`, `maverickctl` y
-`maverick-msg`, bajo `target/release/`. Cargo también descubre la utilidad
-separada `maverick-setup` en `src/bin/`; el instalador shell instala los tres
-binarios de runtime, no esa utilidad. Ningún crate instalador de Rust forma
+Los binarios normales de runtime son `maverick` y `maverickctl`, bajo
+`target/release/`. Cargo también descubre la utilidad separada `maverick-setup`
+en `src/bin/`; el instalador shell instala los dos binarios de runtime, no esa
+utilidad. Ningún crate instalador de Rust forma
 parte del workspace.
 
 ### Instalar
@@ -488,8 +488,8 @@ maverickctl restart --name desktop
 maverickctl quit --name desktop --confirm
 ```
 
-`maverick-msg` también reenvía líneas de acción, por ejemplo
-`maverick-msg view 3` o `maverick-msg wallpaper clear`. Cada instancia tiene
+`maverickctl` también reenvía líneas de acción, por ejemplo
+`maverickctl view 3` o `maverickctl wallpaper clear`. Cada instancia tiene
 un directorio de runtime privado y un socket Unix bajo
 `$XDG_RUNTIME_DIR/maverick/<session-id>/`. El descubrimiento comprueba
 identidad de proceso y actividad del socket. La selección prefiere
@@ -587,7 +587,7 @@ servidor anidado que soporte la ruta GLX requerida.
 | `src/backend/x11/` | Manejo de eventos, gestión de clientes, entrada, EWMH, struts, reconciliación, planificación de frames, fondo raíz |
 | `src/config.rs`, `src/userconfig.rs` | Defaults compilados, fusión de config, validación |
 | `maverick-x11/` | Arranque de conexión Xlib/XCB compartida |
-| `maverick-sys/` | Identidad/descubrimiento de instancias, socket/hub de control, `maverickctl` y `maverick-msg` |
+| `maverick-sys/` | Identidad/descubrimiento de instancias, socket/hub de control, el modelo Maverick Session, `maverickctl` |
 | `maverick-render/` | Tipos y trait orientados al renderer; ningún backend del árbol implementa `Renderer` todavía |
 | `maverick-gl/` | Renderer OpenGL/GLX y FFI/carga en el árbol |
 | `maverick-vk/` | Código experimental de device/surface/swapchain Vulkan, no integrado al WM |

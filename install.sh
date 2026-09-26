@@ -1312,7 +1312,7 @@ fi
 # ── fase 2 · binarios ────────────────────────────────────────────────────────
 _phase_begin 2 ""
 # Check the complete artifact set before replacing any installed binary.
-for bin in maverick maverickctl maverick-msg; do
+for bin in maverick maverickctl; do
     [[ -f "$CARGO_TARGET_DIR/release/$bin" && -x "$CARGO_TARGET_DIR/release/$bin" ]] ||
         die "missing executable $CARGO_TARGET_DIR/release/$bin (run without --no-build)"
 done
@@ -1320,7 +1320,7 @@ done
 install_command mkdir -p -- "$BIN_DIR" || die "$(t no_write): $BIN_DIR"
 _animate 70 "$BIN_DIR"
 n_ok=0
-for bin in maverick maverickctl maverick-msg; do
+for bin in maverick maverickctl; do
     # A same-directory rename avoids truncating a running executable (ETXTBSY).
     staged="$(install_command mktemp "$BIN_DIR/.${bin}.XXXXXX")"
     if ! install_command install -m 0755 -- "$CARGO_TARGET_DIR/release/$bin" "$staged" \
@@ -1426,7 +1426,7 @@ esac
 _phase_begin 5 ""
 checks=0
 verify_detail=""
-for bin in maverick maverickctl maverick-msg; do
+for bin in maverick maverickctl; do
     if [[ -x "$BIN_DIR/$bin" ]]; then
         checks=$(( checks + 1 ))
     fi

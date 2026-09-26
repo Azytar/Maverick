@@ -5,7 +5,7 @@
 # Drives a REAL compositor under Xephyr (GLX + Composite) and proves the whole
 # Fase 7–12 chain works at runtime — not just in unit tests:
 #
-#   maverick-msg wallpaper set /img.png
+#   maverickctl wallpaper set /img.png
 #        -> Action::Wallpaper -> SetWallpaper command
 #        -> Effect::SetWallpaper -> comp.set_wallpaper
 #        -> maverick-img decode -> GPU upload -> drawn behind everything
@@ -37,12 +37,12 @@ SCREEN_W=1920
 SCREEN_H=1080
 XEPHYR_DISPLAY=":99"
 MAVERICK_BIN="${MAVERICK_BIN:-./target/debug/maverick}"
-MSG_BIN="${MSG_BIN:-./target/debug/maverick-msg}"
+MSG_BIN="${MSG_BIN:-./target/debug/maverickctl}"
 CTL_BIN="${CTL_BIN:-./target/debug/maverickctl}"
 BINDIR="$(cd "$(dirname "$0")" && pwd)"
 # Short, explicit XDG_RUNTIME_DIR so the control-socket path stays under
 # SUN_LEN (the default can be too long in some sandboxes). Shared by the daemon
-# and the client tools (maverickctl/maverick-msg).
+# and the client tools (maverickctl/maverickctl).
 RTDIR="$(mktemp -d /tmp/mrt.XXXX)"
 export XDG_RUNTIME_DIR="$RTDIR"
 LOG="$(mktemp -t maverick-wp.XXXXXX.log)"

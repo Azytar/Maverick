@@ -39,7 +39,7 @@
 //!   cookie, logs and lifecycle. Owns display allocation, the nested X server
 //!   backend, the process tree and the session record. Still no control-plane
 //!   policy: that is `ctl`.
-//! - [`ctl`] — shared CLI engine for `maverickctl`/`maverick-msg`: instance
+//! - [`ctl`] — the `maverickctl` engine: instance
 //!   selection (`--session`/`--name`/`$MAVERICK_INSTANCE`/DISPLAY+TTY
 //!   context/singleton), `list`/`state`/`query`/`msg`/`subscribe`/`quit`/
 //!   `restart`/`reload`/`prune`, and confirmation via
