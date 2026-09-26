@@ -2850,3 +2850,263 @@ mod proptests {
         });
     }
 }
+
+/// Cross-monitor float geometry.
+///
+/// `normalize_float_geom` is pure over `(geom, hints, workarea, border_w)` and
+/// `clamp_float_geom` pins `g.x` into `[wa.x, wa.x + wa.w]`, so a float's
+/// projection is bounded by the workarea it was handed and is blind to every
+/// other monitor. The monitor-level contract that follows is what a genuine
+/// cross-monitor bug would break, and it is deliberately stated on placements
+/// rather than on the projection function so the tests are not the
+/// implementation's own oracle:
+///
+/// * a float's placement for monitor `M` is inside `monitors[M].workarea`,
+///   even when the geometry the model holds lies far outside it;
+/// * that placement does not depend on any other monitor's screen, so no
+///   neighbour's origin can drag a float across;
+/// * moving a float to another monitor is a *state transition*: it re-settles
+///   the client's own geometry into the destination workarea, so the record and
+///   the placement agree afterwards.
+#[cfg(test)]
+mod cross_monitor_float {
+    use crate::config::Cfg;
+    use crate::core::commands::{Command, MoveWindowToMonitor};
+    use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements, RibbonScratch};
+    use crate::types::{Client, Dir, LayoutKind, Monitor, Rect, State, WinFlags, WindowId};
+    use proptest::prelude::*;
+
+    /// Run a full `arrange` for `mon_idx` and return the rects it produced.
+    fn arrange_for(state: &State, mon_idx: usize) -> Placements {
+        let mut out = Placements::default();
+        arrange(
+            state,
+            mon_idx,
+            &Cfg::default(),
+            &LayoutRegistry::new(),
+            Phase::Live,
+            &mut out,
+            &mut RibbonScratch::default(),
+        );
+        out
+    }
+
+    fn rect_of(placements: &Placements, win: WindowId) -> Option<Rect> {
+        placements.iter().find(|p| p.0 == win).map(|p| p.1)
+    }
+
+    fn inside(r: Rect, wa: Rect) -> bool {
+        r.x >= wa.x
+            && r.y >= wa.y
+            && r.x + r.w as i32 <= wa.x + wa.w as i32
+            && r.y + r.h as i32 <= wa.y + wa.h as i32
+    }
+
+    /// Two side-by-side monitors with one float placed on the first.
+    ///
+    /// `geom` is what the model records, deliberately placed *outside* the
+    /// first monitor's workarea so the clamp has real work to do.
+    fn two_monitors_with_float(geom: Rect) -> State {
+        let mut state = State::new();
+        for screen in [Rect::new(0, 0, 1920, 1080), Rect::new(1920, 0, 1920, 1080)] {
+            let mut mon = Monitor::new(screen, 1);
+            mon.workspaces[0].layout = LayoutKind::Column;
+            state.monitors.push(mon);
+        }
+        let mut c = Client::new(7, 0, 0);
+        c.geom = geom;
+        c.saved_geom = geom;
+        c.flags.set(WinFlags::FLOAT);
+        state.add_client(c);
+        state.monitors[0].workspaces[0].floats.push(7);
+        state.monitors[0].focus_stack.push(7);
+        state.monitors[0].focused = Some(7);
+        state.sel_mon = 0;
+        state
+    }
+
+    /// A float whose recorded geometry lies entirely outside its own monitor is
+    /// clamped into that monitor's workarea — and into *that* one, even though a
+    /// second monitor sits immediately to its right with a reachable origin.
+    ///
+    /// This is the case that was previously misread as a cross-monitor
+    /// re-anchoring: the coordinate moved to the workarea's left edge because
+    /// the clamp bounds `g.x` by `wa.x`, not because another monitor was
+    /// consulted. The monitor never changed here either.
+    #[test]
+    fn a_float_lands_in_its_own_monitor_workarea_not_a_neighbours() {
+        // x/y sit inside the *right* monitor's workarea, which is the trap: the
+        // float's own monitor must still win.
+        let state = two_monitors_with_float(Rect::new(2000, 300, 300, 200));
+        assert_eq!(
+            state.clients[&7].monitor, 0,
+            "the fixture must start on the left monitor"
+        );
+        let placed = rect_of(&arrange_for(&state, 0), 7).expect("the float is placed");
+        let wa = state.monitors[0].workarea;
+        assert!(
+            inside(placed, wa),
+            "a float on monitor 0 was placed outside its own workarea: {placed:?} not in {wa:?}"
+        );
+        assert!(
+            state.monitors[1]
+                .workspaces
+                .iter()
+                .all(|ws| ws.floats.is_empty()),
+            "the float must not appear on the monitor it does not belong to"
+        );
+        assert!(
+            rect_of(&arrange_for(&state, 1), 7).is_none(),
+            "arranging monitor 1 must not produce a placement for monitor 0's float"
+        );
+    }
+
+    /// A float that already fits its monitor keeps its position. This is the
+    /// case that separates the clamp from a re-anchor: an implementation that
+    /// pinned every float to the workarea origin would pass the
+    /// out-of-workarea case above (the clamp lands on the origin there anyway)
+    /// and fail only here, so both directions of the contract are pinned.
+    #[test]
+    fn a_float_inside_its_workarea_keeps_its_position() {
+        let state = two_monitors_with_float(Rect::new(400, 300, 300, 200));
+        let placed = rect_of(&arrange_for(&state, 0), 7).expect("the float is placed");
+        let wa = state.monitors[0].workarea;
+        assert!(
+            inside(placed, wa),
+            "a fitting float was placed outside its workarea: {placed:?} not in {wa:?}"
+        );
+        assert_ne!(
+            placed.x, wa.x,
+            "a float at x=400 was re-anchored to the workarea origin x={}",
+            wa.x
+        );
+        assert_ne!(
+            placed.y, wa.y,
+            "a float at y=300 was re-anchored to the workarea origin y={}",
+            wa.y
+        );
+    }
+
+    /// The placement produced for one monitor does not depend on where the other
+    /// monitor is. A neighbour's origin can therefore never drag a float across,
+    /// which is the whole of the cross-monitor contract on the projection side.
+    #[test]
+    fn a_neighbouring_monitor_cannot_move_another_monitors_float() {
+        // The float's own monitor is fixed at (0, 0, 1920, 1080) throughout; only
+        // the neighbour varies — origin, size, a negative origin, and one far
+        // away. The left monitor's placement must not move.
+        let reference = {
+            let base = two_monitors_with_float(Rect::new(2000, 300, 300, 200));
+            rect_of(&arrange_for(&base, 0), 7).expect("placed")
+        };
+        for right in [
+            Rect::new(1920, 0, 1920, 1080),
+            Rect::new(0, 0, 640, 480),
+            Rect::new(-2560, 300, 1280, 1024),
+            Rect::new(11_000, -700, 400, 300),
+        ] {
+            let mut moved = two_monitors_with_float(Rect::new(2000, 300, 300, 200));
+            moved.monitors[1] = Monitor::new(right, 1);
+            moved.monitors[1].workspaces[0].layout = LayoutKind::Column;
+            assert_eq!(
+                rect_of(&arrange_for(&moved, 0), 7),
+                Some(reference),
+                "monitor 1's screen {right:?} changed monitor 0's float placement"
+            );
+        }
+    }
+
+    /// Moving a float to another monitor is a state transition, not a
+    /// projection: the client's own record is re-settled into the destination
+    /// workarea, so what the model records and what gets placed agree. The
+    /// projection alone never performs this ownership change.
+    #[test]
+    fn moving_a_float_between_monitors_resettles_the_record() {
+        let mut state = two_monitors_with_float(Rect::new(200, 200, 300, 200));
+        let before = state.clients[&7].geom;
+        assert_eq!(state.clients[&7].monitor, 0);
+
+        let report = MoveWindowToMonitor(7, Dir::Right).execute(&mut state, &mut Cfg::default());
+        assert!(
+            !report.effects.is_empty(),
+            "the move must be reported as work done"
+        );
+        let after = state.clients[&7].geom;
+        assert_eq!(state.clients[&7].monitor, 1, "ownership follows the move");
+        assert_ne!(
+            before, after,
+            "the destination workarea must re-settle the float"
+        );
+        let wa = state.monitors[1].workarea;
+        assert!(
+            inside(after, wa),
+            "the re-settled rect {after:?} is outside the destination workarea {wa:?}"
+        );
+        assert_eq!(
+            rect_of(&arrange_for(&state, 1), 7),
+            Some(after),
+            "the placement must match the record the transition wrote"
+        );
+        assert!(
+            state.monitors[0]
+                .workspaces
+                .iter()
+                .all(|ws| ws.floats.is_empty()),
+            "the float must not stay on the monitor it left"
+        );
+    }
+
+    fn arb_monitor_screen() -> impl Strategy<Value = Rect> {
+        (-3840i32..7680, -2160i32..4320, 320u32..5120, 240u32..2880)
+            .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
+    }
+
+    fn arb_float_geom() -> impl Strategy<Value = Rect> {
+        (-7680i32..15360, -4320i32..8640, 1u32..5120, 1u32..2880)
+            .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
+    }
+
+    // Across arbitrary monitor layouts — overlapping, negative origins,
+    // different sizes and orders — a float's placement for its own monitor is
+    // always inside that monitor's workarea, whatever geometry the record
+    // holds. The workarea is the bound because that is what `clamp_float_geom`
+    // clamps against; the point of the property is that no *other* monitor's
+    // geometry can take part in the decision.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn every_float_lands_inside_its_own_monitor_workarea(
+            home in arb_monitor_screen(),
+            other in arb_monitor_screen(),
+            geom in arb_float_geom(),
+        ) {
+            let mut state = State::new();
+            for screen in [home, other] {
+                let mut mon = Monitor::new(screen, 1);
+                mon.workspaces[0].layout = LayoutKind::Column;
+                state.monitors.push(mon);
+            }
+            let mut c = Client::new(7, 0, 0);
+            c.geom = geom;
+            c.saved_geom = geom;
+            c.flags.set(WinFlags::FLOAT);
+            state.add_client(c);
+            state.monitors[0].workspaces[0].floats.push(7);
+            state.monitors[0].focus_stack.push(7);
+            state.monitors[0].focused = Some(7);
+
+            let placed = rect_of(&arrange_for(&state, 0), 7).expect("the float is placed");
+            let wa = state.monitors[0].workarea;
+            prop_assert!(
+                inside(placed, wa),
+                "float {:?} was placed at {:?}, outside monitor 0's workarea {:?} (other monitor {:?})",
+                geom, placed, wa, other
+            );
+            prop_assert!(
+                rect_of(&arrange_for(&state, 1), 7).is_none(),
+                "monitor 1 produced a placement for monitor 0's float"
+            );
+        }
+    }
+}
