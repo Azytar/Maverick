@@ -324,6 +324,341 @@ pub fn scan_object(doc: &str) -> Vec<Field<'_>> {
     fields
 }
 
+/// A parsed JSON value.
+///
+/// Enough of JSON to read what Maverick *writes* — window ids, pids, geometry,
+/// the nesting of the tree query — and nothing more. The alternative would be
+/// `serde` in a window manager's control plane, which is a dependency the whole
+/// project has so far declined; this is the same trade `scan_object` makes, one
+/// level deeper.
+///
+/// Numbers are kept as `f64`. Every number Maverick emits is an integer that
+/// fits exactly (a window id is at most 32 bits, a geometry at most 16), so
+/// [`Json::as_u64`] is exact; a fractional value only comes from the camera
+/// position and the column weights, which are read as floats anyway.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Json {
+    /// `null`.
+    Null,
+    /// `true` / `false`.
+    Bool(bool),
+    /// Any JSON number.
+    Num(f64),
+    /// A string, decoded.
+    Str(String),
+    /// An array.
+    Arr(Vec<Json>),
+    /// An object, in document order.
+    Obj(Vec<(String, Json)>),
+}
+
+impl Json {
+    /// The value at `key`, if this is an object that has it.
+    pub fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Obj(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    /// The value at `key` as a string, `""` when absent or not a string.
+    pub fn str_field(&self, key: &str) -> &str {
+        match self.get(key) {
+            Some(Json::Str(s)) => s,
+            _ => "",
+        }
+    }
+
+    /// The value at `key` as a `u64`, `0` when absent or not a number.
+    pub fn num_field(&self, key: &str) -> u64 {
+        self.get(key).and_then(Json::as_u64).unwrap_or(0)
+    }
+
+    /// The value at `key` as a `bool`, `false` when absent or not a boolean.
+    pub fn bool_field(&self, key: &str) -> bool {
+        matches!(self.get(key), Some(Json::Bool(true)))
+    }
+
+    /// The elements, if this is an array; an empty slice otherwise.
+    pub fn as_array(&self) -> &[Json] {
+        match self {
+            Json::Arr(items) => items,
+            _ => &[],
+        }
+    }
+
+    /// The number, if this is one.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Json::Num(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// The number as a `u64`, when it is a non-negative whole number.
+    ///
+    /// A fractional or negative value is `None` rather than a truncated one: a
+    /// window id is never `-1.5`, and reading a garbage id as a large unsigned
+    /// number would address a window that does not exist.
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Json::Num(n) if *n >= 0.0 && n.fract() == 0.0 && *n <= u64::MAX as f64 => {
+                Some(*n as u64)
+            }
+            _ => None,
+        }
+    }
+
+    /// The string, if this is one.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Json::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Render the value back as compact JSON.
+    ///
+    /// Used where a tool has parsed a document only to reshape it, so the
+    /// escaping is the writer's own (see [`json_quote`]) rather than anything
+    /// recovered from the input.
+    pub fn to_json(&self) -> String {
+        match self {
+            Json::Null => "null".to_string(),
+            Json::Bool(b) => b.to_string(),
+            Json::Num(n) => format_number(*n),
+            Json::Str(s) => json_quote(s),
+            Json::Arr(items) => {
+                let parts: Vec<String> = items.iter().map(Json::to_json).collect();
+                format!("[{}]", parts.join(","))
+            }
+            Json::Obj(fields) => {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|(k, v)| format!("{}:{}", json_quote(k), v.to_json()))
+                    .collect();
+                format!("{{{}}}", parts.join(","))
+            }
+        }
+    }
+}
+
+/// Render a number the way the project's own writers do: a whole number as an
+/// integer, anything else as the shortest form that round-trips.
+fn format_number(n: f64) -> String {
+    if n.fract() == 0.0 && n.abs() < 9.007_199_254_740_992e15 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
+/// Parse a complete JSON document. Returns `None` for anything that is not one.
+///
+/// Total and panic-free: the parser is a recursive-descent over a byte cursor
+/// with an explicit depth bound, so a document of nothing but `[[[[…` cannot
+/// exhaust the stack, and every slice goes through `str::get`, so a truncated
+/// multi-byte character cannot panic.
+///
+/// A *trailing* fragment after the value is a failure, not something ignored: a
+/// tool that reported success for half a document would silently act on
+/// truncated state.
+pub fn parse(doc: &str) -> Option<Json> {
+    let mut p = Parser {
+        bytes: doc.as_bytes(),
+        pos: 0,
+        depth: 0,
+    };
+    p.skip_ws();
+    let value = p.value()?;
+    p.skip_ws();
+    if p.pos == p.bytes.len() {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+/// Nesting bound. Maverick's deepest document is the tree query (monitor →
+/// workspace → column → window), four levels; the bound is generous enough for
+/// anything a future query nests and small enough that a hostile document
+/// cannot turn into unbounded recursion.
+const MAX_DEPTH: usize = 32;
+
+struct Parser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    depth: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn text(&self) -> &'a str {
+        // The document is a `&str`, so every offset the cursor reaches is a
+        // char boundary; the fallback keeps that guarantee local rather than
+        // assumed at each of the slices below.
+        std::str::from_utf8(self.bytes).unwrap_or("")
+    }
+
+    fn skip_ws(&mut self) {
+        while self.pos < self.bytes.len()
+            && matches!(self.bytes[self.pos], b' ' | b'\t' | b'\n' | b'\r')
+        {
+            self.pos += 1;
+        }
+    }
+
+    fn eat(&mut self, b: u8) -> bool {
+        if self.pos < self.bytes.len() && self.bytes[self.pos] == b {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect(&mut self, b: u8) -> Option<()> {
+        self.eat(b).then_some(())
+    }
+
+    fn literal(&mut self, word: &str) -> bool {
+        if self.text()[self.pos..].starts_with(word) {
+            self.pos += word.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn value(&mut self) -> Option<Json> {
+        self.skip_ws();
+        if self.depth >= MAX_DEPTH {
+            return None;
+        }
+        match *self.bytes.get(self.pos)? {
+            b'{' => self.object(),
+            b'[' => self.array(),
+            b'"' => self.string().map(Json::Str),
+            b't' => self.literal("true").then_some(Json::Bool(true)),
+            b'f' => self.literal("false").then_some(Json::Bool(false)),
+            b'n' => self.literal("null").then_some(Json::Null),
+            _ => self.number(),
+        }
+    }
+
+    fn object(&mut self) -> Option<Json> {
+        self.expect(b'{')?;
+        self.depth += 1;
+        let mut fields = Vec::new();
+        self.skip_ws();
+        if self.eat(b'}') {
+            self.depth -= 1;
+            return Some(Json::Obj(fields));
+        }
+        loop {
+            self.skip_ws();
+            let key = self.string()?;
+            self.skip_ws();
+            self.expect(b':')?;
+            let value = self.value()?;
+            fields.push((key, value));
+            self.skip_ws();
+            if self.eat(b',') {
+                continue;
+            }
+            self.expect(b'}')?;
+            self.depth -= 1;
+            return Some(Json::Obj(fields));
+        }
+    }
+
+    fn array(&mut self) -> Option<Json> {
+        self.expect(b'[')?;
+        self.depth += 1;
+        let mut items = Vec::new();
+        self.skip_ws();
+        if self.eat(b']') {
+            self.depth -= 1;
+            return Some(Json::Arr(items));
+        }
+        loop {
+            items.push(self.value()?);
+            self.skip_ws();
+            if self.eat(b',') {
+                continue;
+            }
+            self.expect(b']')?;
+            self.depth -= 1;
+            return Some(Json::Arr(items));
+        }
+    }
+
+    /// A quoted string, decoded, consuming both quotes.
+    fn string(&mut self) -> Option<String> {
+        self.expect(b'"')?;
+        let start = self.pos;
+        loop {
+            let b = *self.bytes.get(self.pos)?;
+            match b {
+                b'\\' => {
+                    // An escape is at most two bytes here, because `\uXXXX` is
+                    // decoded as a unit by `json_unescape`; stepping two always
+                    // makes progress and never steps over the closing quote.
+                    self.pos += 2;
+                }
+                b'"' => {
+                    let body = self.text().get(start..self.pos)?;
+                    self.pos += 1;
+                    return Some(json_unescape(body));
+                }
+                _ => self.pos += 1,
+            }
+        }
+    }
+
+    /// A number, in the JSON grammar: an optional sign, an integer part with no
+    /// leading zeros, an optional fraction and an optional exponent.
+    fn number(&mut self) -> Option<Json> {
+        let start = self.pos;
+        let negative = self.eat(b'-');
+        let digits_start = self.pos;
+        if !self.eat(b'0') {
+            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
+        }
+        if self.pos == digits_start {
+            return None;
+        }
+        if self.eat(b'.') {
+            let frac_start = self.pos;
+            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
+            if self.pos == frac_start {
+                return None;
+            }
+        }
+        if matches!(self.bytes.get(self.pos), Some(b'e' | b'E')) {
+            self.pos += 1;
+            if matches!(self.bytes.get(self.pos), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            let exp_start = self.pos;
+            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
+            if self.pos == exp_start {
+                return None;
+            }
+        }
+        let text = self.text().get(start..self.pos)?;
+        // `-0` and a leading `+` are the only spellings a caller could not also
+        // write; both still have to reach the same number.
+        let _ = negative;
+        text.parse().ok().map(Json::Num)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,6 +822,203 @@ mod tests {
                     "invented key {:?} from {doc:?}",
                     f.key
                 );
+            }
+        }
+    }
+
+    // ── value parser ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_every_value_kind() {
+        let v = parse(r#"{"s":"x","n":42,"f":-1.5e2,"t":true,"z":null,"a":[1,2],"o":{"k":"v"}}"#)
+            .expect("valid document");
+        assert_eq!(v.str_field("s"), "x");
+        assert_eq!(v.num_field("n"), 42);
+        assert_eq!(v.num_field("f"), 0, "-1.5e2 is negative, not a window id");
+        assert_eq!(v.get("f").and_then(Json::as_f64), Some(-150.0));
+        assert!(v.bool_field("t"));
+        assert_eq!(v.get("z"), Some(&Json::Null));
+        assert_eq!(v.get("a").map(Json::as_array).map(<[Json]>::len), Some(2));
+        assert_eq!(v.get("o").unwrap().str_field("k"), "v");
+    }
+
+    /// The shapes a missing field must produce are what every caller relies on
+    /// to stay total: `""`, `0`, `false`, an empty array. A tool that printed
+    /// "None" or panicked on a window without a pid would be useless exactly
+    /// when something is already wrong.
+    #[test]
+    fn absent_and_wrongly_typed_fields_degrade_to_neutral_values() {
+        let v = parse(r#"{"a":"text","b":[1],"c":true}"#).expect("valid");
+        assert_eq!(v.str_field("missing"), "");
+        assert_eq!(v.num_field("missing"), 0);
+        assert!(!v.bool_field("missing"));
+        assert!(v.get("a").and_then(Json::as_u64).is_none());
+        assert_eq!(v.str_field("b"), "", "an array is not a string");
+        assert!(!v.bool_field("a"), "a non-empty string is not true");
+        assert!(v.get("missing").is_none());
+        // And on a non-object, every accessor is still total.
+        let arr = parse("[1,2]").expect("valid");
+        assert_eq!(arr.str_field("a"), "");
+        assert_eq!(arr.num_field("a"), 0);
+    }
+
+    /// Every integer a window id, a pid or a geometry can be is exact through
+    /// `as_u64`. This is the property that lets a window id survive a parse.
+    #[test]
+    fn integers_survive_exactly() {
+        for n in [0u64, 1, 42, 0x42003, u32::MAX as u64, 65535] {
+            let doc = format!("{{\"v\":{n}}}");
+            let v = parse(&doc).expect("valid");
+            assert_eq!(v.num_field("v"), n);
+        }
+        // And a fractional or negative value is refused rather than truncated.
+        for bad in ["-1", "1.5"] {
+            let doc = format!("{{\"v\":{bad}}}");
+            let v = parse(&doc).expect("valid");
+            assert_eq!(v.get("v").and_then(Json::as_u64), None, "{bad}");
+        }
+        // `-0` is zero: it is the one negative spelling that names a real
+        // value, and truncating it to 0 is the correct answer, not a
+        // fabrication.
+        assert_eq!(parse("-0").and_then(|v| v.as_u64()), Some(0));
+    }
+
+    #[test]
+    fn strings_decode_and_escapes_do_not_end_them_early() {
+        let v = parse(r#"{"a":"say \"hi\"","b":"tab\there","c":"é","d":""}"#).expect("valid");
+        assert_eq!(v.str_field("a"), r#"say "hi""#);
+        assert_eq!(v.str_field("b"), "tab\there");
+        assert_eq!(v.str_field("c"), "é");
+        assert_eq!(v.str_field("d"), "");
+    }
+
+    /// Pretty-printed input is what a human sees in a log, and a tool must
+    /// read it the same as the compact form.
+    #[test]
+    fn whitespace_between_tokens_is_insignificant() {
+        let compact = r#"{"a":[1,{"b":2}],"c":"d"}"#;
+        let pretty = "{\n  \"a\": [1, {\n    \"b\": 2\n  }],\n  \"c\": \"d\"\n}";
+        assert_eq!(parse(compact), parse(pretty));
+    }
+
+    /// A document of nothing but open brackets must not exhaust the stack: the
+    /// parser is recursive, and the input comes off a socket.
+    #[test]
+    fn deep_nesting_is_refused_rather_than_overflowing() {
+        let deep = "[".repeat(10_000);
+        assert!(parse(&deep).is_none());
+        let deep_objs = "{\"a\":".repeat(10_000);
+        assert!(parse(&deep_objs).is_none());
+        // Just inside the bound still parses.
+        let ok = "[".repeat(MAX_DEPTH - 1) + &"]".repeat(MAX_DEPTH - 1);
+        assert!(parse(&ok).is_some());
+    }
+
+    /// Truncated output is the realistic bad input — a control socket that
+    /// closed mid-write — and it must never be reported as a document.
+    #[test]
+    fn a_truncated_document_is_not_a_document() {
+        let full = r#"{"monitors":[{"index":0,"workspaces":[{"name":"a"}]}]}"#;
+        for cut in 1..full.len() {
+            let partial = &full[..cut];
+            if !full.is_char_boundary(cut) {
+                continue;
+            }
+            if parse(partial).is_some() {
+                // A prefix can be a complete value only if it ends the document
+                // — which a truncated one never does.
+                panic!("{partial:?} must not parse");
+            }
+        }
+    }
+
+    /// A trailing fragment after the value is a failure, not something ignored:
+    /// a tool that accepted half a document would act on truncated state.
+    #[test]
+    fn a_trailing_fragment_is_refused() {
+        assert!(parse(r#"{"a":1} {"b":2}"#).is_none());
+        assert!(parse("1 2").is_none());
+        assert!(parse(r#"{"a":1}x"#).is_none());
+        assert!(parse("").is_none());
+        assert!(parse("   ").is_none());
+    }
+
+    /// The grammar, not just the happy path: a leading zero, a bare `.` or a
+    /// missing digit are all malformed, and a reader that accepted them would
+    /// invent values.
+    #[test]
+    fn the_number_grammar_is_enforced() {
+        for bad in ["01", "+1", ".5", "1.", "1e", "1e+", "--1", "1..2"] {
+            assert!(parse(bad).is_none(), "{bad:?} is not a JSON number");
+        }
+        for good in ["0", "-0", "1", "-1", "1.5", "1e3", "1E-3", "1.5e+10"] {
+            assert!(parse(good).is_some(), "{good:?} is a JSON number");
+        }
+    }
+
+    #[test]
+    fn the_literal_keywords_are_not_prefix_matched() {
+        for bad in ["tru", "truex", "nul", "falsey"] {
+            assert!(parse(bad).is_none(), "{bad:?} is not a literal");
+        }
+        assert!(parse("true").is_some());
+        assert!(parse("null").is_some());
+    }
+
+    /// Round-tripping is what makes the parser usable where a document is
+    /// reshaped for output.
+    #[test]
+    fn values_round_trip_through_to_json() {
+        for doc in [
+            r#"{"a":1,"b":"x"}"#,
+            r#"{"a":[1,2,3],"b":{"c":false,"d":null}}"#,
+            r#"{"a":1.5,"b":"with \"quotes\" and \\ backslash"}"#,
+            r#"{}"#,
+            r#"[]"#,
+        ] {
+            let v = parse(doc).expect("valid");
+            let again = parse(&v.to_json()).expect("re-parses");
+            assert_eq!(v, again, "{doc}");
+        }
+    }
+
+    /// The scanner and the parser are two readers of the same writer's output;
+    /// if they disagreed about where a value ended, a document written by one
+    /// and read by the other would be misread.
+    #[test]
+    fn the_scanner_and_the_parser_agree_on_field_values() {
+        let doc = r#"{"name":"a,b","n":7,"f":true,"args":["x","y"]}"#;
+        let flat = scan_object(doc);
+        let tree = parse(doc).expect("valid");
+        for field in &flat {
+            let other = tree.get(field.key).expect("present in both readings");
+            match &field.value {
+                Value::Str(body) => {
+                    assert_eq!(other.as_str(), Some(json_unescape(body).as_str()))
+                }
+                Value::Raw(raw) => match *raw {
+                    "true" => assert!(matches!(other, Json::Bool(true))),
+                    "false" => assert!(matches!(other, Json::Bool(false))),
+                    number => {
+                        assert_eq!(
+                            tree.num_field(field.key),
+                            number.parse().expect("a number Maverick writes")
+                        )
+                    }
+                },
+                Value::Array(items) => {
+                    let read = items
+                        .iter()
+                        .map(|raw| json_unescape(raw))
+                        .collect::<Vec<String>>();
+                    let parsed: Vec<String> = other
+                        .as_array()
+                        .iter()
+                        .filter_map(Json::as_str)
+                        .map(str::to_string)
+                        .collect();
+                    assert_eq!(parsed, read);
+                }
             }
         }
     }
