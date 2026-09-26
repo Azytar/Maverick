@@ -61,7 +61,7 @@
 
 use std::io;
 use std::io::Write;
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -175,12 +175,136 @@ pub fn display_is_free(display: Display) -> bool {
 /// "nothing has a socket or a lock for it". The scan starts at 1 because
 /// display 0 is the console's by convention, and the bound keeps a pathological
 /// machine from turning a typo into an unbounded scan.
+/// The per-display claim file Maverick uses to serialise its own creators.
+///
+/// Deliberately *not* `/tmp/.X<n>-lock`. An X server claims that path itself
+/// with `O_EXCL`, so pre-creating it makes every spawn fail; worse, a server
+/// that finds a stale lock reclaims it by replacing the file, which would
+/// destroy a lock taken on that path. This is a separate file, so neither
+/// happens. A zero-byte file whose name says only "a Maverick creator is
+/// working on this display" is all it holds: authority is the kernel's, not the
+/// file's.
+fn claim_path(display: Display) -> PathBuf {
+    Path::new("/tmp").join(format!(".X{}-mav", display.0))
+}
+
+/// An exclusive claim on one display number, held across select → spawn →
+/// confirm.
+///
+/// Display selection is a stat-then-act probe, so two creators could both see
+/// a number free and both spawn onto it. The X server's own `O_EXCL` lock then
+/// picks a winner, but a loser had already committed: its readiness check asks
+/// whether *the display* is listening, which the winner's server is, so the
+/// loser recorded a dead pid and then spent the full start timeout failing.
+///
+/// `flock` is what makes the selection a decision rather than a guess. It is
+/// released by the kernel if this process dies — including `SIGKILL` — so a
+/// crashed creator cannot strand a number, which an `O_CREAT|O_EXCL` marker
+/// file could. The file is left behind empty and is harmless.
+///
+/// Non-blocking, so a caller that loses the race moves on to the next number
+/// rather than waiting: another creator is already doing this work. The mode is
+/// `0600` so another user cannot hold a claim on a display from this account,
+/// and gets `EACCES` instead, which is also "in use".
+pub struct DisplayClaim {
+    file: std::fs::File,
+}
+
+impl DisplayClaim {
+    /// Try to claim `display` for exclusive use. `Ok(None)` means another
+    /// creator holds it; `Err` is a real filesystem error.
+    pub fn try_acquire(display: Display) -> io::Result<Option<Self>> {
+        use std::os::unix::io::AsRawFd;
+        let file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(claim_path(display))
+        {
+            Ok(file) => file,
+            // Held by another user. Their claim is as real as ours.
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        // SAFETY: `flock` only needs a valid descriptor, and `file` owns one
+        // for as long as the claim is held.
+        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if locked != 0 {
+            // EWOULDBLOCK: another creator is inside the window. Not an error.
+            return Ok(None);
+        }
+        Ok(Some(Self { file }))
+    }
+}
+
+impl Drop for DisplayClaim {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: as above. The file is closed immediately after, which drops
+        // the lock anyway, so a failure here changes nothing.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+/// True if the X server on `display` has written its own pid into the lock.
+///
+/// This is how a creator knows the number is now the server's rather than its
+/// own reservation: the X server publishes its pid there, and comparing it with
+/// the pid we spawned is the server telling us it won. It is a fact on disk
+/// rather than a sleep — the wait measured 4.4 ms to 7.0 ms from spawn to the
+/// lock naming us, and a poll is the only honest way to observe it.
+pub fn lock_names(display: Display, pid: u32) -> bool {
+    std::fs::read_to_string(lock_path(display))
+        .map(|text| text.trim().parse::<u32>() == Ok(pid))
+        .unwrap_or(false)
+}
+
+/// The first free display number at or after `from`.
+///
+/// X display numbering is a flat namespace with no allocator: "free" means
+/// "nothing has a socket or a lock for it". The scan starts at 1 because
+/// display 0 is the console's by convention, and the bound keeps a pathological
+/// machine from turning a typo into an unbounded scan.
+///
+/// Callers that can spawn should prefer [`DisplayClaim`], which makes the
+/// choice exclusive rather than advisory. This stays as the scan, and a caller
+/// that holds a claim knows the number is not shared.
 pub fn allocate_display(from: u32) -> io::Result<Display> {
     let start = from.max(1);
     for n in start..start.saturating_add(512) {
         let d = Display(n);
         if display_is_free(d) {
             return Ok(d);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("no free X display in :{start}.."),
+    ))
+}
+
+/// Claim a free display for this creator, exclusively.
+///
+/// The scan asks [`display_is_free`], and a candidate is only taken once
+/// [`DisplayClaim`] succeeds — so two creators racing the same number cannot
+/// both proceed to the spawn, which is what made the loser record a dead pid
+/// and then wait out a full start timeout for a window manager whose display
+/// server had never existed.
+///
+/// The claim is held by the caller until the X server has claimed the number
+/// in turn; see [`lock_names`].
+pub fn claim_display(from: Display) -> io::Result<(Display, DisplayClaim)> {
+    let start = from.0.max(1);
+    for n in start..start.saturating_add(512) {
+        let display = Display(n);
+        if !display_is_free(display) {
+            continue;
+        }
+        if let Some(claim) = DisplayClaim::try_acquire(display)? {
+            return Ok((display, claim));
         }
     }
     Err(io::Error::new(

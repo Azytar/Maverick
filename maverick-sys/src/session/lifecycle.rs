@@ -403,13 +403,20 @@ fn launch_inner(session: &mut Session) -> Result<(), SessionError> {
     std::fs::create_dir_all(&dir)?;
     identity::set_private_dir(&dir)?;
 
-    // Pick a display. The recorded one is preferred so a restart lands where it
-    // did, but it is only used if it is actually free — a display left claimed
-    // by something else is not something to fight over.
-    let display = if xserver::display_is_free(session.display) && session.display.0 != 0 {
-        session.display
+    // Pick a display, and hold it while this generation claims it. The scan
+    // alone is advisory — two creators can both see a number free — so the
+    // candidate is only taken once the claim is exclusive, and the claim stays
+    // held until the X server below has written its own pid into the real lock.
+    // The recorded display is preferred so a restart lands where it did, but
+    // only if it is actually free: a number another session holds is not
+    // something to fight over.
+    let (display, claim) = if xserver::display_is_free(session.display) && session.display.0 != 0 {
+        match xserver::DisplayClaim::try_acquire(session.display)? {
+            Some(claim) => (session.display, claim),
+            None => xserver::claim_display(Display(1))?,
+        }
     } else {
-        xserver::allocate_display(1)?
+        xserver::claim_display(Display(1))?
     };
     session.display = display;
     // The cookie is written for the display the session actually got, not the
@@ -432,7 +439,7 @@ fn launch_inner(session: &mut Session) -> Result<(), SessionError> {
     // Only now is it safe to wait: if this process dies mid-wait the record
     // already names the server, so the next command that touches the session
     // can stop it.
-    await_xserver(&server, session)?;
+    await_xserver(&server, session, &claim)?;
     let wm = start_maverick(session)?;
     session.wm = wm;
     session.state = SessionState::Running;
@@ -470,10 +477,27 @@ fn spawn_xserver(session: &Session, display: Display) -> Result<xserver::XServer
 }
 
 /// Wait for a spawned X server to accept connections.
-fn await_xserver(server: &xserver::XServer, session: &Session) -> Result<(), SessionError> {
+///
+/// The display claim is held until the X server has published its own pid in
+/// `/tmp/.X<n>-lock`. Releasing it earlier would reopen the exact window the
+/// claim exists to close: a second creator could take the number while this
+/// server was still coming up, and the loser would be right to conclude the
+/// display was taken. `lock_names` is the observation, not a delay — the X
+/// server writes that file as part of claiming the number, so polling for it
+/// reports the handover rather than guessing at its length.
+fn await_xserver(
+    server: &xserver::XServer,
+    session: &Session,
+    claim: &xserver::DisplayClaim,
+) -> Result<(), SessionError> {
     let display = server.display;
     let proc_ref = server.proc;
-    match xserver::wait_ready(display, START_TIMEOUT, || proc::is_running(&proc_ref)) {
+    // The claim is only ours to drop once the real lock names our server; keep
+    // it alive across the wait by holding the reference for the whole call.
+    let _claim = claim;
+    match xserver::wait_ready(display, START_TIMEOUT, || {
+        proc::is_running(&proc_ref) || xserver::lock_names(display, proc_ref.pid)
+    }) {
         Ok(()) => Ok(()),
         Err(e) => {
             server.stop(STOP_GRACE);
