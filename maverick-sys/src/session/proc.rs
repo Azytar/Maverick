@@ -228,20 +228,30 @@ impl ProcTable {
 /// `None` when the process is gone or the line is unparsable — both mean "not
 /// a process to describe", not an error.
 fn read_stat(pid: u32) -> Option<(u32, u32, u64)> {
+    read_stat_with_state(pid).map(|(ppid, pgid, start_time, _)| (ppid, pgid, start_time))
+}
+
+/// As [`read_stat`], plus the single-letter process state from field 3.
+///
+/// `Z` is separated out because a zombie still has a `/proc/<pid>/stat` and
+/// still satisfies a pid-and-start-time identity check, while being a process
+/// that has already exited. Anything that asks "is this still running" rather
+/// than "is this the same process" needs this variant.
+fn read_stat_with_state(pid: u32) -> Option<(u32, u32, u64, char)> {
     let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let pos = text.rfind(')')?;
     let mut fields = text[pos + 1..].split_whitespace();
     // state, ppid, pgrp, session, tty_nr, tpgid, flags, minflt, cminflt,
     // majflt, cmajflt, utime, stime, cutime, cstime, priority, nice,
     // num_threads, itrealvalue, starttime
-    let _state = fields.next()?;
+    let state = fields.next()?.chars().next()?;
     let ppid = fields.next()?.parse().ok()?;
     let pgid = fields.next()?.parse().ok()?;
     for _ in 0..16 {
         fields.next()?;
     }
     let start_time = fields.next()?.parse().ok()?;
-    Some((ppid, pgid, start_time))
+    Some((ppid, pgid, start_time, state))
 }
 
 /// Read the full [`ProcInfo`] for `pid`, or `None` if it is gone.
@@ -385,6 +395,21 @@ pub fn marked_pids(name: &str) -> HashSet<u32> {
 /// hands out is paired with a start time precisely so that check is possible.
 pub fn pid_is(pid: u32, start_time: u64) -> bool {
     pid != 0 && start_time != 0 && read_stat(pid).map(|s| s.2) == Some(start_time)
+}
+
+/// True if `proc_ref` is that same process *and* has not already exited.
+///
+/// Distinct from [`pid_is`] on purpose. A zombie keeps its `/proc/<pid>/stat`,
+/// so it still satisfies a pid-plus-start-time identity check — which is what
+/// that function is for, and why it must keep answering `true` for one. But a
+/// zombie is a process that has finished, and anything asking "is it still
+/// running" has to be able to say no. The X server readiness wait is the case
+/// that matters: `xserver::spawn` returns without reaping its child, so the
+/// server it just started is an unreaped zombie for the whole wait, and asking
+/// only `pid_is` meant a server that had already died still looked alive.
+pub fn is_running(proc_ref: &super::ProcRef) -> bool {
+    proc_ref.is_alive()
+        && read_stat_with_state(proc_ref.pid).is_some_and(|(_, _, _, state)| state != 'Z')
 }
 
 /// The start time of `pid`, from `stat` alone.
