@@ -39,10 +39,14 @@
 //! - `layout` — columnar layout engine (coordinates only, never stored).
 //! - `present` — presentation overlay: fullscreen/maximize geometry rewrites.
 //! - `wallpaper` — re-exports + GPU abstraction for the compositor.
-//! - `invariants` — debug-only end-state contract between the focus pipeline
+//! - `invariants` — test-only end-state contract between the focus pipeline
 //!   and the pointer.
 //! - `framebench` — test-only heap-allocation counter (allocation-free proof).
-//! - `session` — session persistence/recovery (logical topology only).
+//!
+//! Graphical sessions — the X server, the window manager and the applications
+//! launched into them — are not modelled here. They live in `maverick_sys::session`
+//! and are driven by `maverickctl session`; this module owns window-management
+//! state only.
 
 pub mod action;
 pub mod capability;
