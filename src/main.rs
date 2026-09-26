@@ -85,6 +85,12 @@ fn main() {
     // Parse args in any order. Unknown arguments abort before any state is
     // created, so a typo cannot leave a half-initialised session behind.
     let mut instance_name = maverick_sys::DEFAULT_NAME.to_string();
+    let mut session_id: Option<String> = None;
+    // Logging flags, applied after `log::init` (which reads the environment)
+    // and before anything is created, so a debug session's very first line is
+    // already at the level that was asked for.
+    let mut debug = false;
+    let mut log_level: Option<String> = None;
     let mut replace = false;
     let mut show_help = false;
     let mut show_version = false;
@@ -130,6 +136,36 @@ fn main() {
                     break;
                 }
             }
+            "--session-id" => {
+                // An explicit id makes this instance's runtime directory, its
+                // control socket and its identity ficha live at a name the user
+                // chose, which is how a session manager addresses a Maverick by
+                // session name instead of by a random per-process id. Rejected
+                // before any state is created: an invalid id would otherwise
+                // produce a directory no tool knows how to find.
+                if let Some(s) = args.next() {
+                    session_id = Some(s)
+                } else {
+                    bad_arg = Some("--session-id requires a value".into());
+                    break;
+                }
+            }
+            "--debug" => debug = true,
+            "--log-level" => {
+                if let Some(l) = args.next() {
+                    if log::is_known_level(&l) {
+                        log_level = Some(l)
+                    } else {
+                        bad_arg = Some(format!(
+                            "--log-level '{l}' is not a level (off|error|warn|info|debug|trace)"
+                        ));
+                        break;
+                    }
+                } else {
+                    bad_arg = Some("--log-level requires a value".into());
+                    break;
+                }
+            }
             unknown => {
                 bad_arg = Some(format!("unknown argument: {unknown}"));
                 break;
@@ -145,6 +181,17 @@ fn main() {
     if let Some(msg) = bad_arg {
         eprintln!("maverick: {msg}");
         process::exit(1);
+    }
+
+    // Applied here, after the environment was read and validated but before the
+    // first log line: a session started with `--debug` must not lose its first
+    // few lines to the level it was asked to raise. `--log-level` wins over
+    // `--debug` so the two do not have to be ordered relative to each other.
+    if debug {
+        log::set_level("debug");
+    }
+    if let Some(level) = &log_level {
+        log::set_level(level);
     }
 
     // Synthetic release benchmark: no X, no WM startup, exits after printing.
@@ -189,9 +236,15 @@ fn main() {
         process::exit(0);
     }
     if show_help {
-        println!("Usage: maverick [--name <id>] [--replace] [--config <path>] [--check-config [path]] [-v] [-h]");
+        println!("Usage: maverick [--name <id>] [--session-id <id>] [--replace] [--debug] [--log-level <level>] [--config <path>] [--check-config [path]] [-v] [-h]");
         println!("  --name <id>          Instance name for control/identification");
+        println!("  --session-id <id>    Publish this instance under a fixed session id");
+        println!("                        ([A-Za-z0-9_-]), so its runtime directory and");
+        println!("                        control socket are named after it. Used by");
+        println!("                        `maverickctl session`; the default is random.");
         println!("  --replace            Replace an already-running WM (adopts your windows)");
+        println!("  --debug              Log at debug level (same as MAVERICK_LOG=debug)");
+        println!("  --log-level <level>  off|error|warn|info|debug|trace (overrides --debug)");
         println!("  --config <path>      Load the config TOML from <path> instead of");
         println!("                        $XDG_CONFIG_HOME/maverick/config.toml");
         println!("  --check-config [path] Validate the config TOML and exit (0 = clean,");
@@ -207,12 +260,26 @@ fn main() {
 
     log::info!("instance name: {}", instance_name);
 
-    // Build this instance's identity. The `session_id` is a random, unique-per-
-    // process key naming the per-session runtime dir, control socket and
-    // identity record; the human `--name` is kept separately as a label.
-    // Computed before detaching so the tty_nr/start_time metadata are captured
-    // reliably.
-    let info = maverick_sys::self_info(&instance_name);
+    // Build this instance's identity. The `session_id` is the filesystem key
+    // naming the per-session runtime dir, control socket and identity record;
+    // the human `--name` is kept separately as a label. Computed before
+    // detaching so the tty_nr/start_time metadata are captured reliably.
+    //
+    // A `--session-id` makes the key a name the user chose instead of a random
+    // one, so the session manager can address this instance by session name.
+    // A rejected id aborts here, before anything is created: an instance that
+    // fell back to a random id would write its ficha and bind its socket
+    // somewhere no `maverickctl` command would ever look.
+    let info = match &session_id {
+        Some(sid) => match maverick_sys::identity::self_info_with_sid(&instance_name, sid) {
+            Ok(info) => info,
+            Err(e) => {
+                eprintln!("maverick: {e}");
+                process::exit(1);
+            }
+        },
+        None => maverick_sys::self_info(&instance_name),
+    };
     let sid = info.session_id.clone();
 
     // Export the session id so child processes (notably `maverickctl`) target

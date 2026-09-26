@@ -28,14 +28,37 @@ pub(crate) fn init() {
     let raw = std::env::var("MAVERICK_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))
         .unwrap_or_default();
-    let level = match raw.to_ascii_lowercase().as_str() {
-        "off" => 0,
+    set_level(&raw);
+}
+
+/// Set the level from a name, ignoring anything unrecognized (so a typo never
+/// silences the log).
+///
+/// Split from `init` so `--log-level` on the command line goes through exactly
+/// the same vocabulary as the environment variable: there is one list of level
+/// names, and a spelling that works on the command line works in the
+/// environment and the other way round.
+pub(crate) fn set_level(raw: &str) {
+    let level = match raw.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" => 0,
         "error" => ERROR,
-        "warn" => WARN,
+        "warn" | "warning" => WARN,
         "debug" | "trace" => DEBUG,
+        // "info" and anything unrecognized both mean `info`, so a typo never
+        // silences the log. `--log-level` is validated before it gets here.
         _ => INFO,
     };
     LEVEL.store(level, Ordering::Relaxed);
+}
+
+/// True if `raw` names a level this build understands. Used to reject a typo
+/// on the command line instead of silently running at `info`, which is the one
+/// outcome that would look like "the flag did nothing".
+pub(crate) fn is_known_level(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "off" | "none" | "error" | "warn" | "warning" | "info" | "debug" | "trace"
+    )
 }
 
 #[inline]

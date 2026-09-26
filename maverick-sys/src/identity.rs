@@ -461,6 +461,36 @@ fn parse_meta(json: &str) -> Option<InstanceInfo> {
 /// Build the `InstanceInfo` for the current process under `name` (human label).
 /// Allocates a fresh random `session_id` and records liveness metadata.
 pub fn self_info(name: &str) -> InstanceInfo {
+    // A freshly generated id passes the validation by construction (it is
+    // built from the same charset the predicate accepts), so this cannot fail.
+    self_info_with_sid(name, &new_session_id()).expect("a generated session id is always valid")
+}
+
+/// Build the `InstanceInfo` for the current process under an explicit
+/// `session_id`.
+///
+/// This is what lets a session manager address a window manager by name: the
+/// session id is the per-session directory, the control socket path and the
+/// ficha filename, so a fixed id means `$XDG_RUNTIME_DIR/maverick/debug/` holds
+/// the control socket of the instance the user calls "debug" — the same paths
+/// [`discover`] already scans, and the same `sock_path` every tool already
+/// builds. Nothing else about the record changes.
+///
+/// The id is validated by the same predicate that guards every path built from
+/// it, and a rejection is an error rather than a silent fallback to a random
+/// id: an instance that quietly got a different id would create a second,
+/// unreachable runtime directory and advertise itself under a name no tool
+/// could find.
+pub fn self_info_with_sid(name: &str, sid: &str) -> io::Result<InstanceInfo> {
+    validate_sid(sid)?;
+    let mut info = self_info_base(name);
+    info.session_id = sid.to_string();
+    Ok(info)
+}
+
+/// Everything [`self_info`] records except the session id, which its two
+/// callers choose differently.
+fn self_info_base(name: &str) -> InstanceInfo {
     let pid = std::process::id();
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -588,6 +618,44 @@ mod tests {
             !dir.starts_with("/tmp"),
             "runtime_dir must not be /tmp: {dir:?}"
         );
+    }
+
+    /// The whole point of `--session-id`: the paths a tool builds for an
+    /// instance are the instance's *name*, so `maverickctl` and the session
+    /// manager address the same socket and the same ficha.
+    #[test]
+    fn an_explicit_sid_names_every_path_the_instance_publishes() {
+        let info = self_info_with_sid("debug", "debug").expect("a valid sid");
+        assert_eq!(info.session_id, "debug");
+        assert_eq!(info.name, "debug");
+        // The socket and the ficha the WM will create land under the *name*.
+        assert!(
+            try_sock_path(&info.session_id)
+                .expect("socket path")
+                .ends_with("debug/control.sock"),
+            "the control socket must be addressed by name"
+        );
+        assert!(
+            try_meta_path(&info.session_id)
+                .expect("meta path")
+                .ends_with("debug/debug.json"),
+            "the identity ficha must be addressed by name"
+        );
+        // A random id still works, and is still not a name.
+        assert!(!self_info("dev").session_id.is_empty());
+    }
+
+    /// An id that cannot be a path component must be refused outright. A
+    /// silent fallback to a random id would put the socket and the ficha
+    /// somewhere no tool computes a path to.
+    #[test]
+    fn an_unsafe_sid_is_refused_rather_than_replaced() {
+        for bad in ["", ".", "..", "../escape", "a/b", "a b", &"x".repeat(65)] {
+            assert!(
+                self_info_with_sid("dev", bad).is_err(),
+                "'{bad}' must not be accepted as a session id"
+            );
+        }
     }
 }
 
