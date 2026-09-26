@@ -1505,21 +1505,22 @@ _phase_begin 5 ""
 # maverickctl that predates Sessions answers it as an unknown command with a
 # non-zero status. That makes it a capability probe for a stale install rather
 # than a version string that would have to be invented and kept in step.
-VERIFY_PROBES=(
-    "$BIN_DIR/maverick --version"
-    "$BIN_DIR/maverickctl --help"
-    "$BIN_DIR/maverickctl session --help"
-)
-VERIFY_PROBE_COUNT="${#VERIFY_PROBES[@]}"
-checks=0
-for probe in "${VERIFY_PROBES[@]}"; do
-    # Word splitting is intended here: each entry is a path plus arguments.
-    # shellcheck disable=SC2086
-    if ! $probe >/dev/null 2>&1; then
-        die "$(t verify_fail): $probe"
+# Run the installed binaries, quoted as argv so a prefix containing spaces is
+# not split into words, and count the probes as they pass.
+VERIFY_CHECKS=0
+verify_installed() {
+    local label="$1"; shift
+    if ! "$@" >/dev/null 2>&1; then
+        die "$(t verify_fail): $label"
     fi
-    checks=$(( checks + 1 ))
-done
+    VERIFY_CHECKS=$(( VERIFY_CHECKS + 1 ))
+}
+verify_installed "$BIN_DIR/maverick --version" \
+    "$BIN_DIR/maverick" --version
+verify_installed "$BIN_DIR/maverickctl --help" \
+    "$BIN_DIR/maverickctl" --help
+verify_installed "$BIN_DIR/maverickctl session --help" \
+    "$BIN_DIR/maverickctl" session --help
 for bin in "${RUNTIME_BINS[@]}"; do
     [[ -x "$BIN_DIR/$bin" ]] || die "$(t verify_fail): $BIN_DIR/$bin"
 done
@@ -1527,7 +1528,7 @@ done
 verify_detail="$(t verify_ok)"
 
 _animate 100 "$(t checks_ok)"
-_phase_end 5 "$checks/$VERIFY_PROBE_COUNT ✓ · $verify_detail"
+_phase_end 5 "$VERIFY_CHECKS ✓ · $verify_detail"
 _nap 0.35
 
 # ── cerrar el bloque ─────────────────────────────────────────────────────────

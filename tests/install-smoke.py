@@ -332,6 +332,26 @@ def suite_obsolete_artifacts_absent():
         print("PASS: obsolete binaries are neither built nor installed")
 
 
+def suite_prefix_with_spaces():
+    """A prefix containing spaces must work end to end.
+
+    The installer's verification executes the installed binaries, so anything
+    that word-splits a path silently breaks here. This suite is the guard for
+    quoting in the install path.
+    """
+    with tempfile.TemporaryDirectory(prefix="maverick-install-test-") as d:
+        box = Sandbox(Path(d))
+        box.seed_build()
+        prefix = box.base / "prefix with space"
+        result = box.install("--prefix", str(prefix), "--no-build")
+        check_success(box, result, expect_prefix=prefix)
+        for binary in BINS:
+            assert (prefix / "bin" / binary).is_file()
+        assert f'Exec="{prefix}/bin/maverick"' in \
+            (prefix / "share/xsessions/maverick.desktop").read_text()
+        print("PASS: a prefix containing spaces installs and verifies")
+
+
 def suite_cli_contract():
     for option in ("--prefix", "--lang", "--xsessions-dir"):
         result = subprocess.run(["bash", str(ROOT / "install.sh"), option],
@@ -359,6 +379,7 @@ def main():
         suite_no_partial_install,
         suite_repeat_and_overwrite,
         suite_builds_from_source,
+        suite_prefix_with_spaces,
         suite_obsolete_artifacts_absent,
         suite_cli_contract,
     ]
