@@ -38,6 +38,12 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
         }
         s.push('{');
         write!(s, "\"index\":{mi},").unwrap();
+        // The screen rectangle, so a tool can report a session's resolution
+        // without an X connection of its own. A session the manager created
+        // knows it because it chose it; the user's own session can only be
+        // learned from the window manager that measured it.
+        write!(s, "\"screen\":[{},{}],", mon.screen.w, mon.screen.h).unwrap();
+        write!(s, "\"workarea\":[{},{}],", mon.workarea.w, mon.workarea.h).unwrap();
         write!(s, "\"active_ws\":{},", mon.active_ws).unwrap();
 
         match mon.focused {
@@ -120,8 +126,8 @@ pub fn layout_name(l: LayoutKind) -> &'static str {
     }
 }
 
-/// Answer a structured `query` request from the control socket (`maverick-msg
-/// -j query …`). Pure — no X11, no side effects. Returns a JSON document, or
+/// Answer a structured `query` request from the control socket (`maverickctl
+/// query …`). Pure — no X11, no side effects. Returns a JSON document, or
 /// `error unknown-query: <topic>` for topics it doesn't know.
 pub fn query_json(state: &State, cfg: &Cfg, topic: &str) -> String {
     match topic {
@@ -129,8 +135,102 @@ pub fn query_json(state: &State, cfg: &Cfg, topic: &str) -> String {
         "workspaces" => workspaces_json(state, cfg),
         "tree" => tree_json(state),
         "focused" => focused_json(state),
+        "inspect" => inspect_json(state, cfg, &BackendFacts::default()),
         _ => format!("error unknown-query: {topic}"),
     }
+}
+
+/// Facts the backend knows and `State` cannot.
+///
+/// Split out rather than passed in individually because these are exactly the
+/// things a `State` snapshot is not allowed to record: whether the GL
+/// compositor came up is a property of the *live* X connection, and a stale
+/// `true` in the state would be a lie the reconciler could act on. Keeping them
+/// out of `State` is what makes it safe for the plain `query_json` path to
+/// answer `inspect` with a default — a caller that wants the truth has to
+/// supply it from the backend.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BackendFacts {
+    /// The GL compositor is initialised and driving presentation.
+    pub compositor_active: bool,
+    /// The configured backend name (`opengl`, `vulkan`), whether or not it came
+    /// up — the difference between "asked for OpenGL" and "running OpenGL" is
+    /// the first thing worth knowing about a compositor.
+    pub compositor_backend: &'static str,
+    /// Animations are enabled by configuration (independent of the compositor:
+    /// the analytic spring path runs without one).
+    pub animations: bool,
+}
+
+/// `query inspect` — what this window manager is, in one document.
+///
+/// The topic exists because "what is this session doing" spans three questions
+/// that no existing answer covered together: how many windows it manages and
+/// how they are arranged (which the tree query answers as a tree, not as
+/// totals), whether the compositor it was configured for is actually running
+/// (which only the backend knows), and the camera the layout is scrolled to.
+/// `maverickctl inspect` renders this plus what the session manager knows.
+pub fn inspect_json(state: &State, cfg: &Cfg, facts: &BackendFacts) -> String {
+    use std::fmt::Write;
+    let mi = state.sel_mon.min(state.monitors.len().saturating_sub(1));
+    let mon = state.monitors.get(mi);
+    let ws = mon.map(crate::types::Monitor::ws);
+
+    let managed: usize = state.clients.len();
+    let floating: usize = state.clients.values().filter(|c| c.is_float()).count();
+    let fullscreen: usize = state.clients.values().filter(|c| c.is_fullscreen()).count();
+    let maximized: usize = state.clients.values().filter(|c| c.is_maximized()).count();
+    let columns = ws.map_or(0, |w| w.columns.len());
+    let cameras = state
+        .monitors
+        .iter()
+        .flat_map(|m| m.workspaces.iter())
+        .count();
+
+    let mut s = String::with_capacity(512);
+    s.push('{');
+    write!(s, "\"sel_mon\":{mi},").unwrap();
+    write!(s, "\"tags\":{},", cfg.n_tags).unwrap();
+    write!(
+        s,
+        "\"windows\":{{\"total\":{managed},\"floating\":{floating},\"fullscreen\":{fullscreen},\"maximized\":{maximized}}},",
+    )
+    .unwrap();
+    write!(
+        s,
+        "\"layout\":{{\"type\":\"{}\",\"columns\":{columns},\"cameras\":{cameras},\"camera\":{}}},",
+        layout_name(ws.map_or(crate::types::LayoutKind::Column, |w| w.layout)),
+        mon.map_or(0.0, |m| m.ws().camera.position),
+    )
+    .unwrap();
+    if let Some(mon) = mon {
+        write!(
+            s,
+            "\"monitor\":{{\"index\":{mi},\"screen\":[{},{}],\"workarea\":[{},{}],\"active_ws\":{},\"focused\":{}}},",
+            mon.screen.w,
+            mon.screen.h,
+            mon.workarea.w,
+            mon.workarea.h,
+            mon.active_ws,
+            mon.focused.map_or("null".to_string(), |w| w.to_string()),
+        )
+        .unwrap();
+    } else {
+        s.push_str("\"monitor\":null,");
+    }
+    write!(
+        s,
+        "\"compositor\":{{\"backend\":\"{}\",\"active\":{}}},",
+        facts.compositor_backend, facts.compositor_active
+    )
+    .unwrap();
+    write!(s, "\"animations\":{},", facts.animations).unwrap();
+    // The configuration's opinion, kept beside the live one: a session that
+    // asked for the compositor and did not get it is a bug worth seeing, and
+    // the two values are only distinguishable if both are reported.
+    write!(s, "\"compositor_requested\":{}", cfg.compositor.enabled).unwrap();
+    s.push('}');
+    s
 }
 
 /// `query workspaces` — one entry per workspace per monitor: identity, layout,
@@ -400,6 +500,130 @@ pub fn parse_action(input: &str) -> Option<Action> {
 mod tests {
     use super::*;
     use crate::types::Dir;
+
+    /// Every control document the WM publishes is read by tools, so each has to
+    /// parse. `maverickctl window list` and `inspect` are built on this: a
+    /// malformed document is not a degraded view, it is no view.
+    fn parses(doc: &str) -> maverick_sys::json::Json {
+        maverick_sys::json::parse(doc).unwrap_or_else(|| panic!("document does not parse: {doc}"))
+    }
+
+    /// `inspect` is the one document assembled from two sources — `State` and
+    /// the backend's own facts — so both halves have to appear, and the
+    /// compositor's *configured* backend has to be distinguishable from whether
+    /// it came up.
+    #[test]
+    fn the_inspect_document_reports_totals_layout_and_compositor() {
+        use crate::types::Client;
+        let mut state = crate::types::State::new();
+        state.monitors.push(crate::types::Monitor::new(
+            crate::types::Rect::new(0, 0, 1920, 1080),
+            9,
+        ));
+        let mi = 0;
+        let ws_i = state.monitors[mi].active_ws;
+        for (win, float) in [(1u32, false), (2, false), (3, true)] {
+            state.add_client(Client::new(win, mi, ws_i));
+            if float {
+                state.monitors[mi].workspaces[ws_i].floats.push(win);
+                state
+                    .clients
+                    .get_mut(&win)
+                    .expect("added")
+                    .flags
+                    .set(crate::types::WinFlags::FLOAT);
+            } else {
+                state.monitors[mi].workspaces[ws_i].add_tiled(win, 1.0);
+            }
+        }
+        let cfg = crate::config::Cfg::default();
+        let facts = BackendFacts {
+            compositor_active: true,
+            compositor_backend: "opengl",
+            animations: true,
+        };
+        let doc = inspect_json(&state, &cfg, &facts);
+        let v = parses(&doc);
+
+        let windows = v.get("windows").expect("windows totals");
+        assert_eq!(windows.num_field("total"), 3);
+        assert_eq!(windows.num_field("floating"), 1);
+        assert_eq!(windows.num_field("fullscreen"), 0);
+        let layout = v.get("layout").expect("layout");
+        assert_eq!(layout.str_field("type"), "column");
+        assert_eq!(
+            layout.num_field("columns"),
+            2,
+            "two tiled columns, one float"
+        );
+        let compositor = v.get("compositor").expect("compositor");
+        assert_eq!(compositor.str_field("backend"), "opengl");
+        assert!(compositor.bool_field("active"));
+        assert!(v.bool_field("animations"));
+        // And the monitor the user can actually see.
+        let mon = v.get("monitor").expect("monitor");
+        assert_eq!(
+            mon.get("screen").map(|s| s.as_array().len()),
+            Some(2),
+            "the screen size is what makes `main` reportable: {doc}"
+        );
+    }
+
+    /// A window manager with no monitor must still answer, rather than
+    /// panicking on the way to a document a tool is blocked waiting for.
+    #[test]
+    fn the_inspect_document_survives_an_empty_state() {
+        let state = crate::types::State::new();
+        let doc = inspect_json(
+            &state,
+            &crate::config::Cfg::default(),
+            &BackendFacts::default(),
+        );
+        let v = parses(&doc);
+        assert_eq!(v.num_field("sel_mon"), 0);
+        assert_eq!(v.get("monitor"), Some(&maverick_sys::json::Json::Null));
+        assert_eq!(v.get("windows").expect("windows").num_field("total"), 0);
+    }
+
+    /// The default facts must report the compositor as *not* running: a caller
+    /// that reaches `inspect` without a backend answer has no evidence it came
+    /// up, and claiming otherwise would report a session as composited when
+    /// nothing says it is.
+    #[test]
+    fn default_backend_facts_do_not_claim_a_compositor() {
+        let state = crate::types::State::new();
+        let doc = inspect_json(
+            &state,
+            &crate::config::Cfg::default(),
+            &BackendFacts::default(),
+        );
+        let v = parses(&doc);
+        assert!(!v
+            .get("compositor")
+            .expect("compositor")
+            .bool_field("active"));
+    }
+
+    /// The state snapshot is what every client polls, so the screen size added
+    /// for resolution reporting has to be there for every monitor and survive a
+    /// parse — a client reporting a session's resolution reads exactly this.
+    #[test]
+    fn the_state_snapshot_carries_each_monitors_screen_size() {
+        use crate::types::Monitor;
+        let mut state = crate::types::State::new();
+        state
+            .monitors
+            .push(Monitor::new(crate::types::Rect::new(0, 0, 1920, 1080), 9));
+        state
+            .monitors
+            .push(Monitor::new(crate::types::Rect::new(1920, 0, 1280, 720), 9));
+        let v = parses(&state_json(&state, &crate::config::Cfg::default()));
+        let mons = v.get("monitors").expect("monitors").as_array();
+        assert_eq!(mons.len(), 2);
+        assert_eq!(mons[0].get("screen").expect("screen").as_array().len(), 2);
+        assert_eq!(mons[1].get("screen").expect("screen").as_array().len(), 2);
+        assert_eq!(mons[1].num_field("index"), 1);
+    }
 
     #[test]
     fn parses_directional_actions() {

@@ -342,8 +342,20 @@ impl WindowManager {
                     // blocked on the channel until the reply lands. State is
                     // only touched here (the WM thread), which is exactly why
                     // querying has to happen through this queue.
-                    let json =
-                        crate::core::ipc::query_json(&self.engine.state, &self.engine.cfg, &topic);
+                    let json = if topic == "inspect" {
+                        // `inspect` is the one topic that also needs what only
+                        // the backend knows — whether the compositor actually
+                        // came up — so it is built here rather than from a
+                        // `State` snapshot that cannot honestly record it.
+                        let facts = crate::core::ipc::BackendFacts {
+                            compositor_active: self.compositor.is_some(),
+                            compositor_backend: compositor_backend_name(&self.engine.cfg),
+                            animations: crate::config::animations_enabled(&self.engine.cfg),
+                        };
+                        crate::core::ipc::inspect_json(&self.engine.state, &self.engine.cfg, &facts)
+                    } else {
+                        crate::core::ipc::query_json(&self.engine.state, &self.engine.cfg, &topic)
+                    };
                     let _ = reply.send(json);
                 }
             }
@@ -521,5 +533,19 @@ impl WindowManager {
             hub.publish_state(json.clone());
             self.last_state_json = json;
         }
+    }
+}
+
+/// The compositor backend name to report, as configured.
+///
+/// Read from the configuration rather than from the compile-time features
+/// because the two are not the same question: a build can have OpenGL
+/// compiled in and still be configured for Vulkan, and `inspect` has to be
+/// able to say which was asked for even when the answer is "neither is
+/// running".
+fn compositor_backend_name(cfg: &crate::config::Cfg) -> &'static str {
+    match cfg.compositor.backend {
+        crate::config::CompositorBackend::OpenGl => "opengl",
+        crate::config::CompositorBackend::Vulkan => "vulkan",
     }
 }
