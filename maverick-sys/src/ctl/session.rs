@@ -464,35 +464,44 @@ fn display_or_dash(s: &str) -> &str {
 /// `maverickctl exec debug alacritty --json` runs `alacritty --json`, because
 /// a program must never inherit this tool's vocabulary by accident.
 ///
-/// The child is started in its own process group so it survives this
-/// one-shot CLI, and the group id is recorded in the session — which is what
-/// makes an `exec`ed program findable by `process list` after the CLI that
-/// launched it has exited and the kernel has reparented it to init.
+/// The child is started in its own process group so it survives this one-shot
+/// CLI, and the group id is *recorded in the session* — that record is the only
+/// thing that keeps an `exec`ed program findable by `process list` once the CLI
+/// has exited and the kernel has reparented it to init, where a parent-pointer
+/// walk can no longer reach it.
 pub fn exec(c: &Ctl, args: &[String]) -> Result<(), String> {
-    let Some((name, command)) = split_session_and_command(c, args, "exec") else {
+    let Some(call) = split_call(c, args) else {
         return Err(
             "exec needs a session and a program\n\n  try: maverickctl exec debug alacritty"
                 .to_string(),
         );
     };
-    let record = live_record(&name).ok_or_else(|| {
+    let record = live_record(&call.session).ok_or_else(|| {
         format!(
-            "session '{name}' does not exist\n\n{}",
+            "session '{}' does not exist\n\n{}",
+            call.session,
             available_sessions()
         )
     })?;
-    if command.is_empty() {
+    if call.argv.is_empty() {
         return Err("exec needs a program to run".to_string());
     }
     let wait = c.flag(&["--wait", "-w"]);
-    let to_log = c.flag(&["--log"]);
+    let inherit = c.flag(&["--inherit", "-i"]);
 
-    let child = launch_in_session(&record, command, to_log).map_err(|e| e.to_string())?;
+    let child = launch_in_session(&record, &call.argv, inherit).map_err(|e| e.to_string())?;
     let pid = child.id();
+    // The new process group's id is the child's pid (`process_group(0)`), but
+    // it is read back from `/proc` rather than assumed: the registration is
+    // what makes the program part of the session, and a wrong id would put it
+    // in some other session's tree or none.
+    if let Some(info) = proc::read(pid) {
+        register_pgrp(&call.session, info.pgid)?;
+    }
     if c.json {
         println!(
             "{{\"session\":{},\"pid\":{pid}}}",
-            crate::json::json_quote(&name)
+            crate::json::json_quote(&call.session)
         );
     } else {
         println!("{pid}");
@@ -511,6 +520,26 @@ pub fn exec(c: &Ctl, args: &[String]) -> Result<(), String> {
             std::process::exit(status.code().unwrap_or(1));
         }
     }
+    Ok(())
+}
+
+/// Add a process group to a session's registry.
+///
+/// The record is read, updated and written back atomically by
+/// [`session::write`], and the write is verified: a group that is not recorded
+/// is a program the session cannot see, and an `exec` that reports a pid while
+/// the process is invisible to `process list` is worse than one that fails.
+fn register_pgrp(name: &str, pgid: u32) -> Result<(), String> {
+    if pgid == 0 {
+        return Ok(());
+    }
+    let parsed = SessionName::parse(name).map_err(|e| e.to_string())?;
+    let mut record = live_record(name).ok_or_else(|| format!("session '{name}' is gone"))?;
+    if !record.pgrps.contains(&pgid) {
+        record.pgrps.push(pgid);
+        session::write(&record).map_err(|e| e.to_string())?;
+    }
+    let _ = parsed;
     Ok(())
 }
 
@@ -535,11 +564,12 @@ pub fn attach(c: &Ctl, args: &[String]) -> Result<(), String> {
 
 /// Shared body of `shell` and `attach`.
 fn enter(c: &Ctl, args: &[String], verb: &str, announce: bool) -> Result<(), String> {
-    let Some((name, command)) = split_session_and_command(c, args, verb) else {
+    let Some(call) = split_call(c, args) else {
         return Err(format!(
             "{verb} needs a session\n\n  try: maverickctl {verb} debug"
         ));
     };
+    let name = call.session;
     let record = live_record(&name).ok_or_else(|| {
         format!(
             "session '{name}' does not exist\n\n{}",
@@ -553,17 +583,19 @@ fn enter(c: &Ctl, args: &[String], verb: &str, announce: bool) -> Result<(), Str
         ));
     }
 
-    // A real attach replaces the terminal it was given; `shell` leaves the
-    // caller's terminal alone, which is what makes it usable from a script.
-    let mut argv: Vec<String> = if command.is_empty() {
+    // No command named: the user's shell. The difference between `shell` and
+    // `attach` is the announcement, not the environment — a nested session is
+    // a window on the parent display, so what a user "attaches to" is the
+    // graphical session, and the terminal's job is to be inside it.
+    let argv: Vec<String> = if call.argv.is_empty() {
         default_shell()
     } else {
-        command.to_vec()
+        call.argv
     };
     if announce && c.stderr_is_tty() {
         eprintln!(
-            "entering Maverick session '{}' (display {}) — leave with `exit`",
-            name, record.display
+            "entering Maverick session '{name}' (display {}) — leave with `exit`",
+            record.display
         );
     }
 
@@ -579,7 +611,6 @@ fn enter(c: &Ctl, args: &[String], verb: &str, announce: bool) -> Result<(), Str
     // thing, and there is nothing for the parent to do with its streams.
     cmd.status()
         .map_err(|e| format!("could not run {}: {e}", argv[0]))?;
-    argv.clear();
     Ok(())
 }
 
@@ -592,55 +623,117 @@ fn default_shell() -> Vec<String> {
         .unwrap_or_else(|| vec!["/bin/sh".to_string()])
 }
 
-/// Split `<session> <command…>` off the front of the arguments.
+/// Split `<session> <rest…>` off the front of the arguments.
 ///
 /// Returns `None` when no session was named, so each caller can print its own
 /// usage rather than a shared "missing argument" that says nothing about what
 /// the command was for.
-fn split_session_and_command<'a>(
-    c: &Ctl,
-    args: &'a [String],
-    verb: &str,
-) -> Option<(String, &'a [String])> {
-    match args.split_first() {
-        Some((name, rest)) if !name.starts_with('-') => {
-            Some((name.clone(), strip_trailing_flags(c, rest)))
-        }
-        // A global `--session debug` with no positional: the command is then
-        // everything after the flags.
-        _ => c
-            .explicit_session()
-            .map(|s| (s.to_string(), strip_trailing_flags(c, args))),
+///
+/// When the session came from `--session`, *every* positional belongs to the
+/// rest; otherwise the first positional is the session and the rest follows it.
+/// That distinction is the whole reason this is not just `args[1..]`: with a
+/// positional session, `window focus debug firefox` must resolve `firefox` as
+/// the window, and reading the first positional as the selector would address a
+/// session name as if it were a window.
+pub fn split_session_and_rest(c: &Ctl, args: &[String]) -> Option<(String, Vec<String>)> {
+    let rest: Vec<String> = args
+        .iter()
+        .filter(|a| !a.starts_with('-') && !c.is_own_flag(a))
+        .cloned()
+        .collect();
+    match c.explicit_session() {
+        Some(explicit) => Some((explicit.to_string(), rest)),
+        None => rest
+            .split_first()
+            .map(|(name, tail)| (name.clone(), tail.to_vec())),
     }
-    .or_else(|| {
-        let _ = verb;
-        None
+}
+
+/// A `maverickctl <verb> <session> <command…>` call, with the command split off.
+pub struct Call {
+    /// The session the command runs in.
+    pub session: String,
+    /// The command and its arguments, verbatim.
+    pub argv: Vec<String>,
+}
+
+/// Split a call into its session and its command.
+///
+/// `exec`, `shell` and `attach` take a command to run, and the boundary between
+/// this tool's arguments and the command's has to land exactly where a user
+/// expects it. The rule is positional: everything after the *command word*
+/// belongs to the command, unfiltered, so `maverickctl exec debug alacritty
+/// --json` runs `alacritty --json`. A program's own flags must never be consumed
+/// by the tool that launched it — the one place where being clever about
+/// argument parsing is actively wrong.
+///
+/// A bare `--` before the command word ends this tool's parsing instead, for
+/// the case where the command word itself looks like a flag. Everything after
+/// it is then the command, including arguments that would otherwise be
+/// interpreted.
+///
+/// Returns `None` when no session was named, so each caller prints its own
+/// usage rather than a shared "missing argument" that says nothing about what
+/// the command was for.
+pub fn split_call(c: &Ctl, args: &[String]) -> Option<Call> {
+    // A bare `--` is a boundary, not a word.
+    if let Some(at) = args.iter().position(|a| a == "--") {
+        let session = match c.explicit_session() {
+            Some(explicit) => explicit.to_string(),
+            None => args.get(*c.positionals.first()?)?.clone(),
+        };
+        return Some(Call {
+            session,
+            argv: args[at + 1..].to_vec(),
+        });
+    }
+    let (session, command_at) = match c.explicit_session() {
+        // With the session named by a flag, the first positional *is* the
+        // command.
+        Some(explicit) => (explicit.to_string(), c.positionals.first().copied()),
+        // Otherwise the first positional is the session and the second is the
+        // command; its index is what separates the two. A session with no
+        // command is legitimate — `shell debug` uses the user's shell — so a
+        // missing second positional is an empty command, not an error.
+        None => (
+            args.get(*c.positionals.first()?)?.clone(),
+            c.positionals.get(1).copied(),
+        ),
+    };
+    // From the command word onwards, verbatim: no flag filtering, because from
+    // here on it is not this tool's to interpret.
+    Some(Call {
+        session,
+        argv: command_at.map_or_else(Vec::new, |at| args[at..].to_vec()),
     })
 }
 
-/// Drop this tool's own flags from a forwarded argument list.
-///
-/// Only the flags it recognises, and only whole words: an argument that
-/// happens to equal one of them (`alacritty --json`) must reach the program.
-fn strip_trailing_flags<'a>(c: &Ctl, args: &'a [String]) -> &'a [String] {
-    let owned: Vec<String> = args.iter().filter(|a| !c.is_own_flag(a)).cloned().collect();
-    Box::leak(owned.into_boxed_slice())
-}
-
 /// Start a program inside a session, recording its process group.
+///
+/// Output goes to the session's own `exec.log` by default, not to the caller's
+/// terminal. A detached program's output belongs to the session it runs in —
+/// and inheriting is actively unsafe in the two cases that matter: a caller
+/// whose stdout is a pipe nobody reads (an agent, a script) leaves the program
+/// blocked forever on a full buffer, and a caller on a terminal has its screen
+/// scribbled on by a background job. `--inherit` opts back in for the case
+/// where the caller *is* the terminal the output is wanted on.
 fn launch_in_session(
     session: &Session,
     command: &[String],
-    to_log: bool,
+    inherit: bool,
 ) -> Result<std::process::Child, String> {
     let mut cmd = Command::new(&command[0]);
     cmd.args(&command[1..]);
     for (key, value) in session.env() {
         cmd.env(key, value);
     }
-    if to_log {
-        // A detached program's output would otherwise be written to a pipe the
-        // caller has already stopped reading, which is a hang, not a log.
+    if inherit {
+        // A detached program holding the terminal open would also stop the
+        // caller's shell from returning, so its stdin is /dev/null even when
+        // its output is inherited: it is a background job, not a child of a
+        // terminal session.
+        cmd.stdin(Stdio::null());
+    } else {
         let log = crate::session::xserver::open_private_log(&session.dir().join("exec.log"))
             .map_err(|e| format!("could not open the session log: {e}"))?;
         cmd.stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?));
@@ -789,7 +882,7 @@ fn process_json(p: &proc::ProcInfo, role: &str) -> String {
 }
 
 fn process_inspect(c: &Ctl, args: &[String]) -> Result<(), String> {
-    let (name, rest) = split_session_and_command(c, args, "process inspect")
+    let (name, rest) = split_session_and_rest(c, args)
         .ok_or_else(|| "process inspect needs a session and a pid".to_string())?;
     let record = live_record(&name).ok_or_else(|| {
         format!(
@@ -823,7 +916,7 @@ fn process_inspect(c: &Ctl, args: &[String]) -> Result<(), String> {
 }
 
 fn process_kill(c: &Ctl, args: &[String]) -> Result<(), String> {
-    let (name, rest) = split_session_and_command(c, args, "process kill")
+    let (name, rest) = split_session_and_rest(c, args)
         .ok_or_else(|| "process kill needs a session and a pid".to_string())?;
     let record = live_record(&name).ok_or_else(|| {
         format!(
@@ -835,7 +928,7 @@ fn process_kill(c: &Ctl, args: &[String]) -> Result<(), String> {
         return Err("process kill needs a pid".to_string());
     };
     let pid: u32 = raw.parse().map_err(|_| format!("'{raw}' is not a pid"))?;
-    let force = args.iter().any(|a| a == "--force" || a == "-9");
+    let force = c.flag(&["--force", "-9"]);
     let Some(p) = proc::read(pid) else {
         return Err(format!("no process {pid}"));
     };
@@ -1239,6 +1332,89 @@ pub fn available_sessions() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ctl::windows::window_selector;
+
+    /// The boundary between this tool's arguments and a command's is the one
+    /// place where being clever is actively wrong: a program's own flags must
+    /// reach the program.
+    #[test]
+    fn a_commands_own_flags_reach_the_command() {
+        let args = vec![
+            "debug".to_string(),
+            "alacritty".to_string(),
+            "--json".to_string(),
+            "--wait".to_string(),
+        ];
+        let c = Ctl::parse("maverickctl", &args, &[]);
+        let call = split_call(&c, &args).expect("a call");
+        assert_eq!(call.session, "debug");
+        assert_eq!(
+            call.argv,
+            vec!["alacritty", "--json", "--wait"],
+            "a program's flags must not be eaten by the launcher"
+        );
+    }
+
+    /// With an explicit `--session`, the first positional is the command rather
+    /// than the session.
+    #[test]
+    fn an_explicit_session_makes_the_first_positional_the_command() {
+        let args = vec![
+            "--session".to_string(),
+            "agent".to_string(),
+            "firefox".to_string(),
+            "--new-window".to_string(),
+        ];
+        let c = Ctl::parse("maverickctl", &args, &[]);
+        let call = split_call(&c, &args).expect("a call");
+        assert_eq!(call.session, "agent");
+        assert_eq!(call.argv, vec!["firefox", "--new-window"]);
+    }
+
+    /// `--` ends this tool's parsing, which is the escape hatch for a command
+    /// word that looks like a flag.
+    #[test]
+    fn a_double_dash_hands_the_rest_over_untouched() {
+        let args = vec![
+            "debug".to_string(),
+            "--".to_string(),
+            "--weird".to_string(),
+            "-x".to_string(),
+        ];
+        let c = Ctl::parse("maverickctl", &args, &[]);
+        let call = split_call(&c, &args).expect("a call");
+        assert_eq!(call.session, "debug");
+        assert_eq!(call.argv, vec!["--weird", "-x"]);
+    }
+
+    /// With no command named at all, the argv is empty and the caller supplies
+    /// a default — the split must not invent a program.
+    #[test]
+    fn a_session_with_no_command_yields_no_command() {
+        let args = vec!["debug".to_string()];
+        let c = Ctl::parse("maverickctl", &args, &[]);
+        let call = split_call(&c, &args).expect("a call");
+        assert_eq!(call.session, "debug");
+        assert!(call.argv.is_empty());
+    }
+
+    /// The window verbs read the selector from *after* the session: reading the
+    /// first positional as the selector would ask the window manager to act on a
+    /// session name.
+    #[test]
+    fn a_window_selector_is_never_the_session_name() {
+        let c = Ctl::parse("maverickctl", &[], &[]);
+        let args = vec!["debug".to_string(), "firefox".to_string()];
+        assert_eq!(window_selector(&c, &args), Some("firefox".to_string()));
+        // No selector at all: the caller falls back to the focused window.
+        assert_eq!(window_selector(&c, &["debug".to_string()]), None);
+        // A direction is the verb's own argument, never the target.
+        let moving = vec!["debug".to_string(), "right".to_string()];
+        assert_eq!(window_selector(&c, &moving), None);
+        // And a flag of this tool's is not a window name.
+        let flagged = vec!["debug".to_string(), "--json".to_string()];
+        assert_eq!(window_selector(&c, &flagged), None);
+    }
 
     /// Everything after `--` belongs to the window manager, and nothing before
     /// it does: a flag Maverick supports today must be forwardable without

@@ -527,6 +527,11 @@ impl Session {
     /// only hard requirement is a valid `name` — because that is the one field
     /// every path is built from, and a record that cannot name itself safely is
     /// not usable.
+    ///
+    /// A `null` field reads as *absent*, not as the four characters `null`
+    /// (see [`crate::json::Field::text`]), so an optional the writer left empty
+    /// stays empty on the way back in. That is what keeps `cwd: null` from
+    /// becoming a session whose working directory is a file called "null".
     pub fn from_json(doc: &str) -> Option<Self> {
         let fields = scan_object(doc);
         let get_str = |k: &str| {
@@ -855,6 +860,16 @@ pub fn list() -> Vec<SessionView> {
 /// Build the view of a session the manager owns.
 fn view_of(s: &Session) -> SessionView {
     let state = s.derived_state();
+    // A crash that nothing has reaped yet has no recorded reason, because the
+    // reason is written when the reaper runs. Until then the note has to say
+    // what is *known* — the window manager is not answering — and what to do
+    // about it, because a row that says "crashed" with no note leaves the
+    // reader to guess whether an X server is still holding a display.
+    let exit_reason = if s.exit_reason.is_empty() && state == SessionState::Crashed {
+        "the window manager is not answering; `maverickctl session stop` will clean up".to_string()
+    } else {
+        s.exit_reason.clone()
+    };
     SessionView {
         name: s.name.as_str().to_string(),
         sid: s.name.as_str().to_string(),
@@ -869,7 +884,7 @@ fn view_of(s: &Session) -> SessionView {
         debug: s.spec.debug,
         compositor_requested: s.spec.compositor,
         backend: Some(s.spec.backend),
-        exit_reason: s.exit_reason.clone(),
+        exit_reason,
         created_at: s.created_at,
         owner_uid: s.owner_uid,
     }

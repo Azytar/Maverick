@@ -130,6 +130,15 @@ pub struct Ctl {
     /// The arguments as given, so a flag a subcommand claimed for itself can
     /// still be asked about without being re-parsed differently.
     pub raw: Vec<String>,
+    /// Indices of the arguments that are *not* this tool's own flags, and not
+    /// their values.
+    ///
+    /// Precomputed because the boundary between this tool's arguments and a
+    /// command's is positional, and reconstructing it per call is how
+    /// `exec debug app --json` ends up running `app` without its own flag: the
+    /// filter has to know that `--json` came *after* the command word, not just
+    /// that it starts with a dash.
+    pub positionals: Vec<usize>,
     /// The tool's own name, for messages.
     tool: String,
 }
@@ -164,6 +173,7 @@ impl Ctl {
             yes: false,
             session: None,
             name: None,
+            positionals: Vec::new(),
             tool: tool.to_string(),
         };
         let mut i = 0;
@@ -176,16 +186,19 @@ impl Ctl {
             match arg {
                 "--json" | "-j" => c.json = true,
                 "--yes" | "-y" => c.yes = true,
+                // The only flags here that take a value. The value is consumed
+                // as well, so a session named in a flag is never mistaken for
+                // the first positional.
                 "--session" | "-s" | "--name" | "-n" => {
                     let value = args.get(i + 1).cloned();
                     match arg {
                         "--session" | "-s" => c.session = value,
                         _ => c.name = value,
                     }
-                    // Skip the value so it is not also read as a positional.
                     i += 1;
                 }
-                _ => {}
+                _ if arg.starts_with('-') => {}
+                _ => c.positionals.push(i),
             }
             i += 1;
         }
@@ -306,7 +319,9 @@ SESSIONS
 RUNNING THINGS IN A SESSION
     exec <session> <program> [args…]    Run a program in the session
     exec <session> … --wait             …and wait for it, propagating its status
-    exec <session> … --log              …and append its output to the session log
+    exec <session> … --inherit          …with its output on your terminal
+                                         (by default it goes to the session's
+                                         exec.log, readable with `logs`)
     shell <session> [command…]          A shell with the session's environment
     attach <session> [command…]         As shell, announcing display and session
     process list <session> [--json]     Every process in the session

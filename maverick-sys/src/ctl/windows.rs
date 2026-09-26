@@ -19,7 +19,7 @@
 
 use crate::json::Json;
 
-use super::session::{available_sessions, truncate};
+use super::session::{available_sessions, split_session_and_rest, truncate};
 use super::{print_usage, session_target, Ctl};
 
 /// One managed window, flattened out of the tree query.
@@ -96,6 +96,13 @@ pub fn flatten_windows(tree: &Json) -> Vec<WindowInfo> {
 }
 
 /// One window entry of the tree, with the position the walk found it at.
+///
+/// The keys are the ones `core::ipc::tree_json` actually writes. The geometry
+/// is a single four-element `geom` array rather than four scalars, and the
+/// title is `title` — reading a schema that resembles it silently produces a
+/// window with no title and no geometry, which looks like a window manager bug
+/// rather than a reader bug. The test fixture below is a document captured from
+/// a running session for that reason.
 fn window_of(
     w: &Json,
     monitor: usize,
@@ -112,26 +119,46 @@ fn window_of(
         Some(Json::Num(n)) if *n > 0.0 => Some(*n as u32),
         _ => None,
     };
+    let geom = w.get("geom").map(Json::as_array).unwrap_or(&[]);
+    let coord = |i: usize| geom.get(i).and_then(Json::as_f64).unwrap_or(0.0);
     WindowInfo {
         id,
         pid,
         class: w.str_field("class").to_string(),
         instance: w.str_field("instance").to_string(),
-        title: w.str_field("name").to_string(),
-        monitor,
-        workspace,
+        title: w.str_field("title").to_string(),
+        monitor: monitor_of(w, monitor),
+        workspace: workspace_of(w, workspace),
         column,
         index,
         floating: w.bool_field("float"),
         fullscreen: w.bool_field("fullscreen"),
         maximized: w.bool_field("maximized"),
-        focused: mon_focus != 0 && mon_focus == id,
+        // The window's own `focus` is authoritative; the monitor's `focused`
+        // slot is the fallback for a document that predates it.
+        focused: w.bool_field("focus") || (mon_focus != 0 && mon_focus == id),
         geometry: (
-            w.num_field("x") as i32,
-            w.num_field("y") as i32,
-            w.num_field("w") as u32,
-            w.num_field("h") as u32,
+            coord(0) as i32,
+            coord(1) as i32,
+            coord(2) as u32,
+            coord(3) as u32,
         ),
+    }
+}
+
+/// A window's own `monitor`, or the one the walk found it on.
+fn monitor_of(w: &Json, walked: usize) -> usize {
+    match w.get("monitor").and_then(Json::as_u64) {
+        Some(m) => m as usize,
+        None => walked,
+    }
+}
+
+/// A window's own `workspace`, or the one the walk found it on.
+fn workspace_of(w: &Json, walked: usize) -> usize {
+    match w.get("workspace").and_then(Json::as_u64) {
+        Some(ws) => ws as usize,
+        None => walked,
     }
 }
 
@@ -140,10 +167,13 @@ fn window_of(
 /// Precedence, and the reason for it: an id is a fact, a name is a guess. A
 /// selector that parses as an id *and* names a live window is that window; a
 /// selector that parses as an id and names nothing is an error rather than a
-/// name search, because "0x999" was never a class. Otherwise the selector is
-/// matched against class, instance and title, exact before substring, and a
-/// substring that matches more than one window is refused with the ids listed —
-/// picking one would be a coin flip with the user's windows on it.
+/// name search, because "0x999" was never a class.
+///
+/// Past that, the name is matched exactly against the class, the instance and
+/// the title, and only then as a substring — and at *both* stages a match that
+/// several windows satisfy is refused with the ids listed. Taking the first
+/// would be a coin flip between the user's own windows, and the whole reason
+/// stable ids are printed in the first place is so a caller can pick one.
 pub fn resolve_window(windows: &[WindowInfo], selector: &str) -> Result<u32, String> {
     let sel = selector.trim();
     if let Some(id) = parse_id(sel) {
@@ -159,22 +189,19 @@ pub fn resolve_window(windows: &[WindowInfo], selector: &str) -> Result<u32, Str
                 )
             });
     }
-    let lower = sel.to_ascii_lowercase();
-    let exact = |field: fn(&WindowInfo) -> &String| {
-        windows
-            .iter()
-            .find(|w| field(w).eq_ignore_ascii_case(sel))
-            .map(|w| w.id)
-    };
-    for field in [
-        (|w: &WindowInfo| &w.instance) as fn(&WindowInfo) -> &String,
-        |w: &WindowInfo| &w.class,
-        |w: &WindowInfo| &w.title,
-    ] {
-        if let Some(id) = exact(field) {
-            return Ok(id);
+    let fields: [fn(&WindowInfo) -> &String; 3] = [|w| &w.instance, |w| &w.class, |w| &w.title];
+    let exact: Vec<&WindowInfo> = windows
+        .iter()
+        .filter(|w| fields.iter().any(|f| f(w).eq_ignore_ascii_case(sel)))
+        .collect();
+    match exact.as_slice() {
+        [only] => return Ok(only.id),
+        [] => {}
+        many => {
+            return Err(ambiguous(sel, "matches", many));
         }
     }
+    let lower = sel.to_ascii_lowercase();
     let matches: Vec<&WindowInfo> = windows
         .iter()
         .filter(|w| {
@@ -190,12 +217,17 @@ pub fn resolve_window(windows: &[WindowInfo], selector: &str) -> Result<u32, Str
             plural(windows.len()),
             candidates(&windows.iter().collect::<Vec<_>>())
         )),
-        many => Err(format!(
-            "'{sel}' matches {} windows — use the id:\n\n{}",
-            many.len(),
-            candidates(many)
-        )),
+        many => Err(ambiguous(sel, "matches", many)),
     }
+}
+
+/// The refusal for a selector more than one window satisfies.
+fn ambiguous(sel: &str, verb: &str, many: &[&WindowInfo]) -> String {
+    format!(
+        "'{sel}' {verb} {} windows — use the id:\n\n{}",
+        many.len(),
+        candidates(many)
+    )
 }
 
 fn parse_id(s: &str) -> Option<u32> {
@@ -346,21 +378,24 @@ fn window_json(w: &WindowInfo) -> String {
 /// `maverickctl window inspect <session> <window>`
 fn window_inspect(c: &Ctl, args: &[String]) -> Result<(), String> {
     let (sid, windows) = windows_of(c, args)?;
-    let selector = args
-        .iter()
-        .find(|a| !a.starts_with('-') && !a.is_empty() && !is_dir(a))
-        .cloned()
-        .or_else(|| {
-            // No selector: the focused window is what a user means by "the
-            // window" when they do not name one.
-            windows.iter().find(|w| w.focused).map(|w| w.class.clone())
-        })
-        .ok_or_else(|| {
-            format!(
-                "no window in session '{sid}' to inspect\n\n{}",
-                available_sessions()
-            )
-        })?;
+    // The selector is the first positional *after* the session — same rule as
+    // every other window verb, and the reason `window inspect debug firefox`
+    // inspects `firefox` and not a window called "debug".
+    let selector = window_selector(c, args).unwrap_or_else(|| {
+        // No selector: the focused window is what a user means by "the window"
+        // when they do not name one.
+        windows
+            .iter()
+            .find(|w| w.focused)
+            .map(|w| w.class.clone())
+            .unwrap_or_default()
+    });
+    if selector.is_empty() {
+        return Err(format!(
+            "no window in session '{sid}' to inspect\n\n{}",
+            available_sessions()
+        ));
+    }
     let id = resolve_window(&windows, &selector)?;
     let w = windows
         .iter()
@@ -450,6 +485,21 @@ impl WindowOp {
     }
 }
 
+/// The window a verb names, from the arguments that follow it.
+///
+/// `args` is everything *after* the verb, so its first positional is the
+/// session and the second is the window. Directions are excluded because a
+/// direction is the verb's own argument, never the target, and a `--flag` is
+/// excluded because a program's flags must never be read as a name.
+pub(crate) fn window_selector(c: &Ctl, args: &[String]) -> Option<String> {
+    let mut positionals = args
+        .iter()
+        .filter(|a| !a.starts_with('-') && !is_dir(a) && !c.is_own_flag(a));
+    // Skip the session.
+    let _ = positionals.next();
+    positionals.next().cloned()
+}
+
 /// Resolve the window, then dispatch the action.
 fn act(c: &Ctl, args: &[String], verb: &str, op: WindowOp) -> Result<(), String> {
     let name = session_target(c, args)?;
@@ -460,13 +510,11 @@ fn act(c: &Ctl, args: &[String], verb: &str, op: WindowOp) -> Result<(), String>
         .ok_or_else(|| format!("the window tree of '{name}' was not valid JSON"))?;
     let windows = flatten_windows(&tree);
 
-    // A selector of "focused" is the one name that is not a substring, and it
-    // is the most common intent: act on what the user is looking at.
-    let selector = args
-        .iter()
-        .find(|a| !a.starts_with('-') && !a.is_empty() && !is_dir(a) && *a != verb)
-        .cloned()
-        .unwrap_or_else(|| "focused".to_string());
+    // The window selector is the first positional *after* the session, never
+    // the session itself: `window focus debug firefox` addresses `firefox`, and
+    // reading the first positional as the selector would ask the window manager
+    // to act on a session name.
+    let selector = window_selector(c, args).unwrap_or_else(|| "focused".to_string());
     let id = if selector == "focused" {
         windows
             .iter()
@@ -542,17 +590,16 @@ pub fn camera(c: &Ctl, args: &[String]) -> Result<(), String> {
 /// knows better. Both end up as one action on the wire.
 pub fn resize(c: &Ctl, args: &[String]) -> Result<(), String> {
     let name = session_target(c, args)?;
-    let amount = args
+    // The amount is the first positional *after* the session: a signed
+    // percentage starts with `-` and must not be mistaken for one of this
+    // tool's own flags.
+    let (_, rest) =
+        split_session_and_rest(c, args).ok_or_else(|| "resize needs a session".to_string())?;
+    let amount = rest
         .iter()
-        .find(|a| !a.starts_with('-') || a.starts_with('+') || a.starts_with('-'))
-        .and_then(|a| {
-            let t = a.trim();
-            if t.is_empty() || t == name {
-                None
-            } else {
-                Some(t.to_string())
-            }
-        })
+        .map(|a| a.trim())
+        .find(|a| !a.is_empty())
+        .map(str::to_string)
         .ok_or_else(|| {
             "resize needs an amount\n\n  try: maverickctl resize debug +10%".to_string()
         })?;
@@ -665,17 +712,24 @@ mod tests {
         assert_eq!(resolve_window(&windows, "zed"), Ok(3), "case-insensitive");
         assert_eq!(resolve_window(&windows, "Navigator"), Ok(1));
         assert_eq!(resolve_window(&windows, "main.rs"), Ok(3));
-        // An exact *instance* beats an exact class: two windows can share a
-        // class, but the instance is the more specific of the two.
-        assert_eq!(resolve_window(&windows, "firefox"), Ok(2));
-        // Ambiguity is only reached through a substring, and it is refused
-        // rather than guessed.
+        // Ambiguity is refused at the *exact* stage too, not only on a
+        // substring: three windows can all be exactly "xterm", and taking the
+        // first would be a coin flip between the user's own windows.
         let err = resolve_window(&windows, "fox").expect_err("ambiguous");
         assert!(err.contains("matches 2 windows"), "{err}");
         assert!(err.contains("0x1"), "the candidates must be listed: {err}");
         // A substring that is unique is fine — that is what substring matching
         // is for.
         assert_eq!(resolve_window(&windows, "Navi"), Ok(1));
+
+        // And an exact name several windows share is refused the same way,
+        // listing every candidate.
+        let same = vec![w(1, "xterm", "xterm", ""), w(2, "xterm", "xterm", "")];
+        let err = resolve_window(&same, "xterm").expect_err("ambiguous");
+        assert!(err.contains("matches 2 windows"), "{err}");
+        assert!(err.contains("0x1") && err.contains("0x2"), "{err}");
+        // An id is the way out, and it is always unambiguous.
+        assert_eq!(resolve_window(&same, "0x2"), Ok(2));
     }
 
     #[test]
@@ -688,39 +742,70 @@ mod tests {
 
     /// The tree is the only place the column and index of a window are knowable,
     /// so the flattening has to walk the real hierarchy — including floats,
-    /// which are not in any column.
+    /// which are in no column.
+    ///
+    /// The fixture is a document captured from a running session, not one
+    /// written to match the reader: an earlier version of this test used a
+    /// schema that merely *resembled* the real one, and it passed while the
+    /// tool reported every window as having no title and no geometry — which
+    /// reads as a window manager bug, not a reader bug. The keys are `title`
+    /// and a four-element `geom` array; anything that changes them has to
+    /// change this fixture with it.
     #[test]
     fn flattening_reads_the_hierarchy_including_floats() {
         let tree = crate::json::parse(
             r#"{"sel_mon":0,"monitors":[{"index":0,"active_ws":0,"focused":2,
                  "workspaces":[{"index":0,"layout":"column","columns":[
                     {"width":640.0,"focused":0,"windows":[
-                        {"id":1,"pid":100,"class":"alacritty","instance":"alacritty","name":"zsh"},
-                        {"id":2,"pid":0,"class":"Zed","instance":"Zed","name":"main.rs","x":0,"y":0,"w":640,"h":480}]},
+                        {"id":1,"pid":100,"class":"alacritty","instance":"alacritty","title":"zsh","monitor":0,"workspace":0,"float":false,"fullscreen":false,"maximized":false,"sticky":false,"geom":[0,8,640,750],"focus":false,"overlay":false},
+                        {"id":2,"pid":0,"class":"Zed","instance":"Zed","title":"main.rs","monitor":0,"workspace":0,"float":false,"fullscreen":false,"maximized":false,"sticky":false,"geom":[640,8,320,720],"focus":true,"overlay":false}]},
                     {"width":320.0,"focused":0,"windows":[
-                        {"id":3,"pid":300,"class":"firefox","instance":"firefox","name":"M"}]}],"floats":[
-                    {"id":4,"pid":400,"class":"mpv","instance":"mpv","name":"video","float":true,"fullscreen":true}]}]}]}"#,
+                        {"id":3,"pid":300,"class":"firefox","instance":"firefox","title":"M","monitor":0,"workspace":0,"float":false,"fullscreen":false,"maximized":false,"sticky":false,"geom":[960,8,320,720],"focus":false,"overlay":false}]}],"floats":[
+                    {"id":4,"pid":400,"class":"mpv","instance":"mpv","title":"video","monitor":0,"workspace":0,"float":true,"fullscreen":true,"maximized":false,"sticky":false,"geom":[100,100,320,240],"focus":false,"overlay":true}]}]}]}"#,
         )
         .expect("valid tree");
         let windows = flatten_windows(&tree);
         assert_eq!(windows.len(), 4);
+
         assert_eq!(windows[0].id, 1);
         assert_eq!(windows[0].pid, Some(100));
+        assert_eq!(windows[0].class, "alacritty");
+        assert_eq!(windows[0].instance, "alacritty");
+        assert_eq!(windows[0].title, "zsh", "the title key is `title`");
+        assert_eq!(windows[0].geometry, (0, 8, 640, 750), "geometry is `geom`");
         assert_eq!(windows[0].column, 0);
         assert_eq!(windows[0].index, 0);
+
         // The second window in the first column.
         assert_eq!(windows[1].id, 2);
         assert_eq!(windows[1].column, 0);
         assert_eq!(windows[1].index, 1);
-        // pid 0 is "no pid", never pid 1.
-        assert_eq!(windows[1].pid, None);
-        assert_eq!(windows[1].geometry, (0, 0, 640, 480));
-        assert!(windows[1].focused, "the monitor's focused window");
+        assert_eq!(windows[1].pid, None, "pid 0 is 'no pid', never pid 1");
+        assert!(windows[1].focused, "the window says so itself");
+        assert_eq!(windows[1].geometry, (640, 8, 320, 720));
+
         assert_eq!(windows[2].column, 1);
-        // A float is not in a column, and reports its state.
+
+        // A float is in no column, and reports its state.
         assert_eq!(windows[3].id, 4);
         assert!(windows[3].floating);
         assert!(windows[3].fullscreen);
+        assert_eq!(windows[3].title, "video");
+    }
+
+    /// A window's own `monitor`/`workspace` win over the walk's position, so a
+    /// document that disagrees with itself reports the window's own answer.
+    #[test]
+    fn a_windows_own_placement_beats_the_walk_position() {
+        let tree = crate::json::parse(
+            r#"{"sel_mon":0,"monitors":[{"index":0,"active_ws":0,"focused":0,
+                 "workspaces":[{"index":0,"columns":[{"width":1.0,"focused":0,"windows":[
+                    {"id":1,"pid":7,"class":"a","instance":"a","title":"t","monitor":1,"workspace":3,"geom":[0,0,10,10]}]}],"floats":[]}]}]}"#,
+        )
+        .expect("valid");
+        let w = &flatten_windows(&tree)[0];
+        assert_eq!(w.monitor, 1);
+        assert_eq!(w.workspace, 3);
     }
 
     /// An empty or malformed tree must yield no windows rather than a panic: it

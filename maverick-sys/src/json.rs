@@ -113,7 +113,10 @@ pub struct Field<'a> {
 }
 
 impl Field<'_> {
-    /// The value as text, decoding a string's escapes. `None` for a non-string.
+    /// The value as text, decoding a string's escapes. `None` for a non-string,
+    /// and for `null` — which is how a document says "no value", and reading it
+    /// as the four-character string `"null"` turns an absent optional field
+    /// into a present one holding nonsense.
     pub fn as_str(&self) -> Option<String> {
         match &self.value {
             Value::Str(body) => Some(json_unescape(body)),
@@ -125,6 +128,10 @@ impl Field<'_> {
     pub fn text(&self) -> String {
         match &self.value {
             Value::Str(body) => json_unescape(body),
+            // A writer that emits `"field":null` for an absent optional has
+            // said exactly that; the literal text `null` is the one value that
+            // must never be mistaken for content.
+            Value::Raw("null") => String::new(),
             Value::Raw(raw) => (*raw).to_string(),
             Value::Array(_) => String::new(),
         }
@@ -764,6 +771,21 @@ mod tests {
         let items = [r#"--log "x,y""#.to_string(), r#"tail\"#.to_string()];
         let doc = format!("{{\"args\":{}}}", quote_array(&items));
         assert_eq!(field(&doc, "args").as_str_array(), Some(items.to_vec()));
+    }
+
+    /// `"field": null` is how a writer says "no value", and it must read as
+    /// absent. Reading it as the four characters `null` is how an optional
+    /// string field turns into a present one holding nonsense — a working
+    /// directory called "null", a resolution that fails to parse for the wrong
+    /// reason.
+    #[test]
+    fn a_null_field_reads_as_absent_not_as_the_text_null() {
+        let doc = r#"{"a":null,"b":"","c":0}"#;
+        assert_eq!(field(doc, "a").text(), "");
+        assert_eq!(field(doc, "a").as_str(), None);
+        assert_eq!(field(doc, "a").as_u64(), None);
+        assert_eq!(field(doc, "b").text(), "");
+        assert_eq!(field(doc, "c").text(), "0", "zero is a value, null is not");
     }
 
     /// An empty array and an absent field must stay distinguishable: an empty
