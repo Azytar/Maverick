@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  MAVERICK — installer · v2.5 (Pre-release Hardening)
-#  columnar tiling WM · bilingual (EN/ES) · roadmap + live gradient bar
+#  MAVERICK — installer
+#  columnar tiling WM · bilingual (EN/ES)
 #
-#  v2.5 fixes:
-#    · Verificación post-install real (ejecuta maverick --version)
-#    · Build log retenido en ~/.local/share/maverick/install.log
-#    · Validación de espacio en disco antes de compilar (mínimo 2GB)
-#    · Aviso graceful si wc no está disponible (fallback a bytes)
-#    · target-cpu=native documentado como machine-specific
+#  Installs the release binaries into a prefix. The default prefix is
+#  $HOME/.local, so a normal installation needs no privileges. A system or
+#  custom prefix is always explicit, and the installer never writes outside
+#  the prefix it was given and never escalates privileges on its own.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -16,6 +14,8 @@ set -euo pipefail
 ORIGINAL_ARGS=("$@")
 LANG_CHOICE="auto"
 PREFIX="${PREFIX:-}"
+SYSTEM_INSTALL=false
+XSESSIONS_DIR=""
 YES=false
 NO_CONFIG=false
 NO_BUILD=false
@@ -25,12 +25,17 @@ KEEP_LOG=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --prefix|--lang)
+        --prefix|--lang|--xsessions-dir)
             [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || {
                 echo "$1 requires a value" >&2; exit 2;
             }
-            if [[ "$1" == --prefix ]]; then PREFIX="$2"; else LANG_CHOICE="$2"; fi
+            case "$1" in
+                --prefix)         PREFIX="$2" ;;
+                --lang)           LANG_CHOICE="$2" ;;
+                --xsessions-dir)  XSESSIONS_DIR="$2" ;;
+            esac
             shift 2 ;;
+        --system)    SYSTEM_INSTALL=true; shift ;;
         --yes|-y)    YES=true; shift ;;
         --no-config) NO_CONFIG=true; shift ;;
         --no-build)  NO_BUILD=true; shift ;;
@@ -43,10 +48,19 @@ while [[ $# -gt 0 ]]; do
             cat <<'HELP'
 Usage: ./install.sh [options]
 
+Installs maverick and maverickctl into a prefix. The default prefix is
+$HOME/.local and needs no privileges. Nothing is ever written outside the
+selected prefix, and the installer never invokes sudo.
+
 Options:
-  --prefix DIR     Install prefix (default: /usr/local; use ~/.local for user-only)
+  --system         Install into /usr/local (requires write access to it)
+  --prefix DIR     Install prefix (default: $HOME/.local)
+  --xsessions-dir DIR
+                   Also install the X11 session file into DIR. Off by
+                   default: display managers usually only read system
+                   locations, so this is an explicit opt-in.
   --lang LANG      Force language: en | es | auto (auto-detects $LANG)
-  --yes, -y        Skip installer confirmations (sudo may still ask for a password)
+  --yes, -y        Skip installer confirmations
   --no-config      Don't create ~/.config/maverick/config.toml
   --no-build       Skip cargo build (use existing target/release/*)
   --no-anim        Disable all animations (or export MAVERICK_NO_ANIM=1)
@@ -57,21 +71,23 @@ Options:
 
 Environment:
   PREFIX=DIR          same as --prefix
+  CARGO_TARGET_DIR    cargo build directory; honoured as given
   LANG / LC_ALL       auto language detection
   MAVERICK_NO_ANIM=1  same as --no-anim
   NO_COLOR=1          disable colors
 
 Notes:
-  Run as your normal user: sudo authenticates first for system installation.
-  Cargo and user config never run as root; old root-owned target files are repaired.
-  System session: /usr/share/xsessions; logs: ~/.local/share/maverick/.
-  Cached sudo credentials or NOPASSWD may avoid a password prompt.
+  Run as your normal user. Cargo never runs as root, and a prefix you cannot
+  write is reported as an error rather than escalated.
+  If CARGO_TARGET_DIR is unset it defaults to a cache directory under
+  $XDG_CACHE_HOME; the checkout is never used as a build directory.
   Binaries are compiled with -C target-cpu=native for maximum performance
   on THIS machine. They will NOT work on different CPU architectures.
-  Pre-built portable binaries are distributed separately.
 
 Examples:
   ./install.sh
+  ./install.sh --system
+  ./install.sh --prefix /opt/maverick
   ./install.sh --prefix ~/.local --lang es
   ./install.sh --yes --no-anim --keep-log
 HELP
@@ -82,20 +98,25 @@ done
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
-# Never run Cargo, rustup, configuration writes or verification as root.
-# Accommodate `sudo ./install.sh`, but immediately drop back to its caller.
+# Cargo and the user config must never run as root: a root-owned build
+# directory is a recurring source of "permission denied" for the next ordinary
+# run. Rather than re-exec through sudo to undo a privilege the caller already
+# has, this installer declines to run as root at all and says how to proceed.
 if [[ $EUID -eq 0 ]]; then
-    [[ "${SUDO_UID:-0}" =~ ^[0-9]+$ && "${SUDO_UID:-0}" -ne 0 && -n "${SUDO_USER:-}" ]] || {
-        echo 'Run ./install.sh from your normal user account, not a root shell.' >&2
-        exit 1
-    }
-    exec sudo -H -u "$SUDO_USER" -- env -u XDG_CONFIG_HOME -u XDG_DATA_HOME \
-        -u CARGO_HOME -u RUSTUP_HOME -u CARGO_TARGET_DIR \
-        PREFIX="${PREFIX:-/usr/local}" /bin/bash "$APP_DIR/install.sh" "${ORIGINAL_ARGS[@]}"
+    echo 'Run ./install.sh as your normal user, not as root.' >&2
+    echo 'The default prefix needs no privileges; for a system-wide install,' >&2
+    echo 'arrange write access to the prefix yourself and re-run as that user.' >&2
+    exit 1
 fi
 [[ -n "${HOME:-}" ]] || { echo 'HOME not set' >&2; exit 1; }
 export PATH="$HOME/.cargo/bin:$PATH"
-PREFIX="${PREFIX:-/usr/local}"
+
+# A bare ./install.sh installs for the current user. A system or custom prefix
+# is always something the caller asked for by name.
+if [[ "$SYSTEM_INSTALL" == true && -z "$PREFIX" ]]; then
+    PREFIX=/usr/local
+fi
+PREFIX="${PREFIX:-$HOME/.local}"
 [[ "$PREFIX" == /* && "$PREFIX" != *$'\n'* && "$PREFIX" != *$'\r'* ]] || {
     echo 'Install prefix must be an absolute, single-line path.' >&2; exit 2;
 }
@@ -107,87 +128,83 @@ BIN_DIR="$PREFIX/bin"
 # The runtime binaries this installer installs, in one place.
 #
 # Every count in the installer is derived from this list rather than written
-# out: the three places that used to say "4" and the one that said "3" were
-# already inconsistent with each other, and when the list shrank they made the
-# final verification reject an installation it had just performed correctly.
+# out: the places that used to say "4" and the one that said "3" were already
+# inconsistent with each other, and when the list shrank they made the final
+# verification reject an installation it had just performed correctly.
 # A literal next to a list is a second source of truth waiting to be wrong.
 RUNTIME_BINS=(maverick maverickctl)
 RUNTIME_BIN_COUNT="${#RUNTIME_BINS[@]}"
+
+# The session file lives inside the prefix and nowhere else. Display managers
+# generally read only system locations, so a user installation's copy is there
+# for anything that does look in the prefix; installing into a location a
+# display manager actually reads is the job of --xsessions-dir, which is
+# explicit because it is the one case that must leave the prefix.
 XS_DIR="$PREFIX/share/xsessions"
-# Display managers normally search here, not /usr/local/share/xsessions.
-if [[ "$PREFIX" == /usr/local || "$PREFIX" == /usr ]]; then
-    XS_DIR=/usr/share/xsessions
-fi
+
 LOG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/maverick"
-# Use the same artifact directory for build AND --no-build installation.
-# Do not let inherited Cargo settings send root repairs outside this checkout.
-export CARGO_TARGET_DIR="$APP_DIR/target"
+
+# Build where the caller asked. An inherited CARGO_TARGET_DIR is used exactly
+# as given, including when it already holds artifacts from an earlier build;
+# the default lives in the user's cache rather than in the checkout, so merely
+# running the installer never leaves a build tree in the source tree.
+if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
+    CARGO_TARGET_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/maverick/target"
+fi
+export CARGO_TARGET_DIR
 [[ ! -L "$CARGO_TARGET_DIR" ]] || {
-    echo 'Refusing a symlinked target directory; use a real checkout-local target.' >&2; exit 1;
+    echo "Refusing a symlinked target directory: $CARGO_TARGET_DIR" >&2
+    echo 'Point CARGO_TARGET_DIR at a real directory.' >&2; exit 1;
 }
 
-SUDO_KEEPALIVE_PID=""
 INSTALL_TMP=""
-privilege_cleanup() {
-    if [[ -n "$SUDO_KEEPALIVE_PID" ]]; then
-        kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
-        wait "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
-    fi
+STAGE_DIR=""
+# Both cleanups are idempotent and are called from the exit handler, so a
+# failure at any point leaves no staging directory and no temporary file
+# behind. STAGE_DIR is cleared once the set has been committed.
+install_cleanup() {
     if [[ -n "$INSTALL_TMP" ]]; then rm -rf -- "$INSTALL_TMP"; fi
 }
-trap privilege_cleanup EXIT
+stage_cleanup() {
+    if [[ -n "$STAGE_DIR" && -d "$STAGE_DIR" ]]; then rm -rf -- "$STAGE_DIR"; fi
+    STAGE_DIR=""
+}
+trap install_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Decide privileges before the banner, prompts or build. --yes skips installer
-# confirmations, not sudo authentication; cached/NOPASSWD sudo remains valid.
-SYSTEM_INSTALL=false
+# A prefix the caller cannot write is reported, not escalated around. This
+# installer has no privilege to acquire and does not try to acquire one, so an
+# unwritable prefix is a permission error the caller decides how to handle.
 for destination in "$PREFIX" "$BIN_DIR" "$XS_DIR"; do
     parent="$destination"
     while [[ ! -e "$parent" ]]; do parent="$(dirname "$parent")"; done
-    if [[ ! -w "$parent" ]]; then SYSTEM_INSTALL=true; fi
-done
-if [[ "$PREFIX" == /usr/local || "$PREFIX" == /usr ]]; then
-    SYSTEM_INSTALL=true
-fi
-ROOT_ARTIFACTS=""
-if [[ -d "$CARGO_TARGET_DIR" ]]; then
-    ROOT_ARTIFACTS="$(find -P "$CARGO_TARGET_DIR" -xdev -uid 0 -print -quit 2>/dev/null)" \
-        || ROOT_ARTIFACTS="unreadable"
-fi
-if [[ "$SYSTEM_INSTALL" == true || -n "$ROOT_ARTIFACTS" ]]; then
-    command -v sudo >/dev/null || { echo 'sudo is required for installation/target repair.' >&2; exit 1; }
-    printf '%s\n' 'Autorización inicial / Initial authorization (sudo). Cargo runs as your user.'
-    sudo -v || exit 1
-    (
-        timer=""
-        trap 'if [[ -n "$timer" ]]; then kill "$timer" 2>/dev/null || true; fi; exit' TERM INT
-        while true; do
-            sleep 30 & timer=$!
-            wait "$timer" || exit
-            timer=""
-            sudo -n -v || exit
-        done
-    ) </dev/null >/dev/null 2>&1 &
-    SUDO_KEEPALIVE_PID=$!
-fi
-if [[ -n "$ROOT_ARTIFACTS" ]]; then
-    printf '%s\n' 'Reparando target/ / Repairing root-owned build artifacts…'
-    sudo -n find -P "$CARGO_TARGET_DIR" -xdev -uid 0 \
-        -exec chown --no-dereference --from=0 "$(id -u):$(id -g)" -- {} +
-    remaining="$(find -P "$CARGO_TARGET_DIR" -xdev -uid 0 -print -quit)" || {
-        echo 'target is still unreadable; inspect its permissions before building.' >&2; exit 1;
-    }
-    [[ -z "$remaining" && -w "$CARGO_TARGET_DIR" ]] || {
-        echo 'target ownership repair incomplete; refusing to build.' >&2; exit 1;
-    }
-fi
-install_command() {
-    if [[ "$SYSTEM_INSTALL" == true ]]; then
-        sudo -n -- "$@"
-    else
-        "$@"
+    if [[ ! -w "$parent" ]]; then
+        echo "cannot write to $destination (nearest existing parent: $parent)" >&2
+        echo 'Choose a writable prefix, e.g. --prefix "$HOME/.local", or arrange' >&2
+        echo 'write access to this one yourself. This installer does not use sudo.' >&2
+        exit 1
     fi
+done
+
+# A build directory holding another user's files cannot be repaired without
+# privileges this installer does not have, so it is named instead of chowned.
+if [[ -d "$CARGO_TARGET_DIR" ]]; then
+    foreign="$(find -P "$CARGO_TARGET_DIR" -xdev ! -uid "$(id -u)" -print -quit 2>/dev/null)" \
+        || foreign="(unreadable)"
+    if [[ -n "$foreign" ]]; then
+        echo "cargo target directory has files owned by another user:" >&2
+        echo "  $foreign" >&2
+        echo "Repair or remove them, or set CARGO_TARGET_DIR to a directory you own." >&2
+        exit 1
+    fi
+fi
+
+# Every filesystem change goes through here. There is deliberately no privilege
+# branch: the installer does not escalate, so a path it cannot write surfaces
+# as a permission error rather than being worked around.
+install_command() {
+    "$@"
 }
 
 # ── language ─────────────────────────────────────────────────────────────────
@@ -416,7 +433,7 @@ BAR_W=30
 if (( COLS < 64 )); then BAR_W=16; fi
 PANEL_W=48
 
-# ── FIX: _pad() usa wc -m con fallback graceful ─────────────────────────────
+# Pad by display width; falls back to a byte count when wc is unavailable.
 _SPACES="                                                                                                                            "
 HAS_WC=1
 if ! command -v wc >/dev/null 2>&1; then
@@ -511,7 +528,8 @@ CURSOR_HIDDEN=0
 BUILD_PID=""
 
 _on_exit() {
-    privilege_cleanup
+    stage_cleanup
+    install_cleanup
     if [[ ${CURSOR_HIDDEN:-0} -eq 1 ]]; then
         printf '\e[?25h' >&2 || true
     fi
@@ -1063,7 +1081,7 @@ check_disk_space() {
 # ─────────────────────────────────────────────────────────────────────────────
 check_unsupported_os
 
-# FIX: Warn if wc is missing (alignment fallback)
+# Column alignment degrades to bytes when wc is unavailable; say so once.
 if [[ $HAS_WC -eq 0 ]]; then
     printf '  %s⚠%s  %s\n' "$YELLOW" "$RESET" "$(t wc_missing)"
 fi
@@ -1131,7 +1149,7 @@ fi
 DEPS_DETAIL="$(t deps_ok)"
 if [[ -n "$CARGO_VER" ]]; then DEPS_DETAIL="cargo $CARGO_VER"; fi
 
-# FIX: Check disk space before building
+# A release build needs room; a full disk otherwise fails deep in the build.
 if [[ "$NO_BUILD" != true ]]; then
     check_disk_space "$APP_DIR" || true
 fi
@@ -1151,19 +1169,23 @@ _phase_begin 0 "$DEPS_DETAIL"
 if [[ "$NO_BUILD" != true ]]; then
     command -v cargo >/dev/null 2>&1 || die "$(t need_cargo)"
 fi
-# System link check (only when we are about to compile): the GLX FFI links
-# libX11/libX11-xcb and the test helpers need -lX11 -lXcomposite. Without
-# them `cargo build` dies late with a cryptic linker error — fail here with
-# the distro package names instead.
+# System link check (only when we are about to compile). The GLX FFI links
+# libX11 and libX11-xcb; without them `cargo build` dies late with a cryptic
+# linker error, so fail here with the distro package names instead.
+#
+# Only what the installed binaries actually link is probed. libXcomposite is
+# not among them — it is used solely by the C test client in tests/, so
+# requiring its -dev package would block a normal installation over a
+# development-only dependency.
 if [[ "$NO_BUILD" != true ]]; then
     if ! command -v cc >/dev/null 2>&1; then
         die "no C linker (cc) — Arch: pacman -S base-devel · Debian: apt install build-essential · Fedora: dnf groupinstall 'Development Tools'"
     fi
     _x11_probe="$(mktemp /tmp/maverick-x11probe.XXXXXX.c)"
     printf 'int XOpenDisplay(); int main(void){return XOpenDisplay();}\n' >"$_x11_probe"
-    if ! cc -o "${_x11_probe}.out" "$_x11_probe" -lX11 -lXcomposite >/dev/null 2>&1; then
+    if ! cc -o "${_x11_probe}.out" "$_x11_probe" -lX11 -lX11-xcb >/dev/null 2>&1; then
         rm -f "$_x11_probe" "${_x11_probe}.out"
-        die "X11 client libraries not linkable (-lX11 -lXcomposite) — Arch: pacman -S libx11 libxcomposite · Debian: apt install libx11-dev libxcomposite-dev · Fedora: dnf install libX11-devel libXcomposite-devel"
+        die "X11 client libraries not linkable (-lX11 -lX11-xcb) — Arch: pacman -S libx11 · Debian: apt install libx11-dev libxcb1-dev · Fedora: dnf install libX11-devel libxcb-devel"
     fi
     rm -f "$_x11_probe" "${_x11_probe}.out"
 fi
@@ -1180,16 +1202,10 @@ else
     _phase_begin 1 "$(t building_detail)"
     BUILD_LOG="$(mktemp /tmp/maverick-build.XXXXXX)"
 
-    # FIX: el número de crates a compilar se media con un estimado fijo (45
-    # sin compositor / 75 con compositor), heredado de cuando el workspace
-    # tenía muchas más dependencias. Desde que se podó a "zero unnecessary
-    # dependencies" el build real sin compositor compila ~12 crates, pero
-    # `total_crates` solo podía CRECER (`compiled + 5` si `compiled` superaba
-    # el estimado inicial) — nunca bajar — así que la barra quedaba clavada
-    # en algo como "12/45" el build entero, mostrando ~33 compilaciones
-    # pendientes que jamás iban a existir. Contamos el árbol real de
-    # dependencias para los paquetes/features que se van a compilar, con el
-    # viejo estimado solo como último recurso si `cargo tree` falla.
+    # Progress needs a denominator. Count the real dependency tree for the
+    # packages and features actually being compiled; a fixed estimate is only
+    # the last resort when `cargo tree` cannot answer, because an estimate that
+    # can only grow leaves the bar pinned below 100% for the whole build.
     # shellcheck disable=SC2086
     estimated_crates="$(cargo tree --edges normal,build --prefix none $CARGO_FEATURES \
         -p maverick -p maverick-sys 2>/dev/null | sort -u | grep -c . || true)"
@@ -1304,7 +1320,7 @@ else
         exit 1
     fi
     
-    # FIX: Retain or move build log
+    # --keep-log copies the build log somewhere it survives the run.
     if [[ "$KEEP_LOG" == true ]]; then
         mkdir -p "$LOG_DIR" 2>/dev/null || true
         FINAL_LOG_PATH="$LOG_DIR/install.log"
@@ -1326,21 +1342,43 @@ for bin in "${RUNTIME_BINS[@]}"; do
 done
 "$CARGO_TARGET_DIR/release/maverick" --version >/dev/null 2>&1 || die "$(t verify_fail)"
 install_command mkdir -p -- "$BIN_DIR" || die "$(t no_write): $BIN_DIR"
-_animate 70 "$BIN_DIR"
+
+# Stage the whole set before replacing anything. Committing one binary at a
+# time could leave a prefix holding a new maverick beside an old maverickctl,
+# which is a version-skewed pair that still type-checks and still misbehaves.
+# Staging first means a missing artifact, a full disk or a bad destination
+# fails while the installed prefix is still entirely the previous one.
+STAGE_DIR="$BIN_DIR/.maverick-stage.$$"
+install_command mkdir -p -- "$STAGE_DIR" || die "$(t no_write): $STAGE_DIR"
+for bin in "${RUNTIME_BINS[@]}"; do
+    install_command install -m 0755 -- "$CARGO_TARGET_DIR/release/$bin" "$STAGE_DIR/$bin" \
+        || { stage_cleanup; die "stage failed: $bin"; }
+done
+# Verify the staged set before any of it becomes the installed set. A
+# destination that is a directory rather than a file is caught here, while the
+# rename that would have failed is still ahead of us.
+for bin in "${RUNTIME_BINS[@]}"; do
+    [[ -f "$STAGE_DIR/$bin" && -x "$STAGE_DIR/$bin" ]] \
+        || { stage_cleanup; die "staged binary is not executable: $bin"; }
+    if [[ -d "$BIN_DIR/$bin" && ! -L "$BIN_DIR/$bin" ]]; then
+        stage_cleanup
+        die "$BIN_DIR/$bin is a directory; refusing to replace it"
+    fi
+done
+
+# Commit. Each move is a rename within one directory, so a running executable
+# is never truncated (ETXTBSY) and the set lands as a unit.
 n_ok=0
 for bin in "${RUNTIME_BINS[@]}"; do
-    # A same-directory rename avoids truncating a running executable (ETXTBSY).
-    staged="$(install_command mktemp "$BIN_DIR/.${bin}.XXXXXX")"
-    if ! install_command install -m 0755 -- "$CARGO_TARGET_DIR/release/$bin" "$staged" \
-        || ! install_command mv -fT -- "$staged" "$BIN_DIR/$bin"; then
-        install_command rm -f -- "$staged" || true
-        die "install failed: $bin"
-    fi
+    install_command mv -fT -- "$STAGE_DIR/$bin" "$BIN_DIR/$bin" \
+        || { stage_cleanup; die "install failed: $bin"; }
     n_ok=$(( n_ok + 1 ))
     if (( OVERALL < 78 )); then OVERALL=$(( OVERALL + 2 )); fi
     _render "$bin"
     _nap 0.05
 done
+rm -rf -- "$STAGE_DIR"
+STAGE_DIR=""
 _animate 80 "$n_ok/$RUNTIME_BIN_COUNT"
 _phase_end 2 "$n_ok/$RUNTIME_BIN_COUNT · $(t installed)"
 
@@ -1356,18 +1394,39 @@ exec_path="${exec_path//\"/\\\\\"}"
 exec_path="${exec_path//\$/\\\\\$}"
 exec_path="${exec_path//\`/\\\\\`}"
 exec_path="${exec_path//%/%%}"
+if [[ "$WITH_COMPOSITOR" == "no" ]]; then
+    session_comment='Columnar tiling WM — keyboard-driven'
+else
+    session_comment='Columnar tiling WM — scrollable, composited, keyboard-driven'
+fi
 printf '%s\n' \
     '[Desktop Entry]' \
     'Name=maverick' \
-    'Comment=Columnar tiling WM — scrollable, composited, keyboard-driven' \
+    "Comment=$session_comment" \
     "Exec=\"$exec_path\"" \
     'Type=Application' > "$INSTALL_TMP/maverick.desktop"
 install_command mkdir -p -- "$XS_DIR" || die "$(t no_write): $XS_DIR"
 install_command install -m 0644 -- "$INSTALL_TMP/maverick.desktop" "$XS_DIR/maverick.desktop" \
     || die "session install failed: $XS_DIR/maverick.desktop"
-_animate 84 "$XS_DIR"
 SESSION_VALUE="$XS_DIR/maverick.desktop"
-_phase_end 3 "maverick.desktop"
+
+# A display manager usually reads only a system location, so the in-prefix copy
+# alone will not appear in a session chooser. That is why this second copy is
+# opt-in: it is the one write that leaves the prefix, so it happens only when
+# the caller names the directory.
+if [[ -n "$XSESSIONS_DIR" ]]; then
+    xsessions_abs="$(realpath -m -- "$XSESSIONS_DIR")"
+    parent="$xsessions_abs"
+    while [[ ! -e "$parent" ]]; do parent="$(dirname "$parent")"; done
+    [[ -w "$parent" ]] || die "$(t no_write): $xsessions_abs (checked $parent)"
+    install_command mkdir -p -- "$xsessions_abs" || die "$(t no_write): $xsessions_abs"
+    install_command install -m 0644 -- "$INSTALL_TMP/maverick.desktop" \
+        "$xsessions_abs/maverick.desktop" \
+        || die "session install failed: $xsessions_abs/maverick.desktop"
+    SESSION_VALUE="$xsessions_abs/maverick.desktop"
+fi
+_animate 84 "$SESSION_VALUE"
+_phase_end 3 "$SESSION_VALUE"
 
 # ── fase 4 · configuración ───────────────────────────────────────────────────
 _phase_begin 4 ""
@@ -1394,6 +1453,10 @@ case "$CONFIG_ACTION" in
             fi
         fi
         if [[ $wrote -eq 0 ]]; then
+            # No [autostart] table at all: an omitted table keeps the compiled
+            # defaults, whereas an empty `commands = []` is a value of the
+            # wrong shape and the config loader discards it with a warning,
+            # which then fails the --check-config run below.
             if cat > "$CFG_FILE" <<'TOML'
 # Maverick — generated by install.sh
 [general]
@@ -1409,9 +1472,6 @@ action = "spawn:alacritty"
 [[keybindings]]
 key = "Mod4+p"
 action = "spawn:rofi -show drun"
-
-[autostart]
-commands = []
 TOML
             then
                 wrote=1
@@ -1432,25 +1492,42 @@ esac
 
 # ── fase 5 · verificación final ──────────────────────────────────────────────
 _phase_begin 5 ""
+
+# Execute what was installed, by absolute path, and require each to succeed.
+# An executable-bit check proves only that a file exists: a stub, a truncated
+# binary or a stale copy from an earlier install all pass it. Running the real
+# commands is what distinguishes the binary just built from a file that merely
+# occupies its name.
+#
+# `maverickctl session --help` is the check that carries the most weight. The
+# session command group is the feature the installed tree exists to provide, it
+# needs no display, no running instance and no network, and an older
+# maverickctl that predates Sessions answers it as an unknown command with a
+# non-zero status. That makes it a capability probe for a stale install rather
+# than a version string that would have to be invented and kept in step.
+VERIFY_PROBES=(
+    "$BIN_DIR/maverick --version"
+    "$BIN_DIR/maverickctl --help"
+    "$BIN_DIR/maverickctl session --help"
+)
+VERIFY_PROBE_COUNT="${#VERIFY_PROBES[@]}"
 checks=0
-verify_detail=""
-for bin in "${RUNTIME_BINS[@]}"; do
-    if [[ -x "$BIN_DIR/$bin" ]]; then
-        checks=$(( checks + 1 ))
+for probe in "${VERIFY_PROBES[@]}"; do
+    # Word splitting is intended here: each entry is a path plus arguments.
+    # shellcheck disable=SC2086
+    if ! $probe >/dev/null 2>&1; then
+        die "$(t verify_fail): $probe"
     fi
+    checks=$(( checks + 1 ))
+done
+for bin in "${RUNTIME_BINS[@]}"; do
+    [[ -x "$BIN_DIR/$bin" ]] || die "$(t verify_fail): $BIN_DIR/$bin"
 done
 
-# Real post-install verification: every declared binary is present, and the
-# window manager actually runs. The count is compared against the list, not a
-# literal, so adding or removing a binary cannot leave this accepting an
-# incomplete install or rejecting a complete one.
-if [[ "$checks" -ne "$RUNTIME_BIN_COUNT" ]] || ! "$BIN_DIR/maverick" --version >/dev/null 2>&1; then
-    die "$(t verify_fail): $BIN_DIR/maverick"
-fi
 verify_detail="$(t verify_ok)"
 
 _animate 100 "$(t checks_ok)"
-_phase_end 5 "$checks/$RUNTIME_BIN_COUNT ✓ · $verify_detail"
+_phase_end 5 "$checks/$VERIFY_PROBE_COUNT ✓ · $verify_detail"
 _nap 0.35
 
 # ── cerrar el bloque ─────────────────────────────────────────────────────────
@@ -1479,7 +1556,7 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     printf '  %s  export PATH="%s:$PATH"%s\n' "$DIM" "$BIN_DIR" "$RESET"
 fi
 
-# FIX: Show log path if retained
+# Report where the retained log went, if one was kept.
 if [[ -n "$FINAL_LOG_PATH" && -f "$FINAL_LOG_PATH" ]]; then
     echo
     printf '  %s📋%s  %s: %s%s%s\n' "$DIM" "$RESET" "$(t log_saved)" "$GREY" "$FINAL_LOG_PATH" "$RESET"
