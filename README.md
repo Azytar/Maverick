@@ -442,12 +442,60 @@ maverickctl quit --name desktop --confirm
 ```
 
 `maverickctl` also forwards action lines verbatim, for example
-`maverickctl view 3` or `maverickctl wallpaper clear`. Each instance has a
+`maverickctl view 3` or `maverickctl wallpaper clear`; a word it does not
+recognise as a command is passed to the window manager, which is the only thing
+that can tell an action from a query topic from a typo. Each instance has a
 private runtime directory and
 Unix socket under `$XDG_RUNTIME_DIR/maverick/<session-id>/`. Discovery checks
 process identity and socket liveness. Selection prefers `--session`, then `--name`,
 then inherited `MAVERICK_INSTANCE`, then display/TTY context; a global singleton
 can also be selected. Use explicit targeting when testing alongside a live session.
+
+There is no second control binary: `maverick-msg`'s capability is `maverickctl`'s.
+
+### Maverick Sessions
+
+A **session** is a whole graphical unit — a real nested X server, a Maverick, the
+applications launched into it, a control socket, logs and a lifecycle — named,
+reproducible and controllable from that one tool:
+
+```bash
+maverickctl session create debug --resolution 1280x720
+maverickctl exec debug alacritty
+maverickctl window list debug --json
+maverickctl inspect debug
+maverickctl session stop debug
+```
+
+A session can run a specific binary, working directory and arguments, which is
+what makes it a development and debugging tool rather than a second desktop:
+
+```bash
+maverickctl session create debug \
+    --binary ./target/debug/maverick --resolution 1280x720 --debug \
+    -- --debug --log-level trace
+
+maverickctl session create release --binary ./target/release/maverick
+maverickctl session create tiny   --resolution 800x600
+```
+
+`maverickctl` controls windows semantically — by id or by name, with the same
+actions the keybindings use — and never touches X11 itself, so a tool and a
+keypress cannot reach different code:
+
+```bash
+maverickctl window focus  debug firefox
+maverickctl window float  debug 0x42003
+maverickctl camera        debug right
+maverickctl resize        debug +10%
+maverickctl process list  debug --json
+```
+
+The user's own session is `main` and is addressable the same way. Every listing
+has a `--json` form, and ownership is by uid: the runtime directory is `0700`,
+the socket `0600` and peer-checked with `SO_PEERCRED`, and each display has its
+own X cookie. See **[`docs/sessions.md`](docs/sessions.md)** for the model, the
+nested-X-server backend comparison, the lifecycle and the limitations.
 
 **Quit closes the session's managed applications**, not just the WM. Shutdown asks
 clients through `WM_DELETE_WINDOW`, then force-closes survivors after a bounded
@@ -555,9 +603,9 @@ or async-runtime requirement, but still depends on native X11 libraries.
 ├── maverick-render/     # Renderer types/trait (no in-tree implementor)
 ├── maverick-img/        # Image support
 ├── maverick-toml/       # TOML/config support
-├── maverick-sys/        # IPC/control interfaces
+├── maverick-sys/        # IPC/control interfaces, Maverick Sessions
 ├── config/              # Example configuration
-├── docs/                # Documentation assets
+├── docs/                # Documentation (see sessions.md) and assets
 ├── showcase/            # Reproducible technical presentation
 └── tests/               # Integration and X11 tests
 ```

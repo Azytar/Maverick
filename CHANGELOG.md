@@ -5,7 +5,100 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Maverick Sessions**: a whole graphical unit — a real nested X server, a
+  Maverick, the applications launched into it, a control socket, logs and a
+  lifecycle — that is named, reproducible and controllable from `maverickctl`
+  alone. `session create` takes a resolution, a refresh rate, a nested-server
+  backend, the Maverick binary, a working directory, a debug mode, a
+  compositor on/off switch, and passes everything after `--` to Maverick
+  verbatim. `exec`, `shell` and `attach` run a program inside a session with its
+  `DISPLAY`, `XAUTHORITY`, `MAVERICK_SESSION` and `MAVERICK_INSTANCE` already
+  set. `process list|inspect|kill` describe and control the session's process
+  graph, and `window list|inspect|focus|close|move|float|fullscreen` plus
+  `camera`, `resize` and `layout` control it semantically. `inspect`, `logs` and
+  `debug` report what the session is doing; every listing has a `--json` form.
+  The user's own session is addressable as `main` by the same commands. See
+  `docs/sessions.md`.
+- **Window-targeted actions** in the window manager: `focus_window`,
+  `close_window`, `float_window`, `fullscreen_window` and `move_window`, plus a
+  percentage form of the column resize. Each dispatches to the *same* command
+  the corresponding keybinding uses, so a tool and a keypress cannot reach
+  different code.
+- **A nested-X-server backend** with a documented comparison of the
+  alternatives. Xephyr is the default because it is the only one that is both a
+  real X server and visible; Xvfb is available for headless use. Display
+  allocation, the per-session MIT-MAGIC cookie, readiness, teardown and cleanup
+  are backend-independent.
+- **`--session-id`, `--debug` and `--log-level` on `maverick`**: an instance can
+  be published under a fixed name, which is what lets a session directory and a
+  control socket be addressed by session name, and a session started with
+  explicit arguments can set its own log level.
+- **`query inspect`** and a per-monitor `screen`/`workarea` in the state
+  snapshot, so a tool can report what an instance is running without an X
+  connection of its own.
+- **`tests/session-suite.sh`** and **`tests/session-security.sh`**: end-to-end
+  coverage against a real X server, real windows and real applications, and
+  checks of the four boundaries that keep one user's session out of another's
+  reach. Neither simulates anything, and neither reports success when it could
+  not run.
+
+### Security
+
+- **The control socket verifies its peer.** `SO_PEERCRED` reports the
+  credentials the kernel recorded at connect time — the only part of a peer's
+  identity a peer cannot assert — and a connection from any other uid is closed
+  before a handler thread exists and before a byte is read. The owner is read
+  from the kernel inside the server; there is no way to declare one's own.
+- **The runtime directory is `0700`.** It was created with the process umask,
+  which left it at `0754`/`0755` while each session directory was tightened to
+  `0700` — leaking the *names* of sessions, and a name is the address of a
+  control socket.
+- **The control socket and session logs are `0600`**, set at creation rather
+  than after it, so a session's stderr is never briefly world-readable.
+- **Per-session X11 authentication.** Each display gets its own
+  MIT-MAGIC cookie, written straight into the `.Xauthority` format in a `0600`
+  file inside the session directory, and the X server runs with `-nolisten tcp`.
+  No cookie appears in any command output, JSON document or log.
+
 ### Fixed
+
+- **`maverick-msg` is gone.** Its capability — forwarding any line verbatim —
+  is now `maverickctl`'s, with the same engine underneath. A word
+  `maverickctl` does not recognise as a command is passed to the window
+  manager. The installer, the test suite, the config comments and both READMEs
+  name one client.
+- **`MoveWindow(win, dir)` moved the focused window, not `win`.** It called
+  `apply_move_dir`, which acts on the *focused* window in `sel_mon`'s active
+  workspace, so a named window tiled somewhere else was moved in a tree it was
+  not in. It now resolves the monitor, workspace and column the named window is
+  actually in.
+- **`ToggleFullscreen(Some(win))` rearranged the wrong monitor.** It used
+  `sel_mon` for the camera recentre, the pending-focus consumption and the
+  arrange, so on a multi-monitor setup the camera moved and another screen
+  re-arranged. `ToggleFloat` gained the same targeted monitor resolution, which
+  is also why it no longer rejects a target on a different monitor than
+  `sel_mon` — that guard exists for a stale *focus* slot, and an explicit
+  request carries no such ambiguity.
+- **The nested X server's readiness wait had an inverted predicate**, so a
+  healthy server was reported as having exited during startup and every
+  `session create` failed with a reason pointing at an empty log.
+- **`maverickctl` consumed the arguments of the program it launched.**
+  `maverickctl exec debug alacritty --json` ran `alacritty` without `--json`.
+  Everything after the program word is now the program's, and a bare `--` hands
+  the rest over untouched.
+- **The verbatim-forwarding path ignored the line's selection options**, so
+  `maverickctl ping --session debug` resolved the target from context *and* sent
+  the literal text `ping --session debug` as a protocol line. A global option
+  may also now precede the verb.
+- **A signed amount was read as an option**, so `maverickctl resize debug -10%`
+  reported no argument at all. Flags are now recognised from the list this tool
+  actually has; a dash alone is a value.
+- **A session view could report a working directory of "null".** A `null` field
+  read as the four characters `null` rather than as absent.
+
+### Fixed (earlier in this release)
 
 - **Floating windows no longer "jump around by themselves"** (two-authorities
   ping-pong). Root cause: the `ConfigureRequest` sink adopted the client's
