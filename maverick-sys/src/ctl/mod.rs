@@ -768,15 +768,37 @@ fn cmd_quit(tool: &str, args: &[String]) -> ExitCode {
         }
     }
 
-    match discover::quit_by_name(&name) {
-        Ok(_) => {
-            println!("{tool}: '{name}' quit");
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("{tool}: quit failed: {e}");
-            ExitCode::FAILURE
-        }
+    // A session with a record is stopped, not merely asked: the X server under
+    // it belongs to the record, and asking the window manager to quit leaves
+    // that server running with a display claimed and a record that still says
+    // `running`. `stop` already orders the teardown correctly and is a no-op on a
+    // session that is not running, so this is also the idempotent case. An
+    // instance with no record is somebody's own window manager and is left to
+    // `quit_by_name`, which only asks.
+    let managed = crate::session::SessionName::parse(&name)
+        .ok()
+        .filter(|parsed| crate::session::read(parsed).is_some());
+    match managed {
+        Some(parsed) => match crate::session::lifecycle::stop(&parsed) {
+            Ok(_) => {
+                println!("{tool}: '{name}' quit");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{tool}: quit failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        None => match discover::quit_by_name(&name) {
+            Ok(_) => {
+                println!("{tool}: '{name}' quit");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{tool}: quit failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
     }
 }
 

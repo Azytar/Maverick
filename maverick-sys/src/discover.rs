@@ -127,11 +127,19 @@ pub fn find_by_display(display: &str) -> Vec<InstanceInfo> {
 
 /// Ask a single instance (by session id) to quit via its control socket.
 /// Returns the server reply or an error if it can't be reached.
+///
+/// This does not clean up after the instance, and that is deliberate. A managed
+/// session's X server is owned by the session record, not by the window
+/// manager, so unlinking the ficha and socket from here left the X server alive
+/// holding its display while the record still read `running` — and it deleted
+/// the very two files `wm_is_up` uses to tell a live window manager from a dead
+/// one, so the next command reported a running manager as `crashed` and stopped
+/// its display server out from under it. Callers acting on a managed session go
+/// through [`crate::session::lifecycle::stop`], which orders all of that
+/// correctly; this remains the path for an instance nobody has a record of,
+/// where the window manager owns its own socket and removes it on exit.
 pub fn quit_by_name(sid: &str) -> std::io::Result<String> {
-    let reply = control::quit(sid)?;
-    // Socket answered the quit; clean up the ficha too.
-    identity::cleanup_meta(sid);
-    Ok(reply)
+    control::quit(sid)
 }
 
 /// Quit every discovered instance that is still alive.
