@@ -277,37 +277,72 @@ cargo build --release --no-default-features \
   -p maverick -p maverick-sys
 ```
 
-Los binarios normales de runtime son `maverick` y `maverickctl`, bajo
-`target/release/`. Cargo también descubre la utilidad separada `maverick-setup`
-en `src/bin/`; el instalador shell instala los dos binarios de runtime, no esa
-utilidad. Ningún crate instalador de Rust forma
+Los binarios de runtime son `maverick` (el gestor de ventanas) y `maverickctl`
+(herramienta de control y de sesiones), bajo `target/release/`. Esos dos son
+toda la superficie orientada al usuario. Ningún crate instalador de Rust forma
 parte del workspace.
 
 ### Instalar
 
-Ejecuta el instalador como tu usuario normal, no desde un shell de root:
+Ejecuta el instalador como tu usuario normal. El valor por defecto es una
+instalación por usuario que no necesita privilegios:
 
 ```bash
-./install.sh --prefix "$HOME/.local" --yes --without-compositor
-# O en todo el sistema (el script pide sudo para la instalación):
-./install.sh --yes --without-compositor
-# Optar explícitamente por la compilación GL experimental:
-./install.sh --prefix "$HOME/.local" --yes --with-compositor
+./install.sh
 ```
 
-El prefijo por defecto es `/usr/local`, incluso para un invocador no root.
-Las instalaciones de sistema escriben la entrada de sesión en
-`/usr/share/xsessions`; un prefijo de usuario la escribe bajo
-`$prefix/share/xsessions`, que los display managers pueden no descubrir.
-Asegura que `$HOME/.local/bin` esté en `PATH` para una instalación de
-usuario.
+Esto compila e instala en `$HOME/.local`, así que asegúrate de que esté en
+`PATH`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Otras formas:
+
+```bash
+# Sin compositor: build X11 puro, el valor por defecto recomendado.
+./install.sh --yes --without-compositor
+# Instalación en todo el sistema, en /usr/local.
+./install.sh --system
+# Cualquier prefijo explícito.
+./install.sh --prefix /opt/maverick
+# Optar explícitamente por la compilación GL experimental.
+./install.sh --yes --with-compositor
+# Publicar además el archivo de sesión donde lo lee un display manager.
+./install.sh --system --xsessions-dir /usr/share/xsessions
+```
+
+El prefijo es una frontera estricta: el instalador no escribe nada fuera del
+prefijo indicado y nunca ejecuta `sudo`. Un prefijo en el que no puedas
+escribir se informa como error de permisos en lugar de escalarlo, así que una
+instalación en todo el sistema necesita que tú mismo arregles el acceso de
+escritura a `/usr/local` — el instalador te lo dirá claramente si no lo tiene.
+
+La entrada de sesión se escribe dentro del prefijo
+(`$prefix/share/xsessions`). Los display managers normalmente solo leen
+ubicaciones del sistema, y por eso publicarla en otro sitio es la opción
+explícita `--xsessions-dir` y no algo que el instalador haga por su cuenta.
 
 El instalador compila binarios release, ofrece/siembra configuración y
 conserva una config existente con `--yes`. Usa `--no-config` para evitar la
-creación de config. Su primer intento de compilación usa
+creación de config. Ejecuta cada binario instalado antes de informar del éxito,
+así que una instalación parcial o obsoleta falla de forma ruidosa en lugar de
+anunciarse como completa. Su primer intento de compilación usa
 `-C target-cpu=native`, así que usa una compilación Cargo normal cuando
-produzcas artefactos para otras máquinas. Véase `./install.sh --help` para
-las opciones restantes.
+produzcas artefactos para otras máquinas.
+
+`CARGO_TARGET_DIR` se respeta tal cual, incluso si ya contiene artefactos de
+una compilación anterior. Si no está definido, el directorio de compilación es
+un directorio de caché bajo `$XDG_CACHE_HOME`; el checkout nunca se usa como
+directorio de compilación. Véase `./install.sh --help` para las opciones
+restantes.
+
+Para desinstalar, borra los dos binarios de `$prefix/bin` y el archivo de
+sesión de `$prefix/share/xsessions`. No se instala nada más en el prefijo; el
+único otro archivo que el instalador puede escribir es tu propio
+`~/.config/maverick/config.toml`, y un log de compilación retenido bajo
+`~/.local/share/maverick/` si usas `--keep-log`.
 
 ## Ejecución
 

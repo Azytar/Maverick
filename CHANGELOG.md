@@ -5,6 +5,51 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The installer installs for the current user by default.** A bare
+  `./install.sh` now installs into `$HOME/.local` and needs no privileges;
+  `--system` selects `/usr/local`, and any other location is reachable with
+  `--prefix`. The installer never invokes `sudo` and never runs as root: an
+  unwritable prefix is reported as a permission error naming the path, rather
+  than escalated around. A system-wide install therefore needs write access
+  arranged by the caller, and says so if it is missing.
+- **The prefix is a hard boundary.** The installer no longer redirects the X11
+  session file to `/usr/share/xsessions` when another prefix was selected.
+  Everything installed derives from the chosen prefix, and publishing the
+  session file to a system location a display manager reads is now the
+  explicit, documented `--xsessions-dir` option.
+- **Installation is staged before it is committed.** The previous loop
+  installed one binary and renamed it into place before starting the next, so a
+  failure partway through left a prefix holding a new `maverick` beside an old
+  `maverickctl` — a version-skewed pair. The complete set is now staged,
+  verified, and only then moved into the prefix, with a destination that is a
+  directory caught before any rename.
+- **Post-install verification executes the installed binaries.** The final
+  check ran `maverick --version` and tested `-x` on files the install loop had
+  just written, so a 53-byte stub exiting 42 was reported as
+  `2/2 binary functional` with a zero status. The installer now runs
+  `maverick --version`, `maverickctl --help` and `maverickctl session --help`
+  by absolute path from the prefix. The last of these needs no display, no
+  running instance and no network, and an older `maverickctl` that predates
+  Sessions answers it as an unknown command with a non-zero status, so it
+  doubles as a stale-install probe without hard-coding a version string.
+- **`CARGO_TARGET_DIR` is honoured as given.** It was overwritten with
+  `$APP_DIR/target` and stripped from the environment on the privileged
+  re-exec, so an inherited value was ignored, roughly 70 MB of build output was
+  left in the checkout, and `--no-build` was unusable for anyone building to a
+  custom directory. When unset it now defaults to a cache directory under
+  `$XDG_CACHE_HOME`; an existing directory with prior artifacts is fine.
+- **The X11 link pre-flight no longer requires `libXcomposite`.** No shipped
+  binary links it — the `#[link]` attributes and `ldd` agree on `libX11` and
+  `libX11-xcb` alone — so requiring its `-dev` package blocked ordinary
+  installs over a dependency used solely by the C test client in `tests/`.
+- **The generated fallback config no longer fails its own validation.** When
+  `config/config.toml` is absent the installer wrote `[autostart] commands = []`,
+  which the config loader discards as the wrong shape, so `--check-config`
+  could never report the config as clean. The fallback omits the table instead,
+  which keeps the compiled defaults.
+
 ### Added
 
 - **Maverick Sessions**: a whole graphical unit — a real nested X server, a
@@ -138,12 +183,28 @@ All notable changes to this project are documented here. Format follows
 - **`Mod4+Shift+Q` quits natively.** The default quit binding dispatches the
   WM's own `Action::Quit` (`Effect::Quit` → `begin_shutdown`): cooperative
   client close, one global budget, force-kill of stragglers, then `cleanup()`
-  before the process exits 0. The shipped sample config and the
-  `maverick-setup` generator now write `action = "quit"` instead of spawning
+  before the process exits 0. The shipped sample config now writes
+  `action = "quit"` instead of spawning
   `maverickctl quit --confirm`, so no auxiliary process or prompt sits on the
   keyboard quit path.
 
 ### Removed
+
+- **`maverick-setup`.** The host-probe / starter-config generator in
+  `src/bin/` is gone, and `maverickctl` is the single supported control and
+  session interface. The utility was built on every install and then discarded
+  (the installer installs a fixed list that never included it), and it could
+  not succeed: its default keybind table still emitted the removed
+  `layout:grid` action, so `--write` always exited non-zero and left the invalid
+  config it had already written on disk. `theme_palette`'s doc no longer claims
+  a synchronisation obligation with a second hardcoded list of theme names.
+- **An orphan session implementation.** `src/core/session.rs` defined
+  `PersistedSession`, `ValidatedSession`, `SessionStage` and
+  `SESSION_SCHEMA_VERSION` behind a staged `snapshot → parse → validate →
+  commit` pipeline, but no `mod session;` ever declared it, so it had never
+  been compiled and nothing referenced it. `src/core/mod.rs` nevertheless
+  advertised it as a live module. Graphical sessions are modelled in
+  `maverick_sys::session`; the module map now says so.
 
 - **Grid layout.** The `Grid` mode described under `[0.18.4]` is no longer
   present. `LayoutKind` now has the single variant `Column`, the layout

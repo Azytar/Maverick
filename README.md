@@ -246,32 +246,68 @@ cargo build --release --no-default-features \
   -p maverick -p maverick-sys
 ```
 
-The normal runtime binaries are `maverick` and `maverickctl`, under
-`target/release/`. Cargo also discovers the separate `maverick-setup` utility in
-`src/bin/`; the shell installer installs the two runtime binaries, not that
-utility. No Rust installer crate is part of the workspace.
+The runtime binaries are `maverick` (the window manager) and `maverickctl` (its
+control and session tool), under `target/release/`. Those two are the whole
+user-facing surface. No Rust installer crate is part of the workspace.
 
 ### Install
 
-Run the installer as your normal user, not from a root shell:
+Run the installer as your normal user. The default is a per-user install that
+needs no privileges:
 
 ```bash
-./install.sh --prefix "$HOME/.local" --yes --without-compositor
-# Or system-wide (the script requests sudo for installation):
-./install.sh --yes --without-compositor
-# Explicitly opt into the experimental GL build:
-./install.sh --prefix "$HOME/.local" --yes --with-compositor
+./install.sh
 ```
 
-The default prefix is `/usr/local`, including for a non-root caller. System installs
-write the session entry to `/usr/share/xsessions`; a user prefix writes it under
-`$prefix/share/xsessions`, which display managers may not discover. Ensure
-`$HOME/.local/bin` is on `PATH` for a user install.
+That builds and installs into `$HOME/.local`, so make sure it is on `PATH`:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Other forms:
+
+```bash
+# Skip the compositor: a pure X11 build, the recommended default.
+./install.sh --yes --without-compositor
+# System-wide install into /usr/local.
+./install.sh --system
+# Any explicit prefix.
+./install.sh --prefix /opt/maverick
+# Explicitly opt into the experimental GL build.
+./install.sh --yes --with-compositor
+# Additionally publish the session file where a display manager reads it.
+./install.sh --system --xsessions-dir /usr/share/xsessions
+```
+
+The prefix is a hard boundary: the installer writes nothing outside the prefix
+it was given, and it never runs `sudo`. A prefix you cannot write is reported
+as a permission error rather than escalated around, so a system-wide install
+needs write access to `/usr/local` arranged by you — the installer will tell
+you so plainly if it does not have it.
+
+The session entry is written inside the prefix (`$prefix/share/xsessions`).
+Display managers generally read only system locations, which is why publishing
+it elsewhere is the explicit `--xsessions-dir` option rather than something the
+installer does on its own.
 
 The installer builds release binaries, offers/seeds configuration, and retains an
-existing config with `--yes`. Use `--no-config` to avoid config creation. Its first
-build attempt uses `-C target-cpu=native`, so use a normal Cargo build when producing
-artifacts for other machines. See `./install.sh --help` for the remaining options.
+existing config with `--yes`. Use `--no-config` to avoid config creation. It runs
+each installed binary before reporting success, so a partial or stale install
+fails loudly instead of being announced as complete. Its first build attempt uses
+`-C target-cpu=native`, so use a normal Cargo build when producing artifacts for
+other machines.
+
+`CARGO_TARGET_DIR` is honoured as given, including when it already holds
+artifacts from an earlier build. When unset, the build directory is a cache
+directory under `$XDG_CACHE_HOME`; the checkout is never used as a build
+directory. See `./install.sh --help` for the remaining options.
+
+To remove an installation, delete the two binaries from `$prefix/bin` and the
+session file from `$prefix/share/xsessions`. Nothing else is installed into the
+prefix; the only other file the installer may write is your own
+`~/.config/maverick/config.toml`, and a retained build log under
+`~/.local/share/maverick/` if you pass `--keep-log`.
 
 ## Running
 
