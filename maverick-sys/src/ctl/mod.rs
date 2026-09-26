@@ -40,15 +40,65 @@ pub mod windows;
 
 pub use windows::WindowInfo;
 
-/// Entry point shared by both control binaries.
+/// Split leading global options off the front of an argument list.
+///
+/// Returns `(options, rest)` where `rest` starts with the verb. Only the flags
+/// this tool owns are lifted, and a flag that takes a value lifts the value
+/// with it — otherwise `--session` would be recognised as a flag and `debug`
+/// as the verb.
+fn split_leading_options(args: &[String]) -> (Vec<String>, Vec<String>) {
+    const VALUE_FLAGS: &[&str] = &["--session", "-s", "--name", "-n"];
+    let mut lifted = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if VALUE_FLAGS.contains(&arg) {
+            match args.get(i + 1) {
+                Some(value) => {
+                    lifted.push(arg.to_string());
+                    lifted.push(value.clone());
+                    i += 2;
+                }
+                // A trailing option with no value is passed through untouched
+                // so the verb's own parser can report it.
+                None => {
+                    lifted.push(arg.to_string());
+                    i += 1;
+                }
+            }
+        } else if arg == "--json" || arg == "-j" || arg == "--yes" || arg == "-y" {
+            lifted.push(arg.to_string());
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    (lifted, args[i..].to_vec())
+}
+
+/// Entry point shared by the control binary.
 pub fn main_with_args(tool: &str, args: Vec<String>) -> ExitCode {
     if args.is_empty() {
         usage(tool);
         return ExitCode::FAILURE;
     }
 
-    let cmd = args[0].as_str();
-    let rest = &args[1..];
+    // A global option may come *before* the verb — `maverickctl --session debug
+    // window list` is how a shell completion or a script usually spells it — so
+    // leading options are lifted off before the verb is matched. Without this
+    // the verb lookup sees `--session`, finds no command, and falls through to
+    // the verbatim-forwarding path, which tries to send a whole option line to
+    // an instance it was never told about.
+    let (leading, tail) = split_leading_options(&args);
+    let cmd = tail.first().map(String::as_str).unwrap_or("");
+
+    // The verb's own arguments, with the lifted options put back at the front:
+    // both the legacy parser and the session-aware one scan for their flags
+    // wherever they appear and read positionals after them, so this is the
+    // order both already expect.
+    let mut sub_args = leading.clone();
+    sub_args.extend_from_slice(&tail[1..]);
+    let rest = &sub_args[..];
 
     match cmd {
         "-h" | "--help" | "help" | "h" => {
@@ -104,7 +154,9 @@ pub fn main_with_args(tool: &str, args: Vec<String>) -> ExitCode {
             // every *documented* command is handled above and `usage` lists
             // them all.
             let _ = other;
-            let line = args.join(" ");
+            let mut line = leading.clone();
+            line.extend_from_slice(&tail);
+            let line = line.join(" ");
             cmd_forward(tool, &line)
         }
     }
@@ -781,11 +833,32 @@ fn cmd_prune(_tool: &str) -> ExitCode {
 /// query ("query tree"), a raw protocol word ("state", "quit"), or an action
 /// ("focus-right", "view 3"). Resolution order: raw command words first, then
 /// `query <topic>` (structured), then fall back to dispatching.
+/// Forward a line to a window manager verbatim.
+///
+/// The line's *selection* options are stripped off before it is forwarded, and
+/// used to resolve the target instead. This is the one place where a flag would
+/// otherwise be silently dropped: `maverickctl ping --session debug` used to
+/// resolve the target from context and then send the literal text
+/// `ping --session debug` as a protocol line, which the window manager
+/// correctly refused — so the user saw a protocol error instead of a ping of
+/// the session they named. Selection is this tool's business; the rest of the
+/// line is the window manager's.
 fn cmd_forward(tool: &str, line: &str) -> ExitCode {
-    let name = match resolve_target(tool, &None, &None) {
+    let args: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+    let o = parse_opts_default(&args);
+    let name = match resolve_target(tool, &o.name, &o.session) {
         Some(n) => n,
         None => return ExitCode::FAILURE,
     };
+    // What is left after removing the options is the payload. Reassembled with
+    // single spaces: the protocol is line-based and whitespace-separated, and
+    // rejoining is what makes `query  tree` and `query tree` the same request.
+    let payload = args
+        .iter()
+        .zip(o.positional.iter())
+        .map(|(_, word)| word.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
     use crate::identity::{DISPATCH_CMD, IDENTIFY_CMD, PING_CMD, QUERY_CMD};
     // Require a whitespace delimiter after `query`/`dispatch`, mirroring the
     // server (`control::dispatch_line`): `queryfoo` must fall through to
@@ -798,7 +871,7 @@ fn cmd_forward(tool: &str, line: &str) -> ExitCode {
             None
         }
     }
-    let res: std::io::Result<String> = match line.trim() {
+    let res: std::io::Result<String> = match payload.as_str() {
         "ping" => control::send_command(&name, PING_CMD),
         "identify" => control::send_command(&name, IDENTIFY_CMD),
         "state" => control::state(&name),

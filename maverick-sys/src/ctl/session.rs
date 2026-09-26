@@ -636,17 +636,58 @@ fn default_shell() -> Vec<String> {
 /// the window, and reading the first positional as the selector would address a
 /// session name as if it were a window.
 pub fn split_session_and_rest(c: &Ctl, args: &[String]) -> Option<(String, Vec<String>)> {
-    let rest: Vec<String> = args
-        .iter()
-        .filter(|a| !a.starts_with('-') && !c.is_own_flag(a))
-        .cloned()
-        .collect();
+    let rest: Vec<String> = args.iter().filter(|a| !is_flag(a, c)).cloned().collect();
     match c.explicit_session() {
         Some(explicit) => Some((explicit.to_string(), rest)),
         None => rest
             .split_first()
             .map(|(name, tail)| (name.clone(), tail.to_vec())),
     }
+}
+
+/// Every flag name this tool recognises, including the ones a subcommand claims.
+///
+/// Listed rather than guessed from "does it start with a dash", because that
+/// guess is wrong in both directions: `+10%` and `-10%` are amounts, and a
+/// command word may begin with a dash. Both were being read as options, so
+/// `resize session -10%` found nothing to resize.
+const KNOWN_FLAGS: &[&str] = &[
+    "--json",
+    "-j",
+    "--yes",
+    "-y",
+    "--session",
+    "-s",
+    "--name",
+    "-n",
+    "--wait",
+    "-w",
+    "--inherit",
+    "-i",
+    "--force",
+    "-f",
+    "-9",
+    "--xserver",
+    "-x",
+    "--follow",
+    "--window",
+    "--help",
+    "-h",
+    "--keep",
+];
+
+/// True if an argument is one of this tool's own flags.
+///
+/// A leading dash alone is not enough: an amount, or a command word like
+/// `--weird`, is a value. An argument counts as a flag when it is one this tool
+/// recognises, including with a value attached (`--json=x`) — never on the dash
+/// alone.
+fn is_flag(arg: &str, c: &Ctl) -> bool {
+    if !arg.starts_with('-') {
+        return false;
+    }
+    let name = arg.split('=').next().unwrap_or(arg);
+    c.is_own_flag(name) || KNOWN_FLAGS.contains(&name)
 }
 
 /// A `maverickctl <verb> <session> <command…>` call, with the command split off.

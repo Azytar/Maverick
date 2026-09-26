@@ -71,3 +71,23 @@ pub fn oversized_text(min_len: usize, max_len: usize) -> impl Strategy<Value = S
         s
     })
 }
+
+/// Point `XDG_RUNTIME_DIR` at an empty throwaway directory for this test binary.
+///
+/// The CLI entry point resolves its target by reading the runtime directory, and
+/// an unknown word is *forwarded* to whatever instance that resolves to. Without
+/// isolation the properties here would depend on whether the machine running
+/// them happens to have a live window manager — and, worse, `list` and `prune`
+/// would read and delete the developer's real sessions.
+///
+/// The value is set once and to the same path for every test in the binary, so
+/// two tests racing to set it cannot disagree.
+pub fn isolate_runtime_dir() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("maverick-ctl-props-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("XDG_RUNTIME_DIR", &dir);
+    });
+}

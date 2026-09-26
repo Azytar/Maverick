@@ -11,9 +11,17 @@ use maverick_sys::ctl::main_with_args;
 use proptest::prelude::*;
 use std::process::ExitCode;
 
-/// Admin words that would reach for an instance, a socket or the filesystem.
-/// Excluded so the property can never touch a running window manager.
-const INSTANCE_WORDING: [&str; 14] = [
+/// Every word `maverickctl` handles itself, and every word it would forward to
+/// an instance.
+///
+/// Excluded from the random-word property for two reasons that used to be one:
+/// a handled word must produce its *own* documented exit code (a separate
+/// property below), and a word the tool does not know is now forwarded verbatim
+/// — so a random word *is* a request to act on whatever instance the context
+/// resolves to. The list has to keep up with the command surface, or the
+/// property would start failing the day a verb is added.
+const INSTANCE_WORDING: [&str; 26] = [
+    // instance commands
     "list",
     "ls",
     "state",
@@ -28,7 +36,25 @@ const INSTANCE_WORDING: [&str; 14] = [
     "quit-all",
     "restart",
     "reload",
+    "prune",
+    // sessions
+    "session",
+    "sessions",
+    "sess",
+    "exec",
+    "shell",
+    "attach",
+    // windows, processes and layout
+    "window",
+    "win",
+    "process",
+    "proc",
+    "camera",
 ];
+
+/// Every word that is *also* a handled command but not an instance word, i.e.
+/// the read-only verbs that only print.
+const LOCAL_VERBS: [&str; 3] = ["resize", "layout", "inspect"];
 
 /// A word the admin tool can be given that decides its exit code without
 /// leaving the process: the help forms, and anything it does not know.
