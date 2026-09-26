@@ -22,7 +22,7 @@
 //! ignores it rather than guessing.
 
 use crate::core::wallpaper::WallpaperMode;
-use crate::types::{Action, Dir, LayoutKind, WallpaperCmd};
+use crate::types::{Action, Dir, LayoutKind, WallpaperCmd, WindowId};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -87,8 +87,14 @@ pub fn name(a: &Action) -> &'static str {
         Action::ToggleFloat => "toggle_float",
         Action::ToggleFullscreen => "toggle_fullscreen",
         Action::ToggleMaximize => "toggle_maximize",
+        Action::FocusWindow(..) => "focus_window",
+        Action::MoveWindow(..) => "move_window",
+        Action::CloseWindow(..) => "close_window",
+        Action::ToggleFloatWindow(..) => "float_window",
+        Action::ToggleFullscreenWindow(..) => "fullscreen_window",
         Action::SetLayout(_) => "set_layout",
         Action::GrowCol(_) => "grow_col",
+        Action::GrowColPct(_) => "grow_col_pct",
         Action::NewColumn => "new_column",
         Action::CollapseColumn => "collapse_column",
         Action::View(_) => "view",
@@ -116,6 +122,42 @@ fn dir_from(s: &str) -> Option<Dir> {
         "prev" => Some(Dir::Prev),
         _ => None,
     }
+}
+
+/// Parse a window id as a control client writes it.
+///
+/// Both spellings an id appears in are accepted: hexadecimal (`0x42003`, what
+/// `maverickctl window list` prints and what the EWMH conversation uses) and
+/// plain decimal. Nothing else is — a trailing word, an empty argument, a
+/// negative number all fail, because an id that parsed to *some* number would
+/// address a window the caller did not name.
+///
+/// Zero is refused because it is not a window: X11 spells "no window" as 0, so
+/// accepting it would turn a failed lookup into a request to act on nothing.
+fn parse_window_id(s: &str) -> Option<WindowId> {
+    let t = s.trim();
+    let parsed = match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok(),
+        None => t.parse::<u32>().ok(),
+    }?;
+    (parsed != 0).then_some(parsed)
+}
+
+/// Split `"<dir> <id>"` into its parts, for the one window-targeted action that
+/// takes a direction as well as a target.
+fn dir_and_window(arg: &str) -> Option<(Dir, WindowId)> {
+    let (dir, id) = arg.split_once(char::is_whitespace)?;
+    Some((dir_from(dir)?, parse_window_id(id)?))
+}
+
+/// Parse a signed percentage, with or without the sign character a user types.
+///
+/// `+10%`, `10`, `-5%` and `-5` all mean the same three things respectively;
+/// the trailing `%` is stripped rather than required because a control client
+/// that already rendered the number as a percentage should not have to
+/// reproduce the decoration.
+fn parse_percent(s: &str) -> Option<f32> {
+    s.trim().trim_end_matches('%').trim().parse::<f32>().ok()
 }
 
 fn layout_from(s: &str) -> Option<LayoutKind> {
@@ -205,6 +247,34 @@ pub fn parse(input: &str) -> Option<Action> {
         "toggle_float" => none_if_arg(has_arg, Action::ToggleFloat),
         "toggle_fullscreen" => none_if_arg(has_arg, Action::ToggleFullscreen),
         "toggle_maximize" => none_if_arg(has_arg, Action::ToggleMaximize),
+        // Window-targeted verbs. Not in the `ACTIONS` table: their target is
+        // resolved at dispatch time by whoever asks, so there is no fixed
+        // argument to put in a TOML keymap — they exist for the control
+        // channel, where the target is part of the request.
+        "focus_window" => has_arg
+            .then(|| parse_window_id(arg))
+            .flatten()
+            .map(Action::FocusWindow),
+        "close_window" | "kill_window" => has_arg
+            .then(|| parse_window_id(arg))
+            .flatten()
+            .map(Action::CloseWindow),
+        "float_window" | "toggle_float_window" => has_arg
+            .then(|| parse_window_id(arg))
+            .flatten()
+            .map(Action::ToggleFloatWindow),
+        "fullscreen_window" | "toggle_fullscreen_window" => has_arg
+            .then(|| parse_window_id(arg))
+            .flatten()
+            .map(Action::ToggleFullscreenWindow),
+        "move_window" => has_arg
+            .then(|| dir_and_window(arg))
+            .flatten()
+            .map(|(dir, win)| Action::MoveWindow(dir, win)),
+        "grow_col_pct" => has_arg
+            .then(|| parse_percent(arg))
+            .flatten()
+            .map(Action::GrowColPct),
         "set_layout" => has_arg
             .then(|| layout_from(arg))
             .flatten()
@@ -343,6 +413,137 @@ mod tests {
                 Some(a.clone()),
                 "name->parse round trip failed for {a:?}",
             );
+        }
+    }
+
+    /// A window id arrives from a control client in whichever spelling it was
+    /// printed in. Both must resolve to the same window, and everything else
+    /// must fail: an id that parsed to *some* number would address a window the
+    /// caller did not name.
+    #[test]
+    fn window_ids_parse_in_every_spelling_a_client_prints() {
+        for text in ["0x42003", "0X42003", "270339"] {
+            assert_eq!(parse_window_id(text), Some(0x42003), "{text}");
+        }
+        for bad in [
+            "",
+            "  ",
+            "0x",
+            "0xZZ",
+            "-1",
+            "0",
+            "0x0",
+            "42003 42004",
+            "42003x",
+            "twelve",
+        ] {
+            assert_eq!(parse_window_id(bad), None, "{bad:?} must not parse");
+        }
+    }
+
+    /// Zero is X11's spelling of "no window"; accepting it would turn a failed
+    /// lookup into a request to act on nothing.
+    #[test]
+    fn a_zero_window_id_is_refused() {
+        assert_eq!(parse_window_id("0"), None);
+        assert_eq!(parse_window_id("0x0"), None);
+        assert!(parse("focus_window 0").is_none());
+    }
+
+    #[test]
+    fn window_targeted_actions_round_trip() {
+        let cases: &[(Action, &str)] = &[
+            (Action::FocusWindow(0x42003), "focus_window:0x42003"),
+            (Action::CloseWindow(0x42003), "close_window:0x42003"),
+            (Action::ToggleFloatWindow(0x42003), "float_window:0x42003"),
+            (
+                Action::ToggleFullscreenWindow(0x42003),
+                "fullscreen_window:0x42003",
+            ),
+            (
+                Action::MoveWindow(Dir::Left, 0x42003),
+                "move_window:left 0x42003",
+            ),
+        ];
+        for (action, text) in cases {
+            assert_eq!(parse(text), Some(action.clone()), "{text}");
+            assert_eq!(name(action), text.split([':', ' ']).next().expect("verb"));
+        }
+    }
+
+    /// A control client and a keybinding reach the same `Action`, so an alias
+    /// is a convenience, not a second behaviour.
+    #[test]
+    fn window_targeted_aliases_name_the_same_action() {
+        for (alias, canonical) in [
+            ("kill_window:0x1", "close_window:0x1"),
+            ("toggle_float_window:0x1", "float_window:0x1"),
+            ("toggle_fullscreen_window:0x1", "fullscreen_window:0x1"),
+        ] {
+            assert_eq!(parse(alias), parse(canonical), "{alias}");
+        }
+    }
+
+    /// A percentage is what a user means by "ten percent wider", and both the
+    /// sign a user types and the `%` decoration are optional decoration.
+    #[test]
+    fn percentages_parse_with_or_without_their_decoration() {
+        for (text, want) in [
+            ("+10%", 10.0),
+            ("10%", 10.0),
+            ("10", 10.0),
+            ("-5%", -5.0),
+            ("-5", -5.0),
+            (" 0.5%", 0.5),
+        ] {
+            let input = format!("grow_col_pct:{text}");
+            assert_eq!(parse(&input), Some(Action::GrowColPct(want)), "{input}");
+        }
+        for bad in ["", "%", "ten%", "+%"] {
+            let input = format!("grow_col_pct:{bad}");
+            assert_eq!(parse(&input), None, "{input:?} must not parse");
+        }
+        // The colon form and the space form are the same request.
+        assert_eq!(parse("grow_col_pct +10%"), parse("grow_col_pct:+10%"));
+    }
+
+    /// `move_window` is the one window-targeted verb that takes a direction too,
+    /// and both halves have to be present and valid.
+    #[test]
+    fn move_window_needs_a_direction_and_an_id() {
+        assert_eq!(
+            parse("move_window:right 0x2a"),
+            Some(Action::MoveWindow(Dir::Right, 0x2a))
+        );
+        for bad in [
+            "move_window 0x2a",
+            "move_window:sideways 0x2a",
+            "move_window:right",
+            "move_window:right 0",
+        ] {
+            assert_eq!(parse(bad), None, "{bad:?} must not parse");
+        }
+    }
+
+    /// These verbs are not in the `ACTIONS` table on purpose — a keymap has no
+    /// place to put a target resolved at dispatch time — so the table-driven
+    /// tests must not start expecting them.
+    #[test]
+    fn window_targeted_verbs_are_not_keymap_actions() {
+        for (verb, sample) in [
+            ("focus_window", "0x1"),
+            ("close_window", "0x1"),
+            ("float_window", "0x1"),
+            ("fullscreen_window", "0x1"),
+            ("move_window", "left 0x1"),
+            ("grow_col_pct", "10%"),
+        ] {
+            assert!(
+                !ACTIONS.iter().any(|(name, _)| *name == verb),
+                "{verb} must not be offered as a keymap action"
+            );
+            let input = format!("{verb}:{sample}");
+            assert!(parse(&input).is_some(), "{input} must parse");
         }
     }
 

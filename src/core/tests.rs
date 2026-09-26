@@ -3067,7 +3067,7 @@ mod unit_tests {
                     live.remove(idx);
                 }
                 8 => {
-                    run_cmd(&mut engine, ToggleFloat);
+                    run_cmd(&mut engine, ToggleFloat(None));
                 }
                 9 => {
                     run_cmd(&mut engine, ToggleFullscreen(None));
@@ -3736,7 +3736,7 @@ mod unit_tests {
                 }
                 // Float
                 5 => {
-                    engine.execute(ToggleFloat);
+                    engine.execute(ToggleFloat(None));
                 }
                 // Manage a window on a randomly-selected monitor/workspace so the
                 // deferral can be bound to a monitor/workspace that is NOT the
@@ -4489,13 +4489,13 @@ mod unit_tests {
         engine.state.add_client(Client::new(1, mi, ws_i));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, engine.cfg.column_width);
         engine.state.monitors[mi].focused = Some(1);
-        ToggleFloat.execute(&mut engine.state, &mut engine.cfg);
+        ToggleFloat(None).execute(&mut engine.state, &mut engine.cfg);
         assert!(engine.state.clients.get(&1).unwrap().is_float());
         assert!(
             !engine.state.clients.get(&1).unwrap().is_native_float(),
             "a torn-off tile must NOT acquire the native-float origin"
         );
-        ToggleFloat.execute(&mut engine.state, &mut engine.cfg);
+        ToggleFloat(None).execute(&mut engine.state, &mut engine.cfg);
         assert!(!engine.state.clients.get(&1).unwrap().is_float());
         assert!(!engine.state.clients.get(&1).unwrap().is_native_float());
 
@@ -4508,13 +4508,13 @@ mod unit_tests {
         engine.state.add_client(f);
         engine.state.monitors[mi].workspaces[ws_i].floats.push(2);
         engine.state.monitors[mi].focused = Some(2);
-        ToggleFloat.execute(&mut engine.state, &mut engine.cfg);
+        ToggleFloat(None).execute(&mut engine.state, &mut engine.cfg);
         assert!(!engine.state.clients.get(&2).unwrap().is_float());
         assert!(
             engine.state.clients.get(&2).unwrap().is_native_float(),
             "tiled mode must not erase a native float's origin"
         );
-        ToggleFloat.execute(&mut engine.state, &mut engine.cfg);
+        ToggleFloat(None).execute(&mut engine.state, &mut engine.cfg);
         assert!(engine.state.clients.get(&2).unwrap().is_float());
         assert!(engine.state.clients.get(&2).unwrap().is_native_float());
     }
@@ -4689,7 +4689,7 @@ mod unit_tests {
             .expect("tiled window in Desired")
             .rect;
         engine.state.clients.get_mut(&1).unwrap().geom = tile;
-        crate::core::commands::ToggleFloat.execute(&mut engine.state, &mut engine.cfg);
+        crate::core::commands::ToggleFloat(None).execute(&mut engine.state, &mut engine.cfg);
         {
             let c = engine.state.clients.get(&1).unwrap();
             assert!(c.is_float(), "toggle made it float");
@@ -5009,7 +5009,7 @@ mod unit_tests {
                 }
                 // Float toggle.
                 4 => {
-                    engine.execute(ToggleFloat);
+                    engine.execute(ToggleFloat(None));
                 }
                 // MoveResize: a valid rect, applied as a self-resize (float-follow).
                 5 => {
@@ -5814,7 +5814,7 @@ mod unit_tests {
         assert_eq!(engine.state.clients.get(&1).unwrap().geom, g1);
 
         // convert back to tiled
-        aud_run_cmd(&mut engine, crate::core::commands::ToggleFloat);
+        aud_run_cmd(&mut engine, crate::core::commands::ToggleFloat(None));
         assert!(
             !engine.state.clients.get(&1).unwrap().is_float(),
             "window back to tiled"
@@ -5836,7 +5836,7 @@ mod unit_tests {
         t_manage(&mut engine, 1);
 
         // convert to float
-        aud_run_cmd(&mut engine, crate::core::commands::ToggleFloat);
+        aud_run_cmd(&mut engine, crate::core::commands::ToggleFloat(None));
         assert!(engine.state.clients.get(&1).unwrap().is_float());
         // client changes geometry
         let g1 = Rect::new(200, 150, 400, 250);
@@ -5844,7 +5844,7 @@ mod unit_tests {
         assert_eq!(engine.state.clients.get(&1).unwrap().geom, g1);
 
         // back to tiled — geometry authority returns to the WM
-        aud_run_cmd(&mut engine, crate::core::commands::ToggleFloat);
+        aud_run_cmd(&mut engine, crate::core::commands::ToggleFloat(None));
         assert!(!engine.state.clients.get(&1).unwrap().is_float());
 
         let desired = pipeline_desired(&engine, mi);
@@ -6589,7 +6589,7 @@ mod unit_tests {
                     engine.execute(ToggleMaximize(None));
                 }
                 4 => {
-                    engine.execute(ToggleFloat);
+                    engine.execute(ToggleFloat(None));
                 }
                 5 => {
                     // MoveResize on an existing float.
@@ -7287,7 +7287,7 @@ mod unit_tests {
                 }
                 // 5: Float toggle.
                 5 => {
-                    run!(ToggleFloat);
+                    run!(ToggleFloat(None));
                 }
                 // 6: MoveResize (valid rect) on an already-floating window.
                 6 => {
@@ -8245,6 +8245,223 @@ mod unit_tests {
     /// If the focused window belongs to a DIFFERENT monitor than the selected one
     /// (logical focus corruption), `ToggleFloat` must not mutate the selected
     /// monitor's trees (no `remove from tree A / insert into floating B` split).
+    /// A window-targeted action must reach the window it was asked about, not
+    /// the one that happened to be focused. Every window-targeting action is
+    /// checked against a *different* focused window, because a test that
+    /// targeted the focused window would pass even if the argument were ignored.
+    #[test]
+    fn window_targeted_actions_ignore_the_focused_window() {
+        use crate::core::Effect;
+        use crate::types::{Action, Dir};
+        // Three columns, focus the middle one, target the ones on either side.
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        for win in [1u32, 2, 3] {
+            engine.state.add_client(Client::new(win, mi, ws_i));
+            engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, 0.5);
+        }
+        engine.state.monitors[mi].focused = Some(2);
+        let order = |e: &Engine| -> Vec<u32> {
+            e.state.monitors[mi].workspaces[ws_i]
+                .columns
+                .iter()
+                .filter_map(|c| c.windows.first().copied())
+                .collect()
+        };
+        assert_eq!(order(&engine), vec![1, 2, 3]);
+
+        // Move the *left* window right: it swaps past the focused one.
+        engine.dispatch(Action::MoveWindow(Dir::Right, 1));
+        assert_eq!(order(&engine), vec![2, 1, 3]);
+        engine.dispatch(Action::MoveWindow(Dir::Left, 1));
+        assert_eq!(order(&engine), vec![1, 2, 3]);
+
+        // Float the *right* window; the focused one must be untouched.
+        engine.dispatch(Action::ToggleFloatWindow(3));
+        assert!(engine.state.clients[&3].is_float(), "the target must float");
+        assert!(
+            !engine.state.clients[&2].is_float(),
+            "the focused window must be untouched"
+        );
+        assert_eq!(order(&engine), vec![1, 2], "a float leaves the column tree");
+
+        // Focus is a *sink* decision: the core emits the intent and the X11
+        // sink applies it (and updates `monitors[mi].focused` with it), so what
+        // the pure engine can be asked for is the effect, not the resulting
+        // focus. Asserting on the effect keeps the test on the side of the
+        // boundary the action actually lives on.
+        let effects = engine.dispatch(Action::FocusWindow(3));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::FocusWindow(Some(3)))),
+            "focus_window must emit the targeted id: {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::FocusWindow(Some(2)))),
+            "the focused window must not be re-focused: {effects:?}"
+        );
+    }
+
+    /// Fullscreen and float have to move the *targeted* window's monitor, not
+    /// `sel_mon`: the camera recentre, the pending-focus consumption and the
+    /// arrange are all monitor-indexed, and running them against the selected
+    /// monitor would rearrange the wrong screen and move the camera in a window
+    /// the user is not looking at.
+    #[test]
+    fn a_targeted_window_arranges_its_own_monitor() {
+        use crate::core::Effect;
+        use crate::types::Action;
+        let mut engine = setup_engine_multi();
+        // Window 2 lives on monitor 1 while monitor 0 stays selected.
+        engine.state.add_client(Client::new(2, 1, 0));
+        engine.state.monitors[1].workspaces[0].add_tiled(2, 1.0);
+        engine.state.monitors[0].focused = None;
+        engine.state.sel_mon = 0;
+
+        let effects = engine.dispatch(Action::ToggleFloatWindow(2));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ArrangeMonitor(1))),
+            "the wrong monitor was arranged: {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::ArrangeMonitor(0))),
+            "the selected monitor must not be arranged for another monitor's window: {effects:?}"
+        );
+    }
+
+    /// A window id that names nothing must be a no-op, never a panic and never
+    /// a mutation of some other window.
+    #[test]
+    fn a_window_id_that_names_nothing_changes_nothing() {
+        use crate::types::{Action, Dir};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        engine.state.add_client(Client::new(1, mi, ws_i));
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, 1.0);
+        engine.state.monitors[mi].focused = Some(1);
+        // `State` is not `Clone`, so the invariant is checked as a fingerprint:
+        // the focused window, the float flags and the topology, which is
+        // everything a window-targeting action could plausibly disturb.
+        let fingerprint = |e: &Engine| {
+            format!(
+                "sel_mon={} focus={:?} float1={} float2={} cols={:?}",
+                e.state.sel_mon,
+                e.state.monitors[mi].focused,
+                e.state.clients[&1].is_float(),
+                e.state.clients.get(&2).is_some_and(Client::is_float),
+                e.state.monitors[mi].workspaces[ws_i]
+                    .columns
+                    .iter()
+                    .map(|c| (c.windows.clone(), c.weight))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let before = fingerprint(&engine);
+
+        for action in [
+            Action::ToggleFloatWindow(0xdead),
+            Action::ToggleFullscreenWindow(0xdead),
+            Action::FocusWindow(0xdead),
+            Action::CloseWindow(0xdead),
+            Action::MoveWindow(Dir::Left, 0xdead),
+        ] {
+            engine.dispatch(action);
+            assert_eq!(
+                fingerprint(&engine),
+                before,
+                "an unknown id must change nothing"
+            );
+        }
+    }
+
+    /// A percentage resize is a statement about the *workarea*, resolved where
+    /// the layout lives. The test pins the direction, not the exact weight: the
+    /// weight is then redistributed among the siblings, which is what makes a
+    /// scroll layout's ribbon change length instead of stealing from a
+    /// neighbour.
+    #[test]
+    fn a_percentage_resize_scales_with_the_workarea() {
+        use crate::types::Action;
+        // Two half-width columns: a *single* column already fills the workarea,
+        // so a grow on it is a no-op by design and would prove nothing.
+        // The *focused* column is the one that grows, so the test reads that
+        // one: `add_tiled` puts the second window in a new column and moves the
+        // focus there, so the second column is the one under test.
+        let focused_weight = |e: &Engine| {
+            let ws = &e.state.monitors[0].workspaces[0];
+            ws.columns[ws.focus.column_idx].weight
+        };
+        let two_columns = |w: u32| {
+            let mut engine = Engine::new(default_cfg());
+            engine
+                .state
+                .monitors
+                .push(Monitor::new(Rect::new(0, 0, w, 600), 9));
+            for win in [1u32, 2] {
+                engine.state.add_client(Client::new(win, 0, 0));
+                engine.state.monitors[0].workspaces[0].add_tiled(win, 0.5);
+            }
+            engine
+        };
+
+        let mut big = two_columns(1920);
+        let before = focused_weight(&big);
+        big.dispatch(Action::GrowColPct(10.0));
+        let after = focused_weight(&big);
+        assert!(
+            after > before,
+            "+10% of a 1920px workarea must widen the focused column ({before} -> {after})"
+        );
+
+        // The weight is a fraction of the *usable* width — the workarea minus
+        // the gaps between columns — because that is the space the layout
+        // actually distributes. So ten percent lands within a hair of a tenth
+        // on any monitor, and not exactly: the same fraction of a larger
+        // usable width is a larger number of pixels, which is the whole point.
+        let mut small = two_columns(800);
+        let s_before = focused_weight(&small);
+        small.dispatch(Action::GrowColPct(10.0));
+        let s_after = focused_weight(&small);
+        assert!(
+            (s_before - before).abs() < f32::EPSILON,
+            "both start from the same weight"
+        );
+        for (label, delta) in [("1920px", after - before), ("800px", s_after - s_before)] {
+            assert!(
+                (delta - 0.10).abs() < 0.005,
+                "10% on a {label} workarea must be about a tenth, got {delta}"
+            );
+        }
+        // And a negative percentage shrinks.
+        let mut shrink = two_columns(1920);
+        let s2_before = focused_weight(&shrink);
+        shrink.dispatch(Action::GrowColPct(-10.0));
+        assert!(
+            focused_weight(&shrink) < s2_before,
+            "-10% must narrow the column"
+        );
+    }
+
+    /// No columns, no selected monitor: a percentage has nothing to act on, and
+    /// must be a no-op rather than a division by zero.
+    #[test]
+    fn a_percentage_resize_on_an_empty_workspace_is_a_no_op() {
+        use crate::types::Action;
+        let mut engine = setup_engine();
+        assert!(engine.dispatch(Action::GrowColPct(10.0)).is_empty());
+        let mut none = Engine::new(default_cfg());
+        assert!(none.dispatch(Action::GrowColPct(-10.0)).is_empty());
+    }
+
     #[test]
     fn toggle_float_rejects_cross_monitor_focus() {
         use crate::core::commands::ToggleFloat;
@@ -8258,7 +8475,7 @@ mod unit_tests {
         engine.state.monitors[0].focused = Some(1);
         engine.state.monitors[0].focus_stack = vec![1];
 
-        let effects = engine.execute(ToggleFloat);
+        let effects = engine.execute(ToggleFloat(None));
         assert!(effects.is_empty(), "a cross-monitor toggle must be a no-op");
         // Monitor 0's trees untouched: window 1 was never floating there.
         assert!(!engine.state.monitors[0].workspaces[0].floats.contains(&1));
@@ -8275,7 +8492,7 @@ mod unit_tests {
         // Sanity: the same toggle when focus is *consistent* still works.
         engine.state.sel_mon = 1;
         engine.state.monitors[1].focused = Some(1);
-        let effects = engine.execute(ToggleFloat);
+        let effects = engine.execute(ToggleFloat(None));
         assert!(!effects.is_empty(), "a consistent toggle still mutates");
         assert!(engine.state.monitors[1].workspaces[0].floats.contains(&1));
     }
@@ -8544,7 +8761,7 @@ mod unit_tests {
                     Self::Restart => Box::new(Restart),
                     Self::CycleLayout => Box::new(CycleLayout),
                     Self::FocusDirection(d) => Box::new(FocusDirection(dir_of(*d))),
-                    Self::ToggleFloat => Box::new(ToggleFloat),
+                    Self::ToggleFloat => Box::new(ToggleFloat(None)),
                     Self::ToggleFullscreen => Box::new(ToggleFullscreen(None)),
                     Self::ToggleMaximize => Box::new(ToggleMaximize(None)),
                     Self::FocusWindow(p) => Box::new(FocusWindow(target(*p))),
@@ -9460,7 +9677,7 @@ mod unit_tests {
             engine.state.monitors[1].focused = Some(1);
             assert_eq!(engine.state.monitors[1].focused, Some(1));
             assert!(!engine.state.clients.contains_key(&1));
-            ToggleFloat
+            ToggleFloat(None)
                 .execute(&mut engine.state, &mut engine.cfg)
                 .effects
                 .is_empty();

@@ -25,8 +25,6 @@ All notable changes to this project are documented here. Format follows
 
 ### Changed
 
-### Changed
-
 - **Pointer drags no longer change tiling membership** (niri-style drop
   removed by design decision): only already-floating windows are draggable
   (Button1 = move, Button3 = resize), a float released over a column stays
@@ -54,6 +52,15 @@ All notable changes to this project are documented here. Format follows
 
 ### Removed
 
+- **Grid layout.** The `Grid` mode described under `[0.18.4]` is no longer
+  present. `LayoutKind` now has the single variant `Column`, the layout
+  registry registers only `ColumnLayout`, and `LayoutKind::from_str` resolves
+  every name to `Column` so existing config strings keep working. The
+  `cycle_layout` helper no longer exists. Session records written by earlier
+  versions still load: `src/core/session.rs` maps a `"grid"` tag onto
+  `LayoutKind::Column`. The `[0.18.4]` entries describing `grid.rs` and the
+  two-mode `Column`/`Grid` cycle are kept above as the historical record of
+  that release.
 - **`maverick-installer`.** The leftover legacy Rust installer directory is
   gone too: it was already out of the workspace and unused (nothing invoked
   it — `install.sh` is the official installer, CI only syntax-checks that

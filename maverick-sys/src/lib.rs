@@ -1,9 +1,16 @@
-//! System boundary — the only crate with `unsafe` in the workspace.
+//! System boundary — process, signal and session FFI in one place.
 //!
-//! Centralizes all `libc` FFI: POSIX signal handlers (`sigaction`), `poll(2)`
-//! for the event-loop socket, and `/proc`/`getuid` reads. Everything else in
-//! the workspace stays `unsafe`-free and never touches raw statics; the event
-//! loop polls the [`AtomicBool`] flags exported here.
+//! Centralizes this crate's `libc` FFI: POSIX signal handlers (`sigaction`),
+//! `poll(2)` for the event-loop socket, `getuid`/`getgid` identity reads, and
+//! the process-tree signalling (`kill`/`killpg`) behind [`session`]. The event
+//! loop polls the [`AtomicBool`] flags exported here, and no `static mut` is
+//! used anywhere in the workspace.
+//!
+//! `unsafe` is **not** confined to this crate. `maverick-gl`, `maverick-vk` and
+//! `maverick-x11` each contain their own FFI `unsafe`, as does the X11 backend
+//! in the root package; within those crates it stays confined to the FFI
+//! boundary and the public API is safe. `maverick-core` is `unsafe`-free: it
+//! speaks `WindowId(u32)` and `Rect` and holds no FFI.
 //!
 //! What is not owned: the X11 connection fd passed to [`wait_readable`], the
 //! terminal fds touched by [`detach_from_terminal`], and the WM state itself
@@ -55,8 +62,10 @@
 //! `AtomicBool::store` with `SeqCst` runs inside handlers. `poll` wraps a
 //! valid `pollfd` and treats `EINTR`/errors as wakeups. `detach_from_terminal`
 //! is best-effort, never calls `setsid`, and only redirects stdin/stdout to
-//! `/dev/null` when `isatty(STDIN)` is true. `getuid` and `/proc` reads are
-//! the only other `unsafe`/FFI.
+//! `/dev/null` when `isatty(STDIN)` is true. The remaining `unsafe` in this
+//! crate is confined to `getuid`/`getgid` identity reads and to the
+//! [`session`] process-tree signals, which gate every `kill`/`killpg` on a
+//! recorded process start time so a recycled PID cannot be hit.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

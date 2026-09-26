@@ -1498,6 +1498,30 @@ pub enum Action {
     ToggleFloat,
     /// Toggle fullscreen for the focused window.
     ToggleFullscreen,
+    /// Focus one specific window, rather than the monitor's focused one.
+    ///
+    /// Exists for external control (`maverickctl window focus <id>`): without
+    /// it a tool could only ever move the focus that happened to be where the
+    /// user was already looking, which is a different request from "focus
+    /// *this* window".
+    FocusWindow(WindowId),
+    /// Move one specific window in a direction, rather than the focused one.
+    MoveWindow(Dir, WindowId),
+    /// Close one specific window.
+    CloseWindow(WindowId),
+    /// Toggle floating for one specific window, rather than the focused one.
+    ToggleFloatWindow(WindowId),
+    /// Toggle fullscreen for one specific window.
+    ToggleFullscreenWindow(WindowId),
+    /// Grow or shrink the focused column by a fraction of the selected
+    /// monitor's workarea width, e.g. `+10%`.
+    ///
+    /// The pixel form (`GrowCol`) cannot express "a tenth of what the user can
+    /// see" without the caller knowing the workarea, and a caller that knew it
+    /// would be reimplementing a layout decision inside a tool. A percentage is
+    /// what a user means by "ten percent wider", and the conversion belongs
+    /// next to the layout that owns the number.
+    GrowColPct(f32),
     /// Toggle the maximized (workarea-filling, border 0) presentation state of
     /// the focused window. Like fullscreen, but it respects reserved regions and
     /// is only presented while the window is focused (the "peek" overlay in
@@ -2053,31 +2077,89 @@ impl State {
             Some(w) => w,
             None => return false,
         };
+        self.apply_move_dir_in(mi, ws_i, focused, dir)
+    }
 
-        if self.clients.get(&focused).is_some_and(Client::is_float) {
+    /// Apply a move in `dir` to one specific window, wherever it lives.
+    ///
+    /// The targeted counterpart of [`Self::apply_move_dir`], and the reason it
+    /// is not just a parameter on that one: the monitor, the workspace and the
+    /// column a window sits in are three different things when it is not the
+    /// focused one. The focused path resolves all three from `sel_mon` and
+    /// `active_ws`; a window the caller named has to be looked up in the tree
+    /// it is actually tiled in, or the move lands on a column that does not
+    /// contain it.
+    pub fn apply_move_dir_for(&mut self, win: WindowId, dir: Dir) -> bool {
+        let Some(client) = self.clients.get(&win) else {
+            return false;
+        };
+        if client.is_float() {
+            return false;
+        }
+        let (mi, ws_i) = (client.monitor, client.workspace);
+        if mi >= self.monitors.len() || ws_i >= self.monitors[mi].workspaces.len() {
+            return false;
+        }
+        // A float is not in the column tree, so it has no column to move
+        // between; `apply_move_dir_in` refuses it too, but checking here keeps
+        // the reason in the one place that knows what the tree looks like.
+        if client.is_float() {
+            return false;
+        }
+        let tiled = self.monitors[mi].workspaces[ws_i]
+            .columns
+            .iter()
+            .any(|c| c.windows.contains(&win));
+        if !tiled {
+            return false;
+        }
+        self.apply_move_dir_in(mi, ws_i, win, dir)
+    }
+
+    /// The body of a directional move, with the monitor, the workspace and the
+    /// window all supplied by the caller.
+    ///
+    /// `mi`/`ws_i`/`target` are the resolved location of the window being
+    /// moved: `sel_mon` + `active_ws` + the focused window for the keybinding
+    /// path, and the client's own monitor/workspace for the targeted one.
+    fn apply_move_dir_in(&mut self, mi: usize, ws_i: usize, target: WindowId, dir: Dir) -> bool {
+        if self.monitors.is_empty() || mi >= self.monitors.len() {
+            return false;
+        }
+        if self.clients.get(&target).is_some_and(Client::is_float) {
             return false;
         }
 
+        // The column the window is in, found by search: for the focused path
+        // that is the focus slot, for a targeted one it can be anywhere.
         let (ci, n_cols, col_len) = {
             let ws = &self.monitors[mi].workspaces[ws_i];
+            let ci = ws
+                .columns
+                .iter()
+                .position(|c| c.windows.contains(&target))
+                .unwrap_or(ws.focus.column_idx);
             (
-                ws.focus.column_idx,
+                ci,
                 ws.columns.len(),
-                ws.columns
-                    .get(ws.focus.column_idx)
-                    .map_or(0, |c| c.windows.len()),
+                ws.columns.get(ci).map_or(0, |c| c.windows.len()),
             )
         };
-        // Stale focus after restore/shrink: `ci` can exceed the column list
-        // (col_len == 0 above). Bail instead of indexing `columns[ci]`.
-        if ci >= n_cols {
+        // A window that is in no column (a float, or a nameable slot that was
+        // never placed) must not be moved against whatever sits at `ci`.
+        if ci >= n_cols
+            || !self.monitors[mi].workspaces[ws_i]
+                .columns
+                .get(ci)
+                .is_some_and(|c| c.windows.contains(&target))
+        {
             return false;
         }
 
         // Horizontal `MoveDir` on a column has two distinct meanings: a
         // single-window column is *swapped* with its neighbour (the window stays
         // put, the ribbon order changes), while a multi-window column is *split*
-        // — the focused window is extracted into a new column beside it.
+        // — the target window is extracted into a new column beside it.
         match dir {
             Dir::Left | Dir::Right => {
                 if col_len <= 1 {
@@ -2099,7 +2181,7 @@ impl State {
                     // even half/half; the caller can re-tune with grow/shrink.
                     let ratio = 0.5;
                     let src_w = ws.columns[ci].weight;
-                    ws.remove_window(focused); // column keeps `src_w` (still non-empty)
+                    ws.remove_window(target); // column keeps `src_w` (still non-empty)
                     let index_in_ws = if dir == Dir::Left { ci } else { ci + 1 };
                     let insert_pos = index_in_ws.min(ws.columns.len());
                     // Spring-split the source column: it keeps `ratio` of its
@@ -2117,7 +2199,7 @@ impl State {
                     // down to the floor, never below it.
                     ws.columns[insert_pos.min(ci)].weight = band_weight(src_w * ratio);
                     let mut new_col = Column::new(band_weight(src_w * (1.0 - ratio)));
-                    new_col.windows.push(focused);
+                    new_col.windows.push(target);
                     new_col.focused = 0;
                     ws.columns.insert(insert_pos, new_col);
                     ws.focus.column_idx = insert_pos;
@@ -2131,7 +2213,10 @@ impl State {
                     if n < 2 {
                         return false;
                     }
-                    let ri = col.focused;
+                    // Start from where the *named* window is, not from the
+                    // column's focus slot: for a targeted move those can differ,
+                    // and rotating from the wrong one moves a different window.
+                    let ri = col.windows.iter().position(|w| *w == target).unwrap_or(0);
                     let new_ri = if dir == Dir::Up {
                         (ri + n - 1) % n
                     } else {

@@ -863,12 +863,18 @@ pub struct MoveWindow(pub WindowId, pub Dir);
 impl Command for MoveWindow {
     fn execute(&mut self, state: &mut State, cfg: &mut Cfg) -> CommandReport {
         let mut cmds = Vec::new();
-        let mi = state.sel_mon;
-        if mi >= state.monitors.len() {
+        // The window's *own* monitor and workspace, not `sel_mon` +
+        // `active_ws`: a named window can be tiled somewhere else entirely, and
+        // a move applied to the selected monitor's active workspace would
+        // reorder a tree this window is not in.
+        let Some(client) = state.clients.get(&self.0) else {
+            return CommandReport::new(cmds);
+        };
+        let (mi, ws_i) = (client.monitor, client.workspace);
+        if mi >= state.monitors.len() || ws_i >= state.monitors[mi].workspaces.len() {
             return CommandReport::new(cmds);
         }
-        let ws_i = state.monitors[mi].active_ws;
-        if !state.apply_move_dir(self.1) {
+        if !state.apply_move_dir_for(self.0, self.1) {
             return CommandReport::new(cmds);
         }
         let wa = state.monitors[mi].workarea;
@@ -900,19 +906,41 @@ impl Command for KillWindow {
     }
 }
 
+/// Toggle floating for `Some(win)`, or for the selected monitor's focused
+/// window when `None`.
+///
+/// The single funnel for the `Mod4+F` keybinding, the IPC `togglefloat`
+/// action and `maverickctl window float <id>`, so the three channels cannot
+/// drift apart in topology, border, snapshot, policy or camera handling.
+///
+/// The targeted form resolves the window's *own* monitor instead of
+/// `sel_mon`, and skips the cross-monitor guard below: that guard exists
+/// because a stale focus slot can name a window the focus-repair paths have not
+/// settled yet, which is an ambiguity of *focus*. An explicit request carries
+/// no such ambiguity — the client that asked for this window cannot be
+/// mistaken about which one it means.
 #[derive(Debug, Clone, Copy)]
-pub struct ToggleFloat;
+pub struct ToggleFloat(pub Option<WindowId>);
 
 impl Command for ToggleFloat {
     fn execute(&mut self, state: &mut State, cfg: &mut Cfg) -> CommandReport {
         let mut cmds = Vec::new();
-        let mi = state.sel_mon;
+        let mi = match self.0 {
+            Some(win) => match state.clients.get(&win) {
+                Some(c) => c.monitor,
+                None => return CommandReport::new(cmds),
+            },
+            None => state.sel_mon,
+        };
         if mi >= state.monitors.len() {
             return CommandReport::new(cmds);
         }
-        let win = match state.monitors[mi].focused {
-            Some(w) => w,
-            None => return CommandReport::new(cmds),
+        let win = match self.0 {
+            Some(win) => win,
+            None => match state.monitors[mi].focused {
+                Some(w) => w,
+                None => return CommandReport::new(cmds),
+            },
         };
         // Operate on the focused window's *own* (home) workspace, not the
         // monitor's `active_ws`: after `ViewWorkspace` the focus can sit on a
@@ -933,13 +961,10 @@ impl Command for ToggleFloat {
             Some(c) => (c.workspace, c.is_float()),
             None => return CommandReport::new(cmds),
         };
-        // Guard against cross-monitor focus corruption. If the focused window
-        // does not actually belong to the selected monitor, mutating the
-        // selected monitor's trees would remove it from tree A and insert it
-        // into floating B — an inconsistent split state. Bailing out is safe:
-        // nothing is mutated and the caller's focus anomaly is left to the
-        // focus-repair paths instead of being compounded here.
-        if state.clients.get(&win).is_some_and(|c| c.monitor != mi) {
+        // Guard against cross-monitor focus corruption — only for the
+        // *unfocused* form, where `mi` came from `sel_mon` and the focused
+        // window may genuinely belong elsewhere.
+        if self.0.is_none() && state.clients.get(&win).is_some_and(|c| c.monitor != mi) {
             return CommandReport::new(cmds);
         }
         if ws_i >= state.monitors[mi].workspaces.len() {
@@ -987,12 +1012,25 @@ pub struct ToggleFullscreen(pub Option<WindowId>);
 impl Command for ToggleFullscreen {
     fn execute(&mut self, state: &mut State, cfg: &mut Cfg) -> CommandReport {
         let mut cmds = Vec::new();
-        let mi = state.sel_mon;
+        // A targeted window's own monitor, not `sel_mon`: the camera recentre,
+        // the pending-focus consumption and the arrange below are all
+        // monitor-indexed, and running them against `sel_mon` for a window on
+        // another monitor would move the camera and re-arrange the wrong screen.
+        let target = self
+            .0
+            .or_else(|| state.monitors.get(state.sel_mon).and_then(|m| m.focused));
+        let mi = match target {
+            Some(win) => match state.clients.get(&win) {
+                Some(c) => c.monitor,
+                None => return CommandReport::new(cmds),
+            },
+            None => state.sel_mon,
+        };
         if mi >= state.monitors.len() {
             return CommandReport::new(cmds);
         }
         let ws_i = state.monitors[mi].active_ws;
-        if let Some(win) = self.0.or(state.monitors.get(mi).and_then(|m| m.focused)) {
+        if let Some(win) = target {
             // This command owns ALL fullscreen logical state. The backend's
             // `SetFullscreen` handler is the X11-only half (EWMH atom +
             // compositor bypass hint) and must not decide topology, border,

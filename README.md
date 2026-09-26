@@ -470,8 +470,10 @@ action parsing, IPC/session discovery, image decoding, and renderer helpers.
 They do not constitute a real-driver compositor or application compatibility test.
 Some Vulkan integration tests require explicit opt-in and an X11/Vulkan environment.
 
-[CI](.github/workflows/ci.yml) runs workspace tests, strict Clippy, and installer
-Bash syntax checks. It does not run the Xephyr scenarios.
+[CI](.github/workflows/ci.yml) runs three jobs: workspace tests with strict
+Clippy, installer checks (`bash -n` plus `tests/install-smoke.py`), and an
+X11 smoke job that builds the `--no-default-features` profile and runs the Xvfb
+stacking regression. It does not run the Xephyr scenarios.
 
 ### Real X11 and installer tests
 
@@ -528,7 +530,7 @@ server that supports the required GLX path.
 | `src/config.rs`, `src/userconfig.rs` | Compiled defaults, config merging, validation |
 | `maverick-x11/` | Shared Xlib/XCB connection bootstrap |
 | `maverick-sys/` | Instance identity/discovery, control socket/hub, `maverickctl` and `maverick-msg` |
-| `maverick-render/` | Renderer-facing abstraction |
+| `maverick-render/` | Renderer-facing types and trait; no in-tree backend implements `Renderer` yet |
 | `maverick-gl/` | OpenGL/GLX renderer and in-tree FFI/loading |
 | `maverick-vk/` | Experimental Vulkan device/surface/swapchain code, not integrated into the WM |
 | `maverick-toml/`, `maverick-img/` | TOML-subset parser and PNG decoder/external image conversion |
@@ -549,7 +551,7 @@ or async-runtime requirement, but still depends on native X11 libraries.
 ├── maverick-x11/        # X11 integration
 ├── maverick-gl/         # OpenGL compositor
 ├── maverick-vk/         # Vulkan backend
-├── maverick-render/     # Rendering support
+├── maverick-render/     # Renderer types/trait (no in-tree implementor)
 ├── maverick-img/        # Image support
 ├── maverick-toml/       # TOML/config support
 ├── maverick-sys/        # IPC/control interfaces
@@ -561,6 +563,12 @@ or async-runtime requirement, but still depends on native X11 libraries.
 
 `maverick-vk` is an unintegrated experimental bootstrap (see
 [Compositor](#compositor)); it is not a working compositor backend.
+
+`maverick-render` likewise defines a backend-agnostic `Renderer` trait and
+shared value types, but no crate in the workspace implements that trait yet —
+`maverick-gl` ships its own unrelated `Renderer` type. The crate is currently
+re-exported through `src/backend/renderer.rs` and used by its own contract
+tests only.
 
 ## Current status
 

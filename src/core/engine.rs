@@ -18,10 +18,10 @@
 
 use crate::config::Cfg;
 use crate::core::commands::{
-    CollapseColumn, Command, FocusDirection, FocusMonitor, GrowColumn, KillWindow, MoveToWorkspace,
-    MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav, PageSnap, Quit,
-    Restart, SetLayout, SetWallpaper, Spawn, ToggleFloat, ToggleFullscreen, ToggleMaximize,
-    ToggleOverview, ViewWorkspace, ViewportZoom,
+    CollapseColumn, Command, FocusDirection, FocusMonitor, FocusWindow, GrowColumn, KillWindow,
+    MoveToWorkspace, MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav,
+    PageSnap, Quit, Restart, SetLayout, SetWallpaper, Spawn, ToggleFloat, ToggleFullscreen,
+    ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
 };
 use crate::core::effect::Effect;
 use crate::core::event::{Event, EventBus, EventHandler};
@@ -240,6 +240,18 @@ impl Engine {
             Action::View(ws_idx) => self.execute(ViewWorkspace(ws_idx)),
             Action::MoveToWs(ws_idx) => self.execute(MoveToWorkspace(ws_idx)),
             Action::GrowCol(px) => self.execute(GrowColumn(px)),
+            Action::GrowColPct(pct) => {
+                // Resolved here, against the live workarea, rather than by the
+                // caller: the percentage is a statement about *this* monitor,
+                // and a tool that had to know the workarea to convert it would
+                // be duplicating a layout decision outside the layout.
+                let workarea_w = self
+                    .state
+                    .monitors
+                    .get(self.state.sel_mon)
+                    .map_or(0, |m| m.workarea.w);
+                self.execute(GrowColumn((pct / 100.0 * workarea_w as f32) as i32))
+            }
             Action::NewColumn => self.execute(NewColumn),
             Action::CollapseColumn => self.execute(CollapseColumn),
             Action::FocusMon(dir) => self.execute(FocusMonitor(dir)),
@@ -262,10 +274,21 @@ impl Engine {
                     vec![]
                 }
             }
+            // Window-targeted actions. Each names the window instead of
+            // resolving the focused one, and each is the *same* command the
+            // keybinding uses — only the target differs. That is the whole
+            // point: a tool and a keypress cannot reach different code, so
+            // there is no second implementation of "float a window" to keep
+            // in step.
+            Action::FocusWindow(win) => self.execute(FocusWindow(Some(win))),
+            Action::MoveWindow(dir, win) => self.execute(MoveWindow(win, dir)),
+            Action::CloseWindow(win) => self.execute(KillWindow(win)),
+            Action::ToggleFloatWindow(win) => self.execute(ToggleFloat(Some(win))),
+            Action::ToggleFullscreenWindow(win) => self.execute(ToggleFullscreen(Some(win))),
             Action::Spawn(cmd) => self.execute(Spawn(cmd)),
             Action::Quit => self.execute(Quit),
             Action::Restart => self.execute(Restart),
-            Action::ToggleFloat => self.execute(ToggleFloat),
+            Action::ToggleFloat => self.execute(ToggleFloat(None)),
             Action::ToggleFullscreen => {
                 let mi = self.state.sel_mon;
                 if let Some(win) = self.state.monitors.get(mi).and_then(|m| m.focused) {
