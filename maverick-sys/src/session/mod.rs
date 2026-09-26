@@ -54,6 +54,7 @@
 //! authorization decision: `owner_uid` is recorded so a *foreign* record is
 //! refused, never so a caller can claim one.
 
+pub mod lifecycle;
 pub mod proc;
 pub mod xserver;
 
@@ -252,6 +253,11 @@ impl SessionState {
             Self::Stopped => "stopped",
             Self::Crashed => "crashed",
         }
+    }
+
+    /// True for the states in which a session is (or is becoming) usable.
+    pub fn is_live(self) -> bool {
+        matches!(self, Self::Starting | Self::Running)
     }
 
     /// Parse a wire name. Unknown values read as `Stopped`: a record written by
@@ -1036,6 +1042,13 @@ pub enum SessionError {
         /// Why it could not be used.
         reason: String,
     },
+    /// The Maverick binary a session records cannot be executed.
+    MissingBinary {
+        /// The path or name that was tried.
+        path: String,
+    },
+    /// The session is still running, so its record cannot just be deleted.
+    StillRunning(SessionName),
     /// The window manager did not come up.
     WmFailed {
         /// Why, as far as could be told.
@@ -1074,6 +1087,14 @@ impl fmt::Display for SessionError {
             Self::MissingBackend { binary, reason } => {
                 write!(f, "the {binary} X server is not usable: {reason}")
             }
+            Self::MissingBinary { path } => write!(
+                f,
+                "the Maverick binary '{path}' cannot be executed — build it, or pass --binary"
+            ),
+            Self::StillRunning(name) => write!(
+                f,
+                "session '{name}' is still running — stop it first (or pass --force)"
+            ),
             Self::WmFailed { reason, log } => write!(
                 f,
                 "the session's window manager did not start: {reason}\n  its log: {}",
