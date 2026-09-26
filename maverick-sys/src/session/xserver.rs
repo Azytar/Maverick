@@ -898,6 +898,7 @@ mod tests {
             start.elapsed() < Duration::from_secs(2),
             "it must be reported at once, not after the timeout"
         );
+        release_display(free);
     }
 
     /// A healthy server is still reported ready, and still immediately.
@@ -915,6 +916,7 @@ mod tests {
             start.elapsed() < Duration::from_secs(2),
             "a live server must not pay the poll interval for a display that is up"
         );
+        release_display(free);
     }
 
     /// Exactly one holder at a time, decided by the kernel rather than by a
@@ -965,7 +967,48 @@ mod tests {
             is_listening(free),
             "another server owns this display and must be left alone"
         );
+        release_display(free);
         drop(listener);
+    }
+
+    /// Remove the socket file a test listener left behind.
+    ///
+    /// Dropping a `UnixListener` closes the socket but does not unlink the file,
+    /// and `display_is_free` treats the file as a claim — so without this a test
+    /// that binds one fails on its second run with `AddrInUse`, or quietly makes
+    /// the next allocation skip the number.
+    fn release_display(display: Display) {
+        let _ = std::fs::remove_file(socket_path(display));
+        let _ = std::fs::remove_file(lock_path(display));
+    }
+
+    /// The handover that ends the display claim is the X server naming itself,
+    /// not the passage of time.
+    ///
+    /// Written against a planted lock rather than a real server, so it asserts
+    /// the comparison itself: the pid in the lock is the only thing that makes
+    /// the number ours, and any other value must not.
+    #[test]
+    fn only_the_pid_in_the_lock_marks_the_display_as_ours() {
+        let display = Display(350);
+        let path = lock_path(display);
+        // The X server writes its pid right-aligned and newline-terminated,
+        // which is the format the comparison has to cope with.
+        std::fs::write(&path, format!("{:>10}\n", 4242)).expect("plant a lock file");
+        assert!(
+            lock_names(display, 4242),
+            "the server that wrote its own pid into the lock owns the number"
+        );
+        assert!(
+            !lock_names(display, 4243),
+            "any other pid must not read as ours, or the claim is released early"
+        );
+        std::fs::write(&path, "not a number\n").expect("plant a junk lock file");
+        assert!(
+            !lock_names(display, 4242),
+            "an unparsable lock is not a handover"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A display that is already claimed must be refused, not hijacked: this is    /// the check that stops two sessions landing on one display.
