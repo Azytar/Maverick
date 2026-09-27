@@ -696,17 +696,20 @@ echo
 
 # ── 14. SIGINT reaches the same orderly shutdown as SIGTERM ─────────────────
 echo "14. signal disposition"
-# A non-interactive shell sets SIGINT to SIG_IGN in any job it starts with `&`,
-# so a backgrounded Maverick inherited a signal it could never act on. `trap ''`
-# sets that disposition explicitly, so the test does not depend on the shell's
-# job-control mode. Dispositions set to SIG_IGN survive exec, which is exactly
-# how the WM received it.
+# A non-interactive shell sets SIGINT *and* SIGQUIT to SIG_IGN in any job it
+# starts with `&`, so a backgrounded Maverick inherited signals it could never
+# act on. `trap ''` sets those dispositions explicitly, so the test does not
+# depend on the shell's job-control mode. Dispositions set to SIG_IGN survive
+# exec, which is exactly how the WM received them. SIGQUIT is in the list for
+# the same reason SIGINT is: it is the signal a user reaches for next, and an
+# ignored one left in place would also be inherited by every client the WM
+# starts, which then cannot act on it either.
 SIG_DISPLAY=""
 sig_disp_run() { # signal, -> prints "exited|leaked|alive <artifact-count>"
     local sig="$1"
     local log=/tmp/maverick-sigdisp.$$.log
     DISPLAY="$SIG_DISPLAY" MAVERICK_NO_COMPOSITOR=1 \
-        setsid bash -c "trap '' INT; exec '$MAVERICK_BIN' --name sigdisp --config /dev/null" \
+        setsid bash -c "trap '' INT QUIT; exec '$MAVERICK_BIN' --name sigdisp --config /dev/null" \
         >"$log" 2>&1 &
     local pid=$!
     local i
@@ -737,19 +740,29 @@ if [ -n "$SIG_DISPLAY" ]; then
     for i in $(seq 1 40); do [ -e "/tmp/.X11-unix/X${SIG_DISPLAY#:}" ] && break; sleep 0.2; done
     R_TERM=$(sig_disp_run TERM)
     R_INT=$(sig_disp_run INT)
+    R_QUIT=$(sig_disp_run QUIT)
     echo "    SIGTERM -> $R_TERM"
     echo "    SIGINT  -> $R_INT"
+    echo "    SIGQUIT -> $R_QUIT"
     case "$R_TERM" in exited*) ok "a backgrounded WM stops on SIGTERM" ;;
                    *) bad "SIGTERM left it '$R_TERM'" ;; esac
     case "$R_INT" in exited*) ok "a backgrounded WM stops on SIGINT (was ignored entirely)" ;;
                   alive*)   bad "SIGINT was ignored: the WM is still running" ;;
                   leaked*)  bad "SIGINT exited but leaked its socket and identity file" ;;
                   *) bad "SIGINT left it '$R_INT'" ;; esac
+    case "$R_QUIT" in exited*) ok "a backgrounded WM stops on SIGQUIT (was ignored entirely)" ;;
+                   alive*)   bad "SIGQUIT was ignored: the WM is still running" ;;
+                   leaked*)  bad "SIGQUIT exited but leaked its socket and identity file" ;;
+                   *) bad "SIGQUIT left it '$R_QUIT'" ;; esac
     # The log line is how a user learns the WM chose to exit rather than crash.
     INT_CLEAN=$(printf '%s' "$R_INT" | awk '{print $4}')
     [ "${INT_CLEAN:-0}" -ge 1 ] \
         && ok "SIGINT runs the orderly path (the 'exiting cleanly' log line is present)" \
         || bad "SIGINT did not reach the orderly shutdown path"
+    QUIT_CLEAN=$(printf '%s' "$R_QUIT" | awk '{print $4}')
+    [ "${QUIT_CLEAN:-0}" -ge 1 ] \
+        && ok "SIGQUIT runs the orderly path (the 'exiting cleanly' log line is present)" \
+        || bad "SIGQUIT did not reach the orderly shutdown path"
     kill "$SIG_XP" 2>/dev/null; wait "$SIG_XP" 2>/dev/null
     rm -f "/tmp/.X${SIG_DISPLAY#:}-lock" 2>/dev/null
 else

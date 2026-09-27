@@ -846,8 +846,7 @@ mod wait_bounds {
     /// happens". A pending deadline has to turn that into a finite wait.
     #[test]
     fn a_deadline_turns_an_unbounded_wait_into_a_bounded_one() {
-        let bounded =
-            bounded_by_deadline(None, Some(Instant::now() + Duration::from_secs(3)));
+        let bounded = bounded_by_deadline(None, Some(Instant::now() + Duration::from_secs(3)));
         let bounded = bounded.expect("a deadline must produce a wait");
         assert!(
             bounded <= Duration::from_secs(3),
@@ -893,7 +892,10 @@ mod wait_bounds {
     /// block" and returns on, so the budget check in `run` gets its turn.
     #[test]
     fn an_elapsed_deadline_yields_no_wait_at_all() {
-        let bounded = bounded_by_deadline(None, Some(Instant::now() - Duration::from_secs(1)));
+        let elapsed = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("monotonic");
+        let bounded = bounded_by_deadline(None, Some(elapsed));
         assert_eq!(bounded, Some(Duration::ZERO));
     }
 }

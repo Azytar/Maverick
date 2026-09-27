@@ -48,24 +48,51 @@
 //! # Ownership
 //!
 //! [`Signal`] owns the handler/ignore lists; [`Signal::install`] consumes it
-//! and installs `SIGCHLD` (`SA_NOCLDWAIT|SA_RESTART`) plus the configured
-//! handlers. Static flags (`QUIT_REQUESTED`, `NEED_REGRAB`) are written by
-//! `extern "C"` trampolines and read by the WM thread via
-//! [`quit_requested`]/[`need_regrab`]. [`ControlServer`] owns the listener and
-//! a `stop` flag; [`ControlHub`] is shared via `Arc` between server and WM
-//! threads. `detach_from_terminal` is called once at startup before the X
-//! connection is opened; [`wait_readable`] is called each event-loop iteration.
+//! and installs `SIGCHLD` (`SIG_DFL` with `SA_NOCLDWAIT|SA_RESTART`) plus the
+//! configured handlers and ignores. Static flags (`QUIT_REQUESTED`,
+//! `NEED_REGRAB`) are written by `extern "C"` trampolines and read by the WM
+//! thread via [`quit_requested`]/[`need_regrab`]. [`ControlServer`] owns the
+//! listener and a `stop` flag; [`ControlHub`] is shared via `Arc` between
+//! server and WM threads. `detach_from_terminal` is called once at startup
+//! before the X connection is opened; [`wait_readable`] is called each
+//! event-loop iteration.
+//!
+//! Two properties of that arrangement are worth stating once, because callers
+//! depend on them and neither is obvious:
+//!
+//! - **A handler is a notification, not a control path.** A trampoline only
+//!   stores a process-global `AtomicBool`; the event loop reads it at the top of
+//!   a turn and turns it into an ordinary method call. Nothing in a handler
+//!   allocates, locks, logs or touches X11, and the flags are process-global so
+//!   it does not matter which thread the kernel picks to run the trampoline on.
+//!   A process-directed signal is still *delivered* to an arbitrary thread, so
+//!   the loop's wake-up depends on the signal reaching the thread blocked in
+//!   `poll`; `poll` is never restarted by `SA_RESTART` on Linux, so the
+//!   resulting `EINTR` is what wakes it.
+//! - **A control-socket command is the other control path, and it is not this
+//!   flag.** `quit` arrives as a [`ControlCommand`] on the [`ControlHub`], not
+//!   by setting `QUIT_REQUESTED`; the two converge on the caller's shutdown
+//!   routine instead. The socket path is the stronger of the two, because the
+//!   producer writes the hub's self-pipe, so the wake is caused rather than
+//!   hoped for. There is deliberately no public setter for the quit flag, to
+//!   keep a future reader from wiring the two together and losing that
+//!   guarantee.
 //!
 //! # Safety
 //!
-//! `sigaction` installs use `zeroed` + `sigemptyset` and `SA_RESTART`; only
-//! `AtomicBool::store` with `SeqCst` runs inside handlers. `poll` wraps a
-//! valid `pollfd` and treats `EINTR`/errors as wakeups. `detach_from_terminal`
+//! There is exactly one disposition primitive, [`install_raw`], so the
+//! `sigaction` struct layout, the handler-union member and the `sigemptyset` call
+//! are argued once. It zero-initialises the struct, writes either a
+//! `SIG_DFL`/`SIG_IGN` constant or the address of a permanently-linked
+//! `extern "C" fn(c_int)`, passes an explicitly emptied `sa_mask`, and passes a
+//! null `oldact`. Only `AtomicBool::store` with `SeqCst` runs inside a handler,
+//! and `SeqCst` is stronger than the flag-to-flag hand-off needs. `poll` wraps
+//! valid `pollfd`s and treats `EINTR`/errors as wakeups. `detach_from_terminal`
 //! is best-effort, never calls `setsid`, and only redirects stdin/stdout to
 //! `/dev/null` when `isatty(STDIN)` is true. The remaining `unsafe` in this
-//! crate is confined to `getuid`/`getgid` identity reads and to the
-//! [`session`] process-tree signals, which gate every `kill`/`killpg` on a
-//! recorded process start time so a recycled PID cannot be hit.
+//! crate is confined to `getuid`/`getgid` identity reads and to the [`session`]
+//! process-tree signals, which gate every `kill`/`killpg` on a recorded process
+//! start time so a recycled PID cannot be hit.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -205,13 +232,6 @@ pub fn clear_regrab() {
     NEED_REGRAB.store(false, ORD);
 }
 
-/// Request the WM to quit (used by the control socket's `quit` command).
-/// The main loop polls `quit_requested()` and tears down.
-#[inline]
-pub fn request_quit() {
-    QUIT_REQUESTED.store(true, ORD);
-}
-
 /// Builder for installing POSIX signal handlers without writing `sigaction`
 /// structs by hand. Each method is safe; the FFI only happens inside `install()`.
 pub struct Signal {
@@ -239,7 +259,16 @@ impl Signal {
         self
     }
 
-    /// On this signal, set the quit flag (SIGTERM).
+    /// On this signal, set the quit flag.
+    ///
+    /// Any signal that should mean "shut down" belongs here, not just
+    /// `SIGTERM`: `SIGINT` and `SIGQUIT` take the same route, because the
+    /// point of a handler is to replace the disposition the window manager
+    /// inherited. A backgrounded job started by a non-interactive shell
+    /// inherits `SIG_IGN` for both of those, and an ignored disposition
+    /// survives `exec`, so without a handler of their own a backgrounded
+    /// window manager cannot be stopped by `Ctrl-C` or `Ctrl-\` and would
+    /// pass that same dead disposition to every client it starts.
     pub fn on_sigterm(mut self, sig: libc::c_int) -> Self {
         self.handlers.push(Handler::Term(sig));
         self
@@ -253,20 +282,44 @@ impl Signal {
 
     /// Install every configured handler, reporting the ones that did not take.
     ///
-    /// SIGCHLD is always installed with `SA_NOCLDWAIT | SA_RESTART` so the WM
-    /// reaps spawned children (alacritty, rofi, …) without leaving zombies —
-    /// that behavior is mandatory for a WM, not optional, which is why a
-    /// failure to install it is reported rather than swallowed.
+    /// # SIGCHLD
     ///
-    /// The previous version discarded every result, so a `sigaction` refused by
-    /// a seccomp policy or an exhausted thread table left the window manager
-    /// running with a disposition it never installed and nothing said so. The
-    /// handler is still async-signal-safe and still only ever stores an
-    /// `AtomicBool`; what changed is that the caller can now find out.
+    /// `SIGCHLD` is always installed with `SA_NOCLDWAIT | SA_RESTART` and
+    /// `SIG_DFL`, and that pairing is the whole point: `SA_NOCLDWAIT` tells the
+    /// kernel to discard a child's exit status instead of leaving the child as a
+    /// zombie, which is what a window manager wants for the clients it starts.
+    /// It is not "the window manager reaps" — nothing here waits on anything,
+    /// and no child of the process is ever waited for. The kernel reaps them
+    /// before `waitpid` could, and the observable consequence is that
+    /// `waitpid`, `Child::wait` and `Command::output` all report `ECHILD` for
+    /// *any* child of a process that has installed this.
     ///
-    /// The returned list is in the order the signals were configured, so the
-    /// `SIGCHLD` entry is always first. A single call that ignores the result
-    /// is still a programming error, not a style choice.
+    /// So `SA_NOCLDWAIT` is correct here and explicit reaping would not be: a
+    /// reaper would be machinery nothing calls, and it would race any future
+    /// caller that did need a status. What it costs is that code in the same
+    /// process may not depend on a child's exit status, which is a constraint
+    /// on callers rather than something `install` can enforce. The
+    /// `SA_NOCLDWAIT` flag itself is a `sigaction` flag, not a disposition: it
+    /// is inherited across `fork` but *not* across `exec`, so it never leaks
+    /// into a child that execs.
+    ///
+    /// A failure here is reported rather than swallowed for the same reason the
+    /// handler failures are: without `SA_NOCLDWAIT` every autostarted client
+    /// becomes a zombie for the life of the process.
+    ///
+    /// # Partial installation
+    ///
+    /// Install is not atomic and does not pretend to be. The dispositions it
+    /// overwrites are never read back, so there is nothing to restore, and a
+    /// refusal part-way through leaves the earlier installs in place. The
+    /// returned vector is the complete account of what is missing, in the order
+    /// the signals were configured so `SIGCHLD` is always first. Deciding
+    /// whether a given refusal is fatal belongs to the caller, which is the
+    /// only party that knows what it was going to depend on.
+    ///
+    /// A single call that ignores the result is a programming error, not a
+    /// style choice: the caller would be claiming a signal-controlled lifecycle
+    /// with dispositions it never installed.
     pub fn install(self) -> Vec<libc::c_int> {
         let mut failed = Vec::new();
         if !install_raw(
@@ -312,38 +365,42 @@ extern "C" fn regrab_trampoline(_: libc::c_int) {
 }
 
 fn install_term(sig: libc::c_int) -> bool {
-    install_raw_fn(term_trampoline, sig, libc::SA_RESTART)
+    install_raw(sig, term_trampoline as *const () as usize, libc::SA_RESTART)
 }
 
 fn install_regrab(sig: libc::c_int) -> bool {
-    install_raw_fn(regrab_trampoline, sig, libc::SA_RESTART)
+    install_raw(
+        sig,
+        regrab_trampoline as *const () as usize,
+        libc::SA_RESTART,
+    )
 }
 
-/// Install a handler whose address is a plain `extern "C" fn` (no captured
-/// state) — safe to pass straight to `sigaction`.
-/// Returns `false` instead of panicking: a transient `sigaction` failure
-/// (seccomp, bad sig) must not take down the WM from inside a library.
-fn install_raw_fn(func: extern "C" fn(libc::c_int), sig: libc::c_int, flags: libc::c_int) -> bool {
-    unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        // NOTE: without SA_SIGINFO the kernel uses the `sa_handler` union
-        // member (1-arg handler), which shares storage with `sa_sigaction`.
-        // Our trampolines are 1-arg `extern "C" fn(c_int)`, so this assignment
-        // is correct as long as callers never add SA_SIGINFO.
-        sa.sa_sigaction = func as *const () as usize;
-        sa.sa_flags = flags;
-        libc::sigemptyset(&mut sa.sa_mask);
-        if libc::sigaction(sig, &sa, std::ptr::null_mut()) != 0 {
-            // Reported by the caller rather than printed here: a library must
-            // not decide on its own how loudly a window manager complains.
-            return false;
-        }
-    }
-    true
-}
-
-/// Install a handler from a `sighandler_t` constant (SIG_DFL / SIG_IGN).
+/// Install a disposition for `sig`.
+///
+/// The `action` is a `sighandler_t`: one of `SIG_DFL`/`SIG_IGN`, or a plain
+/// `extern "C" fn(c_int)` cast to a pointer, which is what the kernel stores
+/// in the `sa_sigaction` union member when `SA_SIGINFO` is *not* set. Every
+/// caller here is one-argument and never sets `SA_SIGINFO`, so writing the
+/// handler through that member is correct; a caller that added `SA_SIGINFO`
+/// would need the three-argument `sa_sigaction` member instead.
+///
+/// This is the crate's only disposition primitive. `SIG_DFL`, `SIG_IGN` and a
+/// handler therefore share one safety argument rather than three near-copies
+/// of it, and `SA_NOCLDWAIT` is just another `flags` value here.
+///
+/// Returns `false` instead of panicking: a `sigaction` refused by a seccomp
+/// policy or a bad signal number must not take down a window manager from
+/// inside a library. The caller reports it.
 fn install_raw(sig: libc::c_int, action: usize, flags: libc::c_int) -> bool {
+    // SAFETY: `sa` is a fully initialised `sigaction` before the call — zeroed,
+    // with `action` written to the handler member, `flags` to `sa_flags` and an
+    // explicitly emptied `sa_mask`. Passing a null `oldact` is always valid and
+    // is what lets this not have to save the disposition it is about to
+    // replace. `action` is either a `SIG_DFL`/`SIG_IGN` constant or the address
+    // of an `extern "C" fn(c_int)` that is linked for the life of the process,
+    // so the kernel cannot be left holding a dangling handler. The only failure
+    // the call can report is a refusal, which is returned to the caller.
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = action;

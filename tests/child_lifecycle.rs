@@ -95,10 +95,7 @@ fn a_spawned_child_leaves_no_zombie_without_an_explicit_reap() {
     // Polled to a deadline rather than slept: the assertion is "it goes away",
     // and how long the kernel takes is the kernel's business, not the test's.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            break;
-        };
+    while let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         let state = stat
             .rsplit_once(')')
             .and_then(|(_, rest)| rest.split_whitespace().next());

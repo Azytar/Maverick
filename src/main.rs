@@ -18,7 +18,14 @@
 //! `--check-config` never starts the backend: it loads the TOML, dumps
 //! diagnostics, prints a summary, and exits 0/1. Signal handlers are installed
 //! after `detach_from_terminal` and before the X connection is opened, so
-//! `SIGTERM`/`SIGCONT`/`SIGPIPE` disposition is defined for the whole session.
+//! `SIGTERM`/`SIGINT`/`SIGQUIT`/`SIGCONT`/`SIGPIPE` disposition is defined for
+//! the whole session. `SIGCHLD` is set to auto-reaping at the same moment,
+//! which is what keeps autostarted clients from becoming zombies — and which
+//! also means nothing in this process may wait on a child, so the image
+//! decoders' external fallback reads its converter's output instead of asking
+//! for a status. If any of those installs is refused, `uninstalled_report` says
+//! which guarantee was lost rather than leaving the process to imply it has
+//! all of them.
 //! The original argv is captured verbatim (minus `argv[0]`) because `restart`
 //! re-execs with exactly those arguments, so a `--config` override can never be
 //! silently downgraded to the XDG default.
@@ -304,18 +311,23 @@ fn main() {
         // an ignored disposition survives `exec`, so an inherited one would
         // hand every autostarted client a SIGINT it can never act on.
         .on_sigterm(libc::SIGINT)
+        // SIGQUIT is the same hole, and it is the one a user reaches for next
+        // (Ctrl-\), so leaving it out made the handler above half a fix: a
+        // shell sets *both* dispositions to `SIG_IGN` for a backgrounded job,
+        // so a backgrounded window manager was unstoppable by SIGQUIT, ran
+        // none of its cleanup, and passed that `SIG_IGN` to every client it
+        // started. Registering it costs nothing and closes both halves.
+        .on_sigterm(libc::SIGQUIT)
         .on_sigcont(libc::SIGCONT)
         .install();
-    // A disposition that did not install is a window manager that cannot be
-    // stopped the way it expects. `SIGCHLD` is the one to read twice: without
-    // `SA_NOCLDWAIT` every autostarted client becomes a zombie for the life of
-    // the process. The result used to be discarded, so a `sigaction` refused by
-    // a seccomp policy left the process running with a disposition it never had.
-    if !uninstalled.is_empty() {
-        log::warn!(
-            "could not install a handler for signal(s) {uninstalled:?}; \
-             the window manager may not be stoppable, and may not reap autostarted children"
-        );
+    // A disposition that did not install is a window manager that is missing
+    // one of the guarantees it is about to depend on, so say which one rather
+    // than that "a handler" is missing: they are not interchangeable, and the
+    // user who reads this line needs to know whether the window manager can be
+    // stopped or whether its clients will be left as zombies. See
+    // `uninstalled_report`.
+    if let Some(report) = uninstalled_report(&uninstalled) {
+        log::warn!("{report}");
     }
 
     // Advertise this instance so an external tool can discover or close it,
@@ -419,3 +431,174 @@ fn main() {
 
 // Detaching and signal setup live in `maverick-sys`, the only place in the
 // project that touches libc FFI. See `detach_from_terminal` and `Signal` there.
+
+/// Describe the signal dispositions that did not install, naming the guarantee
+/// each one is holding up.
+///
+/// `Signal::install` reports the signals whose `sigaction` was refused and
+/// nothing else — it cannot know what the caller was going to depend on. The
+/// consequences are not interchangeable, and a report that lumps them together
+/// is worse than no report: a window manager that ignored `SIGPIPE` did not
+/// become unkillable, and a reader told otherwise learns to distrust the next
+/// one. So the classification lives here, with the window manager's own
+/// lifecycle, rather than in the FFI crate.
+///
+/// `None` means every disposition installed, which is the only state in which
+/// this process may claim a signal-controlled lifecycle at all. Partial
+/// installation is not rolled back — there is nothing to roll back to, since
+/// the inherited dispositions were never read — so the claim is narrowed to
+/// what did install, and the gap is reported rather than described away.
+fn uninstalled_report(uninstalled: &[libc::c_int]) -> Option<String> {
+    if uninstalled.is_empty() {
+        return None;
+    }
+
+    // What each disposition is holding up, if it fails to install. A missed
+    // stop signal is the one that strands the session: the window manager
+    // cannot be asked to stop, so it never runs `cleanup()`, never removes its
+    // identity record and never closes its control socket. A missed `SIGCHLD`
+    // turns every autostarted client into a zombie for the life of the process,
+    // because nothing in the window manager waits. A signal nobody configured —
+    // refused as an invalid number, say — has no consequence this crate can
+    // name, and must not be reported as if it had one.
+    let consequence = |sig: libc::c_int| -> Option<&'static str> {
+        Some(match sig {
+            libc::SIGTERM | libc::SIGINT | libc::SIGQUIT => {
+                "the window manager cannot be stopped by signal and will not run its cleanup"
+            }
+            libc::SIGCONT => "keyboard grabs are not restored after a suspend",
+            libc::SIGCHLD => "autostarted children are not auto-reaped and stay as zombies",
+            libc::SIGPIPE => "a client disconnecting mid-write can terminate the window manager",
+            _ => return None,
+        })
+    };
+
+    let mut names: Vec<&str> = Vec::with_capacity(uninstalled.len());
+    let mut consequences: Vec<&str> = Vec::new();
+    for &sig in uninstalled {
+        names.push(signal_name(sig).unwrap_or("an unrecognised signal"));
+        consequences.extend(consequence(sig));
+    }
+    // The three stop signals share one consequence, so a report naming all of
+    // them must not repeat it three times.
+    names.sort_unstable();
+    names.dedup();
+    consequences.sort_unstable();
+    consequences.dedup();
+
+    let mut report = format!("could not install a disposition for {}", names.join(", "));
+    if consequences.is_empty() {
+        report.push_str("; no window-manager guarantee is known to be lost");
+    } else {
+        report.push_str(": ");
+        report.push_str(&consequences.join("; "));
+    }
+    Some(report)
+}
+
+/// `SIGTERM` and friends, or the number itself when it names nothing this
+/// crate knows. Never panics and never allocates for the known cases, because
+/// this runs on the startup path where a message that cannot be rendered is
+/// worse than a message that is merely terse.
+fn signal_name(sig: libc::c_int) -> Option<&'static str> {
+    Some(match sig {
+        libc::SIGHUP => "SIGHUP",
+        libc::SIGINT => "SIGINT",
+        libc::SIGQUIT => "SIGQUIT",
+        libc::SIGILL => "SIGILL",
+        libc::SIGABRT => "SIGABRT",
+        libc::SIGFPE => "SIGFPE",
+        libc::SIGKILL => "SIGKILL",
+        libc::SIGUSR1 => "SIGUSR1",
+        libc::SIGSEGV => "SIGSEGV",
+        libc::SIGUSR2 => "SIGUSR2",
+        libc::SIGPIPE => "SIGPIPE",
+        libc::SIGALRM => "SIGALRM",
+        libc::SIGTERM => "SIGTERM",
+        libc::SIGCHLD => "SIGCHLD",
+        libc::SIGCONT => "SIGCONT",
+        libc::SIGSTOP => "SIGSTOP",
+        libc::SIGTSTP => "SIGTSTP",
+        libc::SIGTTIN => "SIGTTIN",
+        libc::SIGTTOU => "SIGTTOU",
+        libc::SIGWINCH => "SIGWINCH",
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uninstalled_report;
+
+    /// The only state in which the process may claim a signal-controlled
+    /// lifecycle at all.
+    #[test]
+    fn a_complete_install_reports_nothing() {
+        assert_eq!(uninstalled_report(&[]), None);
+    }
+
+    /// SIGCHLD is the disposition that silently changes child reaping, and its
+    /// consequence is not the one a missing stop signal has. Reporting them
+    /// alike is what made the previous single message unreadable.
+    #[test]
+    fn a_missed_sigchld_names_reaping_and_not_stoppability() {
+        let report = uninstalled_report(&[libc::SIGCHLD]).expect("a report");
+        assert!(report.contains("SIGCHLD"), "{report}");
+        assert!(report.contains("zombies"), "{report}");
+        assert!(
+            !report.contains("cannot be stopped"),
+            "SIGCHLD has nothing to do with stoppability: {report}"
+        );
+    }
+
+    #[test]
+    fn a_missed_stop_signal_names_stoppability() {
+        let report = uninstalled_report(&[libc::SIGTERM]).expect("a report");
+        assert!(report.contains("SIGTERM"), "{report}");
+        assert!(report.contains("cannot be stopped"), "{report}");
+    }
+
+    /// Every one of them at once: each consequence must appear, and the report
+    /// must not stop at the first.
+    #[test]
+    fn a_partial_install_reports_every_lost_guarantee() {
+        let report =
+            uninstalled_report(&[libc::SIGTERM, libc::SIGINT, libc::SIGQUIT, libc::SIGCHLD])
+                .expect("a report");
+        for expected in ["SIGINT", "SIGQUIT", "SIGTERM", "SIGCHLD"] {
+            assert!(
+                report.contains(expected),
+                "{expected} missing from {report}"
+            );
+        }
+        assert!(report.contains("cannot be stopped"), "{report}");
+        assert!(report.contains("zombies"), "{report}");
+    }
+
+    /// A signal this crate does not configure has no consequence it can name.
+    /// Guessing one would be a lie in a message whose whole purpose is to be
+    /// trusted.
+    #[test]
+    fn an_unconfigured_signal_reports_no_consequence() {
+        let report = uninstalled_report(&[-1]).expect("a report");
+        assert!(report.contains("an unrecognised signal"), "{report}");
+        assert!(
+            report.contains("no window-manager guarantee is known to be lost"),
+            "{report}"
+        );
+    }
+
+    /// Raw signal numbers are not a message. The whole point of reporting is
+    /// that someone can act on it.
+    #[test]
+    fn every_reported_signal_is_named() {
+        let report =
+            uninstalled_report(&[libc::SIGPIPE, libc::SIGCONT, libc::SIGUSR1]).expect("a report");
+        for expected in ["SIGPIPE", "SIGCONT", "SIGUSR1"] {
+            assert!(
+                report.contains(expected),
+                "{expected} missing from {report}"
+            );
+        }
+    }
+}

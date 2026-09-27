@@ -1106,8 +1106,8 @@ fn decode_external(path: &Path) -> Result<Rgba8, String> {
         // this process allocate without limit — the one byte past the cap is
         // what distinguishes "exactly at the limit" from "over it".
         let mut out = Vec::new();
-        let read = std::io::Read::take(&mut pipe, MAX_EXTERNAL_BYTES as u64 + 1)
-            .read_to_end(&mut out);
+        let read =
+            std::io::Read::take(&mut pipe, MAX_EXTERNAL_BYTES as u64 + 1).read_to_end(&mut out);
         // Dropped, never waited on: `SA_NOCLDWAIT` makes the status
         // unobtainable, and EOF on the pipe already means the converter is
         // done writing.
