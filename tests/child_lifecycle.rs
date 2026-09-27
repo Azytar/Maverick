@@ -145,10 +145,17 @@ fn the_external_image_fallback_does_not_depend_on_a_childs_exit_status() {
     assert_eq!(decoded.data.len(), 3 * 4, "one RGBA pixel per source pixel");
     // Alpha exists only if the converter's PPM was re-widened to RGBA here,
     // and the three pixels differ only if the converter's real output came
-    // through rather than a constant fill. The channel *values* are not
-    // asserted: ImageMagick applies its own colour management to a PPM round
-    // trip, so they need not match the native decoder's byte for byte, and
-    // reconciling that belongs to the image decoder, not to this contract.
+    // through rather than a constant fill. The channel *values* are
+    // deliberately not asserted. The fixture is a PNG carrying no gAMA, cHRM,
+    // iCCP or sRGB chunk, so it declares no colour space and both decoders
+    // return its stored samples verbatim — there is no colour management for a
+    // converter to apply, and on the reference toolchain the two paths agree
+    // byte for byte. Pinning the values would still be wrong, because it would
+    // make this test assert against whichever converter the host happens to
+    // have installed, when what it exists to prove is that the delegated path
+    // completes under `SA_NOCLDWAIT` without a waitable child. Pixel equality
+    // across the two decoders is covered in `maverick-img` against an
+    // independent model of the PNG spec, not here.
     for px in decoded.data.chunks_exact(4) {
         assert_eq!(px[3], 0xff, "every pixel must be opaque");
     }
