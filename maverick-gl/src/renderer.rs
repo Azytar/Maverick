@@ -2394,7 +2394,7 @@ mod fbconfig_list_tests {
     fn list(n: usize) -> *mut GLXFBConfig {
         // A real array of `n` null handles — the shape matters, not the values,
         // because the predicate is about length and nullness alone.
-        let mut v: Vec<GLXFBConfig> = std::iter::repeat(std::ptr::null_mut()).take(n).collect();
+        let mut v: Vec<GLXFBConfig> = std::iter::repeat_n(std::ptr::null_mut(), n).collect();
         v.as_mut_ptr()
     }
 
