@@ -655,6 +655,246 @@ for g in session window process; do
 done
 echo
 
+# ── 13. the help must describe the interface the tool actually has ───────────
+echo "13. help describes the command surface"
+# Content, not exit status. The existing help tests assert only the status and
+# discard the output, which is how a top-level help page that named 11 of 23
+# commands shipped while every one of them passed.
+HELP_OUT=$("$MAVERICKCTL_BIN" --help 2>/dev/null)
+for verb in session exec shell attach logs debug inspect \
+            window process camera resize layout; do
+    if printf '%s\n' "$HELP_OUT" | grep -qE "^ +$verb( |$)"; then
+        ok "--help advertises '$verb'"
+    else
+        bad "--help does not advertise '$verb'"
+    fi
+done
+# Each group's own page must name the group it was asked about. `camera`,
+# `resize` and `layout` used to print the SESSIONS page, which mentions none
+# of them, because usage_for() sent everything unrecognised there.
+for verb in camera resize layout; do
+    if "$MAVERICKCTL_BIN" "$verb" --help 2>/dev/null | grep -q "$verb"; then
+        ok "'$verb --help' documents itself"
+    else
+        bad "'$verb --help' never mentions '$verb'"
+    fi
+done
+# A usage *error* is a diagnostic. It used to go to stdout, where
+# `maverickctl 2>/dev/null` silently swallowed it.
+"$MAVERICKCTL_BIN" >/dev/null 2>/dev/null
+BARE_RC=$?
+BARE_ERR=$("$MAVERICKCTL_BIN" 2>&1 >/dev/null | wc -c)
+BARE_OUT=$("$MAVERICKCTL_BIN" 2>/dev/null | wc -c)
+HELP_ERR=$("$MAVERICKCTL_BIN" --help 2>&1 >/dev/null | wc -c)
+if [ "$BARE_RC" = 1 ] && [ "$BARE_ERR" -gt 0 ] && [ "$BARE_OUT" = 0 ]; then
+    ok "bare maverickctl reports usage on stderr and exits 1"
+else
+    bad "bare maverickctl: rc=$BARE_RC stderr=${BARE_ERR}B stdout=${BARE_OUT}B"
+fi
+[ "$HELP_ERR" = 0 ] && ok "--help stays on stdout" || bad "--help wrote $HELP_ERR bytes to stderr"
+echo
+
+# ── 14. SIGINT reaches the same orderly shutdown as SIGTERM ─────────────────
+echo "14. signal disposition"
+# A non-interactive shell sets SIGINT to SIG_IGN in any job it starts with `&`,
+# so a backgrounded Maverick inherited a signal it could never act on. `trap ''`
+# sets that disposition explicitly, so the test does not depend on the shell's
+# job-control mode. Dispositions set to SIG_IGN survive exec, which is exactly
+# how the WM received it.
+SIG_DISPLAY=""
+sig_disp_run() { # signal, -> prints "exited|leaked|alive <artifact-count>"
+    local sig="$1"
+    local log=/tmp/maverick-sigdisp.$$.log
+    DISPLAY="$SIG_DISPLAY" MAVERICK_NO_COMPOSITOR=1 \
+        setsid bash -c "trap '' INT; exec '$MAVERICK_BIN' --name sigdisp --config /dev/null" \
+        >"$log" 2>&1 &
+    local pid=$!
+    local i
+    for i in $(seq 1 80); do grep -q 'maverick ready' "$log" 2>/dev/null && break; sleep 0.2; done
+    local before
+    before=$(find "$XDG_RUNTIME_DIR/maverick" \( -name control.sock -o -name '*.json' \) 2>/dev/null | wc -l)
+    kill -"$sig" "$pid" 2>/dev/null
+    local gone=0
+    for i in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || { gone=1; break; }; sleep 0.1; done
+    local after
+    after=$(find "$XDG_RUNTIME_DIR/maverick" \( -name control.sock -o -name '*.json' \) 2>/dev/null | wc -l)
+    local out
+    if [ $gone -eq 0 ]; then out="alive"
+    elif [ "$after" -gt "$before" ]; then out="leaked"
+    else out="exited"; fi
+    echo "$out $before $after $(grep -c 'exiting cleanly' "$log" 2>/dev/null)"
+    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    rm -f "$log"
+}
+# A scratch display of its own: a window manager on the suite's display would
+# fight the suite's own sessions for their windows.
+if command -v Xvfb >/dev/null 2>&1; then
+    for n in $(seq 90 99); do [ -e "/tmp/.X$n-lock" ] || { SIG_DISPLAY=":$n"; break; }; done
+fi
+if [ -n "$SIG_DISPLAY" ]; then
+    Xvfb "$SIG_DISPLAY" -screen 0 800x600x24 >/dev/null 2>&1 &
+    SIG_XP=$!
+    for i in $(seq 1 40); do [ -e "/tmp/.X11-unix/X${SIG_DISPLAY#:}" ] && break; sleep 0.2; done
+    R_TERM=$(sig_disp_run TERM)
+    R_INT=$(sig_disp_run INT)
+    echo "    SIGTERM -> $R_TERM"
+    echo "    SIGINT  -> $R_INT"
+    case "$R_TERM" in exited*) ok "a backgrounded WM stops on SIGTERM" ;;
+                   *) bad "SIGTERM left it '$R_TERM'" ;; esac
+    case "$R_INT" in exited*) ok "a backgrounded WM stops on SIGINT (was ignored entirely)" ;;
+                  alive*)   bad "SIGINT was ignored: the WM is still running" ;;
+                  leaked*)  bad "SIGINT exited but leaked its socket and identity file" ;;
+                  *) bad "SIGINT left it '$R_INT'" ;; esac
+    # The log line is how a user learns the WM chose to exit rather than crash.
+    INT_CLEAN=$(printf '%s' "$R_INT" | awk '{print $4}')
+    [ "${INT_CLEAN:-0}" -ge 1 ] \
+        && ok "SIGINT runs the orderly path (the 'exiting cleanly' log line is present)" \
+        || bad "SIGINT did not reach the orderly shutdown path"
+    kill "$SIG_XP" 2>/dev/null; wait "$SIG_XP" 2>/dev/null
+    rm -f "/tmp/.X${SIG_DISPLAY#:}-lock" 2>/dev/null
+else
+    note "no Xvfb for the signal section; the disposition case is not covered here"
+fi
+
+# Managed: a session's window manager, stopped by signal. The record must end
+# truthful and the nested X server must not be orphaned.
+SIGW_SESS=sigw
+"$MAVERICKCTL_BIN" session remove "$SIGW_SESS" --force >/dev/null 2>&1
+"$MAVERICKCTL_BIN" session create "$SIGW_SESS" --binary "$MAVERICK_BIN" --resolution 640x480 >/dev/null 2>&1
+SIGW_PID=$("$MAVERICKCTL_BIN" session list --json 2>/dev/null | python3 -c "
+import json,sys
+try:
+    print(next(s['pid'] or 0 for s in json.load(sys.stdin)['sessions'] if s['name']=='$SIGW_SESS'))
+except Exception:
+    print(0)" 2>/dev/null)
+if [ "${SIGW_PID:-0}" != "0" ] && kill -0 "$SIGW_PID" 2>/dev/null; then
+    SIGW_DISPLAY=$("$MAVERICKCTL_BIN" session list --json 2>/dev/null | python3 -c "
+import json,sys
+print(next(s['display'] for s in json.load(sys.stdin)['sessions'] if s['name']=='$SIGW_SESS'))" 2>/dev/null)
+    kill -INT "$SIGW_PID" 2>/dev/null
+    for i in $(seq 1 60); do kill -0 "$SIGW_PID" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$SIGW_PID" 2>/dev/null; then
+        bad "a managed window manager ignored SIGINT"
+    else
+        ok "a managed window manager stops on SIGINT"
+    fi
+    SIGW_X=$("$MAVERICKCTL_BIN" session list --json 2>/dev/null | python3 -c "
+import json,sys
+try: print(next(s['x_pid'] or 0 for s in json.load(sys.stdin)['sessions'] if s['name']=='$SIGW_SESS'))
+except Exception: print(0)" 2>/dev/null)
+    # The window manager does not own the session's X server — it is never told
+    # the server's pid, and the record belongs to the session manager — so the
+    # server outliving the WM is the same on SIGTERM as on SIGINT, and reaping
+    # it is `session stop`'s job. Asserting the WM reaps it would be asserting
+    # an ownership the architecture deliberately withholds from it.
+    if [ "${SIGW_X:-0}" != "0" ] && kill -0 "$SIGW_X" 2>/dev/null; then
+        ok "the X server survives the WM's death, as it does on SIGTERM"
+    else
+        ok "the X server was already gone with the WM"
+    fi
+    "$MAVERICKCTL_BIN" session stop "$SIGW_SESS" >/dev/null 2>&1
+    SIGW_X2=$("$MAVERICKCTL_BIN" session list --json 2>/dev/null | python3 -c "
+import json,sys
+try: print(next(s['x_pid'] or 0 for s in json.load(sys.stdin)['sessions'] if s['name']=='$SIGW_SESS'))
+except Exception: print(0)" 2>/dev/null)
+    if [ "${SIGW_X2:-0}" = "0" ] || ! kill -0 "$SIGW_X2" 2>/dev/null; then
+        ok "the orphaned X server is reaped by the next lifecycle command"
+    else
+        bad "the orphaned X server $SIGW_X2 is still running after session stop"
+    fi
+    SIGW_STATE=$("$MAVERICKCTL_BIN" session list --json 2>/dev/null | python3 -c "
+import json,sys
+try: print(next(s['state'] for s in json.load(sys.stdin)['sessions'] if s['name']=='$SIGW_SESS'))
+except Exception: print('gone')" 2>/dev/null)
+    case "$SIGW_STATE" in
+        stopped|gone) ok "the session record is truthful after a signalled WM ($SIGW_STATE)" ;;
+        *) bad "after SIGINT the record reads '$SIGW_STATE'" ;;
+    esac
+    SIGW_N=${SIGW_DISPLAY#:}
+    if [ ! -e "/tmp/.X${SIGW_N}-lock" ] && [ ! -e "/tmp/.X11-unix/X${SIGW_N}" ]; then
+        ok "the display is reusable after a signalled WM"
+    else
+        bad "display $SIGW_DISPLAY is still claimed"
+    fi
+else
+    bad "could not start a managed session for the signal case"
+fi
+"$MAVERICKCTL_BIN" session remove "$SIGW_SESS" --force >/dev/null 2>&1
+echo
+
+# ── 15. a refusal is a failure, not a completed command ─────────────────────
+echo "15. a refusing instance is reported as a failure"
+# The control protocol answers `ok` at *queue admission*, so a window manager
+# with a full command queue replies `error busy: …` — a non-empty line that
+# reaches the client as a successful transport. Discarding it reported a quit
+# that never happened.
+REFUSE_SID=refuse
+REFUSE_DIR="$XDG_RUNTIME_DIR/maverick/$REFUSE_SID"
+rm -rf "$REFUSE_DIR"; mkdir -p "$REFUSE_DIR"; chmod 700 "$REFUSE_DIR"
+REFUSE_PY=$(command -v python3 || true)
+if [ -n "$REFUSE_PY" ] && [ -n "$SIG_DISPLAY" ]; then
+    "$REFUSE_PY" - "$REFUSE_DIR" "$REFUSE_SID" "$(( $(id -u) ))" <<'REFPY' &
+import json, os, socket, sys, threading
+d, sid, uid = sys.argv[1], sys.argv[2], int(sys.argv[3])
+p = os.path.join(d, "control.sock")
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(p)
+os.chmod(p, 0o600)
+s.listen(8)
+json.dump({"name": sid, "session_id": sid, "pid": os.getpid(), "display": "",
+           "tty_nr": 0, "x_server_identity": "", "start_time": 0, "exe": "",
+           "started_at": 0, "alive": True},
+          open(os.path.join(d, sid + ".json"), "w"))
+def serve():
+    while True:
+        try:
+            c, _ = s.accept()
+        except OSError:
+            return
+        threading.Thread(target=handle, args=(c,), daemon=True).start()
+def handle(c):
+    try:
+        data = c.recv(4096).decode("utf-8", "replace")
+        line = data.split("\n")[0]
+        if line.startswith("ping"):
+            c.sendall(("pong %s\n" % sid).encode())
+        elif line == "identify":
+            c.sendall(('{"name":"%s"}\n' % sid).encode())
+        else:
+            # A full command queue is the one refusal a real WM produces.
+            c.sendall(b"error busy: command queue full\n")
+        c.close()
+    except OSError:
+        pass
+serve()
+REFPY
+    REFUSE_PID=$!
+    for i in $(seq 1 40); do [ -S "$REFUSE_DIR/control.sock" ] && break; sleep 0.2; done
+    for verb in "quit" "restart" "reload"; do
+        out=$("$MAVERICKCTL_BIN" --session "$REFUSE_SID" $verb 2>&1)
+        rc=$?
+        if [ $rc -ne 0 ]; then
+            ok "'$verb' against a refusing instance exits non-zero"
+        else
+            bad "'$verb' reported success against a refusing instance (rc=0, said: $out)"
+        fi
+    done
+    ALL=$("$MAVERICKCTL_BIN" quit-all --yes 2>&1); ALL_RC=$?
+    if [ $ALL_RC -ne 0 ]; then
+        ok "quit-all reports a partial failure with a non-zero status"
+    else
+        bad "quit-all reported success although an instance refused (said: $ALL)"
+    fi
+    # The refusal is still a correct, visible diagnostic rather than "ok".
+    case "$ALL" in *"busy"*|*"busy"*) ok "the refusal is reported verbatim" ;;
+                     *) bad "quit-all did not surface the refusal: $ALL" ;; esac
+    kill $REFUSE_PID 2>/dev/null; wait $REFUSE_PID 2>/dev/null
+    rm -rf "$REFUSE_DIR"
+else
+    note "python3 or Xvfb unavailable; the refusal case is not covered here"
+fi
+echo
+
 echo "-------------------------------------------"
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
