@@ -202,27 +202,47 @@ impl Signal {
         self
     }
 
-    /// Install every configured handler.
+    /// Install every configured handler, reporting the ones that did not take.
     ///
     /// SIGCHLD is always installed with `SA_NOCLDWAIT | SA_RESTART` so the WM
     /// reaps spawned children (alacritty, rofi, …) without leaving zombies —
-    /// that behavior is mandatory for a WM, not optional.
-    pub fn install(self) {
-        install_raw(
+    /// that behavior is mandatory for a WM, not optional, which is why a
+    /// failure to install it is reported rather than swallowed.
+    ///
+    /// The previous version discarded every result, so a `sigaction` refused by
+    /// a seccomp policy or an exhausted thread table left the window manager
+    /// running with a disposition it never installed and nothing said so. The
+    /// handler is still async-signal-safe and still only ever stores an
+    /// `AtomicBool`; what changed is that the caller can now find out.
+    ///
+    /// The returned list is in the order the signals were configured, so the
+    /// `SIGCHLD` entry is always first. A single call that ignores the result
+    /// is still a programming error, not a style choice.
+    pub fn install(self) -> Vec<libc::c_int> {
+        let mut failed = Vec::new();
+        if !install_raw(
             libc::SIGCHLD,
             libc::SIG_DFL,
             libc::SA_NOCLDWAIT | libc::SA_RESTART,
-        );
+        ) {
+            failed.push(libc::SIGCHLD);
+        }
 
         for sig in &self.ignored {
-            install_raw(*sig, libc::SIG_IGN, libc::SA_RESTART);
-        }
-        for h in &self.handlers {
-            match h {
-                Handler::Term(sig) => install_term(*sig),
-                Handler::Regrab(sig) => install_regrab(*sig),
+            if !install_raw(*sig, libc::SIG_IGN, libc::SA_RESTART) {
+                failed.push(*sig);
             }
         }
+        for h in &self.handlers {
+            let (sig, ok) = match h {
+                Handler::Term(sig) => (*sig, install_term(*sig)),
+                Handler::Regrab(sig) => (*sig, install_regrab(*sig)),
+            };
+            if !ok {
+                failed.push(sig);
+            }
+        }
+        failed
     }
 }
 
@@ -242,12 +262,12 @@ extern "C" fn regrab_trampoline(_: libc::c_int) {
     NEED_REGRAB.store(true, ORD);
 }
 
-fn install_term(sig: libc::c_int) {
-    install_raw_fn(term_trampoline, sig, libc::SA_RESTART);
+fn install_term(sig: libc::c_int) -> bool {
+    install_raw_fn(term_trampoline, sig, libc::SA_RESTART)
 }
 
-fn install_regrab(sig: libc::c_int) {
-    install_raw_fn(regrab_trampoline, sig, libc::SA_RESTART);
+fn install_regrab(sig: libc::c_int) -> bool {
+    install_raw_fn(regrab_trampoline, sig, libc::SA_RESTART)
 }
 
 /// Install a handler whose address is a plain `extern "C" fn` (no captured
@@ -265,7 +285,8 @@ fn install_raw_fn(func: extern "C" fn(libc::c_int), sig: libc::c_int, flags: lib
         sa.sa_flags = flags;
         libc::sigemptyset(&mut sa.sa_mask);
         if libc::sigaction(sig, &sa, std::ptr::null_mut()) != 0 {
-            eprintln!("maverick-sys: sigaction({sig}) failed; continuing");
+            // Reported by the caller rather than printed here: a library must
+            // not decide on its own how loudly a window manager complains.
             return false;
         }
     }
@@ -280,7 +301,8 @@ fn install_raw(sig: libc::c_int, action: usize, flags: libc::c_int) -> bool {
         sa.sa_flags = flags;
         libc::sigemptyset(&mut sa.sa_mask);
         if libc::sigaction(sig, &sa, std::ptr::null_mut()) != 0 {
-            eprintln!("maverick-sys: sigaction({sig}) failed; continuing");
+            // Reported by the caller rather than printed here: a library must
+            // not decide on its own how loudly a window manager complains.
             return false;
         }
     }
@@ -453,5 +475,69 @@ pub(crate) mod prop_support {
             1 => string_regex("[^\x00-\x7f]{0,12}").expect("static pattern"),
             1 => string_regex(".").expect("static pattern"),
         ]
+    }
+}
+
+#[cfg(test)]
+mod install_reporting_tests {
+    use super::*;
+
+    /// A successful install reports nothing, and really installed the handlers.
+    ///
+    /// The result was previously discarded, so a refused `sigaction` was
+    /// indistinguishable from a successful one — which matters most for
+    /// `SIGCHLD`, since without `SA_NOCLDWAIT` every autostarted child becomes
+    /// a zombie for the life of the process.
+    #[test]
+    fn a_good_install_reports_nothing_and_sets_the_dispositions() {
+        // Read the disposition back out of /proc rather than trusting the
+        // return value, so this checks the kernel's view.
+        let caught = |sig: libc::c_int| -> bool {
+            let line = std::fs::read_to_string("/proc/self/status").expect("status");
+            for l in line.lines() {
+                if let Some(hex) = l.strip_prefix("SigCgt:") {
+                    let mask = u64::from_str_radix(hex.trim(), 16).expect("hex");
+                    return mask & (1u64 << (sig - 1)) != 0;
+                }
+            }
+            false
+        };
+        let failed = Signal::new()
+            .ignore(libc::SIGPIPE)
+            .on_sigterm(libc::SIGTERM)
+            .on_sigterm(libc::SIGINT)
+            .on_sigcont(libc::SIGCONT)
+            .install();
+        assert_eq!(failed, Vec::<libc::c_int>::new());
+        assert!(caught(libc::SIGTERM), "SIGTERM must be caught");
+        assert!(caught(libc::SIGINT), "SIGINT must be caught");
+        assert!(caught(libc::SIGCONT), "SIGCONT must be caught");
+    }
+
+    /// Installing the same signal twice is idempotent, and still reports
+    /// success — the point of the change is to report *refusals*, not to make
+    /// a redundant install look like a failure.
+    #[test]
+    fn a_repeat_install_is_not_reported_as_a_failure() {
+        let chain = || {
+            Signal::new()
+                .ignore(libc::SIGPIPE)
+                .on_sigterm(libc::SIGTERM)
+                .on_sigterm(libc::SIGINT)
+                .on_sigcont(libc::SIGCONT)
+        };
+        assert!(chain().install().is_empty());
+        assert!(chain().install().is_empty());
+    }
+
+    /// An invalid signal number must be refused *and* reported.
+    ///
+    /// `sigaction` rejects it, so this is the case the discarded result used to
+    /// hide: the caller believed it had installed a handler for a signal the
+    /// kernel does not recognise.
+    #[test]
+    fn an_invalid_signal_is_reported_rather_than_swallowed() {
+        let failed = Signal::new().on_sigterm(-1).install();
+        assert_eq!(failed, vec![-1], "a refused signal must be reported");
     }
 }

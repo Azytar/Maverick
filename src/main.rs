@@ -288,7 +288,7 @@ fn main() {
     std::env::set_var("MAVERICK_INSTANCE", &sid);
 
     maverick_sys::detach_from_terminal();
-    maverick_sys::Signal::new()
+    let uninstalled = maverick_sys::Signal::new()
         .ignore(libc::SIGPIPE)
         .on_sigterm(libc::SIGTERM)
         // SIGINT takes the same route as SIGTERM: `on_sigterm` records the
@@ -306,6 +306,17 @@ fn main() {
         .on_sigterm(libc::SIGINT)
         .on_sigcont(libc::SIGCONT)
         .install();
+    // A disposition that did not install is a window manager that cannot be
+    // stopped the way it expects. `SIGCHLD` is the one to read twice: without
+    // `SA_NOCLDWAIT` every autostarted client becomes a zombie for the life of
+    // the process. The result used to be discarded, so a `sigaction` refused by
+    // a seccomp policy left the process running with a disposition it never had.
+    if !uninstalled.is_empty() {
+        log::warn!(
+            "could not install a handler for signal(s) {uninstalled:?}; \
+             the window manager may not be stoppable, and may not reap autostarted children"
+        );
+    }
 
     // Advertise this instance so an external tool can discover or close it,
     // even when several Mavericks run on different TTYs/DISPLAYs. Neither of
