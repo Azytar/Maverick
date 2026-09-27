@@ -31,10 +31,23 @@
 //! because X errors are asynchronous the only correct read sequence is
 //! `clear_x_error` → request → [`XDisplay::sync`] → `take_x_error`.
 //!
+//! That signal describes **Xlib and GLX requests only**. Protocol errors on
+//! requests x11rb issues are reported by libxcb to x11rb itself
+//! (`Cookie::reply` answers `Err(ReplyError::X11Error(..))`) and never reach
+//! Xlib's handler, so the window manager's XCB paths use `checked_void!` rather
+//! than this cell. Both halves are exercised against a real server in
+//! `tests/x_error_signal.rs`.
+//!
 //! # Thread safety
 //!
-//! [`XDisplay`] is `Send` so the window-manager structs holding it stay
-//! `Send`; the pointer itself is only ever touched from the WM thread.
+//! [`XDisplay`] is `Send` and deliberately **not** `Sync`; the reasoning is on
+//! the `unsafe impl` itself. `open_x` enables Xlib's own locking with
+//! `XInitThreads()` before anything else and refuses to hand out a display if
+//! that fails, which is what backs the `Send` bound. The pointer is only ever
+//! touched from one thread: Xlib dispatches protocol errors on the thread that
+//! issued the request, and a second thread doing I/O on the same `Display*`
+//! could consume an error meant for the first — which is why sharing it would
+//! need `Sync` and does not get it.
 
 use std::cell::Cell;
 use std::os::raw::{c_char, c_int, c_uchar, c_ulong, c_void};
@@ -48,6 +61,18 @@ pub type Display = c_void;
 /// X resource ids.
 pub type XID = c_ulong;
 
+/// Xlib's `XErrorEvent`, the 32-byte error record the handler is handed.
+///
+/// `#[repr(C)]` with the same field types and order as the C struct, so the
+/// field offsets the handler reads match what libX11 wrote:
+///
+/// ```c
+/// typedef struct {
+///     int type; Display *display; XID resourceid;
+///     unsigned long serial; unsigned char error_code;
+///     unsigned char request_code; unsigned char minor_code;
+/// } XErrorEvent;
+/// ```
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct XErrorEvent {
@@ -73,6 +98,7 @@ extern "C" {
     pub fn XFree(data: *mut c_void) -> c_int;
     pub fn XSync(dpy: *mut Display, discard: c_int) -> c_int;
     pub fn XSetErrorHandler(handler: XErrorHandler) -> XErrorHandler;
+    pub fn XGetErrorHandler() -> XErrorHandler;
 }
 
 #[link(name = "X11-xcb")]
@@ -85,6 +111,25 @@ thread_local! {
     static LAST_X_ERROR: Cell<u8> = const { Cell::new(0) };
 }
 
+// The record cell is per-thread because Xlib runs the handler on the thread
+// that issued the failing request: it is called from inside that thread's
+// request/flush/reply path, never from a background reader. A shared cell
+// would let one thread's `clear → request → sync → take` sequence read another
+// thread's failure — and it would be a data race besides, since the handler
+// runs from C at a point Rust cannot see.
+//
+// The handler is a plain `fn` item, so `silent_error_handler` is an ordinary
+// non-capturing function pointer of exactly the type `XErrorHandler` names and
+// is valid for the life of the process: the code lives in `.text`, it is never
+// unregistered, and the cell it writes has a `const` initialiser, so first
+// access allocates nothing and registers no destructor. libX11 is linked, never
+// `dlclose`d, so the registration cannot outlive the code it points at.
+//
+// Returning `0` is load-bearing, not a convention: Xlib calls `exit()` when a
+// client-installed error handler returns non-zero. That is the whole reason
+// this handler exists — the default one prints the error and takes the window
+// manager down with it, which a compositor cannot afford when a client simply
+// unmapped a window between two requests.
 unsafe extern "C" fn silent_error_handler(_dpy: *mut Display, err: *mut XErrorEvent) -> c_int {
     if !err.is_null() {
         LAST_X_ERROR.with(|c| c.set((*err).error_code));
@@ -93,7 +138,32 @@ unsafe extern "C" fn silent_error_handler(_dpy: *mut Display, err: *mut XErrorEv
 }
 
 /// Install the silent X error handler. Idempotent.
+///
+/// # What discarding the previous handler means
+///
+/// The Xlib error handler is **process-global** — one slot for the whole
+/// process, not one per `Display*` — and `XSetErrorHandler` returns whatever
+/// was installed. That return value is deliberately dropped, and that is the
+/// correct choice rather than a leak of responsibility:
+///
+/// * **Chaining to the previous handler would reintroduce the bug this
+///   replaces.** libX11's default handler prints the protocol error and then
+///   calls `exit()`. Any handler that chains to it kills the window manager on
+///   the first `BadWindow`, which for a compositor is a normal event.
+/// * **A window manager is the process.** Nothing else in it installs an error
+///   handler: `open_x` is the only caller and the only one that ever opens a
+///   `Display*`, so there is no foreign handler to preserve.
+///
+/// The "did an X error happen" signal therefore *is* [`take_x_error`], and the
+/// caller contract is the sequence documented on this module. `open_x` is the
+/// only place that installs it; [`install_silent_error_handler`] is public
+/// because installing it a second time has to be harmless, not because a second
+/// owner is expected.
 pub fn install_silent_error_handler() {
+    // SAFETY: `silent_error_handler` is a non-capturing `extern "C"` fn item
+    // whose signature is the one `XSetErrorHandler` declares, so it is a valid
+    // argument of type `XErrorHandler`; it stays mapped for the process
+    // lifetime, which is as long as libX11 will ever call it.
     unsafe { XSetErrorHandler(Some(silent_error_handler)) };
 }
 
@@ -147,20 +217,60 @@ pub fn x_error_name(code: u8) -> &'static str {
 /// manager holds both for the whole process lifetime and the kernel closes the
 /// socket at exit. Use [`XDisplay::close`] only when you can prove the
 /// connection is already gone.
+///
+/// Being `Copy` and not `Drop` is what makes the ownership graph acyclic: the
+/// window manager's `dpy` field, the compositor's handle built with
+/// [`XDisplay::from_raw`] and the local in `open_x` are all non-owning aliases
+/// of one `Display*`, so there is no path on which two of them can each decide
+/// to close it. [`close`](XDisplay::close) is the only closer, and nothing the
+/// crate returns can reach it.
 #[derive(Debug, Clone, Copy)]
 pub struct XDisplay(*mut Display);
 
-// `Send` is sound because `open_x` runs `XInitThreads()` before any other
-// Xlib call, so Xlib's own locking is active; in practice the pointer is
-// additionally only ever touched from the WM thread. The bound exists purely so
-// the structs holding it stay `Send`.
+// `Send` — and deliberately *not* `Sync`.
+//
+// What backs the claim: `open_x` calls `XInitThreads()` as the very first
+// Xlib call in the process and now *fails* if it does not succeed, so by the
+// time an `XDisplay` exists, Xlib's own per-display lock is installed and a
+// call into Xlib from thread B cannot race one from thread A. Without that call
+// this `impl` would be unsound, which is why [`XDisplay::from_raw`] carries the
+// same requirement in its safety contract.
+//
+// Why `Sync` is withheld rather than granted: the lock makes Xlib's internal
+// state safe, not Xlib's *semantics* on one display. Two threads issuing
+// requests through `&Display` would interleave arbitrarily, and — the concrete
+// harm here — Xlib delivers protocol errors on whichever thread happens to read
+// the socket, so a thread's `clear_x_error` → request → `sync` → `take_x_error`
+// sequence could pick up a failure another thread provoked, and the compositor
+// would answer for a request that succeeded. `Send` alone says "one thread at a
+// time", which is the discipline every call site already follows; `Sync` would
+// claim what the error cell and the event queue cannot support.
+//
+// `tests/x_error_signal.rs` checks both halves against a real server: that the
+// error raised on one thread is not visible from another, and that
+// `XInitThreads` reports success here.
 unsafe impl Send for XDisplay {}
 
 impl XDisplay {
     /// Wrap a raw `Display*`.
     ///
     /// # Safety
-    /// `ptr` must be a live `Display*` returned by `XOpenDisplay`.
+    /// `ptr` must be a live `Display*` returned by `XOpenDisplay` **and** the
+    /// caller must have established Xlib's thread support first — either by
+    /// calling `XInitThreads()` before any other Xlib function, or by taking
+    /// the pointer from [`open_x`], which does exactly that and refuses to
+    /// return a display if it could not.
+    ///
+    /// The second clause is not decoration. The result is a `Send` type, so it
+    /// may be moved to another thread, and `Send` is justified by Xlib's
+    /// internal lock: a `Display*` opened on a process where `XInitThreads` was
+    /// never called is not safe to share even one-owner-at-a-time across
+    /// threads, so wrapping it here would hand out a value the type system
+    /// believes is safe and is not.
+    ///
+    /// The wrapper does not take ownership and must not be closed through
+    /// [`XDisplay::close`]; it borrows a connection whose real owner is the
+    /// process-wide `XDisplay`/`XConn` pair from [`open_x`].
     pub unsafe fn from_raw(ptr: *mut Display) -> Self {
         Self(ptr)
     }
@@ -180,7 +290,15 @@ impl XDisplay {
     /// Safe to call while XCB owns the queue: `XSync` flushes and waits, it
     /// never dequeues into Xlib's own buffer, so the events stay in XCB where
     /// the window manager reads them.
+    ///
+    /// It is also the barrier a protocol error crosses. X errors are
+    /// asynchronous, so `take_x_error` says nothing useful until the server has
+    /// been reached and its answer read; this is the only call in the crate
+    /// that guarantees that has happened.
     pub fn sync(self) {
+        // SAFETY: `self.0` is a live `Display*` for the whole process (the type
+        // is not `Drop`, so nothing the caller can reach closes it) and
+        // `XSync` takes only the display and a discard flag.
         unsafe { XSync(self.0, 0) };
     }
 
@@ -189,8 +307,16 @@ impl XDisplay {
     /// # Safety
     /// Every `XCBConnection` wrapping this display's connection must already be
     /// dropped, and no GLX/Vulkan resource may still be alive.
+    ///
+    /// Nothing this crate returns satisfies that: [`open_x`] hands back a live
+    /// `XConn` alongside the display and the two are meant to live together
+    /// until exit. `close` exists for `open_x`'s own error paths, where the
+    /// wrapping has not yet succeeded and there is provably no borrower left.
     pub unsafe fn close(self) {
         if !self.0.is_null() {
+            // SAFETY: the caller guarantees no connection or driver resource
+            // still refers to this display, and `XCloseDisplay` takes no
+            // argument but the display.
             XCloseDisplay(self.0);
         }
     }
@@ -210,11 +336,27 @@ impl XDisplay {
 /// On success the `XCBConnection` borrows the display's connection
 /// (`should_drop = false`), so the `Display*` stays the owner and the caller
 /// must keep **both** alive for as long as either is used; see the crate docs
-/// for the lifetime rules that follow from that.
+/// for the lifetime rules that follow from that. The display is never closed
+/// afterwards, which is why [`XDisplay`] is not `Drop`.
 pub fn open_x() -> Result<(XDisplay, XConn, usize), String> {
+    // SAFETY for the whole block: the only Xlib calls are the six below, each
+    // on a `Display*` this function owns from `XOpenDisplay` onwards, and each
+    // passing either a pointer to that display or the address of a live local
+    // for an out-parameter. No Xlib event function is called, so XCB's
+    // ownership of the queue established below is never disturbed. The
+    // `Display*` is intentionally not closed on the success path — the
+    // `XCBConnection` returned borrows it.
     unsafe {
-        // First Xlib call in the process (see `Send` docs above).
-        XInitThreads();
+        // Must be the first Xlib call in the process, and its result is
+        // load-bearing rather than advisory: it is what makes `XDisplay: Send`
+        // sound, so a libX11 that could not install its own lock must not
+        // produce a display at all. (libX11 answers non-zero on every platform
+        // it currently ships; a zero here would mean the lock allocation
+        // failed, and continuing would hand out a `Send` handle onto a
+        // non-thread-safe Xlib.)
+        if XInitThreads() == 0 {
+            return Err("XInitThreads failed: Xlib is not thread-safe on this build".into());
+        }
         let dpy = XOpenDisplay(std::ptr::null());
         if dpy.is_null() {
             let target = std::env::var("DISPLAY").unwrap_or_else(|_| "<unset>".into());
@@ -246,6 +388,11 @@ pub fn open_x() -> Result<(XDisplay, XConn, usize), String> {
             format!("x11rb could not wrap the xcb connection: {e}")
         })?;
 
+        // SAFETY: `dpy` is the live display this function just opened, with
+        // Xlib's thread support enabled above, and the wrapper it produces is
+        // returned to the caller next to the `XConn` that borrows it — so the
+        // two stay alive together and neither can be closed underneath the
+        // other.
         Ok((XDisplay::from_raw(dpy), conn, screen))
     }
 }
