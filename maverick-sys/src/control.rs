@@ -190,9 +190,10 @@ impl ControlServer {
     /// Returns `io::Error` if the session directory cannot be created or the
     /// socket cannot be bound.
     pub fn spawn(name: &str, identity_json: String, hub: ControlHub) -> std::io::Result<Self> {
-        // SAFETY: `getuid` always succeeds and reads the process's real uid.
         // The kernel is the only acceptable source for "who owns this socket".
-        let owner_uid = unsafe { libc::getuid() };
+        // Real uid, because that is what `SO_PEERCRED` answers with; see
+        // `identity::current_uid`.
+        let owner_uid = identity::current_uid();
         // Validate early: reject traversal/overlong session ids before touching fs.
         let path = identity::try_sock_path(name)?;
         // The parent directory every session lives in; `0700` so a name is not
@@ -733,9 +734,7 @@ mod tests {
         let _ = std::fs::remove_file(identity::sock_path(&name));
         let hub = ControlHub::new();
         let srv = ControlServer::spawn(&name, "{}".to_string(), hub).expect("spawn");
-        // SAFETY: as in `ControlServer::spawn` — the kernel's answer for this
-        // process.
-        let me = unsafe { libc::getuid() };
+        let me = identity::current_uid();
         assert_eq!(srv.owner_uid(), me, "the owner must come from the kernel");
 
         // A connection from this process is the owner, and the kernel agrees.
@@ -754,9 +753,10 @@ mod tests {
     fn peer_credentials_identify_the_process_not_the_path() {
         use std::os::unix::net::UnixStream;
         let (a, _b) = UnixStream::pair().expect("socketpair");
-        // SAFETY: as above.
-        let me = unsafe { libc::getuid() };
-        assert_eq!(peer_uid(&a).expect("socketpair peers have credentials"), me);
+        assert_eq!(
+            peer_uid(&a).expect("socketpair peers have credentials"),
+            identity::current_uid()
+        );
     }
 
     /// A descriptor the kernel cannot describe must be an error, never a uid.

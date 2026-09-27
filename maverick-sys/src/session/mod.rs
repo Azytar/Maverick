@@ -385,15 +385,11 @@ impl Session {
 
     /// A fresh record for `name` with `spec`, owned by the current process.
     pub fn new(name: SessionName, spec: Spec) -> Self {
-        // SAFETY: `getuid`/`getgid` always succeed and read process
-        // credentials, which is exactly the kernel-provided identity this
-        // record is supposed to carry. Nothing about it is caller-supplied.
-        let (owner_uid, owner_gid) = unsafe { (libc::getuid(), libc::getgid()) };
         Session {
             name,
             spec,
-            owner_uid,
-            owner_gid,
+            owner_uid: current_uid(),
+            owner_gid: current_gid(),
             created_at: epoch_secs(),
             display: Display(0),
             xserver: ProcRef::default(),
@@ -576,8 +572,6 @@ impl Session {
 
         let name = SessionName::parse(&get_str("name")).ok()?;
         let display = Display::parse(&get_str("display")).unwrap_or(Display(0));
-        // SAFETY: as in `Session::new` — process credentials from the kernel.
-        let (owner_uid, owner_gid) = unsafe { (libc::getuid(), libc::getgid()) };
         Some(Session {
             spec: Spec {
                 backend: Backend::parse(&get_str("backend")).unwrap_or_default(),
@@ -597,8 +591,13 @@ impl Session {
                 debug: get_bool("debug").unwrap_or(false),
                 compositor: get_bool("compositor").unwrap_or(true),
             },
-            owner_uid: get_u64("owner_uid").unwrap_or(u64::from(owner_uid)) as u32,
-            owner_gid: get_u64("owner_gid").unwrap_or(u64::from(owner_gid)) as u32,
+            // A record that names no owner is this process's own: reading it is
+            // reading a file only this uid can have written, in a `0700`
+            // directory. Anything that *does* name an owner is taken at its
+            // word here and checked against the kernel's answer in
+            // `read_checked`.
+            owner_uid: get_u64("owner_uid").unwrap_or(u64::from(current_uid())) as u32,
+            owner_gid: get_u64("owner_gid").unwrap_or(u64::from(current_gid())) as u32,
             created_at: get_u64("created_at").unwrap_or(0),
             display,
             xserver: ProcRef {
@@ -719,15 +718,18 @@ pub fn write(session: &Session) -> io::Result<()> {
 }
 
 /// The current process's real uid.
+///
+/// The kernel's answer, via the crate's single credential wrapper
+/// ([`identity::current_uid`]). Nothing here takes it from a caller: ownership
+/// is a fact about who ran the command, and a record that could declare its own
+/// owner would make every `owner_uid` check on it meaningless.
 pub fn current_uid() -> u32 {
-    // SAFETY: `getuid` always succeeds and reads the process's real uid.
-    unsafe { libc::getuid() }
+    identity::current_uid()
 }
 
 /// The current process's real gid.
 pub fn current_gid() -> u32 {
-    // SAFETY: `getgid` always succeeds and reads the process's real gid.
-    unsafe { libc::getgid() }
+    identity::current_gid()
 }
 
 /// Every session name that has a record on disk.
