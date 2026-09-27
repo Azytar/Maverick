@@ -1212,12 +1212,17 @@ mod tests {
     #[test]
     fn ppm_roundtrip_trivial() {
         // A 1x1 PPM written inline.
-        let tmp = std::env::temp_dir().join("maverick-img-test.ppm");
+        // Private per-test directory: the four tests below used fixed
+        // names in $TMPDIR, so two running in parallel deleted each
+        // other's input and failed with a bare `unwrap` panic. The same
+        // collision the workspace `tempfile` dependency exists to prevent,
+        // reintroduced in the one crate without the dev-dependency.
+        let dir = tempfile::tempdir().expect("private temp dir");
+        let tmp = dir.path().join("image.ppm");
         std::fs::write(&tmp, b"P6\n1 1\n255\n\x10\x14\x1e").unwrap();
         let img = decode(&tmp).unwrap();
         assert_eq!((img.w, img.h), (1, 1));
         assert_eq!(&img.data[..3], &[0x10, 0x14, 0x1e]);
-        std::fs::remove_file(&tmp).ok();
     }
 
     #[test]
@@ -1284,13 +1289,18 @@ mod tests {
         buf.push(0b1111_1111); // RGB for pixel 1
         buf.extend_from_slice(&red[0..3]);
         buf.extend_from_slice(&[0xFF, 0, 0, 0, 0, 0, 0, 1]); // end marker
-        let tmp = std::env::temp_dir().join("maverick-img-test.qoi");
+                                                             // Private per-test directory: the four tests below used fixed
+                                                             // names in $TMPDIR, so two running in parallel deleted each
+                                                             // other's input and failed with a bare `unwrap` panic. The same
+                                                             // collision the workspace `tempfile` dependency exists to prevent,
+                                                             // reintroduced in the one crate without the dev-dependency.
+        let dir = tempfile::tempdir().expect("private temp dir");
+        let tmp = dir.path().join("image.qoi");
         std::fs::write(&tmp, &buf).unwrap();
         let img = decode(&tmp).unwrap();
         assert_eq!((img.w, img.h), (2, 1));
         assert_eq!(&img.data[0..4], &red);
         assert_eq!(&img.data[4..8], &red);
-        std::fs::remove_file(&tmp).ok();
     }
 
     #[test]
@@ -1311,12 +1321,17 @@ mod tests {
         b.extend_from_slice(&0u32.to_le_bytes());
         b.extend_from_slice(&[0u8; 16]); // resolutions etc.
         b.extend_from_slice(&[10, 20, 30]); // BGR
-        let tmp = std::env::temp_dir().join("maverick-img-test.bmp");
+                                            // Private per-test directory: the four tests below used fixed
+                                            // names in $TMPDIR, so two running in parallel deleted each
+                                            // other's input and failed with a bare `unwrap` panic. The same
+                                            // collision the workspace `tempfile` dependency exists to prevent,
+                                            // reintroduced in the one crate without the dev-dependency.
+        let dir = tempfile::tempdir().expect("private temp dir");
+        let tmp = dir.path().join("image.bmp");
         std::fs::write(&tmp, &b).unwrap();
         let img = decode(&tmp).unwrap();
         assert_eq!((img.w, img.h), (1, 1));
         assert_eq!(&img.data[0..4], &[30, 20, 10, 255]);
-        std::fs::remove_file(&tmp).ok();
     }
 
     #[test]
@@ -1326,10 +1341,15 @@ mod tests {
         b.extend_from_slice(&1u32.to_be_bytes());
         b.extend_from_slice(&1u32.to_be_bytes());
         b.extend_from_slice(&[0x10u8, 0, 0x20, 0, 0x30, 0, 0x40, 0]); // 16-bit BE
-        let tmp = std::env::temp_dir().join("maverick-img-test.ff");
+                                                                      // Private per-test directory: the four tests below used fixed
+                                                                      // names in $TMPDIR, so two running in parallel deleted each
+                                                                      // other's input and failed with a bare `unwrap` panic. The same
+                                                                      // collision the workspace `tempfile` dependency exists to prevent,
+                                                                      // reintroduced in the one crate without the dev-dependency.
+        let dir = tempfile::tempdir().expect("private temp dir");
+        let tmp = dir.path().join("image.ff");
         std::fs::write(&tmp, &b).unwrap();
         let img = decode(&tmp).unwrap();
         assert_eq!(&img.data[0..4], &[0x10, 0x20, 0x30, 0x40]);
-        std::fs::remove_file(&tmp).ok();
     }
 }

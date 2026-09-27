@@ -74,7 +74,6 @@ maverick-gl = { path = "maverick-gl", optional = true }
 # "pure X11 WM" configuration this manifest advertises. Tests that need the
 # backend reach it through the `compositor-opengl` feature instead.
 proptest.workspace = true
-tempfile.workspace = true
 
 [features]
 # Default build includes the OpenGL compositor backend.

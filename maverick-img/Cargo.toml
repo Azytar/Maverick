@@ -14,3 +14,6 @@ path = "src/lib.rs"
 [dev-dependencies]
 # Property-based coverage for this crate's pure deterministic logic.
 proptest.workspace = true
+# The decode tests write real files and must not share a name in $TMPDIR with a
+# test running in parallel.
+tempfile.workspace = true

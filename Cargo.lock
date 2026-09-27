@@ -128,12 +128,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "log"
-version = "0.4.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
-
-[[package]]
 name = "maverick"
 version = "0.7.1"
 dependencies = [
@@ -146,7 +140,6 @@ dependencies = [
  "maverick-toml",
  "maverick-x11",
  "proptest",
- "tempfile",
  "x11rb",
 ]
 
@@ -162,7 +155,6 @@ name = "maverick-gl"
 version = "0.7.1"
 dependencies = [
  "libc",
- "log",
  "maverick-img",
  "maverick-x11",
  "proptest",
@@ -174,6 +166,7 @@ name = "maverick-img"
 version = "0.7.1"
 dependencies = [
  "proptest",
+ "tempfile",
 ]
 
 [[package]]
@@ -189,6 +182,7 @@ version = "0.7.1"
 dependencies = [
  "libc",
  "proptest",
+ "rustix",
  "tempfile",
 ]
 
@@ -204,7 +198,7 @@ name = "maverick-vk"
 version = "0.7.1"
 dependencies = [
  "ash",
- "maverick-gl",
+ "maverick-x11",
  "proptest",
  "x11rb",
 ]
@@ -213,7 +207,6 @@ dependencies = [
 name = "maverick-x11"
 version = "0.7.1"
 dependencies = [
- "libc",
  "proptest",
  "x11rb",
 ]

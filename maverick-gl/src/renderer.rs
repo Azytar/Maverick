@@ -1293,11 +1293,9 @@ impl Renderer {
             )
         };
         if glx_trace_enabled() {
-            log::info!(
+            eprintln!(
                 "[GLX] create glxpixmap={} for_x_pixmap={} visual={}",
-                glx_pixmap,
-                pixmap,
-                visual
+                glx_pixmap, pixmap, visual
             );
         }
         if verify {
@@ -1373,11 +1371,9 @@ impl Renderer {
         let d = self.dpy.as_ptr();
         let handle = t.handle();
         if glx_trace_enabled() {
-            log::info!(
+            eprintln!(
                 "[GLX] bind glxpixmap={} texture={} was_bound={}",
-                t.glx_pixmap,
-                t.tex,
-                t.bound
+                t.glx_pixmap, t.tex, t.bound
             );
         }
         unsafe {
@@ -1590,11 +1586,9 @@ impl Renderer {
     pub fn destroy_texture(&mut self, mut t: Texture) {
         let d = self.dpy.as_ptr();
         if glx_trace_enabled() {
-            log::info!(
+            eprintln!(
                 "[GLX] destroy glxpixmap={} texture={} was_bound={}",
-                t.glx_pixmap,
-                t.tex,
-                t.bound
+                t.glx_pixmap, t.tex, t.bound
             );
         }
         unsafe {
