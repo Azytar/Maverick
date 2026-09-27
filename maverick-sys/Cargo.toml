@@ -12,6 +12,20 @@ keywords = ["window-manager", "ipc", "ffi"]
 
 [dependencies]
 libc = "0.2"
+# Process, descriptor and entropy operations go through a maintained syscall
+# layer rather than hand-written FFI in this crate, so the `sigaction` and
+# `sigemptyset` details and the `pollfd` layout are not ours to get right.
+#
+# This adds no package: `x11rb` already depends on rustix, and the lockfile
+# already pins it. Only the `event`, `fs` and `rand` features are new, and
+# `default-features = false` keeps the `pty`/`mm`/`mount`/`shm` surface out of
+# a crate whose only consumer is a window manager.
+rustix = { version = "1", default-features = false, features = [
+    "std",
+    "event",
+    "fs",
+    "rand",
+] }
 
 [dev-dependencies]
 # Property-based coverage for this crate's pure deterministic logic.

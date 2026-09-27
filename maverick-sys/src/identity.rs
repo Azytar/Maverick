@@ -248,13 +248,11 @@ pub fn new_session_id() -> String {
     format!("{pid:x}-{nanos:x}-{rand:x}")
 }
 
-/// Read 8 bytes of entropy from `/dev/urandom`. `None` when the source is
+/// Read 8 bytes of entropy from the kernel. `None` when the source is
 /// unavailable, so the caller can fall back to the clock.
 fn read_urandom_u64() -> Option<u64> {
-    use std::io::Read;
-    let mut f = std::fs::File::open("/dev/urandom").ok()?;
     let mut buf = [0u8; 8];
-    f.read_exact(&mut buf).ok()?;
+    rustix::rand::getrandom(&mut buf, rustix::rand::GetRandomFlags::empty()).ok()?;
     Some(u64::from_ne_bytes(buf))
 }
 

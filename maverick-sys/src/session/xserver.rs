@@ -214,7 +214,6 @@ impl DisplayClaim {
     /// Try to claim `display` for exclusive use. `Ok(None)` means another
     /// creator holds it; `Err` is a real filesystem error.
     pub fn try_acquire(display: Display) -> io::Result<Option<Self>> {
-        use std::os::unix::io::AsRawFd;
         let file = match std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -227,25 +226,23 @@ impl DisplayClaim {
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Ok(None),
             Err(e) => return Err(e),
         };
-        // SAFETY: `flock` only needs a valid descriptor, and `file` owns one
-        // for as long as the claim is held.
-        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if locked != 0 {
+        // `flock` through a maintained wrapper: the `EWOULDBLOCK` case is the
+        // interesting one, and reading it as "another creator holds the claim"
+        // rather than as a generic error is the whole point of the call.
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(Some(Self { file })),
             // EWOULDBLOCK: another creator is inside the window. Not an error.
-            return Ok(None);
+            Err(rustix::io::Errno::AGAIN) => Ok(None),
+            Err(e) => Err(std::io::Error::from_raw_os_error(e.raw_os_error())),
         }
-        Ok(Some(Self { file }))
     }
 }
 
 impl Drop for DisplayClaim {
     fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: as above. The file is closed immediately after, which drops
-        // the lock anyway, so a failure here changes nothing.
-        unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
+        // The file is closed immediately after, which releases the lock anyway,
+        // so a failure here changes nothing.
+        let _ = rustix::fs::flock(&self.file, rustix::fs::FlockOperation::Unlock);
     }
 }
 
@@ -424,9 +421,13 @@ pub struct XServerSpec {
 /// 16 bytes from `/dev/urandom`, hex-encoded because that is the only encoding
 /// every X client library (and `xauth`) accepts.
 pub fn generate_cookie() -> io::Result<String> {
-    use std::io::Read;
     let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    // No clock fallback here, unlike the session id: a cookie that is not
+    // unpredictable is not a cookie, so a missing entropy source must fail
+    // the start rather than produce a guessable secret.
+    rustix::rand::getrandom(&mut bytes, rustix::rand::GetRandomFlags::empty()).map_err(|e| {
+        io::Error::other(format!("could not read random bytes for the X cookie: {e}"))
+    })?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 

@@ -76,6 +76,62 @@ const ORD: Ordering = Ordering::SeqCst;
 static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static NEED_REGRAB: AtomicBool = AtomicBool::new(false);
 
+/// The poll timeout must survive being expressed as a `timespec`.
+///
+/// `tv_nsec` is a remainder under one billion, not a total, so a duration is
+/// split rather than truncated. A timeout of zero has to return promptly
+/// instead of blocking, because the event loop uses it for "no work pending".
+#[cfg(test)]
+mod poll_timeout_tests {
+    use super::*;
+
+    fn wait_on_idle(fd: std::os::unix::io::RawFd, d: std::time::Duration) -> bool {
+        wait_readable_fds(&[fd], Some(d))
+    }
+
+    #[test]
+    fn a_zero_timeout_returns_without_blocking() {
+        // A pipe with nothing written: readable never becomes true.
+        let (r, w) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let start = std::time::Instant::now();
+        assert!(!wait_on_idle(
+            std::os::unix::io::AsRawFd::as_raw_fd(&r),
+            std::time::Duration::ZERO
+        ));
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "a zero timeout must not block"
+        );
+        drop(w);
+    }
+
+    #[test]
+    fn a_timeout_longer_than_a_second_is_not_truncated_to_nanoseconds() {
+        // Two seconds expressed as a nanosecond total would be an invalid
+        // timespec. A short timeout is what we can actually observe, so this
+        // only asserts the call returns rather than the kernel rejecting it.
+        let (r, _w) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let fd = std::os::unix::io::AsRawFd::as_raw_fd(&r);
+        let start = std::time::Instant::now();
+        assert!(!wait_on_idle(fd, std::time::Duration::from_secs(2)));
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(500),
+            "the wait should have honoured a sub-second remainder, not returned instantly"
+        );
+    }
+
+    #[test]
+    fn a_readable_descriptor_is_reported() {
+        let (r, mut w) = std::os::unix::net::UnixStream::pair().expect("pair");
+        use std::io::Write;
+        w.write_all(b"x").expect("write");
+        assert!(wait_on_idle(
+            std::os::unix::io::AsRawFd::as_raw_fd(&r),
+            std::time::Duration::from_millis(500)
+        ));
+    }
+}
+
 /// True if a SIGTERM arrived and the WM should exit.
 #[inline]
 pub fn quit_requested() -> bool {
@@ -284,6 +340,9 @@ pub fn wait_readable(fd: std::os::unix::io::RawFd, timeout: std::time::Duration)
 
 /// Wait until one of the X11/control wake descriptors is readable. `None`
 /// blocks until an event (or EINTR) instead of imposing a heartbeat poll.
+///
+/// Takes raw descriptors so the WM crate stays `unsafe`-free; the borrow is
+/// taken here, under the one safety argument that has to exist either way.
 pub fn wait_readable_fds(
     fds: &[std::os::unix::io::RawFd],
     timeout: Option<std::time::Duration>,
@@ -291,25 +350,37 @@ pub fn wait_readable_fds(
     if fds.is_empty() {
         return true;
     }
-    let mut pfds: Vec<libc::pollfd> = fds
+    let borrowed: Vec<std::os::unix::io::BorrowedFd<'_>> = fds
         .iter()
         .copied()
-        .map(|fd| libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        })
+        // SAFETY: every descriptor here is one the caller is already holding
+        // open and passes in solely to be waited on, and the borrow does not
+        // outlive this call.
+        .map(|fd| unsafe { std::os::unix::io::BorrowedFd::borrow_raw(fd) })
         .collect();
-    let ms = timeout
-        .map(|v| v.as_millis().min(i32::MAX as u128) as libc::c_int)
-        .unwrap_or(-1);
-    // SAFETY: every pollfd points at a caller-owned descriptor and remains
-    // valid for the duration of the call.
-    let r = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, ms) };
+    let mut pfds: Vec<rustix::event::PollFd<'_>> = borrowed
+        .iter()
+        .map(|fd| rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN))
+        .collect();
+    let ts = timeout.map(|v| {
+        // `tv_nsec` is a remainder, not a total: `poll(2)` reads the pair as
+        // one value and a `tv_nsec` of 2e9 is undefined rather than 2 seconds.
+        let total = v.as_secs().min(i64::MAX as u64);
+        let nanos = v.subsec_nanos();
+        rustix::event::Timespec {
+            tv_sec: total as i64,
+            tv_nsec: nanos as i64,
+        }
+    });
+    let r = rustix::event::poll(&mut pfds, ts.as_ref());
     match r {
-        0 => false,
-        n if n > 0 => pfds.iter().any(|p| p.revents & libc::POLLIN != 0),
-        _ => true,
+        Ok(0) => false,
+        Ok(_) => pfds
+            .iter()
+            .any(|p| p.revents().contains(rustix::event::PollFlags::IN)),
+        // Any error is a wakeup, including EINTR: the caller re-checks its
+        // flags either way, and a busy loop here would spin the WM.
+        Err(_) => true,
     }
 }
 
