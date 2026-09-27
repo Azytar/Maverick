@@ -291,6 +291,19 @@ fn main() {
     maverick_sys::Signal::new()
         .ignore(libc::SIGPIPE)
         .on_sigterm(libc::SIGTERM)
+        // SIGINT takes the same route as SIGTERM: `on_sigterm` records the
+        // quit flag for whichever signal it is given, and the event loop turns
+        // that flag into the same `begin_shutdown` a control-socket `quit` and
+        // `Mod4+Shift+Q` use. Registering it is what makes the inherited
+        // disposition irrelevant — a non-interactive shell sets SIGINT to
+        // `SIG_IGN` in any job it starts with `&`, and without a handler of our
+        // own a backgrounded Maverick could not be stopped with Ctrl-C at all,
+        // and one that was stopped ran none of its cleanup.
+        //
+        // It also stops that `SIG_IGN` reaching the applications we start:
+        // an ignored disposition survives `exec`, so an inherited one would
+        // hand every autostarted client a SIGINT it can never act on.
+        .on_sigterm(libc::SIGINT)
         .on_sigcont(libc::SIGCONT)
         .install();
 
