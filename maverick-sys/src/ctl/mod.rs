@@ -79,7 +79,7 @@ fn split_leading_options(args: &[String]) -> (Vec<String>, Vec<String>) {
 /// Entry point shared by the control binary.
 pub fn main_with_args(tool: &str, args: Vec<String>) -> ExitCode {
     if args.is_empty() {
-        usage(tool);
+        usage(tool, true);
         return ExitCode::FAILURE;
     }
 
@@ -102,7 +102,7 @@ pub fn main_with_args(tool: &str, args: Vec<String>) -> ExitCode {
 
     match cmd {
         "-h" | "--help" | "help" | "h" => {
-            usage(tool);
+            usage(tool, false);
             ExitCode::SUCCESS
         }
         // ── sessions ──────────────────────────────────────────────────────
@@ -151,8 +151,8 @@ pub fn main_with_args(tool: &str, args: Vec<String>) -> ExitCode {
             // window manager is the one that can tell. The window manager's
             // answer is what the user sees, so a typo that happens to be a
             // valid action is still a typo that does something — which is why
-            // every *documented* command is handled above and `usage` lists
-            // them all.
+            // every command above is also in `usage`, so a mistyped verb is at
+            // least discoverable rather than silently becoming an action.
             let _ = other;
             let mut line = leading.clone();
             line.extend_from_slice(&tail);
@@ -335,6 +335,11 @@ pub enum Usage {
 fn usage_for(group: &str) -> Usage {
     match group {
         "window" => Usage::Windows,
+        // `camera`, `resize` and `layout` are dispatched as layout verbs and are
+        // documented on the WINDOWS page's LAYOUT block. They used to fall
+        // through to `_`, so `maverickctl camera --help` printed the SESSIONS
+        // page, which never mentions the verb it was asked about.
+        "camera" | "resize" | "layout" => Usage::Windows,
         "process" => Usage::Process,
         _ => Usage::Sessions,
     }
@@ -347,7 +352,7 @@ fn usage_for(group: &str) -> Usage {
 /// there.
 pub fn print_usage(which: Usage) {
     match which {
-        Usage::Top => usage("maverickctl"),
+        Usage::Top => usage("maverickctl", false),
         Usage::Sessions => println!(
             "\
 maverickctl sessions — whole graphical sessions (X server + Maverick + apps)
@@ -477,8 +482,15 @@ pub fn dispatch_to(view: &crate::session::SessionView, action: &str) -> Result<(
     }
 }
 
-fn usage(tool: &str) {
-    println!(
+/// Print the top-level usage page.
+///
+/// `to_stderr` distinguishes being *asked* for help from being *told* you used
+/// the tool wrong. Both print the same page and both are correct about what the
+/// commands are, but a usage error is a diagnostic: on stdout it would be
+/// silently swallowed by `maverickctl 2>/dev/null` and would flood the terminal
+/// of anything that only meant to discard a command's data.
+fn usage(tool: &str, to_stderr: bool) {
+    let page = format!(
         "\
 {tool} — control Maverick window-manager instances
 
@@ -486,6 +498,19 @@ USAGE:
     {tool} <command> [options]
 
 COMMANDS:
+    session                    A graphical session: X server + Maverick + apps
+    exec <session> <program>   Run a program inside a session
+    shell  <session> [cmd…]     A shell with the session's environment
+    attach <session> [cmd…]    As shell, announcing display and session
+    logs   <session>           Tail a session's own log
+    debug  <session>           Live event stream + recent debug log
+    inspect <session>          Session, windows, layout, compositor
+    window  <session> <verb>   list | inspect | focus | close | float |
+                               fullscreen | move
+    process <session> <verb>   list | inspect | kill
+    camera <session> <dir>     Move the camera (the scroll position)
+    resize <session> <+10%|40> Resize the focused column
+    layout <session> <column>  Set the layout
     list                       List running/known instances
     state    [--name <id>] [--session <sid>]   Print the WM state snapshot (JSON)
     query <topic> [--name <id>] [--session <sid>]
@@ -505,11 +530,19 @@ COMMANDS:
     reload   [--name <id>] [--session <sid>]     Reload config (no-op for compiled config)
     prune                      Remove stale file far whose socket is dead
 
+    `maverickctl <group> --help` documents one group in full: `session`,
+    `window`, `process`.
+
 INSTANCE SELECTION:
     --session <sid>  explicit session id (from `list`)
     --name <id>      human label (or session id); else $MAVERICK_INSTANCE;
                      else the sole instance on this DISPLAY/TTY."
     );
+    if to_stderr {
+        eprint!("{page}");
+    } else {
+        print!("{page}");
+    }
 }
 
 /// Parsed CLI options shared by all `ctl` commands.
@@ -790,6 +823,12 @@ fn cmd_quit(tool: &str, args: &[String]) -> ExitCode {
             }
         },
         None => match discover::quit_by_name(&name) {
+            // A refusal is a non-empty reply, so it arrives here as `Ok`. The
+            // instance is still running and the command must say so.
+            Ok(reply) if reply.starts_with(ERROR_PREFIX) => {
+                eprintln!("{tool}: quit failed: {}", reply.trim_end());
+                ExitCode::FAILURE
+            }
             Ok(_) => {
                 println!("{tool}: '{name}' quit");
                 ExitCode::SUCCESS
@@ -817,9 +856,13 @@ fn cmd_quit_all(tool: &str, args: &[String]) -> ExitCode {
     let mut ok = true;
     for (name, res) in results {
         match res {
-            Ok(_) => println!("  {name}: quit"),
+            Ok(reply) if reply.starts_with(ERROR_PREFIX) => {
+                eprintln!("{tool}: {name}: FAILED ({})", reply.trim_end());
+                ok = false;
+            }
+            Ok(_) => println!("{tool}: {name}: quit"),
             Err(e) => {
-                eprintln!("  {name}: FAILED ({e})");
+                eprintln!("{tool}: {name}: FAILED ({e})");
                 ok = false;
             }
         }
@@ -846,7 +889,15 @@ fn cmd_simple(tool: &str, args: &[String], verb: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The instance can refuse — a full command queue answers `error busy: …` —
+    // and that refusal arrives as a successful transport, so it has to be
+    // classified here exactly as `print_json` classifies it. Discarding the
+    // reply reported the refusal as a completed restart.
     match res {
+        Ok(reply) if reply.starts_with(ERROR_PREFIX) => {
+            eprintln!("{tool}: {verb} failed: {}", reply.trim_end());
+            ExitCode::FAILURE
+        }
         Ok(_) => {
             println!("{tool}: '{name}' {verb}");
             ExitCode::SUCCESS
