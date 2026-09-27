@@ -288,7 +288,13 @@ fn windows_of(c: &Ctl, args: &[String]) -> Result<(String, Vec<WindowInfo>), Str
 
 /// `maverickctl window …`
 pub fn run(c: &mut Ctl, args: &[String]) -> Result<bool, String> {
-    let verb = args.first().map(String::as_str).unwrap_or("list");
+    // As in the session group: globals are lifted to the front of `args`, so
+    // the verb is the first positional, not the first argument.
+    let verb = c
+        .positionals
+        .first()
+        .map(|&i| args[i].as_str())
+        .unwrap_or("list");
     let rest = if args.is_empty() { &[][..] } else { &args[1..] };
     match verb {
         "list" | "ls" => {

@@ -27,6 +27,10 @@ rustix = { version = "1", default-features = false, features = [
     "rand",
 ] }
 
+[[test]]
+name = "ctl_props"
+path = "tests/ctl_props.rs"
+
 [dev-dependencies]
 # Property-based coverage for this crate's pure deterministic logic.
 proptest.workspace = true

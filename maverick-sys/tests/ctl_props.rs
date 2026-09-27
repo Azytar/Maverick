@@ -139,3 +139,66 @@ fn a_listing_of_a_session_that_does_not_exist_fails() {
         }
     }
 }
+
+/// A global option before the verb must not be mistaken for the verb.
+///
+/// `run_group` lifts leading `--session`/`--name`/`--json` off the front of the
+/// argument list and hands the handler the remainder, so `args[0]` is the
+/// *global*. Reading the verb from there rejected the spelling that a shell
+/// completion or a script would naturally produce — and the code's own comment
+/// at `ctl/mod.rs:86-91` names `maverickctl --session debug window list` as the
+/// case worth supporting.
+///
+/// The global was parsed correctly all along by `Ctl::parse`; only the verb
+/// lookup was in the wrong place, so these failed with "unknown window command
+/// '--session'" while exiting non-zero — a refusal, not a silent success.
+#[test]
+fn a_global_option_before_the_verb_is_not_read_as_the_verb() {
+    common::isolate_runtime_dir();
+    // None of these sessions exist, so the handler must get far enough to
+    // *resolve* them and then report the session, not reject the command word.
+    for group in ["window", "process"] {
+        for argv in [
+            vec![group.to_string(), "list".into()],
+            vec![
+                "--session".into(),
+                "nope".into(),
+                group.into(),
+                "list".into(),
+            ],
+            vec!["--name".into(), "nope".into(), group.into(), "list".into()],
+        ] {
+            assert_ne!(
+                main_with_args("maverickctl", argv.clone()),
+                ExitCode::SUCCESS,
+                "{argv:?} should not succeed against a missing instance"
+            );
+        }
+    }
+    // The precise failure mode: the command word was reported as unknown
+    // instead of the session being reported as missing.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_maverickctl"))
+        .args(["--session", "nope", "window", "list"])
+        .output()
+        .expect("run maverickctl");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unknown window command '--session'"),
+        "the lifted global was read as the verb: {stderr}"
+    );
+}
+
+/// The same for the session group, which is the one users reach first.
+#[test]
+fn a_global_before_a_session_verb_reaches_the_verb() {
+    common::isolate_runtime_dir();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_maverickctl"))
+        .args(["--json", "session", "list"])
+        .output()
+        .expect("run maverickctl");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unknown session command '--json'"),
+        "the lifted --json was read as the verb: {stderr}"
+    );
+}

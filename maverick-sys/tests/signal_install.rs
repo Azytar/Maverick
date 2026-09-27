@@ -34,7 +34,10 @@ fn the_real_chain() -> Signal {
 #[test]
 fn a_good_install_reports_nothing_and_really_installs() {
     let failed = the_real_chain().install();
-    assert!(failed.is_empty(), "a good install must report nothing, got {failed:?}");
+    assert!(
+        failed.is_empty(),
+        "a good install must report nothing, got {failed:?}"
+    );
     let mask = caught_mask();
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGCONT] {
         assert!(

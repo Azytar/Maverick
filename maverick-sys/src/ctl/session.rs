@@ -37,7 +37,13 @@ const DEFAULT_LOG_LINES: usize = 40;
 
 /// Run a `session …` subcommand. Returns `Ok(true)` if it handled the verb.
 pub fn run(c: &mut Ctl, args: &[String]) -> Result<bool, String> {
-    let Some(verb) = args.first().map(String::as_str) else {
+    // The verb comes from `positionals`, not `args`. `run_group` lifts global
+    // options off the front of the argument list before calling, so for
+    // `maverickctl --session debug window list` the first element is
+    // `--session` and reading it as the verb rejected the command with
+    // "unknown window command '--session'". The global itself was already parsed
+    // correctly by `Ctl::parse`; only this lookup was looking in the wrong place.
+    let Some(verb) = c.positionals.first().map(|&i| args[i].as_str()) else {
         print_usage(super::Usage::Sessions);
         return Ok(true);
     };
@@ -793,7 +799,13 @@ fn launch_in_session(
 
 /// `maverickctl process list <session>`
 pub fn process(c: &mut Ctl, args: &[String]) -> Result<bool, String> {
-    let verb = args.first().map(String::as_str).unwrap_or("list");
+    // As in `run`: globals are lifted to the front, so the verb is the first
+    // positional rather than the first argument.
+    let verb = c
+        .positionals
+        .first()
+        .map(|&i| args[i].as_str())
+        .unwrap_or("list");
     let rest = if args.is_empty() { &[][..] } else { &args[1..] };
     match verb {
         "list" | "ls" => process_list(c, rest),

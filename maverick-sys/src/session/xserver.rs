@@ -379,6 +379,8 @@ impl std::fmt::Display for WaitError {
     }
 }
 
+impl std::error::Error for WaitError {}
+
 /// A running nested X server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XServer {
