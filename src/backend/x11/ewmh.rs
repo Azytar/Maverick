@@ -158,6 +158,26 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Clients that no other rule placed, in a stable order.
+    ///
+    /// This is the only part of the stacking list that came straight out of a
+    /// `HashMap`, and `HashMap` iteration order is randomised per process. The
+    /// result is the bottom-to-top Z order published in
+    /// `_NET_CLIENT_LIST_STACKING` and re-published on every restack, so the
+    /// leftover windows reshuffled between runs and between frames — visible as a
+    /// taskbar reordering its entries as focus moved. Both other sources in this
+    /// function already sort, and the comment above the dock loop says so; this
+    /// one had been missed.
+    ///
+    /// Sorted rather than insertion-ordered on purpose: an ordered map would key
+    /// the list on *manage* history, which changes across a restart, so it would
+    /// trade one non-reproducible order for a different one.
+    fn leftovers(clients: &std::collections::HashMap<WindowId, Client>) -> Vec<u32> {
+        let mut out: Vec<u32> = clients.keys().copied().collect();
+        out.sort_unstable();
+        out
+    }
+
     /// Rewrite `_NET_CLIENT_LIST_STACKING` — the client list in bottom-to-top
     /// stack order, consumed by taskbars, Alt+Tab switchers (rofi -windowdmenu,
     /// i3lock-style UIs) and EWMH clients that `XmuClientWindow`-walk the stack.
@@ -194,7 +214,7 @@ impl WindowManager {
                 }
             }
         }
-        for &w in state.clients.keys() {
+        for w in Self::leftovers(&state.clients) {
             if seen.insert(w) {
                 out.push(w);
             }
@@ -307,5 +327,51 @@ impl WindowManager {
         };
         let _ = self.conn.send_event(false, win, EventMask::NO_EVENT, ev);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod stacking_order_tests {
+    use super::*;
+    use maverick_core::types::Client;
+    use std::collections::HashMap;
+
+    fn clients(ids: &[u32]) -> HashMap<WindowId, Client> {
+        ids.iter().map(|id| (*id, Client::new(*id, 0, 0))).collect()
+    }
+
+    /// The published stack order must not depend on `HashMap` iteration order.
+    ///
+    /// This is not a cosmetic property. `_NET_CLIENT_LIST_STACKING` is the
+    /// bottom-to-top Z order, consumed by taskbars and Alt-Tab switchers, and
+    /// it is rewritten on every restack — so an unstable order made those
+    /// consumers reshuffle as focus moved, and differently again on the next
+    /// run of the same session.
+    #[test]
+    fn the_leftover_order_is_stable_across_insertion_orders() {
+        let ids: [u32; 4] = [0x31, 0x7, 0x2ab, 0x1001];
+        let expected: Vec<u32> = {
+            let mut e = ids.to_vec();
+            e.sort_unstable();
+            e
+        };
+        // Insert in several orders into freshly built maps. `HashMap` seeds
+        // its hasher per map, so iteration order genuinely differs between
+        // these; the result must not.
+        let orders: [Vec<u32>; 2] = [ids.to_vec(), ids.iter().rev().copied().collect()];
+        for order in orders {
+            let map = clients(&order);
+            assert_eq!(WindowManager::leftovers(&map), expected);
+        }
+    }
+
+    #[test]
+    fn an_empty_client_map_yields_no_leftovers() {
+        assert!(WindowManager::leftovers(&HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn a_single_client_is_its_own_only_leftover() {
+        assert_eq!(WindowManager::leftovers(&clients(&[0x42])), vec![0x42]);
     }
 }
