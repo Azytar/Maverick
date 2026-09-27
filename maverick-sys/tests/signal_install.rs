@@ -16,6 +16,25 @@
 //! it to be observed, rather than assuming it started false.
 
 use maverick_sys::Signal;
+use std::sync::{Mutex, MutexGuard};
+
+/// Serialises the tests that read or write this process's dispositions.
+///
+/// The Rust runtime installs handlers on a helper thread before `main`, so a
+/// signal raised here can land on that thread while a test is mid-assertion —
+/// which is what makes `a_failed_exit_status_is_never_waited_for` see a
+/// "disposition failed to install" that belongs to someone else. The kernel's
+/// choice of thread is not controllable from here, so the tests that depend on
+/// the process's own dispositions take this lock and are then alone in it.
+static DISPOSITIONS: Mutex<()> = Mutex::new(());
+
+/// The same lock, for the tests that mutate dispositions rather than only read
+/// them. Held across a read-back, because the point of the test is the state
+/// immediately after `install` — a concurrent install from another test would
+/// make the assertion pass or fail at random rather than by design.
+fn exclusive() -> MutexGuard<'static, ()> {
+    DISPOSITIONS.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// The disposition mask the kernel currently has, read back from `/proc` so the
 /// assertions are the kernel's view rather than the library's own return value.
@@ -73,6 +92,7 @@ fn raise(sig: libc::c_int) {
 
 #[test]
 fn a_good_install_reports_nothing_and_really_installs() {
+    let _alone = exclusive();
     let failed = the_real_chain().install();
     assert!(
         failed.is_empty(),
@@ -98,6 +118,7 @@ fn a_good_install_reports_nothing_and_really_installs() {
 /// catching here.
 #[test]
 fn an_ignored_signal_is_really_ignored() {
+    let _alone = exclusive();
     reset(libc::SIGPIPE, libc::SIG_DFL);
     assert_eq!(
         ignored_mask() & (1u64 << (libc::SIGPIPE - 1)),
@@ -140,6 +161,7 @@ fn reset(sig: libc::c_int, action: usize) {
 /// is asserted here against the kernel's own view.
 #[test]
 fn children_are_auto_reaped_rather_than_left_as_zombies() {
+    let _alone = exclusive();
     the_real_chain().install();
 
     let child = std::process::Command::new("/bin/sh")
@@ -175,6 +197,7 @@ fn children_are_auto_reaped_rather_than_left_as_zombies() {
 /// handler exists. This is the one place the flag's round trip is checked.
 #[test]
 fn a_stop_signal_reaches_the_quit_flag_and_clearing_it_is_observed() {
+    let _alone = exclusive();
     the_real_chain().install();
     maverick_sys::clear_quit();
     assert!(!maverick_sys::quit_requested(), "the flag must start clear");
@@ -197,6 +220,7 @@ fn a_stop_signal_reaches_the_quit_flag_and_clearing_it_is_observed() {
 /// inherits as `SIG_IGN`, so they are the ones whose handlers must exist.
 #[test]
 fn sigint_and_sigquit_reach_the_same_quit_flag() {
+    let _alone = exclusive();
     the_real_chain().install();
     for sig in [libc::SIGINT, libc::SIGQUIT] {
         maverick_sys::clear_quit();
@@ -210,6 +234,7 @@ fn sigint_and_sigquit_reach_the_same_quit_flag() {
 
 #[test]
 fn sigcont_reaches_the_regrab_flag() {
+    let _alone = exclusive();
     the_real_chain().install();
     maverick_sys::clear_regrab();
     assert!(!maverick_sys::need_regrab(), "the flag must start clear");
@@ -226,6 +251,7 @@ fn sigcont_reaches_the_regrab_flag() {
 
 #[test]
 fn a_repeat_install_is_not_mistaken_for_a_failure() {
+    let _alone = exclusive();
     // The result reports refusals, not redundancy: installing twice is legal
     // and must not look like something went wrong.
     assert!(the_real_chain().install().is_empty());
@@ -234,6 +260,7 @@ fn a_repeat_install_is_not_mistaken_for_a_failure() {
 
 #[test]
 fn an_invalid_signal_is_reported_rather_than_swallowed() {
+    let _alone = exclusive();
     // The case the discarded result used to hide: the kernel refuses, and the
     // caller used to believe it had a handler for a signal that does not exist.
     let failed = Signal::new().on_sigterm(-1).install();
