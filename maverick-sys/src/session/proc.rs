@@ -428,29 +428,54 @@ pub fn start_time(pid: u32) -> Option<u64> {
 /// clients and release its socket rather than be torn out from under them.
 /// `SIGKILL` only for the case where waiting has already been tried and
 /// failed, so no caller has to decide the policy itself.
-pub fn terminate(pid: u32, start_time: u64) -> bool {
+///
+/// The result distinguishes *why* the signal was not sent. A caller reporting
+/// to a user has to tell "it already exited" apart from "the kernel refused",
+/// because only the first is fixed by running the command again. Collapsing
+/// both into a `false` made a permission failure print "no longer running",
+/// which is not something retrying will ever fix.
+///
+/// [`io::ErrorKind::NotFound`] means the pid no longer names the process this
+/// session recorded, or the process exited between the identity check and the
+/// signal. Any other error is the kernel's own refusal, carried verbatim.
+pub fn terminate(pid: u32, start_time: u64) -> std::io::Result<()> {
     if !pid_is(pid, start_time) {
-        return false;
+        return Err(not_found());
     }
-    // SAFETY: `kill(2)` with a validated, positive pid. `pid_is` above already
-    // proved the pid names the process we recorded, so the recycled-pid case
-    // that would hit the wrong target is closed before the signal is sent.
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-    }
-    true
+    send(pid, libc::SIGTERM)
 }
 
 /// `SIGKILL` a process, still gated on the recorded start time.
-pub fn kill_hard(pid: u32, start_time: u64) -> bool {
+pub fn kill_hard(pid: u32, start_time: u64) -> std::io::Result<()> {
     if !pid_is(pid, start_time) {
-        return false;
+        return Err(not_found());
     }
-    // SAFETY: as in `terminate` — `pid_is` proved the identity first.
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    send(pid, libc::SIGKILL)
+}
+
+/// "The process this record named is gone."
+///
+/// Built explicitly rather than from `ESRCH`, because `io::ErrorKind` maps
+/// `NotFound` from `ENOENT` and reports a raw `ESRCH` as `Uncategorized` —
+/// so a caller branching on the kind would miss the case it most needs to
+/// tell apart from a refusal.
+fn not_found() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "the process this session recorded no longer exists",
+    )
+}
+
+/// `kill(2)`, reporting what the kernel said instead of discarding it.
+fn send(pid: u32, sig: libc::c_int) -> std::io::Result<()> {
+    // SAFETY: `kill(2)` with a validated, positive pid. `pid_is` above already
+    // proved the pid names the process we recorded, so the recycled-pid case
+    // that would hit the wrong target is closed before the signal is sent.
+    if unsafe { libc::kill(pid as libc::pid_t, sig) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
-    true
 }
 
 /// True if the process is still alive (any state, including a zombie — the
@@ -477,6 +502,34 @@ mod tests {
             me.elapsed_ms < 60 * 60 * 1000,
             "a test process is not an hour old"
         );
+    }
+
+    /// A signal that was not delivered is reported as such.
+    ///
+    /// The caller has to be able to say "it already exited" without also
+    /// saying it about a refusal: only the first is fixed by running the
+    /// command again, so collapsing both into one answer sends the user
+    /// looking for an exit that already happened.
+    #[test]
+    fn a_signal_that_was_not_delivered_is_an_error() {
+        // A pid that cannot name a live process, refused on the start time.
+        let err = terminate(u32::MAX - 1, 1).expect_err("must not report success");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+
+        // A real child, signalled for real: the result says it was sent.
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .spawn()
+            .expect("spawn");
+        let live = crate::session::ProcRef::of(child.id());
+        terminate(live.pid, live.start_time).expect("SIGTERM to a live child");
+        let _ = child.wait();
+
+        // Once reaped, the same call is NotFound rather than success.
+        let err = terminate(live.pid, live.start_time)
+            .expect_err("a reaped process must not report as signalled");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]

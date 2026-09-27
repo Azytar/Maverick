@@ -697,8 +697,9 @@ fn signal_tree(wm: &ProcRef, mode: StopMode) -> bool {
     };
     // Only a group leader can stand for its whole group.
     if info.pgid != wm.pid {
-        proc::terminate(wm.pid, wm.start_time);
-        return true;
+        // Not a group leader, so fall back to the process itself. A failure
+        // here means it is already gone, which is the outcome we wanted.
+        return proc::terminate(wm.pid, wm.start_time).is_ok();
     }
     let sig = match mode {
         StopMode::Graceful => libc::SIGTERM,
@@ -712,7 +713,7 @@ fn signal_tree(wm: &ProcRef, mode: StopMode) -> bool {
     if !sent {
         // The group is already gone; fall back to the process itself so a
         // window manager that changed groups is still stopped.
-        proc::terminate(wm.pid, wm.start_time);
+        let _ = proc::terminate(wm.pid, wm.start_time);
     }
     sent
 }

@@ -631,7 +631,11 @@ impl XServer {
             self.cleanup_artifacts();
             return;
         }
-        proc::terminate(self.proc.pid, self.proc.start_time);
+        // The result is deliberately not inspected: whether the signal landed
+        // or the server had already exited, the next loop asks `pid_is` and
+        // escalates to `SIGKILL` if it is still there. A refusal is reported
+        // by the escalation below, or by the server simply outliving us.
+        let _ = proc::terminate(self.proc.pid, self.proc.start_time);
         let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
             if !proc::pid_is(self.proc.pid, self.proc.start_time) {
@@ -640,7 +644,7 @@ impl XServer {
             std::thread::sleep(Duration::from_millis(25));
         }
         if self.is_running() {
-            proc::kill_hard(self.proc.pid, self.proc.start_time);
+            let _ = proc::kill_hard(self.proc.pid, self.proc.start_time);
             // Give the kernel a moment to close the listening socket and the
             // process to be reaped, so a display freed here is really free.
             let deadline = Instant::now() + Duration::from_millis(500);

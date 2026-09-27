@@ -991,13 +991,20 @@ fn process_kill(c: &Ctl, args: &[String]) -> Result<(), String> {
             "process {pid} is not part of session '{name}'\n  refusing to signal a process this session does not own"
         ));
     }
-    let sent = if force {
+    let outcome = if force {
         proc::kill_hard(p.pid, p.start_time)
     } else {
         proc::terminate(p.pid, p.start_time)
     };
-    if !sent {
-        return Err(format!("process {pid} is no longer running"));
+    // Only "it is gone" is worth reporting as gone. Any other errno is the
+    // kernel refusing, and saying "no longer running" there sends the user
+    // looking for an exit that already happened.
+    if let Err(e) = outcome {
+        return Err(if e.kind() == std::io::ErrorKind::NotFound {
+            format!("process {pid} is no longer running")
+        } else {
+            format!("could not signal {pid}: {e}")
+        });
     }
     if c.json {
         println!("{{\"pid\":{pid},\"signalled\":true,\"force\":{force}}}");
