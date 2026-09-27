@@ -596,8 +596,15 @@ impl WindowManager {
                 .map(|(w, _)| *w),
         );
 
-        let hide_wins: Vec<_> = std::mem::take(&mut self.hide_mon_vec);
-        for win in hide_wins {
+        // Take the buffer so the loop can borrow `state.clients` mutably at the
+        // same time, then hand it back. The four sibling scratch buffers in
+        // `compositor_gl` use the same take-and-restore, and the reason is the
+        // point: this one is reserved with capacity 64 at construction so the
+        // per-frame path never reallocates, and dropping it here threw that
+        // capacity away once a frame, so the `extend` above had to grow a fresh
+        // `Vec` every frame instead.
+        let mut hide_wins: Vec<u32> = std::mem::take(&mut self.hide_mon_vec);
+        for win in hide_wins.drain(..) {
             let in_ws = self.hide_ws_set.contains(&win);
             let client = match self.engine.state.clients.get_mut(&win) {
                 Some(c) => c,
@@ -637,6 +644,9 @@ impl WindowManager {
                 }
             }
         }
+        // Hand the buffer back with its capacity intact: this runs every frame,
+        // and the alternative was a fresh allocation on the next one.
+        self.hide_mon_vec = hide_wins;
         Ok(())
     }
 

@@ -311,6 +311,24 @@ pub struct WindowManager {
     compositor: Option<compositor::Compositor>,
 }
 
+/// Render a frame's dirty reasons as one human-readable phrase.
+///
+/// Built as a single string rather than collecting the reasons and joining
+/// them: this is called on the compositor's per-turn path, and the
+/// intermediate `Vec` was a second allocation to produce a message most runs
+/// never print. The reason list is also what a user is asked to paste into a
+/// bug report, so it stays in the same order the scheduler reports.
+fn describe_reasons(sched: &framesched::FrameScheduler) -> String {
+    let mut out = String::new();
+    for reason in sched.reasons().map(framesched::FrameReason::as_str) {
+        if !out.is_empty() {
+            out.push_str(", ");
+        }
+        out.push_str(reason);
+    }
+    out
+}
+
 impl WindowManager {
     fn dispatch(&mut self, ev: x11rb::protocol::Event) -> Result<(), Box<dyn std::error::Error>> {
         if trace::enabled() {
@@ -696,15 +714,11 @@ impl WindowManager {
                 comp.dirty_reasons(),
             );
             if log::enabled(log::DEBUG) {
-                let why: Vec<&str> = sched
-                    .reasons()
-                    .map(framesched::FrameReason::as_str)
-                    .collect();
                 log::debug!(
                     "compositor: scheduling frame (animating={}, dirty={}): {}",
                     sched.is_animating(),
                     sched.has_dirty(),
-                    why.join(", ")
+                    describe_reasons(&sched)
                 );
             }
             if comp.comp_trace {
@@ -2136,4 +2150,35 @@ fn clean_mask(state: u16, numlock: u16, scroll: u16) -> u16 {
             | u16::from(ModMask::M3)
             | u16::from(ModMask::M4)
             | u16::from(ModMask::M5))
+}
+
+#[cfg(test)]
+mod reason_phrase_tests {
+    use super::describe_reasons;
+    use super::framesched::{FrameReason, FrameScheduler};
+
+    /// The phrase a user is asked to paste into a bug report, so the order and
+    /// the separator are part of the contract.
+    #[test]
+    fn reasons_read_in_scheduler_order() {
+        let mut s = FrameScheduler::new();
+        s.mark(FrameReason::Animation);
+        s.mark(FrameReason::Damage);
+        s.mark(FrameReason::Geometry);
+        assert_eq!(describe_reasons(&s), "animation, damage, geometry");
+    }
+
+    #[test]
+    fn a_single_reason_has_no_separator() {
+        let mut s = FrameScheduler::new();
+        s.mark(FrameReason::Focus);
+        assert_eq!(describe_reasons(&s), "focus");
+    }
+
+    /// An idle scheduler must produce an empty phrase rather than a stray
+    /// separator, since the caller formats it unconditionally at debug level.
+    #[test]
+    fn no_reasons_read_as_nothing() {
+        assert_eq!(describe_reasons(&FrameScheduler::new()), "");
+    }
 }
