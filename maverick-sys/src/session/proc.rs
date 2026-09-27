@@ -641,6 +641,34 @@ mod tests {
     /// `false`, because the X server readiness wait is asking something else
     /// entirely, and `xserver::spawn` never reaps its child, so the server it
     /// just started is a zombie for the whole wait.
+    /// The signal's own result must reach the caller, not just the identity
+    /// check.
+    ///
+    /// The other test in this module covers the identity gate; this one covers
+    /// the `kill(2)` return, which is what the caller prints back. A real
+    /// `EPERM` needs a second uid, but `kill` also rejects an invalid signal
+    /// number with `EINVAL`, which exercises the same branch deterministically:
+    /// the process is ours, the identity holds, and the call still fails. That
+    /// is exactly the case a discarded result reports as success.
+    #[test]
+    fn a_refused_signal_is_not_reported_as_delivered() {
+        let me = std::process::id();
+        // 0x7FFF is not a valid signal on Linux, so the kernel refuses it even
+        // for a process we own.
+        let err = send(me, 0x7FFF).expect_err("an invalid signal must be an error");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EINVAL),
+            "expected EINVAL from the kernel, got {err}"
+        );
+        // The identity gate is a separate refusal with its own kind, so a
+        // caller can still tell "it is gone" from "the kernel said no".
+        assert_eq!(
+            terminate(u32::MAX - 1, 1).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
+
     #[test]
     fn a_zombie_is_the_same_process_but_not_a_running_one() {
         let mut child = std::process::Command::new("/bin/sh")

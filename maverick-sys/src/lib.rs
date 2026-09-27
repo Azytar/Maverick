@@ -120,6 +120,56 @@ mod poll_timeout_tests {
         );
     }
 
+    /// A signal arriving during the block must wake the loop, not stall it.
+    ///
+    /// This is the property that keeps the window manager responsive to a
+    /// control-socket command while it is idle on the X connection: `poll` is
+    /// interrupted, and treating that as "nothing to do" would leave the command
+    /// unprocessed until some unrelated event happened to arrive.
+    #[test]
+    fn a_signal_interrupting_the_wait_wakes_the_caller() {
+        use std::io::Write;
+        let (r, _w) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let fd = std::os::unix::io::AsRawFd::as_raw_fd(&r);
+        // A handler with no observable effect, so the delivery is only about
+        // the wait returning.
+        // SAFETY: a no-op handler installed for a signal this test raises at
+        // itself.
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = sigusr1_trampoline as *const () as usize;
+            sa.sa_flags = 0;
+            libc::sigemptyset(&mut sa.sa_mask);
+            assert_eq!(libc::sigaction(libc::SIGUSR1, &sa, std::ptr::null_mut()), 0);
+        }
+        // `tgkill` rather than `kill`: a signal is delivered to an arbitrary
+        // thread that does not block it, so raising one process-wide would
+        // usually interrupt some other test's thread and leave this one
+        // blocked. Targeting the calling thread makes the delivery
+        // deterministic.
+        let pid = std::process::id() as libc::pid_t;
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::pid_t;
+        std::thread::spawn(move || {
+            // Give the poll a moment to actually block, then interrupt it.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // SAFETY: `tgkill(tgid, tid, sig)` aimed at the thread that is
+            // blocked in poll, whose handler is installed above.
+            unsafe {
+                libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGUSR1);
+            }
+        });
+        let start = std::time::Instant::now();
+        // A long timeout: if EINTR were treated as "nothing happened", this
+        // would block for the full second.
+        assert!(wait_on_idle(fd, std::time::Duration::from_secs(2)));
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(1500),
+            "the wait should have returned when interrupted, not run to its timeout"
+        );
+    }
+
+    extern "C" fn sigusr1_trampoline(_: libc::c_int) {}
+
     #[test]
     fn a_readable_descriptor_is_reported() {
         let (r, mut w) = std::os::unix::net::UnixStream::pair().expect("pair");
