@@ -5,6 +5,21 @@
 //! NVIDIA/NVK. A candidate is eligible only if it exposes `VK_KHR_swapchain`,
 //! a graphics queue family, a present-capable queue family (one family may
 //! serve both), and a non-empty surface format and present-mode set.
+//!
+//! # Why the present family is preferred over the graphics one
+//!
+//! When a single family does both, it is chosen for both roles and the swapchain
+//! is created `EXCLUSIVE` on it, so the submit queue and the present queue are
+//! one queue. That is not a preference: the spec runs a queue's operations in
+//! issue order, so on one queue this frame's present is ordered before the next
+//! frame's submit and the render-finished semaphore is always free to be signalled
+//! again. Split the two across families and the swapchain has to be `CONCURRENT`,
+//! the present becomes a separate set of queue operations on a different queue,
+//! and that ordering guarantee is gone — which is why
+//! `Vulkan::acquire_and_present` pays for an extra wait in that case. Every
+//! family index used anywhere in this crate comes from the single `rate` call
+//! below, so a queue can never be fetched for a family the device was not
+//! created with.
 
 use std::ffi::CStr;
 use std::fmt;
@@ -13,6 +28,13 @@ use ash::vk;
 
 use crate::error::VkError;
 use crate::surface::Surface;
+
+/// Stand-in for a device name the driver left unterminated. Vulkan requires
+/// `deviceName` to be a NUL-terminated string inside its fixed-size array, so
+/// this only appears for a driver that broke that rule — and reading the array
+/// as a C string to find out would be the undefined behaviour the bounded
+/// accessor avoids.
+const UNKNOWN_DEVICE_NAME: &CStr = c"<unnamed device>";
 
 /// Diagnostic snapshot of the chosen GPU, for startup logging.
 #[derive(Debug, Clone)]
@@ -70,12 +92,17 @@ pub(crate) fn score_device_type(t: vk::PhysicalDeviceType) -> i32 {
 /// Whether `p` exposes `VK_KHR_swapchain`. An enumeration failure disqualifies
 /// the device rather than aborting the whole selection.
 fn has_swapchain_ext(instance: &ash::Instance, p: vk::PhysicalDevice) -> bool {
+    // SAFETY: `instance` is the live `VkInstance` that owns `p` — `p` came from
+    // `vkEnumeratePhysicalDevices` on this very instance, and a physical device
+    // is only released with its instance, which outlives every call here.
+    // `extension_name_as_c_str` is `ash`'s own bounded reader: it scans for a
+    // NUL inside the fixed-size array rather than trusting the driver to have
+    // terminated it, so a driver that did not cannot make this read past the
+    // array. Such an entry simply does not match.
     match unsafe { instance.enumerate_device_extension_properties(p) } {
-        Ok(props) => props.iter().any(|e| {
-            // SAFETY: `extension_name` is a NUL-terminated C string.
-            let name = unsafe { CStr::from_ptr(e.extension_name.as_ptr()) };
-            name == vk::KHR_SWAPCHAIN_NAME
-        }),
+        Ok(props) => props
+            .iter()
+            .any(|e| e.extension_name_as_c_str() == Ok(vk::KHR_SWAPCHAIN_NAME)),
         Err(_) => false,
     }
 }
@@ -83,6 +110,11 @@ fn has_swapchain_ext(instance: &ash::Instance, p: vk::PhysicalDevice) -> bool {
 impl Device {
     /// Select the best physical device and build the logical device.
     pub fn new(instance: &ash::Instance, surface: &Surface) -> Result<Self, VkError> {
+        // SAFETY: `instance` is the live `VkInstance` the caller built and has
+        // not destroyed — it owns the device and surface this function takes
+        // part in creating, and the caller keeps it alive for the whole
+        // constructor. An empty list is a machine with no Vulkan device at all,
+        // which is reported below rather than as a panic.
         let physical_devices = unsafe { instance.enumerate_physical_devices() }?;
         if physical_devices.is_empty() {
             return Err(VkError::NoPhysicalDevice);
@@ -104,22 +136,23 @@ impl Device {
         let swapchain_ext = vk::KHR_SWAPCHAIN_NAME.as_ptr();
         let ext_ptrs = [swapchain_ext];
 
-        // One queue create info per *distinct* family. The priority slices must
-        // be named bindings, not `&[1.0f32]` temporaries inside the `push`
-        // calls: such a temporary dies at the end of its statement and leaves
-        // the `DeviceQueueCreateInfo` holding a dangling pointer that
-        // `create_device` dereferences below.
+        // One queue create info per *distinct* family, and exactly one queue
+        // requested from each. The priority slices must be named bindings, not
+        // `&[1.0f32]` temporaries inside the `push` calls: such a temporary dies
+        // at the end of its statement and leaves the `DeviceQueueCreateInfo`
+        // holding a dangling pointer that `create_device` dereferences below.
         let gfx_priorities = [1.0f32];
         let present_priorities = [1.0f32];
         let mut qcis = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        seen.insert(graphics_family);
         qcis.push(
             vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(graphics_family)
                 .queue_priorities(&gfx_priorities),
         );
-        if present_family != graphics_family && seen.insert(present_family) {
+        // A second entry, and only when the families differ: a family listed
+        // twice is a spec violation, and the one entry above already covers both
+        // roles when they are the same family.
+        if present_family != graphics_family {
             qcis.push(
                 vk::DeviceQueueCreateInfo::default()
                     .queue_family_index(present_family)
@@ -133,10 +166,30 @@ impl Device {
             .enabled_extension_names(&ext_ptrs)
             .enabled_features(&features);
 
+        // SAFETY: `p` is one of the physical devices the live instance just
+        // enumerated, and `VK_KHR_swapchain` is one of the extensions it
+        // reported, so enabling it is legal. Every queue create info names a
+        // family that was found by inspecting *this* physical device's queue
+        // family properties, which is the requirement, and `qcis` holds at most
+        // one entry per family — the same family twice would be rejected. The
+        // priority slices are named locals rather than temporaries, so the
+        // pointers the create info holds stay valid for the duration of the
+        // call. `features` is all-zero, so no optional feature is requested that
+        // `p` might not support. No allocator is passed, and the returned
+        // `VkDevice` becomes this struct's `handle`, which is what makes the
+        // destroys below and in `Drop` legal.
         let handle = unsafe { instance.create_device(p, &create_info, None) }
             .map_err(|r| VkError::Device(r.to_string()))?;
         let swapchain_loader = ash::khr::swapchain::Device::new(instance, &handle);
 
+        // SAFETY: each family index is one a `DeviceQueueCreateInfo` above asked
+        // a queue to be created for, and the queue index is 0 — the only index
+        // requested, since each create info has exactly one priority. Both
+        // queues therefore come from this very `VkDevice`, and `Drop` destroys
+        // it only after every other field that holds a queue has gone. The
+        // single-family case reuses the one queue rather than asking twice,
+        // which the spec permits: a queue handle is a name for a family, so both
+        // names refer to the same queue.
         let queue = unsafe { handle.get_device_queue(graphics_family, 0) };
         let present_queue = if present_family == graphics_family {
             queue
@@ -144,8 +197,15 @@ impl Device {
             unsafe { handle.get_device_queue(present_family, 0) }
         };
 
+        // SAFETY: `p` is a physical device of the live `instance`. The returned
+        // struct is a copy the driver fills in, and `device_name_as_c_str` reads
+        // it back through `ash`'s bounded accessor, so a driver that failed to
+        // NUL-terminate its own name produces a placeholder rather than a read
+        // past the fixed-size array.
         let props = unsafe { instance.get_physical_device_properties(p) };
-        let device_name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+        let device_name = props
+            .device_name_as_c_str()
+            .unwrap_or(UNKNOWN_DEVICE_NAME)
             .to_string_lossy()
             .into_owned();
         let report = DeviceReport {
@@ -179,6 +239,10 @@ impl Device {
             return Ok(None);
         }
 
+        // SAFETY: `p` is a physical device of the live `instance`, and the
+        // returned slice is the driver filling in a caller-provided array
+        // `ash` owns for the duration of this call. It is read below and not
+        // kept, so nothing outlives the borrow.
         let queue_families = unsafe { instance.get_physical_device_queue_family_properties(p) };
 
         // First graphics family wins. The present family is preferred whenever
@@ -191,6 +255,12 @@ impl Device {
             if qf.queue_flags.contains(vk::QueueFlags::GRAPHICS) && graphics_family.is_none() {
                 graphics_family = Some(idx);
             }
+            // SAFETY: `p` and `surface.handle` are both live — the surface was
+            // created from the same instance and has not been destroyed, which is
+            // the precondition of every `vkGetPhysicalDeviceSurface*` query — and
+            // `idx` is an index into the family array just read, so it names a
+            // family this device really has. A query error is treated as "cannot
+            // present from this family", which only ever disqualifies a family.
             let supports_present = unsafe {
                 surface
                     .loader
@@ -214,11 +284,16 @@ impl Device {
 
         // A device whose surface reports no formats or no present modes cannot
         // back a swapchain, so it is not eligible no matter how good it is.
+        //
+        // SAFETY: same live `p`, live surface handle and live surface loader as
+        // the support query above. The two `?`s are the point of the check: a
+        // surface that cannot answer is a surface no swapchain can be built on.
         let formats = unsafe {
             surface
                 .loader
                 .get_physical_device_surface_formats(p, surface.handle)
         }?;
+        // SAFETY: as above.
         let modes = unsafe {
             surface
                 .loader
@@ -228,6 +303,8 @@ impl Device {
             return Ok(None);
         }
 
+        // SAFETY: `p` is a physical device of the live `instance`; the returned
+        // struct is read immediately and kept only as a `device_type`.
         let props = unsafe { instance.get_physical_device_properties(p) };
         let score = score_device_type(props.device_type);
         Ok(Some((graphics_family, present_family, score)))
@@ -236,6 +313,17 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
+        // SAFETY: `self.handle` is the `VkDevice` this struct created and
+        // destroyed nowhere else. Every object that is a child of it has already
+        // been released by the time this runs — `Vulkan`'s field order puts
+        // `swapchain` (which holds an `ash::Device` for its image views) before
+        // `device`, and `Vulkan::drop` has already destroyed the command pool,
+        // semaphores and fence that are also its children — which is what
+        // `vkDestroyDevice` requires of an object that still has children. The
+        // instance that created the device outlives it, being declared after it
+        // in `Vulkan`. No allocator is passed, matching the NULL the device was
+        // created with. A lost device is still legal to destroy: the spec
+        // counts every object on it as not in use.
         unsafe {
             self.handle.destroy_device(None);
         }
