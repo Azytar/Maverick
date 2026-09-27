@@ -128,7 +128,6 @@ mod poll_timeout_tests {
     /// unprocessed until some unrelated event happened to arrive.
     #[test]
     fn a_signal_interrupting_the_wait_wakes_the_caller() {
-        use std::io::Write;
         let (r, _w) = std::os::unix::net::UnixStream::pair().expect("pair");
         let fd = std::os::unix::io::AsRawFd::as_raw_fd(&r);
         // A handler with no observable effect, so the delivery is only about

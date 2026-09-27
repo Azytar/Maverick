@@ -6,3 +6,6 @@
 /tests/mgdwin
 /tests/pxsample
 /tests/staticwin
+
+# `cargo mutants` working directory: generated output, never source.
+/mutants.out/
