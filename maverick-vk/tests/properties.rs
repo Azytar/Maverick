@@ -96,10 +96,18 @@ fn extent_bound() -> impl Strategy<Value = u32> {
 }
 
 /// An image count. The full `u32` range is included rather than the handful a
-/// driver actually reports: the arithmetic downstream is where a saturating
-/// value bites, and a strategy that only offered 2 or 3 could not reach it.
+/// driver actually reports, because the arithmetic downstream is where a
+/// saturating value bites. The two ends of the range are named as well as drawn
+/// from, because `any::<u32>()` reaches them only by chance: `min + 1` overflows
+/// at exactly `u32::MAX` and nowhere else, so a generator that left it to the
+/// uniform branch would cover the neighbourhood of the overflow and miss the
+/// overflow itself — which is where the wrap to zero, and a swapchain with no
+/// images in it, would come from.
 fn count_bound() -> impl Strategy<Value = u32> {
-    prop_oneof![prop::sample::select(&[0u32, 1, 2, 3, 8]), any::<u32>()]
+    prop_oneof![
+        prop::sample::select(&[0u32, 1, 2, 3, 8, u32::MAX - 1, u32::MAX]),
+        any::<u32>()
+    ]
 }
 
 /// A driver's `(minImageExtent, maxImageExtent)` pair, ordered by
@@ -267,9 +275,87 @@ fn step_off(bound: u32, delta: i8) -> u32 {
     (bound as i64 + delta as i64).clamp(0, u32::MAX as i64) as u32
 }
 
-/// Capabilities for the image-count contract, where the extent fields are left
-/// unconstrained: nothing in the count arithmetic reads them, and letting them
-/// vary keeps the property from accidentally depending on them.
+/// A real size for one axis of a `currentExtent`. Deliberately never
+/// `u32::MAX`: that is the sentinel, and the spec defines it as a value in *both*
+/// fields at once, so a strategy that could produce it here would blur "one axis
+/// is the sentinel" into "neither is".
+fn current_extent_axis() -> impl Strategy<Value = u32> {
+    prop_oneof![
+        prop::sample::select(&[0u32, 1, 320, 800, 1920, 4096]),
+        0u32..=65536
+    ]
+}
+
+/// Capabilities whose `currentExtent` is the "you choose" pair, with the extent
+/// window drawn independently so an inverted one — a driver reporting its
+/// minimum above its maximum — stays reachable. Nothing is filtered for: both
+/// axes are the sentinel by construction, so every draw is a usable case.
+fn free_sized_caps() -> impl Strategy<Value = vk::SurfaceCapabilitiesKHR> {
+    (
+        extent_bound(),
+        extent_bound(),
+        extent_bound(),
+        extent_bound(),
+    )
+        .prop_map(|(min_w, min_h, max_w, max_h)| {
+            caps(
+                vk::Extent2D {
+                    width: min_w,
+                    height: min_h,
+                },
+                vk::Extent2D {
+                    width: max_w,
+                    height: max_h,
+                },
+                2,
+                0,
+                vk::Extent2D {
+                    width: u32::MAX,
+                    height: u32::MAX,
+                },
+            )
+        })
+}
+
+/// The same, with the sentinel on exactly one axis and a real size on the
+/// other. No conforming driver reports that, which is the point: the sentinel is
+/// a pair, so a report that mixes one has to be read as "the surface owns the
+/// size". Built by construction rather than filtered for, so every draw is a
+/// usable case.
+fn one_sentinel_caps() -> impl Strategy<Value = vk::SurfaceCapabilitiesKHR> {
+    (
+        prop::sample::select(&[true, false]),
+        current_extent_axis(),
+        extent_bound(),
+        extent_bound(),
+        extent_bound(),
+        extent_bound(),
+    )
+        .prop_map(|(sentinel_on_width, real, min_w, min_h, max_w, max_h)| {
+            let (width, height) = if sentinel_on_width {
+                (u32::MAX, real)
+            } else {
+                (real, u32::MAX)
+            };
+            caps(
+                vk::Extent2D {
+                    width: min_w,
+                    height: min_h,
+                },
+                vk::Extent2D {
+                    width: max_w,
+                    height: max_h,
+                },
+                2,
+                0,
+                vk::Extent2D { width, height },
+            )
+        })
+}
+
+/// The image count's contract, where the extent fields are left unconstrained:
+/// nothing in the count arithmetic reads them, and letting them vary keeps the
+/// property from accidentally depending on them.
 fn image_count_caps() -> impl Strategy<Value = vk::SurfaceCapabilitiesKHR> {
     (
         extent_bound(),
@@ -393,17 +479,21 @@ proptest! {
         prop_assert_eq!(choose_present_mode(&modes), expected, "offered: {:?}", modes);
     }
 
-    /// "A `current_extent` other than `u32::MAX` means the window manager (not
-    /// us) owns the size, so it wins and the request is ignored." Nothing
-    /// else in the capabilities may interfere: a surface-owned size is returned
-    /// untouched whatever was asked for and whatever bounds were advertised.
+    /// "A `current_extent` other than the `0xFFFFFFFF` pair means the window
+    /// manager (not us) owns the size, so it wins and the request is ignored."
+    /// Nothing else in the capabilities may interfere: a surface-owned size is
+    /// returned untouched whatever was asked for and whatever bounds were
+    /// advertised — including when only one of the two axes is the sentinel,
+    /// since a driver that reported one real size has told us it owns the size.
     #[test]
     fn surface_owned_extent_overrides_any_request(
         caps in surface_caps(),
         w in prop::sample::select(&WIDTHS[..]),
         h in prop::sample::select(&HEIGHTS[..]),
     ) {
-        prop_assume!(caps.current_extent.width != u32::MAX);
+        prop_assume!(
+            caps.current_extent.width != u32::MAX || caps.current_extent.height != u32::MAX
+        );
         prop_assert_eq!(
             clamp_extent(&caps, w, h),
             caps.current_extent,
@@ -411,6 +501,66 @@ proptest! {
             w,
             h
         );
+    }
+
+    /// The sentinel is a value in *both* fields. A driver that left one axis
+    /// real has not handed the size back, so the request is discarded and the
+    /// surface's own mixed extent comes back untouched, sentinel axis included
+    /// — the driver reported it, and it is not this function's to replace with a
+    /// size the driver never said.
+    #[test]
+    fn a_sentinel_on_one_axis_only_is_not_the_you_choose_sentinel(
+        caps in one_sentinel_caps(),
+        w in any::<u32>(),
+        h in any::<u32>(),
+    ) {
+        let got = clamp_extent(&caps, w, h);
+        prop_assert_eq!(
+            got,
+            caps.current_extent,
+            "a surface that owns the size because one axis is real had that size replaced"
+        );
+    }
+
+    /// Clamping is total. The bounds are drawn independently by
+    /// `free_sized_caps`, so this reaches the inverted window — a driver that
+    /// reported its minimum above its maximum — where `u32::clamp` panics. A
+    /// compositor that crashes on a driver that breaks the spec is worse than
+    /// one that presents a size the driver did not advertise, so the call has to
+    /// answer for every input.
+    #[test]
+    fn extent_is_total_and_lands_in_the_advertised_window(
+        caps in free_sized_caps(),
+        w in any::<u32>(),
+        h in any::<u32>(),
+    ) {
+        let got = clamp_extent(&caps, w, h);
+        for (axis, want, low, high) in [
+            (
+                "width",
+                got.width,
+                caps.min_image_extent.width,
+                caps.max_image_extent.width,
+            ),
+            (
+                "height",
+                got.height,
+                caps.min_image_extent.height,
+                caps.max_image_extent.height,
+            ),
+        ] {
+            let (low, high) = if low <= high { (low, high) } else { (high, low) };
+            prop_assert!(
+                want >= low && want <= high,
+                "{} {} for a {}x{} request is outside the advertised window [{}, {}]",
+                axis,
+                want,
+                w,
+                h,
+                low,
+                high
+            );
+        }
     }
 
     /// When the surface leaves the size to us the answer has to land inside
@@ -481,14 +631,18 @@ proptest! {
 
     /// The image count is `min + 1` — a frame can be recorded while another is
     /// presented — capped at `max`, with `0` meaning the driver stated no upper
-    /// bound. It is the only thing between a resize storm and a `create_swapchain`
-    /// refusal, so it may never leave the advertised window and may never be
-    /// zero: a swapchain with no images can never present a frame.
+    /// bound. It is the only thing between a resize storm and a
+    /// `create_swapchain` refusal, so it may never leave the advertised window
+    /// and may never be zero: a swapchain with no images can never present a
+    /// frame. Nothing is assumed about the counts here, because the interesting
+    /// input is exactly the one a filter would drop: a minimum of `u32::MAX`,
+    /// where `min + 1` overflows.
     #[test]
     fn image_count_stays_inside_what_the_driver_allows(caps in image_count_caps()) {
-        // `min + 1` cannot be evaluated on the saturating minimum.
-        prop_assume!(caps.min_image_count < u32::MAX);
         let count = choose_image_count(&caps);
+        // Saturating, because `min + 1` cannot be evaluated on a minimum of
+        // `u32::MAX` and the answer for one is the minimum itself.
+        let one_past_min = caps.min_image_count.saturating_add(1);
 
         prop_assert!(count >= 1, "a swapchain of {count} images can never present");
         prop_assert!(
@@ -497,7 +651,7 @@ proptest! {
             caps.min_image_count
         );
         if caps.max_image_count == 0 {
-            prop_assert_eq!(count, caps.min_image_count + 1, "no upper bound was stated");
+            prop_assert_eq!(count, one_past_min, "no upper bound was stated");
         } else {
             prop_assert!(
                 count <= caps.max_image_count,
@@ -505,9 +659,8 @@ proptest! {
                 caps.max_image_count
             );
             prop_assert!(
-                count == caps.min_image_count + 1 || count == caps.max_image_count,
-                "{count} is neither one past the minimum ({}) nor the maximum ({})",
-                caps.min_image_count,
+                count == one_past_min || count == caps.max_image_count,
+                "{count} is neither one past the minimum ({one_past_min}) nor the maximum ({})",
                 caps.max_image_count
             );
         }
@@ -525,7 +678,6 @@ proptest! {
         modes in present_mode_list(),
         formats in surface_format_list(),
     ) {
-        prop_assume!(caps.min_image_count < u32::MAX);
         prop_assert_eq!(clamp_extent(&caps, w, h), clamp_extent(&caps, w, h));
         prop_assert_eq!(choose_image_count(&caps), choose_image_count(&caps));
         prop_assert_eq!(choose_present_mode(&modes), choose_present_mode(&modes));
