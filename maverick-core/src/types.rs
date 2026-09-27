@@ -1307,8 +1307,18 @@ pub struct Monitor {
 
 impl Monitor {
     /// Create a monitor with `screen` geometry and `n_tags` empty workspaces.
+    ///
+    /// `n_tags` is clamped to at least one, the same floor
+    /// [`Self::reconcile_workspaces`] applies: a monitor with no workspace slot
+    /// has no active workspace for [`Self::ws`] / [`Self::ws_mut`] to return, so
+    /// the count cannot be honoured verbatim without making every later command
+    /// path fail on a monitor the backend built correctly from a legal argument.
+    /// The backend's RandR/Xinerama detection and session restore both reach this
+    /// constructor, so the floor belongs here rather than at each call site.
     pub fn new(screen: Rect, n_tags: usize) -> Self {
-        let workspaces = (0..n_tags).map(|i| Workspace::new(i as u32)).collect();
+        let workspaces = (0..n_tags.max(1))
+            .map(|i| Workspace::new(i as u32))
+            .collect();
         let mut m = Self {
             screen,
             workarea: screen,
