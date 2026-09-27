@@ -71,6 +71,12 @@ pub const GLX_BACK_BUFFER_AGE_EXT: c_int = 0x20F4;
 /// absent — a driver is free to export a non-null stub for something it does
 /// not implement — so callers must additionally match the extension token
 /// against `glXQueryExtensionsString` (see [`has_extension`]) before using one.
+///
+/// As in `gl.rs`, the `unsafe` the macro emits is only `Lib::cast_fn`'s: 24
+/// entry points, one contract, written down once. The invariant this table
+/// cannot state is the one that matters most — a GLX call needs the caller's
+/// context current on the caller's thread, and that belongs to `Renderer`,
+/// which is `!Send` because it holds the context as a raw pointer.
 macro_rules! glx_api {
     (
         required { $( fn $rname:ident ( $($rarg:ident : $rargty:ty),* $(,)? ) $(-> $rret:ty)? ; )+ }
@@ -85,9 +91,20 @@ macro_rules! glx_api {
         impl Glx {
             pub fn load(lib: &Lib) -> Result<Self, String> {
                 Ok(Self {
+                    // SAFETY: a required entry point was resolved from `lib`'s
+                    // own mapping under exactly its own name, so `cast_fn`'s
+                    // contract — a pointer to a function of the signature written
+                    // beside it, which is this field's type — holds by
+                    // construction rather than by review.
                     $( $rname: unsafe {
                         Lib::cast_fn(lib.sym(stringify!($rname))?)
                     }, )+
+                    // SAFETY: as above for the optional half. `sym_opt` may
+                    // answer a non-null *stub* for something the driver does not
+                    // implement, so this `Some` is not a promise the entry point
+                    // is callable — the extension-string check in
+                    // `has_extension` is, and `Renderer::new_with_vsync` refuses
+                    // to start without it.
                     $( $oname: lib.sym_opt(stringify!($oname)).map(|p| unsafe {
                         Lib::cast_fn(p)
                     }), )+
@@ -137,17 +154,39 @@ impl Glx {
     /// The server's GLX extension string for `screen`, as a Rust `String`
     /// (empty when the server answers NULL, which makes every token test fail
     /// and therefore disables every optional path).
+    ///
+    /// The returned storage belongs to the GLX client library — the driver
+    /// builds this string once per screen and hands out the same pointer on
+    /// every call — so it is **not** `XFree`d here. Freeing it would hand
+    /// `XFree` a pointer Xlib never allocated. What the caller does get is a
+    /// copy, so nothing in the returned `String` refers back into the driver.
     pub(crate) fn extensions(&self, dpy: *mut Display, screen: c_int) -> String {
+        // SAFETY: `dpy` is a live `Display*` (see `Renderer::dpy`) and
+        // `screen` came from `open_x`'s `XDefaultScreen` or the same source, so
+        // it names a screen of this connection. The query needs no current
+        // context, and it is a client-library call, so a context being current
+        // elsewhere changes nothing.
         let p = unsafe { (self.glXQueryExtensionsString)(dpy, screen) };
         if p.is_null() {
             return String::new();
         }
+        // SAFETY: a non-null extension string is NUL-terminated by the GLX
+        // spec, and it stays valid for as long as the screen does — longer
+        // than the copy below, which is the first thing that happens after the
+        // call. `CStr::from_ptr` reads only up to that terminator.
         unsafe { std::ffi::CStr::from_ptr(p) }
             .to_string_lossy()
             .into_owned()
     }
 
     /// Read one fbconfig attribute, `None` when the query fails.
+    ///
+    /// `cfg` must be a `GLXFBConfig` this display's `glXGetFBConfigs`
+    /// returned. A handle stays valid for the life of the screen even after the
+    /// array it arrived in has been `XFree`d — the server owns the
+    /// configuration, the array is only a client-side index into it — which is
+    /// what lets `choose_window_fbconfig` and `choose_tfp_fbconfig` return
+    /// their pick after freeing the list.
     pub(crate) fn config_attrib(
         &self,
         dpy: *mut Display,
@@ -155,6 +194,10 @@ impl Glx {
         attrib: c_int,
     ) -> Option<c_int> {
         let mut v: c_int = 0;
+        // SAFETY: `dpy` is live, `cfg` is a config of `dpy`'s screen per the
+        // contract above, and `&mut v` is the address of a live local that
+        // `glXGetFBConfigAttrib` writes exactly one `int` into. The call takes
+        // no ownership and allocates nothing.
         let rc = unsafe { (self.glXGetFBConfigAttrib)(dpy, cfg, attrib, &mut v) };
         if rc == 0 {
             Some(v)

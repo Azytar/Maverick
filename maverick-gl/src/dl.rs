@@ -3,9 +3,11 @@
 // an `LD_PRELOAD` that hides libGL): the load simply fails, `probe()` reports
 // it, and the window manager falls back to the plain `ConfigureWindow` path.
 // libX11/libX11-xcb are a different story — they are a hard dependency of any
-// X11 session, so those are linked normally (see `xlib.rs`).
+// X11 session, so those are linked normally, by `maverick-x11` and re-exported
+// from here as `maverick_gl::XDisplay`.
 
 use std::ffi::CString;
+use std::mem::size_of;
 use std::os::raw::{c_char, c_uchar, c_void};
 
 /// A `dlopen`ed shared object.
@@ -13,6 +15,10 @@ use std::os::raw::{c_char, c_uchar, c_void};
 /// Never closed: GL function pointers, the GLX context and every texture we
 /// created stay valid only while libGL is mapped, and the compositor can be
 /// disabled (but not "un-initialised") at runtime.
+///
+/// `dlopen` returns the *same* handle for the same object, so two `Lib`s for
+/// the same soname share one mapping; there is no refcount here and none is
+/// needed, because the mapping is never released by anyone.
 pub struct Lib {
     handle: *mut c_void,
     /// `glXGetProcAddressARB` — the only correct way to resolve GL/GLX
@@ -21,11 +27,23 @@ pub struct Lib {
     get_proc: Option<unsafe extern "C" fn(*const c_uchar) -> *mut c_void>,
 }
 
+// `Send` — and deliberately NOT `Sync`.
+//
+// What backs the claim: after `open_gl` returns, the only things a `Lib` holds
+// are the mapping handle and the resolved `glXGetProcAddressARB` address.
+// Neither is dereferenced again — `dlsym` and `glXGetProcAddressARB` read the
+// handle, they do not write through it — and both are specified to be callable
+// concurrently, so handing the whole value to another thread and resolving
+// symbols there touches no shared mutable state.
+//
+// Why `Sync` is withheld: `sym_opt` *calls into the driver* through
+// `get_proc`, and `GLX_ARB_get_proc_address` does not promise that
+// `glXGetProcAddressARB` is re-entrant — several drivers keep a scratch buffer
+// and a per-process dispatch table while answering. `&Lib` from two threads at
+// once would be relying on that. `Send` says one thread at a time, which is
+// what the compositor does, and is the strongest claim the driver actually
+// supports.
 unsafe impl Send for Lib {}
-// `Send` (but deliberately NOT `Sync`): every GL call in the compositor runs
-// on the WM thread, and `XInitThreads` (see `open_x`) makes the underlying
-// libGL/Xlib locking valid if the handle ever crosses threads during setup.
-// Sharing `&Lib` across threads would need `Sync`, which is NOT granted.
 
 /// Absolute system paths probed BEFORE the bare soname, in order. A bare
 /// `dlopen("libGL.so.1")` honours `LD_LIBRARY_PATH`/`LD_PRELOAD`, so a hostile
@@ -48,6 +66,14 @@ impl Lib {
             let name = CString::new(*cand).expect("static string has no NUL");
             // RTLD_NOW: fail fast here on missing relocations instead of
             // crashing mid-frame on the first call into a half-bound driver.
+            // `name` outlives the call by borrow, and a successful `dlopen`
+            // does not retain the path, so the `CString` may be dropped right
+            // after — a failure has copied the path into `dlerror`'s own
+            // storage, which `last_error` reads below.
+            // SAFETY: `name.as_ptr()` is a NUL-terminated path that outlives the
+            // call; `RTLD_NOW | RTLD_LOCAL` is a valid flag combination; and a
+            // non-null result is only read back through `dlsym` below, which is
+            // exactly what the handle is for.
             let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
             if handle.is_null() {
                 last_err = format!("dlopen({cand}) failed: {}", last_error());
@@ -62,16 +88,31 @@ impl Lib {
                 last_err = format!("{cand} has no glXGetProcAddressARB");
                 continue;
             }
+            // SAFETY: `raw` came from `dlsym` for exactly the name
+            // `glXGetProcAddressARB`, whose C signature is
+            // `void *(*)(const unsigned char *)` — the type `get_proc` holds.
+            // Nothing is called through it here, only stored.
             lib.get_proc = Some(unsafe { Self::cast_fn(raw) });
             return Ok(lib);
         }
         Err(last_err)
     }
 
+    /// Look a symbol up in this mapping with `dlsym` alone.
+    ///
+    /// The fallback for symbols `glXGetProcAddressARB` will not resolve: on some
+    /// drivers it returns NULL for the ABI-guaranteed *core* entry points it
+    /// is itself reached through, so `sym_opt` tries this second.
     fn dlsym(&self, name: &str) -> *mut c_void {
         let Ok(c) = CString::new(name) else {
+            // A name with an interior NUL would resolve to its own prefix
+            // instead, which is a different entry point than the caller asked
+            // for; refusing is the only answer that cannot call the wrong one.
             return std::ptr::null_mut();
         };
+        // SAFETY: `self.handle` is a live `dlopen` mapping for the process
+        // lifetime (`Lib` has no `Drop`, so nothing can have closed it) and `c`
+        // is a NUL-terminated name that outlives the call.
         unsafe { libc::dlsym(self.handle, c.as_ptr()) }
     }
 
@@ -92,6 +133,12 @@ impl Lib {
             let Ok(c) = CString::new(name) else {
                 return None;
             };
+            // SAFETY: `c` is a NUL-terminated name that outlives the call, and
+            // `get_proc` is the `glXGetProcAddressARB` address resolved from
+            // this very mapping, which is what the GLX extension spec requires
+            // of the call: the pointer must come from the vendor library that
+            // owns the current context, so it is asked of the driver rather
+            // than taken from the symbol table.
             let p = unsafe { get_proc(c.as_ptr().cast::<c_uchar>()) };
             if !p.is_null() {
                 return Some(p);
@@ -116,17 +163,44 @@ impl Lib {
     /// missing extension would still be UB to call — which is why callers
     /// must treat optional symbols via `sym_opt` + extension-string checks,
     /// never by nullness alone.
+    ///
+    /// The size of `T` is settled here, at compile time, and not by the caller:
+    /// the `const` block below rejects any `T` a plain data pointer cannot
+    /// carry. That is the check `transmute_copy` does not do — it would copy
+    /// `size_of::<T>()` bytes out of an `size_of::<*mut c_void>()` source, so an
+    /// oversized `T` yields a value with uninitialised tail bytes (instant UB)
+    /// while the compiler stays silent. Here that instantiation is a build
+    /// failure, and a GL entry point declared to return a struct by value — the
+    /// only way a wrong `T` could reach this — would be rejected at the
+    /// declaration instead of producing garbage at the call.
     pub unsafe fn cast_fn<T>(p: *mut c_void) -> T {
+        const { assert!(size_of::<T>() == size_of::<*mut c_void>()) };
         debug_assert!(!p.is_null());
+        // SAFETY: the caller guarantees `p` points at a function of type `T`, so
+        // reinterpreting the data pointer as that function pointer is the only
+        // conversion happening. The `const` assertion above has already proved
+        // `size_of::<T>() == size_of::<*mut c_void>()`; function pointers and
+        // data pointers share one size and one alignment on every ABI Rust
+        // supports, so the copy below is a whole value in both directions — it
+        // neither truncates nor leaves bytes uninitialised. The null case is the
+        // caller's contract: `sym`/`sym_opt` are the only ways to get here and
+        // both answer `None` for a symbol the driver does not have.
         unsafe { std::mem::transmute_copy::<*mut c_void, T>(&p) }
     }
 }
 
+/// The last `dlerror()` message, copied out before anything else can overwrite
+/// it — `dlerror` clears the slot it reads, so a second call returns NULL.
 fn last_error() -> String {
+    // SAFETY: `dlerror` takes no arguments, returns either NULL or a pointer to
+    // a NUL-terminated string in storage libdl owns, and has no preconditions.
     let e: *mut c_char = unsafe { libc::dlerror() };
     if e.is_null() {
         return "unknown error".into();
     }
+    // SAFETY: a non-null `dlerror` result points at a NUL-terminated string
+    // that stays valid until the next `dlerror` call on this thread, and the
+    // `to_string_lossy` copy below happens before anything can call it again.
     unsafe { std::ffi::CStr::from_ptr(e) }
         .to_string_lossy()
         .into_owned()

@@ -16,6 +16,14 @@
 // Every method here runs on the thread that called `glXMakeCurrent` on the
 // overlay drawable. `Renderer` holds the `GLXContext` as a raw pointer, so it
 // is neither `Send` nor `Sync` and the compiler enforces the affinity.
+//
+// That is the invariant every `unsafe` block below leans on, and it is worth
+// stating once here rather than in each of them: **the context is current on
+// `glx_win` on the thread that holds this `Renderer`**, from
+// `new_with_vsync` (which makes it current) to `destroy` (which releases it
+// last). Within it, each block's own obligations are narrow and local — a
+// pointer is to a live name, an out-parameter is a live local, a buffer is as
+// long as the count says — and each is spelled out where it appears.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CString};
@@ -695,6 +703,17 @@ pub struct Renderer {
     screen: c_int,
     gl: Gl,
     glx: Glx,
+    /// The GLX rendering context, as a raw pointer on purpose.
+    ///
+    /// This field is the *only* thing making `Renderer` neither `Send` nor
+    /// `Sync`, and that is load-bearing: a GL context is current on one thread
+    /// at a time, and every GL entry point reached through `self.gl` is only
+    /// valid while this context is current on the calling thread. Wrapping it in
+    /// a newtype that derives `Send`/`Sync` — or replacing it with a `u64` — would
+    /// let a `Renderer` be built on one thread and drawn on another, and every
+    /// frame would then go to whatever context that thread happened to have
+    /// current. The type system is the only thing enforcing the affinity, so it
+    /// has to keep seeing the raw pointer.
     ctx: GLXContext,
     glx_win: GLXWindow,
     prog: GLuint,
@@ -819,10 +838,16 @@ impl Renderer {
         }
 
         let (mut eb, mut ev) = (0, 0);
+        // SAFETY: both calls take the live `Display*` from `XDisplay` plus the
+        // address of a live `c_int` local for the one value each writes, read
+        // nothing back, allocate nothing, and need no current context. They are
+        // the two queries that establish whether GLX exists at all, so nothing
+        // about the context is assumed yet.
         if unsafe { (glx.glXQueryExtension)(d, &mut eb, &mut ev) } == 0 {
             return Err("server has no GLX extension".into());
         }
         let (mut maj, mut min) = (0, 0);
+        // SAFETY: as above, with two out-parameters instead of one.
         unsafe { (glx.glXQueryVersion)(d, &mut maj, &mut min) };
         if maj < 1 || (maj == 1 && min < 3) {
             return Err(format!(
@@ -849,6 +874,14 @@ impl Renderer {
 
         let win_cfg = choose_window_fbconfig(&glx, d, screen, root_format)?;
 
+        // SAFETY: `d` is live, `win_cfg` is a config of this display's screen
+        // (`choose_window_fbconfig`'s contract), `NULL` as the `share` context
+        // asks for an unshared one, and `GLX_CTX_ATTRIBS` is a `const` array of
+        // `[c_int; 7]` whose lifetime therefore covers the call — it is read
+        // only up to the terminating `0`, which the test
+        // `glx_context_attribute_list_is_paired_and_zero_terminated` pins.
+        // Nothing here takes ownership: the returned context is stored in
+        // `self.ctx` and released by `destroy`.
         let ctx = unsafe {
             create_ctx(
                 d,
@@ -864,20 +897,43 @@ impl Renderer {
         if ctx.is_null() {
             return Err("glXCreateContextAttribsARB(3.3 core) failed".into());
         }
+        // SAFETY: `ctx` is the non-null context just created and not yet
+        // current anywhere, so it is legal to destroy; the two calls take only
+        // the display and a handle the caller owns.
         if unsafe { (glx.glXIsDirect)(d, ctx) } == 0 {
+            // SAFETY: as above — releasing a context this constructor created on
+            // the error path, so no name is left dangling.
             unsafe { (glx.glXDestroyContext)(d, ctx) };
             return Err("GLX compositor context is indirect".into());
         }
 
+        // SAFETY: `overlay` is the Composite overlay window, which the server
+        // created with the root visual, and `win_cfg` is the config chosen to
+        // match exactly that visual — the pair is what `glXCreateWindow`
+        // requires or it answers `BadMatch`. The `NULL` attribute list asks for
+        // the default GLX window attributes. The result is stored in
+        // `self.glx_win` and released by `destroy`.
         let glx_win =
             unsafe { (glx.glXCreateWindow)(d, win_cfg, c_ulong::from(overlay), std::ptr::null()) };
         dpy.sync();
         if glx_win == 0 {
+            // SAFETY: undoing the context this constructor created; the window
+            // was never created, so there is nothing else to release.
             unsafe { (glx.glXDestroyContext)(d, ctx) };
             return Err("glXCreateWindow(overlay) failed".into());
         }
 
+        // The thread affinity starts here. Everything after this point — every
+        // `self.gl` call in the crate — is only valid because *this* thread
+        // holds the context current, and `Renderer` is `!Send` so the type
+        // system keeps it that way.
+        // SAFETY: `glx_win` and `ctx` are the two handles just created, neither
+        // current to any thread yet, and they belong to `d`. On the failure path
+        // both are released, and a context must not be current when it is
+        // destroyed — here it never became current, which is why there is no
+        // `glXMakeCurrent(d, 0, NULL)` to undo first.
         if unsafe { (glx.glXMakeCurrent)(d, glx_win, ctx) } == 0 {
+            // SAFETY: as above, releasing both handles on the error path.
             unsafe {
                 (glx.glXDestroyWindow)(d, glx_win);
                 (glx.glXDestroyContext)(d, ctx);
@@ -888,6 +944,12 @@ impl Renderer {
         let gl = match Gl::load(&lib) {
             Ok(g) => g,
             Err(e) => {
+                // SAFETY: unwinding the three GLX objects this constructor has
+                // created, in the only order that is legal: release the context
+                // from the thread that made it current *first*, then destroy the
+                // window, then the context. `glXDestroyContext` on a context
+                // that is still current is an error, so the release is not
+                // optional.
                 unsafe {
                     (glx.glXMakeCurrent)(d, 0, std::ptr::null_mut());
                     (glx.glXDestroyWindow)(d, glx_win);
@@ -982,11 +1044,24 @@ impl Renderer {
         let fs = match compile_shader(gl, GL_FRAGMENT_SHADER, FRAGMENT_SRC) {
             Ok(f) => f,
             Err(e) => {
+                // SAFETY: `vs` is a shader this function compiled and no program
+                // has attached it yet, so deleting it here frees it exactly once
+                // and loses nothing. This is the half-built-program cleanup: the
+                // vertex shader must not outlive a failure to build the fragment
+                // one, or every bad wallpaper would leak a compiled shader.
                 unsafe { (gl.glDeleteShader)(vs) };
                 return Err(e);
             }
         };
+        // SAFETY: `glCreateProgram` takes no arguments and returns a name, so
+        // the only obligation is a current context.
         let prog = unsafe { (gl.glCreateProgram)() };
+        // SAFETY: `vs` and `fs` are the two shaders this function just compiled
+        // and neither has been attached to anything, and `prog` is the empty
+        // program just created. Deleting the shaders immediately after linking
+        // is the documented pattern — the program keeps them alive until it is
+        // itself deleted — so the two names are dead the moment this block ends
+        // and no later path can use them.
         unsafe {
             (gl.glAttachShader)(prog, vs);
             (gl.glAttachShader)(prog, fs);
@@ -995,9 +1070,15 @@ impl Renderer {
             (gl.glDeleteShader)(fs);
         }
         let mut ok: GLint = 0;
+        // SAFETY: `prog` is a live program name and `&mut ok` a live `GLint` the
+        // call writes one value into. GL updates the flag synchronously inside
+        // `glLinkProgram`, so it is meaningful here without a flush.
         unsafe { (gl.glGetProgramiv)(prog, GL_LINK_STATUS, &mut ok) };
         if ok == 0 {
             let log = program_log(gl, prog);
+            // SAFETY: `prog` failed to link and nothing else refers to it —
+            // `self.prog` is not assigned until the next line — so deleting it
+            // here is its only possible free.
             unsafe { (gl.glDeleteProgram)(prog) };
             return Err(format!("shader link failed: {log}"));
         }
@@ -1005,6 +1086,10 @@ impl Renderer {
 
         let uniform = |name: &str| -> GLint {
             let c = CString::new(name).expect("static uniform name has no NUL");
+            // SAFETY: `c` is a NUL-terminated name that outlives the call, and
+            // `prog` is the live program it is looked up in. A name the program
+            // does not use answers -1, which is exactly what the caller's
+            // `u_*` initialisers use to mean "absent".
             unsafe { (gl.glGetUniformLocation)(prog, c.as_ptr()) }
         };
         self.u_dst = uniform("u_dst");
@@ -1037,6 +1122,14 @@ impl Renderer {
             0.0, 0.0,  1.0, 0.0,  1.0, 1.0,
             0.0, 0.0,  1.0, 1.0,  0.0, 1.0,
         ];
+        // SAFETY: this is the first block after the context became current on
+        // this thread, and it is the only state the renderer sets up once. Each
+        // `&mut self.field` is the address of a name the driver is about to
+        // generate into — a live, aligned, zero-initialised `GLuint` — and
+        // `QUAD` is a `const` array, so its storage outlives the call and
+        // `glBufferData` is told the exact byte length rather than being trusted
+        // to infer it. No name is deleted here, so nothing can be double-freed;
+        // `destroy` releases them.
         unsafe {
             (gl.glGenVertexArrays)(1, &mut self.vao);
             (gl.glBindVertexArray)(self.vao);
@@ -1085,6 +1178,9 @@ impl Renderer {
         let gl = &self.gl;
         self.screen_w = width;
         self.screen_h = height;
+        // SAFETY: the context is current on this thread (see the module note);
+        // every call sets state or a uniform on the program and VAO
+        // `init_gl_objects` bound, and no pointer crosses the boundary.
         unsafe {
             (gl.glViewport)(0, 0, width as GLsizei, height as GLsizei);
             (gl.glUseProgram)(self.prog);
@@ -1107,6 +1203,10 @@ impl Renderer {
             return 0;
         };
         let mut age: c_uint = 0;
+        // SAFETY: `f` is the `glXQueryDrawable` address from this mapping,
+        // present because the extension string also advertised it; `glx_win` is
+        // the overlay drawable the context is current on, and `&mut age` is a
+        // live `c_uint` the call writes one value into.
         unsafe {
             f(
                 self.dpy.as_ptr(),
@@ -1124,6 +1224,9 @@ impl Renderer {
     pub fn set_scissor(&mut self, x: i32, y: i32, w: u32, h: u32, width: u32, height: u32) {
         let (sx, sy, sw, sh) = scissor_box(x, y, w, h, width, height);
         let gl = &self.gl;
+        // SAFETY: pure GL state, no pointers. The four numbers come from
+        // `scissor_box`, which clamps them inside the viewport — a box outside
+        // it would be a GL error, and the clamping is what keeps them there.
         unsafe {
             (gl.glEnable)(GL_SCISSOR_TEST);
             (gl.glScissor)(sx, sy, sw, sh);
@@ -1133,6 +1236,8 @@ impl Renderer {
     /// Clear the colour buffer, respecting the current scissor rectangle.
     pub fn scissor_clear(&mut self) {
         let gl = &self.gl;
+        // SAFETY: pure GL state, no pointers; the context is current on this
+        // thread and the drawable is the overlay.
         unsafe {
             (gl.glClearColor)(0.0, 0.0, 0.0, 0.0);
             (gl.glClear)(GL_COLOR_BUFFER_BIT);
@@ -1142,6 +1247,8 @@ impl Renderer {
     /// Disable the scissor rectangle (back to full-screen drawing).
     pub fn clear_scissor(&mut self) {
         let gl = &self.gl;
+        // SAFETY: pure GL state, no pointers; the context is current on this
+        // thread.
         unsafe {
             (gl.glDisable)(GL_SCISSOR_TEST);
         }
@@ -1155,6 +1262,11 @@ impl Renderer {
     pub fn draw(&mut self, tex: &mut Texture, q: &DrawQuad) {
         let gl = &self.gl;
         let handle = tex.handle();
+        // SAFETY: uniforms and sampler state on the program and texture this
+        // renderer set up, plus one `glDrawArrays` against the bound VAO. No
+        // pointer crosses the boundary — every value is an immediate or a
+        // uniform location cached at link time. The context is current on this
+        // thread (see the module note), which is the only thing the draw needs.
         unsafe {
             if self.last_tex != handle {
                 (gl.glBindTexture)(GL_TEXTURE_2D, tex.tex);
@@ -1198,12 +1310,18 @@ impl Renderer {
         let gl = &self.gl;
         let inner = tex.0;
         let bound = if prev_tex.0 != inner {
+            // SAFETY: `inner` is a `TextureHandle` the compositor obtained from
+            // a `Texture` this renderer created and has not destroyed; binding
+            // a name the driver knows is all this does.
             unsafe { (gl.glBindTexture)(GL_TEXTURE_2D, inner) };
             tex
         } else {
             prev_tex
         };
         let filter = q.filter.to_gl();
+        // SAFETY: as in `draw` — uniforms on the linked program and sampler
+        // state on the bound texture, with the context current on this thread
+        // and no pointer crossing the boundary.
         unsafe {
             (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
             (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
@@ -1229,6 +1347,10 @@ impl Renderer {
     /// Present the frame. With swap interval 1 this blocks until the vertical
     /// blank, which is what paces the whole animation loop.
     pub fn end_frame(&mut self) -> bool {
+        // SAFETY: `glx_win` is the overlay drawable this renderer's context is
+        // current on and the one every frame in this method was drawn into, and
+        // the display is the live `XDisplay` the context was created against.
+        // Swapping does not transfer ownership of either.
         unsafe { (self.glx.glXSwapBuffers)(self.dpy.as_ptr(), self.glx_win) };
         self.gl.take_error() == GL_NO_ERROR
     }
@@ -1246,6 +1368,10 @@ impl Renderer {
             return false;
         };
         let mut count: c_uint = 0;
+        // SAFETY: both addresses are the `glXSwapInterval`-style SGI video-sync
+        // entry points from this mapping, gated above on the extension token
+        // being present; they take no display and allocate nothing, and
+        // `&mut count` is a live `c_uint` each of them writes a counter into.
         unsafe {
             (get)(&mut count);
             (wait)(1, 0, &mut count) == 0
@@ -1284,6 +1410,14 @@ impl Renderer {
         if verify {
             maverick_x11::clear_x_error();
         }
+        // SAFETY: `tfp.cfg` is a config of this display's screen, chosen for
+        // `visual`'s depth (that is exactly what `choose_tfp_fbconfig` selects
+        // on), and `attribs` is a local `[c_int; 5]` that outlives the call and
+        // ends on the `0` terminator GLX requires. A depth/fbconfig mismatch is
+        // reported asynchronously as `BadMatch`, which is why the first pixmap
+        // of each visual is round-tripped below rather than trusted. The result
+        // is owned by the caller: it is either released on the error path here
+        // or handed back inside a `Texture` that `destroy_texture` frees.
         let glx_pixmap = unsafe {
             (self.glx.glXCreatePixmap)(
                 self.dpy.as_ptr(),
@@ -1303,6 +1437,10 @@ impl Renderer {
             if let Some(code) = maverick_x11::take_x_error() {
                 self.verified.remove(&visual.id);
                 if glx_pixmap != 0 {
+                    // SAFETY: the driver handed back a handle for a request the
+                    // server rejected; the server created no resource, so
+                    // releasing the client-side handle here is what keeps a
+                    // failed lookup from accumulating one per retry.
                     unsafe {
                         (self.glx.glXDestroyPixmap)(self.dpy.as_ptr(), glx_pixmap);
                     }
@@ -1318,6 +1456,11 @@ impl Renderer {
             return Err(format!("glXCreatePixmap for {visual} returned None"));
         }
         let mut tex: GLuint = 0;
+        // SAFETY: the context is current on this thread, `&mut tex` is a live
+        // `GLuint` the driver writes the new name into, and the parameter calls
+        // only set sampler state on the texture bound immediately above. The
+        // name is owned by the `Texture` built below and released by
+        // `destroy_texture`.
         unsafe {
             (self.gl.glGenTextures)(1, &mut tex);
             (self.gl.glBindTexture)(GL_TEXTURE_2D, tex);
@@ -1376,6 +1519,15 @@ impl Renderer {
                 t.glx_pixmap, t.tex, t.bound
             );
         }
+        // SAFETY: `bind` and `release` are the `glXBind/ReleaseTexImageEXT`
+        // addresses resolved from this mapping and confirmed present at the top
+        // of this function, and `t.glx_pixmap` is a GLX pixmap this renderer
+        // created and has not destroyed. Release-before-bind is what the TFP
+        // specification requires: while a drawable is bound its texture contents
+        // are undefined, so a second bind without a release would offer the
+        // driver a surface it may still consider in use. `NULL` for the
+        // attribute list asks for the default `GLX_FRONT_LEFT` binding, which is
+        // the same buffer the release above names.
         unsafe {
             if self.last_tex != handle {
                 (self.gl.glBindTexture)(GL_TEXTURE_2D, t.tex);
@@ -1404,6 +1556,11 @@ impl Renderer {
             return;
         }
         let gl = &self.gl;
+        // SAFETY: `&tex.0` is a valid one-element array naming a texture this
+        // renderer created through `upload_rgba` and has not already deleted —
+        // the handle is `Copy` and the caller is the sole owner, so there is no
+        // second path to a double free. The context is current, so the delete
+        // reaches this renderer's objects.
         unsafe {
             if self.last_tex == tex {
                 self.last_tex = TextureHandle(0);
@@ -1429,6 +1586,9 @@ impl Renderer {
             ));
         }
         let mut tex: GLuint = 0;
+        // SAFETY: `&mut tex` is the address of a live `GLuint` and `n` is 1, so
+        // the driver writes exactly one name and reads nothing. The context is
+        // current on this thread.
         unsafe {
             (gl.glGenTextures)(1, &mut tex);
         }
@@ -1438,6 +1598,15 @@ impl Renderer {
         // Premultiply straight RGBA → premultiplied (the compositor's blend is
         // (ONE, ONE_MINUS_SRC_ALPHA) and expects premultiplied source).
         let premult = premultiply_rgba(&img.data);
+        // SAFETY: the pixel pointer is `premult.as_ptr()`, and `premult` is one
+        // `Vec<u8>` holding exactly `w * h * 4` bytes — `premultiply_rgba` emits
+        // one texel per input texel, which
+        // `premultiplied_upload_keeps_one_texel_per_pixel_and_the_source_alpha`
+        // checks — so the `width * height` `GL_RGBA`/`GL_UNSIGNED_BYTE` texels
+        // `glTexImage2D` reads are all inside it. `premult` outlives the call and
+        // is not mutated while GL reads it, which is the aliasing rule a pixel
+        // pointer has to satisfy. The same call *writes* the texture, so
+        // `premult` is not aliased in the direction that matters.
         unsafe {
             (gl.glBindTexture)(GL_TEXTURE_2D, tex);
             (gl.glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1480,11 +1649,17 @@ impl Renderer {
         let fs = match compile_shader(gl, GL_FRAGMENT_SHADER, frag) {
             Ok(f) => f,
             Err(e) => {
+                // SAFETY: as in `init_gl_objects` — a shader this call compiled,
+                // attached to nothing, freed exactly once on the failure path.
                 unsafe { (gl.glDeleteShader)(vs) };
                 return Err(format!("wallpaper fragment shader: {e}"));
             }
         };
+        // SAFETY: no arguments, and the context is current on this thread.
         let prog = unsafe { (gl.glCreateProgram)() };
+        // SAFETY: as in `init_gl_objects` — both shaders are freshly compiled
+        // and unattached, `prog` is the empty program just created, and the
+        // shader names are dead once this block ends.
         unsafe {
             (gl.glAttachShader)(prog, vs);
             (gl.glAttachShader)(prog, fs);
@@ -1493,14 +1668,22 @@ impl Renderer {
             (gl.glDeleteShader)(fs);
         }
         let mut ok: GLint = 0;
+        // SAFETY: a live program name and a live `GLint` out parameter; the
+        // link status is final the moment `glLinkProgram` returns.
         unsafe { (gl.glGetProgramiv)(prog, GL_LINK_STATUS, &mut ok) };
         if ok == 0 {
             let log = program_log(gl, prog);
+            // SAFETY: the program failed to link and `self.wp_prog` is not
+            // assigned until below, so nothing else refers to it and this is its
+            // only possible free.
             unsafe { (gl.glDeleteProgram)(prog) };
             return Err(format!("wallpaper shader link failed: {log}"));
         }
         let loc = |name: &str| -> GLint {
             let c = CString::new(name).expect("uniform name has no NUL");
+            // SAFETY: a NUL-terminated name that outlives the call, looked up in
+            // the live program just linked; a name the program does not declare
+            // answers -1, which is the "absent" value these fields are reset to.
             unsafe { (gl.glGetUniformLocation)(prog, c.as_ptr()) }
         };
         let u_dst = loc("u_dst");
@@ -1522,6 +1705,8 @@ impl Renderer {
     /// oversize check still rejects something absurd.
     fn max_texture_size(&self) -> u32 {
         let mut v: GLint = 0;
+        // SAFETY: a core query taking a live enum and a live `GLint` out
+        // parameter, with the context current.
         unsafe { (self.gl.glGetIntegerv)(GL_MAX_TEXTURE_SIZE, &mut v) };
         if v <= 0 {
             4096
@@ -1542,11 +1727,16 @@ impl Renderer {
     /// happened to leave at the cached indices.
     pub fn draw_shader(&mut self, s: ShaderId, out: Rect, time: f32, dt: f32) {
         let gl = &self.gl;
+        // SAFETY: `s.0` is a program `compile_fragment` linked and
+        // `destroy_shader` has not since released, per this method's contract,
+        // and `self.vao` is the unit quad set up at init.
         unsafe {
             (gl.glUseProgram)(s.0);
             (gl.glBindVertexArray)(self.vao);
         }
         let (sw, sh) = (self.screen_w as f32, self.screen_h as f32);
+        // SAFETY: uniform values only, on the program just bound; no pointer
+        // crosses the boundary and the context is current on this thread.
         unsafe {
             (gl.glUniform2f)(self.wp_u_res, sw, sh);
             let dst = [
@@ -1566,6 +1756,9 @@ impl Renderer {
         if shader.0 == 0 {
             return;
         }
+        // SAFETY: `shader.0` is a program this renderer linked and has not
+        // already released, and the caller is its sole owner. The context is
+        // current, so the delete reaches this renderer's objects.
         unsafe {
             (self.gl.glDeleteProgram)(shader.0);
         }
@@ -1591,6 +1784,14 @@ impl Renderer {
                 t.glx_pixmap, t.tex, t.bound
             );
         }
+        // SAFETY: `t` is moved in, so these are the last reads of its handles
+        // and there is no second owner that could free them too. Each call
+        // releases exactly one thing `t` owned, in the only order GLX allows: the
+        // TFP binding first (a pixmap cannot be destroyed while bound), then the
+        // GLX pixmap, then the GL texture name. The context is still current,
+        // which is what makes the last two act on this renderer's objects rather
+        // than on whatever the thread has current. `t.tex` is a live local, so
+        // `&t.tex` is the valid one-element array `glDeleteTextures` expects.
         unsafe {
             if t.bound {
                 if let Some(release) = self.glx.glXReleaseTexImageEXT {
@@ -1672,45 +1873,42 @@ impl Renderer {
     /// the first thing worth looking at when colours come out wrong.
     pub fn fbconfig_report(&self) -> Vec<String> {
         let d = self.dpy.as_ptr();
-        let mut n: c_int = 0;
-        let list = unsafe { (self.glx.glXGetFBConfigs)(d, self.screen, &mut n) };
-        if list.is_null() || n <= 0 {
-            return vec!["glXGetFBConfigs: none".into()];
-        }
-        let configs = unsafe { std::slice::from_raw_parts(list, n as usize) };
         let attr = |cfg, a| self.glx.config_attrib(d, cfg, a);
-        let out = configs
-            .iter()
-            .enumerate()
-            .map(|(i, &cfg)| {
-                let vid = attr(cfg, GLX_VISUAL_ID).unwrap_or(0) as u32;
-                let depth = self
-                    .visuals
-                    .iter()
-                    .find(|v| v.id == vid)
-                    .map(|v| v.depth as i32)
-                    .unwrap_or(-1);
-                format!(
-                    "fbconfig[{i}] visual 0x{vid:x} (x depth {depth}) buffer {:?} \
-                     R{:?}G{:?}B{:?}A{:?} draw {:?} render {:?} bindRGB {:?} bindRGBA {:?} \
-                     targets {:?} y_inverted {:?} caveat {:?}",
-                    attr(cfg, GLX_BUFFER_SIZE),
-                    attr(cfg, GLX_RED_SIZE),
-                    attr(cfg, GLX_GREEN_SIZE),
-                    attr(cfg, GLX_BLUE_SIZE),
-                    attr(cfg, GLX_ALPHA_SIZE),
-                    attr(cfg, GLX_DRAWABLE_TYPE),
-                    attr(cfg, GLX_RENDER_TYPE),
-                    attr(cfg, GLX_BIND_TO_TEXTURE_RGB_EXT),
-                    attr(cfg, GLX_BIND_TO_TEXTURE_RGBA_EXT),
-                    attr(cfg, GLX_BIND_TO_TEXTURE_TARGETS_EXT),
-                    attr(cfg, GLX_Y_INVERTED_EXT),
-                    attr(cfg, GLX_CONFIG_CAVEAT),
-                )
-            })
-            .collect();
-        unsafe { maverick_x11::XFree(list.cast()) };
-        out
+        match with_fbconfigs(&self.glx, d, self.screen, "glXGetFBConfigs", |configs| {
+            configs
+                .iter()
+                .enumerate()
+                .map(|(i, &cfg)| {
+                    let vid = attr(cfg, GLX_VISUAL_ID).unwrap_or(0) as u32;
+                    let depth = self
+                        .visuals
+                        .iter()
+                        .find(|v| v.id == vid)
+                        .map(|v| v.depth as i32)
+                        .unwrap_or(-1);
+                    format!(
+                        "fbconfig[{i}] visual 0x{vid:x} (x depth {depth}) buffer {:?} \
+                         R{:?}G{:?}B{:?}A{:?} draw {:?} render {:?} bindRGB {:?} bindRGBA {:?} \
+                         targets {:?} y_inverted {:?} caveat {:?}",
+                        attr(cfg, GLX_BUFFER_SIZE),
+                        attr(cfg, GLX_RED_SIZE),
+                        attr(cfg, GLX_GREEN_SIZE),
+                        attr(cfg, GLX_BLUE_SIZE),
+                        attr(cfg, GLX_ALPHA_SIZE),
+                        attr(cfg, GLX_DRAWABLE_TYPE),
+                        attr(cfg, GLX_RENDER_TYPE),
+                        attr(cfg, GLX_BIND_TO_TEXTURE_RGB_EXT),
+                        attr(cfg, GLX_BIND_TO_TEXTURE_RGBA_EXT),
+                        attr(cfg, GLX_BIND_TO_TEXTURE_TARGETS_EXT),
+                        attr(cfg, GLX_Y_INVERTED_EXT),
+                        attr(cfg, GLX_CONFIG_CAVEAT),
+                    )
+                })
+                .collect()
+        }) {
+            Ok(out) => out,
+            Err(e) => vec![e],
+        }
     }
 
     /// Drop the GL context and its drawable. Called when the compositor is
@@ -1721,12 +1919,40 @@ impl Renderer {
     /// the context is still current, and only then is the context released and
     /// destroyed — `glXDestroyContext` rejects a context that is still current
     /// on any drawable.
+    ///
+    /// Every GL object is deleted while the context is current *because*
+    /// deleting one after the context is released targets whatever context the
+    /// thread has current instead, which after the release below is none — so
+    /// the driver would either error or quietly free someone else's object. That
+    /// is why `wp_prog` is released here too and not only on the
+    /// `destroy_shader` path: this method is the last point at which it can be.
+    ///
+    /// Idempotent by construction: each field is zeroed as it is released and
+    /// guarded, so a second call is a no-op rather than a double free. That
+    /// matters because both the compositor's `disable()` and a later shutdown
+    /// path can reach this.
     pub fn destroy(&mut self) {
         let d = self.dpy.as_ptr();
+        // SAFETY: the context created in `new_with_vsync` is still current on
+        // this thread and on `self.glx_win` — nothing releases it but the
+        // `glXMakeCurrent(d, 0, NULL)` at the bottom of this block, and
+        // `Renderer` is `!Send`, so no other thread can have taken it. Every
+        // argument below is a name this renderer generated and has not yet
+        // deleted, or the address of one of its own fields for the read-write
+        // out-parameter. The calls allocate nothing and free nothing Rust owns.
         unsafe {
             if self.prog != 0 {
                 (self.gl.glDeleteProgram)(self.prog);
                 self.prog = 0;
+            }
+            if self.wp_prog != 0 {
+                (self.gl.glDeleteProgram)(self.wp_prog);
+                self.wp_prog = 0;
+                self.wp_u_dst = -1;
+                self.wp_u_res = -1;
+                self.wp_u_time = -1;
+                self.wp_u_resolution = -1;
+                self.wp_u_delta_time = -1;
             }
             if self.vbo != 0 {
                 (self.gl.glDeleteBuffers)(1, &self.vbo);
@@ -1747,6 +1973,76 @@ impl Renderer {
             }
         }
     }
+}
+
+/// Whether a `glXGetFBConfigs` answer is worth turning into a slice.
+///
+/// A null list means the screen offers no framebuffer configurations at all, and
+/// a count of zero or less means the same thing with a list attached — a driver
+/// is not supposed to produce the second shape, but treating it as "nothing
+/// here" is what keeps the caller's `XFree` unconditional.
+fn fbconfig_list_is_usable(list: *mut GLXFBConfig, count: c_int) -> bool {
+    !list.is_null() && count > 0
+}
+
+/// Every framebuffer configuration of `screen`, for as long as the closure runs.
+///
+/// `glXGetFBConfigs` hands back a **client-side array** of server-owned
+/// `GLXFBConfig` handles, and the array itself is the only thing the client has
+/// to release: GLX 1.4 says to `XFree` the memory `glXGetFBConfigs` (and
+/// `glXChooseFBConfig`) returned, and the configurations themselves are
+/// server-created objects that live as long as the screen. So a handle taken out
+/// of the array stays usable after the array is freed — which is what lets
+/// `choose_window_fbconfig` and `choose_tfp_fbconfig` return their pick, and
+/// lets the TFP cache hold it for the rest of the session.
+///
+/// (This is the pattern every GLX client uses — GLFW's `chooseGLXFBConfig` keeps
+/// the handles, `XFree`s `nativeConfigs`, and then creates its context with
+/// them.)
+///
+/// Freeing happens on *every* path, including the "nothing to look at" one: a
+/// list that arrived with a non-positive count is still a list Xlib allocated,
+/// and returning early without `XFree` is a server-side memory leak that only
+/// shows up as slow growth over a long session.
+fn with_fbconfigs<T>(
+    glx: &Glx,
+    d: *mut maverick_x11::Display,
+    screen: c_int,
+    what: &str,
+    f: impl FnOnce(&[GLXFBConfig]) -> T,
+) -> Result<T, String> {
+    let mut n: c_int = 0;
+    // SAFETY: `d` is a live `Display*` and `screen` names a screen of this
+    // connection, so the call has a valid screen to enumerate; `&mut n` is the
+    // address of a live local for the one `int` the call writes.
+    let list = unsafe { (glx.glXGetFBConfigs)(d, screen, &mut n) };
+    if !fbconfig_list_is_usable(list, n) {
+        // Nothing to iterate. A null list has nothing to free; a non-null one
+        // with a non-positive count is still Xlib's memory, so it is released
+        // before returning rather than leaked.
+        if !list.is_null() {
+            // SAFETY: `list` is what `glXGetFBConfigs` just returned and the
+            // only handle to it, so freeing it now frees it exactly once.
+            unsafe { maverick_x11::XFree(list.cast()) };
+        }
+        return Err(format!(
+            "{what}: the server reported no framebuffer configuration"
+        ));
+    }
+    // SAFETY: `list` is a `GLXFBConfigs` array of `n` live, server-owned
+    // handles written by the call above, `n` is positive, so the length is not
+    // negative and cannot exceed what the server produced. The slice borrows
+    // the array and does not outlive it: `f` cannot retain it (it is `&`-bound
+    // and the closure returns no borrow of it), and `XFree` below runs on every
+    // path out of `f`, including a panic — `with_fbconfigs` owns the array for
+    // the duration of the call.
+    let out = f(unsafe { std::slice::from_raw_parts(list, n as usize) });
+    // SAFETY: `list` is the Xlib-allocated array from the call above and has
+    // not been freed on any path through `f`; `XFree` is the deallocator GLX
+    // documents for it. The handles copied out of it stay valid — see this
+    // function's doc.
+    unsafe { maverick_x11::XFree(list.cast()) };
+    Ok(out)
 }
 
 /// Apply `mode` to `drawable` and report whether vsync ends up in effect.
@@ -1781,6 +2077,11 @@ fn enable_vsync(
         || (interval == -1 && has_extension(exts, "GLX_EXT_swap_control_tear"))
     {
         if let Some(f) = glx.glXSwapIntervalEXT {
+            // SAFETY: `f` is the `glXSwapIntervalEXT` address from this
+            // mapping, reached only after the extension string matched
+            // `GLX_EXT_swap_control`; `d` and `drawable` are the live display
+            // and the overlay this context is current on. The interval is
+            // computed above, never a raw driver value.
             unsafe { f(d, drawable, interval) };
             return interval != 0;
         }
@@ -1789,11 +2090,17 @@ fn enable_vsync(
     if interval == -1 {
         if has_extension(exts, "GLX_MESA_swap_control") {
             if let Some(f) = glx.glXSwapIntervalMESA {
+                // SAFETY: `glXSwapIntervalMESA` takes no display or drawable —
+                // it sets the interval on whatever context is current — and is
+                // reached only after the extension token matched. The context
+                // is current on this thread.
                 return unsafe { f(1) } == 0;
             }
         }
         if has_extension(exts, "GLX_SGI_swap_control") {
             if let Some(f) = glx.glXSwapIntervalSGI {
+                // SAFETY: as the MESA call above — no display, no drawable, and
+                // gated on the extension token.
                 return unsafe { f(1) } == 0;
             }
         }
@@ -1802,11 +2109,16 @@ fn enable_vsync(
     }
     if has_extension(exts, "GLX_MESA_swap_control") {
         if let Some(f) = glx.glXSwapIntervalMESA {
+            // SAFETY: as the MESA call above; the interval is the one computed
+            // above, narrowed to the unsigned type this entry point takes.
             return unsafe { f(interval as c_uint) } == 0 && interval != 0;
         }
     }
     if has_extension(exts, "GLX_SGI_swap_control") {
         if let Some(f) = glx.glXSwapIntervalSGI {
+            // SAFETY: as the MESA call above; SGI takes the signed interval and
+            // the two MESA/SGI extensions only support 1 or 0, which is why the
+            // negative value was handled above.
             return unsafe { f(interval) } == 0 && interval != 0;
         }
     }
@@ -1824,45 +2136,48 @@ fn enable_vsync(
 /// 15- or 16-bit screen (`R5G6B5`) and would make the compositor refuse to
 /// start there for no reason. The only hard requirement is the visual id, so we
 /// enumerate and filter on that, and report precisely what was missing.
+///
+/// The returned handle points into the array `glXGetFBConfigs` allocated, which
+/// `with_fbconfigs` frees before this returns; the handle itself is a
+/// server-owned configuration and stays valid for the life of the screen, which
+/// is what makes it safe to hand to `glXCreateContextAttribsARB` and
+/// `glXCreateWindow` afterwards.
 fn choose_window_fbconfig(
     glx: &Glx,
     d: *mut maverick_x11::Display,
     screen: c_int,
     root: VisualFormat,
 ) -> Result<GLXFBConfig, String> {
-    let mut n: c_int = 0;
-    let list = unsafe { (glx.glXGetFBConfigs)(d, screen, &mut n) };
-    if list.is_null() || n <= 0 {
-        return Err("glXGetFBConfigs returned no fbconfig at all".into());
-    }
-    let configs = unsafe { std::slice::from_raw_parts(list, n as usize) };
     let mut matched_visual = 0usize;
     let mut single_buffered = 0usize;
-    let mut picked = None;
-    for &cfg in configs {
-        if glx.config_attrib(d, cfg, GLX_VISUAL_ID) != Some(root.id as c_int) {
-            continue;
+    let (picked, n) = with_fbconfigs(glx, d, screen, "glXGetFBConfigs", |configs| {
+        let n = configs.len();
+        let mut picked = None;
+        for &cfg in configs {
+            if glx.config_attrib(d, cfg, GLX_VISUAL_ID) != Some(root.id as c_int) {
+                continue;
+            }
+            matched_visual += 1;
+            if glx.config_attrib(d, cfg, GLX_DRAWABLE_TYPE).unwrap_or(0) & GLX_WINDOW_BIT == 0 {
+                continue;
+            }
+            if glx
+                .config_attrib(d, cfg, GLX_RENDER_TYPE)
+                .unwrap_or(GLX_RGBA_BIT)
+                & GLX_RGBA_BIT
+                == 0
+            {
+                continue;
+            }
+            if glx.config_attrib(d, cfg, GLX_DOUBLEBUFFER) != Some(1) {
+                single_buffered += 1;
+                continue;
+            }
+            picked = Some(cfg);
+            break;
         }
-        matched_visual += 1;
-        if glx.config_attrib(d, cfg, GLX_DRAWABLE_TYPE).unwrap_or(0) & GLX_WINDOW_BIT == 0 {
-            continue;
-        }
-        if glx
-            .config_attrib(d, cfg, GLX_RENDER_TYPE)
-            .unwrap_or(GLX_RGBA_BIT)
-            & GLX_RGBA_BIT
-            == 0
-        {
-            continue;
-        }
-        if glx.config_attrib(d, cfg, GLX_DOUBLEBUFFER) != Some(1) {
-            single_buffered += 1;
-            continue;
-        }
-        picked = Some(cfg);
-        break;
-    }
-    unsafe { maverick_x11::XFree(list.cast()) };
+        (picked, n)
+    })?;
     picked.ok_or_else(|| {
         format!(
             "no double-buffered fbconfig for the overlay's {root} \
@@ -1876,6 +2191,13 @@ fn choose_window_fbconfig(
 ///
 /// This function only *reads* GLX; the actual decision lives in the pure
 /// [`rate_fbconfig`], which documents every rule and is unit-tested.
+///
+/// The `cfg` in the returned [`TfpConfig`] points into the array
+/// `glXGetFBConfigs` allocated, which `with_fbconfigs` frees before this
+/// returns. The handle is a server-owned configuration that outlives the array,
+/// which is what makes it safe to cache in `Renderer::tfp_cache` and hand to
+/// `glXCreatePixmap` much later — potentially thousands of frames after the
+/// list it was picked from was released.
 fn choose_tfp_fbconfig(
     glx: &Glx,
     d: *mut maverick_x11::Display,
@@ -1888,100 +2210,115 @@ fn choose_tfp_fbconfig(
             "{want} is a palette visual — texture-from-pixmap only samples TrueColor/DirectColor"
         ));
     }
-    let mut n: c_int = 0;
-    let list = unsafe { (glx.glXGetFBConfigs)(d, screen, &mut n) };
-    if list.is_null() || n <= 0 {
-        return Err("glXGetFBConfigs returned no fbconfig at all".into());
-    }
-    let configs = unsafe { std::slice::from_raw_parts(list, n as usize) };
-    let mut why = Rejects::default();
-    let mut best: Option<(i32, TfpConfig)> = None;
+    let (best, why, n) = with_fbconfigs(glx, d, screen, "glXGetFBConfigs", |configs| {
+        let n = configs.len();
+        let mut why = Rejects::default();
+        let mut best: Option<(i32, TfpConfig)> = None;
 
-    for &cfg in configs {
-        let attr = |a| glx.config_attrib(d, cfg, a);
-        let visual = attr(GLX_VISUAL_ID).unwrap_or(0) as u32;
-        let targets = attr(GLX_BIND_TO_TEXTURE_TARGETS_EXT);
-        let fb = FbAttrs {
-            visual,
-            visual_depth: visuals.iter().find(|v| v.id == visual).map(|v| v.depth),
-            pixmap_renderable: attr(GLX_DRAWABLE_TYPE).unwrap_or(0) & GLX_PIXMAP_BIT != 0,
-            // A server that does not answer `GLX_RENDER_TYPE` predates
-            // colour-index configs being interesting; assume RGBA.
-            rgba_render: attr(GLX_RENDER_TYPE).unwrap_or(GLX_RGBA_BIT) & GLX_RGBA_BIT != 0,
-            rgba: [
-                attr(GLX_RED_SIZE).unwrap_or(0),
-                attr(GLX_GREEN_SIZE).unwrap_or(0),
-                attr(GLX_BLUE_SIZE).unwrap_or(0),
-                attr(GLX_ALPHA_SIZE).unwrap_or(0),
-            ],
-            buffer_size: attr(GLX_BUFFER_SIZE).unwrap_or(0),
-            bind_rgb: attr(GLX_BIND_TO_TEXTURE_RGB_EXT) == Some(1),
-            bind_rgba: attr(GLX_BIND_TO_TEXTURE_RGBA_EXT) == Some(1),
-            // `GLX_DONT_CARE` (-1) is what a server that does not track
-            // per-target support answers; treating it as "no 2D target" would
-            // disable compositing entirely on those servers.
-            target_2d: match targets {
-                None | Some(GLX_DONT_CARE) => true,
-                Some(t) => t & GLX_TEXTURE_2D_BIT_EXT != 0,
-            },
-            caveat_free: attr(GLX_CONFIG_CAVEAT) == Some(GLX_NONE),
-            y_inverted: attr(GLX_Y_INVERTED_EXT),
-        };
+        for &cfg in configs {
+            let attr = |a| glx.config_attrib(d, cfg, a);
+            let visual = attr(GLX_VISUAL_ID).unwrap_or(0) as u32;
+            let targets = attr(GLX_BIND_TO_TEXTURE_TARGETS_EXT);
+            let fb = FbAttrs {
+                visual,
+                visual_depth: visuals.iter().find(|v| v.id == visual).map(|v| v.depth),
+                pixmap_renderable: attr(GLX_DRAWABLE_TYPE).unwrap_or(0) & GLX_PIXMAP_BIT != 0,
+                // A server that does not answer `GLX_RENDER_TYPE` predates
+                // colour-index configs being interesting; assume RGBA.
+                rgba_render: attr(GLX_RENDER_TYPE).unwrap_or(GLX_RGBA_BIT) & GLX_RGBA_BIT != 0,
+                rgba: [
+                    attr(GLX_RED_SIZE).unwrap_or(0),
+                    attr(GLX_GREEN_SIZE).unwrap_or(0),
+                    attr(GLX_BLUE_SIZE).unwrap_or(0),
+                    attr(GLX_ALPHA_SIZE).unwrap_or(0),
+                ],
+                buffer_size: attr(GLX_BUFFER_SIZE).unwrap_or(0),
+                bind_rgb: attr(GLX_BIND_TO_TEXTURE_RGB_EXT) == Some(1),
+                bind_rgba: attr(GLX_BIND_TO_TEXTURE_RGBA_EXT) == Some(1),
+                // `GLX_DONT_CARE` (-1) is what a server that does not track
+                // per-target support answers; treating it as "no 2D target"
+                // would disable compositing entirely on those servers.
+                target_2d: match targets {
+                    None | Some(GLX_DONT_CARE) => true,
+                    Some(t) => t & GLX_TEXTURE_2D_BIT_EXT != 0,
+                },
+                caveat_free: attr(GLX_CONFIG_CAVEAT) == Some(GLX_NONE),
+                y_inverted: attr(GLX_Y_INVERTED_EXT),
+            };
 
-        match rate_fbconfig(want, &fb) {
-            Err(r) => why.note(r),
-            Ok(score) if best.as_ref().is_none_or(|(s, _)| score > *s) => {
-                best = Some((
-                    score,
-                    TfpConfig {
-                        cfg,
-                        format: tfp_texture_format(want),
-                        // `GLX_Y_INVERTED_EXT == TRUE` means the *top* of the
-                        // drawable is at texture coordinate `t = 0` — the
-                        // extension spec's own usage example spells it out:
-                        //
-                        //     if (y_inverted == TRUE) { top = 0.0; bottom = 1.0; }
-                        //     else                    { top = 1.0; bottom = 0.0; }
-                        //
-                        // The vertex shader already measures `u_src.y`
-                        // top-down, i.e. it samples `t = 0` at the top of the
-                        // quad, so TRUE is precisely the case that needs **no**
-                        // flip and FALSE is the one that does: test for `0`,
-                        // not for "not TRUE". A server that answers the
-                        // out-of-spec `-1` (`GLX_DONT_CARE`) is treated as the
-                        // common TRUE case, which is what such servers
-                        // measurably do.
-                        flip: tfp_flip(fb.y_inverted),
-                        visual: fb.visual,
-                        buffer_size: fb.buffer_size,
-                        rgba: fb.rgba,
-                        y_inverted: fb.y_inverted,
-                    },
-                ));
+            match rate_fbconfig(want, &fb) {
+                Err(r) => why.note(r),
+                Ok(score) if best.as_ref().is_none_or(|(s, _)| score > *s) => {
+                    best = Some((
+                        score,
+                        TfpConfig {
+                            cfg,
+                            format: tfp_texture_format(want),
+                            // `GLX_Y_INVERTED_EXT == TRUE` means the *top* of
+                            // the drawable is at texture coordinate `t = 0` —
+                            // the extension spec's own usage example spells it
+                            // out:
+                            //
+                            //     if (y_inverted == TRUE) { top = 0.0; bottom = 1.0; }
+                            //     else                    { top = 1.0; bottom = 0.0; }
+                            //
+                            // The vertex shader already measures `u_src.y`
+                            // top-down, i.e. it samples `t = 0` at the top of
+                            // the quad, so TRUE is precisely the case that
+                            // needs **no** flip and FALSE is the one that does:
+                            // test for `0`, not for "not TRUE". A server that
+                            // answers the out-of-spec `-1` (`GLX_DONT_CARE`) is
+                            // treated as the common TRUE case, which is what
+                            // such servers measurably do.
+                            flip: tfp_flip(fb.y_inverted),
+                            visual: fb.visual,
+                            buffer_size: fb.buffer_size,
+                            rgba: fb.rgba,
+                            y_inverted: fb.y_inverted,
+                        },
+                    ));
+                }
+                Ok(_) => {}
             }
-            Ok(_) => {}
         }
-    }
-    unsafe { maverick_x11::XFree(list.cast()) };
+        (best, why, n)
+    })?;
     best.map(|(_, c)| c)
         .ok_or_else(|| format!("no fbconfig binds {want} as a texture (of {n}: {why})"))
 }
 
 fn compile_shader(gl: &Gl, kind: GLenum, src: &str) -> Result<GLuint, String> {
+    // SAFETY: `glCreateShader` takes only an enum and returns a name, so the
+    // only obligation is a current context, which the caller's `Renderer`
+    // guarantees. The returned name is owned by the `Renderer` and released by
+    // `Renderer::destroy` after linking.
     let sh = unsafe { (gl.glCreateShader)(kind) };
     if sh == 0 {
         return Err("glCreateShader failed".into());
     }
+    // Passing an explicit `len` is what makes the source safe to hand over: GL
+    // then reads exactly `src.len()` bytes from `src.as_ptr()` and never looks
+    // for a NUL, so a shader containing an interior NUL — or no NUL at all —
+    // is delivered whole. `src` is borrowed for the call and `ptr`/`len` point
+    // into that borrow, so the buffer outlives the read.
     let ptr = src.as_ptr().cast::<GLchar>();
     let len = src.len() as GLint;
+    // SAFETY: `&ptr` is the address of a live `*const GLchar` local, which is
+    // the one-element array `glShaderSource` dereferences to find the source;
+    // `&len` is a live `GLint` holding its length; and `src` — the storage both
+    // describe — is borrowed for `'src'` and so outlives this block.
     unsafe {
         (gl.glShaderSource)(sh, 1, &ptr, &len);
         (gl.glCompileShader)(sh);
     }
     let mut ok: GLint = 0;
+    // SAFETY: `sh` is a live shader name and `&mut ok` is a live `GLint` the
+    // call writes exactly one value into.
     unsafe { (gl.glGetShaderiv)(sh, GL_COMPILE_STATUS, &mut ok) };
     if ok == 0 {
         let log = shader_log(gl, sh);
+        // SAFETY: `sh` is a name this call created and no program ever
+        // attached, so deleting it now frees it exactly once and loses nothing.
         unsafe { (gl.glDeleteShader)(sh) };
         let stage = if kind == GL_VERTEX_SHADER {
             "vertex"
@@ -1995,27 +2332,46 @@ fn compile_shader(gl: &Gl, kind: GLenum, src: &str) -> Result<GLuint, String> {
 
 fn shader_log(gl: &Gl, sh: GLuint) -> String {
     let mut len: GLint = 0;
+    // SAFETY: `sh` is a live shader name and `&mut len` is a live `GLint` the
+    // call writes one value into. GL documents `GL_INFO_LOG_LENGTH` as *at
+    // least* the buffer size needed including the terminator, so the `len` it
+    // answers is exactly what the buffer below is sized from.
     unsafe { (gl.glGetShaderiv)(sh, GL_INFO_LOG_LENGTH, &mut len) };
     if len <= 0 {
         return String::new();
     }
+    // Zeroed, so a driver that reports a length but writes fewer bytes still
+    // leaves a terminated buffer for `truncate` to cut back to what was real.
     let mut buf = vec![0u8; len as usize];
     let mut written: GLsizei = 0;
+    // SAFETY: `buf` holds `len` writable bytes and `cap` is passed as `len`, so
+    // the driver cannot write past it; `&mut written` is a live `GLsizei` for
+    // the byte count it actually produced. The buffer stays allocated and
+    // unaliased for the whole call, which is the rule a `void*` output buffer
+    // has to satisfy.
     unsafe {
         (gl.glGetShaderInfoLog)(sh, len, &mut written, buf.as_mut_ptr().cast::<GLchar>());
     }
+    // Truncate rather than trust `len`: the driver is allowed to write fewer
+    // bytes than it advertised, and the tail would otherwise be NUL padding
+    // counted into the log a user is shown.
     buf.truncate(written.max(0) as usize);
     String::from_utf8_lossy(&buf).into_owned()
 }
 
 fn program_log(gl: &Gl, prog: GLuint) -> String {
     let mut len: GLint = 0;
+    // SAFETY: as in `shader_log` — a live program name and a live `GLint` out
+    // parameter, with a current context.
     unsafe { (gl.glGetProgramiv)(prog, GL_INFO_LOG_LENGTH, &mut len) };
     if len <= 0 {
         return String::new();
     }
     let mut buf = vec![0u8; len as usize];
     let mut written: GLsizei = 0;
+    // SAFETY: as in `shader_log` — the buffer is `len` writable bytes and `len`
+    // is passed as the capacity, so no write can run past it, and it stays
+    // allocated and unaliased for the duration of the call.
     unsafe {
         (gl.glGetProgramInfoLog)(prog, len, &mut written, buf.as_mut_ptr().cast::<GLchar>());
     }
@@ -2026,6 +2382,58 @@ fn program_log(gl: &Gl, prog: GLuint) -> String {
 /// Keep the `XID` alias reachable for downstream crates that talk about GLX
 /// drawables without importing `xlib` directly.
 pub type GlxXid = XID;
+
+/// Properties of the fbconfig list's *bounds*, which is the one part of the
+/// GLX enumeration that does not need a server to check: what counts as a list
+/// worth turning into a slice, and therefore what `with_fbconfigs` has to free
+/// before it can return.
+#[cfg(test)]
+mod fbconfig_list_tests {
+    use super::{fbconfig_list_is_usable, GLXFBConfig};
+
+    fn list(n: usize) -> *mut GLXFBConfig {
+        // A real array of `n` null handles — the shape matters, not the values,
+        // because the predicate is about length and nullness alone.
+        let mut v: Vec<GLXFBConfig> = std::iter::repeat(std::ptr::null_mut()).take(n).collect();
+        v.as_mut_ptr()
+    }
+
+    /// A positive count with a real list is the only shape that becomes a slice.
+    #[test]
+    fn a_positive_count_with_a_list_is_usable() {
+        assert!(fbconfig_list_is_usable(list(1), 1));
+        assert!(fbconfig_list_is_usable(list(64), 64));
+    }
+
+    /// Everything else is "nothing here" — and the two cases are distinguished
+    /// because only one of them has memory to release. A null list is GLX saying
+    /// "no configurations"; a list with a non-positive count is a driver that
+    /// contradicted itself, and `with_fbconfigs` frees that one before
+    /// returning. Treating it as the null case and returning early is what a
+    /// slow X-server memory leak looks like from the outside: nothing happens,
+    /// and the client grows.
+    #[test]
+    fn no_list_or_no_count_is_not_usable() {
+        assert!(
+            !fbconfig_list_is_usable(std::ptr::null_mut(), 0),
+            "a null list is never a slice"
+        );
+        assert!(
+            !fbconfig_list_is_usable(std::ptr::null_mut(), 12),
+            "a count without a list cannot be sliced either"
+        );
+        assert!(
+            !fbconfig_list_is_usable(list(1), 0),
+            "a list with no elements is not a slice — and still needs freeing"
+        );
+        assert!(
+            !fbconfig_list_is_usable(list(1), -1),
+            "a negative count must never reach `from_raw_parts`, which would \
+             wrap to a huge `usize` and hand `from_raw_parts` a length no \
+             allocation backs"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
