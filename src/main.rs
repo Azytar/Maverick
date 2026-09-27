@@ -601,4 +601,36 @@ mod tests {
             );
         }
     }
+
+    /// Every disposition this window manager installs has a consequence it can
+    /// name, and losing any one of them must say so. Naming the signal is not
+    /// enough: a report that lists `SIGCONT` without saying what stops working
+    /// leaves the reader to guess, which is the failure mode this function
+    /// exists to remove.
+    #[test]
+    fn every_installed_disposition_reports_its_consequence() {
+        for (sig, consequence) in [
+            (
+                libc::SIGTERM,
+                "the window manager cannot be stopped by signal",
+            ),
+            (libc::SIGCONT, "keyboard grabs are not restored"),
+            (libc::SIGCHLD, "autostarted children are not auto-reaped"),
+            (
+                libc::SIGPIPE,
+                "a client disconnecting mid-write can terminate the window manager",
+            ),
+        ] {
+            let report = uninstalled_report(&[sig]).expect("a report");
+            assert!(
+                report.contains(consequence),
+                "losing signal {sig} must report that {consequence:?}; got {report}"
+            );
+            assert!(
+                !report.contains("no window-manager guarantee is known to be lost"),
+                "signal {sig} does cost a known guarantee, so the report must not \
+                 claim otherwise: {report}"
+            );
+        }
+    }
 }

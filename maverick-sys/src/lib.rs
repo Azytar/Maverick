@@ -12,7 +12,7 @@
 //! boundary and the public API is safe. `maverick-core` is `unsafe`-free: it
 //! speaks `WindowId(u32)` and `Rect` and holds no FFI.
 //!
-//! What is not owned: the X11 connection fd passed to [`wait_readable`], the
+//! What is not owned: the X11 connection fd passed to [`wait_readable_fds`], the
 //! terminal fds touched by [`detach_from_terminal`], and the WM state itself
 //! (the control channel only queues commands via [`ControlHub`]).
 //!
@@ -54,7 +54,7 @@
 //! thread via [`quit_requested`]/[`need_regrab`]. [`ControlServer`] owns the
 //! listener and a `stop` flag; [`ControlHub`] is shared via `Arc` between
 //! server and WM threads. `detach_from_terminal` is called once at startup
-//! before the X connection is opened; [`wait_readable`] is called each
+//! before the X connection is opened; [`wait_readable_fds`] is called each
 //! event-loop iteration.
 //!
 //! Two properties of that arrangement are worth stating once, because callers
@@ -452,22 +452,13 @@ pub fn detach_from_terminal() {
     }
 }
 
-/// Wait until `fd` is readable or `timeout` elapses, whichever comes first.
-///
-/// The WM's event loop uses this to block on the X11 connection socket while
-/// still waking up periodically to drain control-socket commands (from
-/// `ControlHub`). Keeping the `poll(2)` FFI here means the WM crate stays
-/// `unsafe`-free.
-///
-/// Returns `true` if the fd became readable, `false` on timeout. Errors
-/// (including `EINTR`) are treated as "wake up and let the caller re-check",
-/// i.e. they return `true` so the loop makes progress.
-pub fn wait_readable(fd: std::os::unix::io::RawFd, timeout: std::time::Duration) -> bool {
-    wait_readable_fds(&[fd], Some(timeout))
-}
-
 /// Wait until one of the X11/control wake descriptors is readable. `None`
 /// blocks until an event (or EINTR) instead of imposing a heartbeat poll.
+///
+/// The window manager's event loop blocks on the X11 connection socket *and* the
+/// control hub's self-pipe, so this takes the set rather than a single
+/// descriptor. Keeping the `poll(2)` FFI here means the WM crate stays
+/// `unsafe`-free.
 ///
 /// Takes raw descriptors so the WM crate stays `unsafe`-free; the borrow is
 /// taken here, under the one safety argument that has to exist either way.

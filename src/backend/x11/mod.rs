@@ -118,31 +118,36 @@ use pointer::DragState;
 /// gap between them.
 const KBD_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Clamp a pending wait so it can never run past `deadline`.
+/// How long the event loop may block on its next turn.
 ///
-/// A settled window manager has no work and so asks for **no** timeout at all
-/// (`None`), blocking until the X connection or the control socket says
-/// something. That is what keeps an idle window manager off the CPU, but it
-/// also means any bound enforced *between* turns — the shutdown budget, the
-/// keyboard-refresh window — is only checked once the wait returns. A bound
-/// that is not folded into the timeout is therefore not a bound: the wait never
-/// returns, so the check that owns it never runs.
+/// Every bound the loop owns is folded in here and enforced nowhere else. A
+/// settled window manager has no work and so asks for **no** timeout at all,
+/// blocking until the X connection or the control socket has something; that is
+/// what keeps an idle window manager off the CPU, but it also means a bound
+/// checked only *between* turns is not a bound — the wait never returns, so the
+/// check that owns it never runs. Folding the deadlines into the wait is what
+/// makes them real.
 ///
-/// Folding a deadline in is what makes "Maverick always terminates" true. The
-/// shutdown case is the one that bites: `begin_shutdown` arms a 3 s budget and
+/// The shutdown budget is the one that bites: `begin_shutdown` arms 3 s and
 /// then keeps pumping the loop so cooperative clients can close, but a client
 /// that advertises `WM_DELETE_WINDOW` and ignores it leaves the loop settled,
 /// the wait unbounded, and the budget unreachable until some unrelated X event
 /// happens to arrive.
-fn bounded_by_deadline(
-    timeout: Option<std::time::Duration>,
-    deadline: Option<std::time::Instant>,
+///
+/// `frame` is the frame scheduler's own answer — 0 ms when a frame is pending —
+/// and `keyboard` and `shutdown` are absolute deadlines. `None` throughout
+/// means "no work and no deadline", i.e. block until something happens.
+fn wait_timeout(
+    frame: Option<std::time::Duration>,
+    keyboard: Option<Instant>,
+    shutdown: Option<Instant>,
 ) -> Option<std::time::Duration> {
-    let Some(deadline) = deadline else {
-        return timeout;
-    };
-    let left = deadline.saturating_duration_since(std::time::Instant::now());
-    Some(timeout.map_or(left, |current| current.min(left)))
+    let mut timeout = frame;
+    for deadline in [keyboard, shutdown].into_iter().flatten() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        timeout = Some(timeout.map_or(left, |current| current.min(left)));
+    }
+    timeout
 }
 
 /// The X11 backend — owns the single `Rc<XConn>` + `XDisplay`, the `State`/
@@ -870,15 +875,10 @@ impl WindowManager {
                 timeout = Some(due.saturating_duration_since(Instant::now()));
             }
         }
-        // Never sleep past a pending keyboard refresh, or the coalescing window
-        // would stretch to the idle timeout. The same fold bounds the graceful
-        // shutdown budget, for the same reason and with more at stake: without
-        // it a shutdown against a client that ignores `WM_DELETE_WINDOW` never
-        // reaches the deadline check in `run` and the window manager hangs.
-        let timeout = bounded_by_deadline(
-            bounded_by_deadline(timeout, self.kbd_refresh_due),
-            self.shutdown_deadline,
-        );
+        // Every bound the loop owns, in one place: see `wait_timeout`. Never
+        // sleep past a pending keyboard refresh, or the coalescing window would
+        // stretch to the idle timeout.
+        let timeout = wait_timeout(timeout, self.kbd_refresh_due, self.shutdown_deadline);
 
         trace!(
             "scheduler_wait",
