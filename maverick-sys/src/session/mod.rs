@@ -7,7 +7,7 @@
 //! ├── X server            (real, nested, own display, own Xauthority cookie)
 //! ├── Maverick            (any binary, any arguments, any working directory)
 //! ├── applications        (everything `maverickctl exec` launched)
-//! ├── control socket      (per-user, 0700, peer-credential checked)
+//! ├── control socket      (per-user, 0600, peer-credential checked)
 //! ├── logs                (independent of any other session)
 //! └── lifecycle           (independent, recorded, reapable)
 //! ```

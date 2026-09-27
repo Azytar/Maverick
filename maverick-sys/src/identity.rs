@@ -366,14 +366,33 @@ pub fn read_proc_exe(pid: u32) -> String {
 }
 
 /// Serialize `InstanceInfo` to the ficha JSON file.
+///
+/// The mode is set when the file is created, not applied afterwards, and an
+/// existing file is tightened too. A bare `write` inherits the process umask,
+/// which left the record at `0644` on a default system — inside the `0700`
+/// session directory, so it was defence in depth rather than a live disclosure,
+/// but it is the one file here whose mode the umask decided, and the record
+/// carries a live window-manager pid, its display and its tty. The cookie and
+/// the logs set their mode the same way, for the same reason.
 pub fn write_meta(info: &InstanceInfo) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     validate_sid(&info.session_id)?;
     ensure_runtime_dir()?;
     let dir = try_session_dir(&info.session_id)?;
     std::fs::create_dir_all(&dir)?;
     set_private_dir(&dir)?;
     let json = serde_free_json(info)?;
-    std::fs::write(try_meta_path(&info.session_id)?, json)?;
+    let path = try_meta_path(&info.session_id)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)?;
+    file.write_all(json.as_bytes())?;
+    // An older build may have left this `0644`; re-assert the mode either way.
+    file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
     Ok(())
 }
 
@@ -960,5 +979,56 @@ mod ficha_props {
         assert_eq!(info.tty_nr, 0);
         assert_eq!(info.start_time, 0);
         assert_eq!(info.started_at, 0);
+    }
+}
+
+#[cfg(test)]
+mod meta_mode_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// The identity record is owner-only, and stays that way.
+    ///
+    /// It was created with a bare `fs::write`, so its mode came from the
+    /// process umask — `0644` on a default system. The `0700` session
+    /// directory kept it out of another account's reach, so this is defence in
+    /// depth; but the record names a live window-manager pid, its display and
+    /// its tty, and it was the one file in that directory whose mode nobody
+    /// chose. Asserted on a real file rather than on the open flags.
+    #[test]
+    fn the_identity_record_is_owner_only() {
+        let sid = "modecheck";
+        ensure_runtime_dir().expect("runtime dir");
+        let dir = try_session_dir(sid).expect("session dir");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create");
+        set_private_dir(&dir).expect("private dir");
+
+        let info = InstanceInfo {
+            name: sid.to_string(),
+            session_id: sid.to_string(),
+            pid: std::process::id(),
+            display: ":0".to_string(),
+            tty_nr: 0,
+            x_server_identity: String::new(),
+            start_time: 0,
+            exe: String::new(),
+            started_at: 0,
+            alive: true,
+        };
+        write_meta(&info).expect("write the ficha");
+        let path = try_meta_path(sid).expect("path");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the record must be owner-only, got {mode:o}");
+
+        // Re-writing, as a restart would, must not loosen it either.
+        write_meta(&info).expect("rewrite");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a rewrite must not loosen the mode, got {mode:o}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
