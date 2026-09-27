@@ -833,3 +833,67 @@ fn keypress_state_separates_group_from_core_modifiers() {
         }
     );
 }
+
+/// The event loop's timeout arithmetic is what makes a signal-requested
+/// shutdown terminate. These pin the fold itself; the end-to-end consequence
+/// (a lying client no longer hanging the window manager) is covered by the
+/// `tests/child_lifecycle.rs` process contract and the session suite.
+mod wait_bounds {
+    use super::super::bounded_by_deadline;
+    use std::time::{Duration, Instant};
+
+    /// A settled window manager passes `None`, meaning "block until something
+    /// happens". A pending deadline has to turn that into a finite wait.
+    #[test]
+    fn a_deadline_turns_an_unbounded_wait_into_a_bounded_one() {
+        let bounded =
+            bounded_by_deadline(None, Some(Instant::now() + Duration::from_secs(3)));
+        let bounded = bounded.expect("a deadline must produce a wait");
+        assert!(
+            bounded <= Duration::from_secs(3),
+            "the wait may not outlast the deadline, got {bounded:?}"
+        );
+        assert!(bounded > Duration::from_millis(2_500), "got {bounded:?}");
+    }
+
+    /// The real bug: with no deadline the wait is `None`, and `None` is what a
+    /// settled loop asks for. If the fold ever stopped applying to
+    /// `shutdown_deadline`, this is the value the shutdown would get.
+    #[test]
+    fn no_deadline_leaves_the_wait_exactly_as_it_was() {
+        assert_eq!(bounded_by_deadline(None, None), None);
+        assert_eq!(
+            bounded_by_deadline(Some(Duration::from_millis(50)), None),
+            Some(Duration::from_millis(50))
+        );
+    }
+
+    /// A later deadline must not stretch a wait that is already shorter, and an
+    /// earlier one must shorten one that is longer. The shutdown budget is the
+    /// later of the two whenever a frame is already pending.
+    #[test]
+    fn the_earlier_of_the_wait_and_the_deadline_wins() {
+        let deadline = Instant::now() + Duration::from_secs(3);
+
+        let clamped = bounded_by_deadline(Some(Duration::from_secs(30)), Some(deadline))
+            .expect("a deadline always bounds");
+        assert!(
+            clamped <= Duration::from_secs(3),
+            "a 30s wait must be clamped to the 3s budget, got {clamped:?}"
+        );
+
+        assert_eq!(
+            bounded_by_deadline(Some(Duration::from_millis(10)), Some(deadline)),
+            Some(Duration::from_millis(10)),
+            "a wait already shorter than the budget must be left alone"
+        );
+    }
+
+    /// An elapsed deadline yields a zero wait, which the loop treats as "do not
+    /// block" and returns on, so the budget check in `run` gets its turn.
+    #[test]
+    fn an_elapsed_deadline_yields_no_wait_at_all() {
+        let bounded = bounded_by_deadline(None, Some(Instant::now() - Duration::from_secs(1)));
+        assert_eq!(bounded, Some(Duration::ZERO));
+    }
+}
