@@ -140,6 +140,7 @@ dependencies = [
  "maverick-toml",
  "maverick-x11",
  "proptest",
+ "tempfile",
  "x11rb",
 ]
 

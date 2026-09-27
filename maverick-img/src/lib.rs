@@ -14,8 +14,9 @@
 //! [`decode`] picks the decoder from the lowercased file extension and falls
 //! back to [`decode_external`] on an unknown extension or any native error.
 //! `decode_external` resolves `ffmpeg`/`convert`/`magick` against `PATH`
-//! itself (no `which` subprocess) and parses their PPM output through
-//! `ppm_from_bytes`. [`Rgba8::is_valid`] checks `data.len() == w*h*4`.
+//! itself (no `which` subprocess), reads each converter's PPM output to EOF
+//! without waiting for it, and parses it through `ppm_from_bytes`.
+//! [`Rgba8::is_valid`] checks `data.len() == w*h*4`.
 //!
 //! # Invariants
 //!
@@ -24,8 +25,11 @@
 //! overflow-checked. `inflate` rejects over-subscribed Huffman trees, invalid
 //! codes, bad length/distance symbols, and back-references past the start of
 //! the output. QOI uses the wrapping arithmetic `DIFF`/`LUMA` require.
-//! External converters run as child processes; their output is bounded and
-//! only parsed after header validation.
+//! External converters run as child processes whose output is bounded *while
+//! being read* and only parsed after header validation. None of them is waited
+//! for, because the process that embeds this crate — the window manager — sets
+//! `SA_NOCLDWAIT` and therefore cannot obtain an exit status at all; see
+//! [`decode_external`].
 //!
 //! # Errors
 //!
@@ -1034,7 +1038,29 @@ fn inflate(data: &[u8]) -> Result<Vec<u8>, String> {
 /// Run one of the external converters and parse its PPM output as RGBA.
 /// Used when no native decoder applies (JPEG/WebP/AVIF/…) or the native one
 /// failed; `Err` only when every converter is missing or fails.
+///
+/// The converter is deliberately **not** waited for. The window manager sets
+/// `SA_NOCLDWAIT` on `SIGCHLD` (`maverick-sys`'s `Signal::install`), which
+/// makes the kernel discard every child's exit status: `waitpid` on any child
+/// of that process fails with `ECHILD`, and it fails immediately, even for a
+/// child that is still running. `Command::output` is `waitpid`-based, so using
+/// it here meant that inside the running window manager every delegated format
+/// — and every native decode failure, which also lands here — reported
+/// `No child processes` instead of decoding.
+///
+/// Reading the pipe to EOF is what synchronises the child instead: the pipe
+/// reaches EOF only once the converter has closed it, which it does on the way
+/// out. The `Child` is then dropped and the kernel reaps it. The exit status
+/// bought nothing here anyway — success was already decided by whether the
+/// output parses as a PPM, and a converter that exits zero having written
+/// garbage was previously caught by the very same check.
+///
+/// `stderr` goes to `/dev/null` rather than to a pipe. A piped `stderr` is
+/// never read, so a chatty converter would block forever on a full 64 KiB pipe
+/// while this process blocked on `stdout`; `Command::output` avoided that by
+/// draining both concurrently, which needs a `wait`.
 fn decode_external(path: &Path) -> Result<Rgba8, String> {
+    use std::io::Read as _;
     let path_str = path.to_string_lossy().into_owned();
     let mut last_err = String::from("no external image converter found");
     for cmd in ["ffmpeg", "convert", "magick"] {
@@ -1044,50 +1070,64 @@ fn decode_external(path: &Path) -> Result<Rgba8, String> {
             Some(b) => b,
             None => continue,
         };
-        let output = if cmd == "ffmpeg" {
-            std::process::Command::new(&bin)
-                .args([
-                    "-i",
-                    &path_str,
-                    "-vframes",
-                    "1",
-                    "-f",
-                    "image2pipe",
-                    "-pix_fmt",
-                    "rgb24",
-                    "-",
-                ])
-                .output()
+        let mut command = std::process::Command::new(&bin);
+        if cmd == "ffmpeg" {
+            command.args([
+                "-i",
+                &path_str,
+                "-vframes",
+                "1",
+                "-f",
+                "image2pipe",
+                "-pix_fmt",
+                "rgb24",
+                "-",
+            ]);
         } else {
-            std::process::Command::new(&bin)
-                .args([&path_str, "ppm:-"])
-                .output()
-        };
-        match output {
-            Ok(out) if out.status.success() && !out.stdout.is_empty() => {
-                // Bound stdout before parsing: a hostile or broken converter
-                // must not OOM us through an unbounded pipe.
-                if out.stdout.len() > MAX_EXTERNAL_BYTES {
-                    last_err = format!("{cmd}: output too large");
-                    continue;
-                }
-                if let Ok(img) = ppm_from_bytes(&out.stdout) {
-                    return Ok(img);
-                }
-                last_err = format!("{cmd}: could not parse PPM output");
-            }
-            Ok(out) => {
-                // Sanitize stderr into a single line (log injection safe).
-                let first: String = String::from_utf8_lossy(&out.stderr)
-                    .chars()
-                    .filter(|c| !c.is_control() || *c == '\t')
-                    .take(200)
-                    .collect();
-                let first = first.lines().next().unwrap_or("").to_string();
-                last_err = format!("{cmd} failed: {first}");
-            }
-            Err(e) => last_err = format!("{cmd}: {e}"),
+            command.args([&path_str, "ppm:-"]);
         }
+        let mut child = match command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = format!("{cmd}: {e}");
+                continue;
+            }
+        };
+        let Some(mut pipe) = child.stdout.take() else {
+            last_err = format!("{cmd}: no output pipe");
+            continue;
+        };
+        // `take` caps the read, so a hostile or runaway converter cannot make
+        // this process allocate without limit — the one byte past the cap is
+        // what distinguishes "exactly at the limit" from "over it".
+        let mut out = Vec::new();
+        let read = std::io::Read::take(&mut pipe, MAX_EXTERNAL_BYTES as u64 + 1)
+            .read_to_end(&mut out);
+        // Dropped, never waited on: `SA_NOCLDWAIT` makes the status
+        // unobtainable, and EOF on the pipe already means the converter is
+        // done writing.
+        drop(child);
+        if let Err(e) = read {
+            last_err = format!("{cmd}: {e}");
+            continue;
+        }
+        if out.len() > MAX_EXTERNAL_BYTES {
+            last_err = format!("{cmd}: output too large");
+            continue;
+        }
+        if out.is_empty() {
+            last_err = format!("{cmd}: no PPM output");
+            continue;
+        }
+        if let Ok(img) = ppm_from_bytes(&out) {
+            return Ok(img);
+        }
+        last_err = format!("{cmd}: could not parse PPM output");
     }
     Err(format!("maverick-img: {last_err}"))
 }
