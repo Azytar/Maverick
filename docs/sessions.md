@@ -294,7 +294,9 @@ A session belongs to the uid that created it, and that uid comes from the kernel
 there is no flag, environment variable or config key that can declare it.
 
 - `$XDG_RUNTIME_DIR/maverick` and each session directory are `0700`.
-- The control socket, the X cookie, the session record and the logs are `0600`.
+- The control socket, the X cookie, the identity record, the session record and
+  the logs are `0600`. The mode is set when each file is created and re-asserted
+  on rewrite, so it never depends on the process umask.
 - The socket's owner is read from the kernel inside the server, and every
   connection is checked with `SO_PEERCRED` before a handler thread exists and
   before a byte is read. A rejected peer gets no reader, no writer and no
