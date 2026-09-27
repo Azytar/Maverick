@@ -19,10 +19,12 @@ keywords = ["window-manager", "x11", "vulkan", "compositor"]
 ash = "0.38"
 
 [dev-dependencies]
-# Reuse `maverick-gl::open_x()` in the smoke test to obtain the shared XCB
-# connection and to build a throwaway override-redirect window. The live
-# compositor's overlay is never touched.
-maverick-gl = { path = "../maverick-gl" }
+# The smoke test needs the shared XCB connection to build a throwaway
+# override-redirect window. It comes from `maverick-x11` rather than
+# `maverick-gl`, so the test does not pull the whole GL backend in and the
+# workspace keeps exactly one Xlib bootstrap. The live compositor's overlay
+# is never touched.
+maverick-x11 = { path = "../maverick-x11" }
 x11rb = { version = "0.13", default-features = false, features = [
     "allow-unsafe-code",
 ] }

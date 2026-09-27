@@ -44,7 +44,7 @@ pub struct Rect {
 use crate::dl::Lib;
 use crate::gl::*;
 use crate::glx::*;
-use crate::xlib::{XDisplay, XID};
+use maverick_x11::{XDisplay, XID};
 
 /// Opt-in diagnostic: when `MAV_GLX_TRACE` is set, log every GLX texture
 /// lifecycle op (create/bind/release/destroy) with the GLXPixmap and texture
@@ -1282,7 +1282,7 @@ impl Renderer {
         // interactive resize.
         let verify = self.verified.insert(visual.id);
         if verify {
-            crate::xlib::clear_x_error();
+            maverick_x11::clear_x_error();
         }
         let glx_pixmap = unsafe {
             (self.glx.glXCreatePixmap)(
@@ -1302,7 +1302,7 @@ impl Renderer {
         }
         if verify {
             self.dpy.sync();
-            if let Some(code) = crate::xlib::take_x_error() {
+            if let Some(code) = maverick_x11::take_x_error() {
                 self.verified.remove(&visual.id);
                 if glx_pixmap != 0 {
                     unsafe {
@@ -1311,7 +1311,7 @@ impl Renderer {
                 }
                 return Err(format!(
                     "glXCreatePixmap for {visual} failed with {} ({})",
-                    crate::xlib::x_error_name(code),
+                    maverick_x11::x_error_name(code),
                     tfp
                 ));
             }
@@ -1348,12 +1348,12 @@ impl Renderer {
         }
         if verify {
             self.dpy.sync();
-            if let Some(code) = crate::xlib::take_x_error() {
+            if let Some(code) = maverick_x11::take_x_error() {
                 self.destroy_texture(t);
                 self.verified.remove(&visual.id);
                 return Err(format!(
                     "glXBindTexImageEXT for {visual} failed with {} ({tfp})",
-                    crate::xlib::x_error_name(code),
+                    maverick_x11::x_error_name(code),
                 ));
             }
         }
@@ -1715,7 +1715,7 @@ impl Renderer {
                 )
             })
             .collect();
-        unsafe { crate::xlib::XFree(list.cast()) };
+        unsafe { maverick_x11::XFree(list.cast()) };
         out
     }
 
@@ -1762,7 +1762,7 @@ impl Renderer {
 /// symbol.
 fn enable_vsync(
     glx: &Glx,
-    d: *mut crate::xlib::Display,
+    d: *mut maverick_x11::Display,
     screen: c_int,
     drawable: GLXDrawable,
     exts: &str,
@@ -1832,7 +1832,7 @@ fn enable_vsync(
 /// enumerate and filter on that, and report precisely what was missing.
 fn choose_window_fbconfig(
     glx: &Glx,
-    d: *mut crate::xlib::Display,
+    d: *mut maverick_x11::Display,
     screen: c_int,
     root: VisualFormat,
 ) -> Result<GLXFBConfig, String> {
@@ -1868,7 +1868,7 @@ fn choose_window_fbconfig(
         picked = Some(cfg);
         break;
     }
-    unsafe { crate::xlib::XFree(list.cast()) };
+    unsafe { maverick_x11::XFree(list.cast()) };
     picked.ok_or_else(|| {
         format!(
             "no double-buffered fbconfig for the overlay's {root} \
@@ -1884,7 +1884,7 @@ fn choose_window_fbconfig(
 /// [`rate_fbconfig`], which documents every rule and is unit-tested.
 fn choose_tfp_fbconfig(
     glx: &Glx,
-    d: *mut crate::xlib::Display,
+    d: *mut maverick_x11::Display,
     screen: c_int,
     visuals: &[VisualFormat],
     want: VisualFormat,
@@ -1968,7 +1968,7 @@ fn choose_tfp_fbconfig(
             Ok(_) => {}
         }
     }
-    unsafe { crate::xlib::XFree(list.cast()) };
+    unsafe { maverick_x11::XFree(list.cast()) };
     best.map(|(_, c)| c)
         .ok_or_else(|| format!("no fbconfig binds {want} as a texture (of {n}: {why})"))
 }

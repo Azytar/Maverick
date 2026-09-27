@@ -55,13 +55,12 @@ pub mod dl;
 pub mod gl;
 pub mod glx;
 pub mod renderer;
-pub mod xlib;
 
+pub use maverick_x11::XDisplay;
 pub use renderer::{
     Acceleration, DrawQuad, Filter, Rect, Renderer, RendererBackend, RendererInfo, ShaderId,
     Texture, TextureHandle, VisualFormat, VisualReport, VsyncMode,
 };
-pub use xlib::XDisplay;
 
 use x11rb::xcb_ffi::XCBConnection;
 
@@ -71,50 +70,6 @@ use x11rb::xcb_ffi::XCBConnection;
 /// built from a `Display*`'s own `xcb_connection_t*`, which is what lets GLX
 /// and the WM share a single connection.
 pub type XConn = XCBConnection;
-
-/// Open the X display and return the pieces the window manager needs.
-///
-/// Returns `(display, connection, screen_number)`. The `XCBConnection` borrows
-/// the display's connection (`should_drop = false`): the `Display*` stays the
-/// owner, so nothing here ever calls `xcb_disconnect`. Both live for the whole
-/// process — see [`XDisplay`] for why that is deliberate.
-pub fn open_x() -> Result<(XDisplay, XConn, usize), String> {
-    unsafe {
-        // Must be the FIRST Xlib call in the process: it enables locking
-        // inside Xlib, which is what makes holding `Display*` across threads
-        // (and the `Send` impls on `XDisplay`/`Lib`) sound. No-op on
-        // already-initialised libX11; returns non-zero on success.
-        xlib::XInitThreads();
-        let dpy = xlib::XOpenDisplay(std::ptr::null());
-        if dpy.is_null() {
-            let target = std::env::var("DISPLAY").unwrap_or_else(|_| "<unset>".into());
-            return Err(format!("cannot open X display (DISPLAY={target})"));
-        }
-
-        // A compositor races clients by nature (a window can die between the
-        // QueryTree that listed it and the request that redirects it), so X
-        // errors are routine. Xlib's default handler *exits the process*;
-        // replace it before issuing a single request.
-        xlib::install_silent_error_handler();
-
-        // Hand the event queue to XCB. Must happen before any event is read.
-        xlib::XSetEventQueueOwner(dpy, xlib::XCB_OWNS_EVENT_QUEUE);
-
-        let screen = xlib::XDefaultScreen(dpy) as usize;
-        let raw = xlib::XGetXCBConnection(dpy);
-        if raw.is_null() {
-            return Err("XGetXCBConnection returned NULL (libX11 built without XCB?)".into());
-        }
-
-        // SAFETY: `raw` is owned by `dpy`, which outlives the connection (the
-        // returned `XDisplay` is not `Drop`), and `should_drop = false` keeps
-        // x11rb from calling `xcb_disconnect` on someone else's connection.
-        let conn = XCBConnection::from_raw_xcb_connection(raw, false)
-            .map_err(|e| format!("x11rb could not wrap the xcb connection: {e}"))?;
-
-        Ok((XDisplay::from_raw(dpy), conn, screen))
-    }
-}
 
 /// Whether an OpenGL driver is present at all (`dlopen("libGL.so.1")`).
 ///

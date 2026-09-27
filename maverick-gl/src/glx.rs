@@ -8,7 +8,7 @@
 // fixed sleep between frames.
 
 use crate::dl::Lib;
-use crate::xlib::{Display, XID};
+use maverick_x11::{Display, XID};
 use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_void};
 
 pub type GLXFBConfig = *mut c_void;

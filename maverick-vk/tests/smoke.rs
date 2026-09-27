@@ -1,5 +1,5 @@
-use maverick_gl::open_x;
 use maverick_vk::{SurfaceTarget, Vulkan};
+use maverick_x11::open_x;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{self, ConnectionExt};
 
