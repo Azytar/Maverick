@@ -88,7 +88,13 @@ impl Rect {
         Self { x, y, w, h }
     }
     /// True when point `(px, py)` lies inside `self` (half-open on right/bottom).
-    /// Saturating: hostile `w = u32::MAX` (`-1 as i32`) can never wrap `x + w`.
+    ///
+    /// Reads the saturated [`Self::right`] / [`Self::bottom`] edges, so a hostile
+    /// `w`/`h` (a client-reported size, a `_NET_WM_STRUT` CARDINAL) can neither
+    /// wrap the coordinate space nor report a point inside the rect as outside
+    /// it. A rect whose far edge is past the coordinate limit simply saturates:
+    /// every representable coordinate is then inside it, which is what the box
+    /// it describes says.
     #[inline]
     pub fn contains(&self, px: i32, py: i32) -> bool {
         px >= self.x && px < self.right() && py >= self.y && py < self.bottom()
@@ -98,12 +104,23 @@ impl Rect {
     pub fn area(&self) -> u64 {
         self.w as u64 * self.h as u64
     }
-    /// X coordinate of the right edge (`x + w`, saturating).
-    /// `w` is clamped to `i32::MAX` first: a hostile `u32::MAX` casts to
-    /// `-1 as i32` and would otherwise move the edge backwards.
+    /// X coordinate of the right edge, `x + w`, saturated to the `i32` range.
+    ///
+    /// The sum is formed in `i64` and the *result* is saturated, never the
+    /// operand. `w` spans the whole `u32` range while `x` is an `i32` screen
+    /// coordinate, so `x + w` can leave the `i32` range in either direction;
+    /// saturating keeps `contains` and `contains_rect` from wrapping a hostile
+    /// extent around the coordinate space. Narrowing the *extent* first instead
+    /// would also never wrap, but it would report an edge short of the real one
+    /// for every rect whose origin is far enough left: a rect at `x = -2e9`
+    /// that is `3e9` wide has a right edge of `+1e9`, which `i32` can express,
+    /// while a helper that clamps `w` to `i32::MAX` first reports `+147 483 647`
+    /// — two billion pixels of a real window treated as outside it, which the
+    /// pointer hit-test, `State::mon_at` and the occlusion cull all read.
     #[inline]
     pub fn right(&self) -> i32 {
-        self.x.saturating_add(self.w.min(i32::MAX as u32) as i32)
+        (i64::from(self.x) + i64::from(self.w)).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+            as i32
     }
     /// True when `other` is entirely inside `self`. Used for occlusion culling:
     /// a window completely behind a single opaque window above it is hidden.
@@ -114,16 +131,25 @@ impl Rect {
             && self.right() >= other.right()
             && self.bottom() >= other.bottom()
     }
-    /// Y coordinate of the bottom edge (`y + h`, saturating on the same terms
-    /// as `right`).
+    /// Y coordinate of the bottom edge, `y + h`, saturated on the same terms as
+    /// [`Self::right`].
     #[inline]
     pub fn bottom(&self) -> i32 {
-        self.y.saturating_add(self.h.min(i32::MAX as u32) as i32)
+        (i64::from(self.y) + i64::from(self.h)).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+            as i32
     }
     /// Smallest rect containing both `self` and `other`. Used for animation
     /// damage: a window sliding from one rect to another must repaint the union
     /// so neither the pixels it left nor the ones it slid into linger.
-    /// Saturating: opposite ±2G origins can never wrap the cast.
+    ///
+    /// # Postcondition
+    ///
+    /// `union` is total: for any two `Rect` values the result satisfies
+    /// `contains_rect` on both, because every edge here is a
+    /// [`Self::right`] / [`Self::bottom`] of a rect that saturates the same way
+    /// as the envelope's own. The extent can only be narrower than the true one
+    /// where the span is not representable as an `i32` edge at all, which the
+    /// two containing rects report as the same saturated limit.
     #[inline]
     pub fn union(&self, other: Rect) -> Rect {
         let x0 = self.x.min(other.x);
@@ -133,8 +159,8 @@ impl Rect {
         Rect::new(
             x0,
             y0,
-            (x1 as i64 - x0 as i64).clamp(0, u32::MAX as i64) as u32,
-            (y1 as i64 - y0 as i64).clamp(0, u32::MAX as i64) as u32,
+            (i64::from(x1) - i64::from(x0)).clamp(0, i64::from(u32::MAX)) as u32,
+            (i64::from(y1) - i64::from(y0)).clamp(0, i64::from(u32::MAX)) as u32,
         )
     }
 }
