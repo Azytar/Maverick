@@ -5,3 +5,4 @@
 cc ab20810afebe43cfd59ad72c7475f428d500d1c386cc1e5bfd8b78a987372f05 # shrinks to width = 0.05, windows = 2, splits = 1
 cc ed1988ada1bb8bc5a2456d2e2b72ce0ee7b6b246a9f483a3d90744c1990f3cfe # shrinks to spec = Spec { monitors: 1, tags: 1, tiled: 1, floats: 0, merges: 0, features: 16 }, victim = 0
 cc 7a69221925dabff76926d8731c0515bdd03ef25f93ba8a8bfaf08ef1ab8a0335 # shrinks to spec = Spec { monitors: 1, tags: 1, tiled: 2, floats: 3, merges: 0, features: 12 }, dir = Next
+cc 67703be2a3f98f21d55c2c47e185ba0dd55d44a8b307657b8e8ef418d82b13d9 # shrinks to screen = Rect { x: 0, y: 0, w: 1, h: 1 }, n_tags = 0

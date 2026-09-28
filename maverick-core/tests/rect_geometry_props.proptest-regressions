@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d9dd296e2151e57810bb1f3551b7a5eaec6cda17df85b578d4abaed2fe40b76f # shrinks to r = Rect { x: 0, y: -193188573, w: 1, h: 3037982122 }, px = 0, py = 6402033853638169573
+cc c896f78ed3d1afde4dc4d6a31f4b24a511911b2a3179cf051c0e17987d6e314d # shrinks to a = Rect { x: -1080023154, y: 0, w: 2147483648, h: 1591997461 }, b = Rect { x: 1067459709, y: 0, w: 785, h: 1 }
+cc 0a12558d097ad5b364d1b41961b2b620665934264df9ef634a07c402894cd69a # shrinks to a = Rect { x: 0, y: 0, w: 2147481815, h: 0 }, b = Rect { x: -1833, y: 0, w: 0, h: 0 }
+cc 166b65069da61b5a7f63591331216f3c11a0d45b22ddfed542b187840e8607bb # shrinks to a = Rect { x: -1621219108, y: 0, w: 2147483648, h: 0 }, b = Rect { x: 0, y: 0, w: 0, h: 0 }
+cc d65a8f137ab9761869fd36cfb24203608b2f3dbfd2588937784194d518cb6342 # shrinks to r = Rect { x: -169287073, y: 0, w: 2669719214, h: 1 }, px = -8846401263693955674, py = 0

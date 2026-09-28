@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{arb_dir, arb_spec, build, focus_logically, Built};
+use common::{arb_dir, arb_screen, arb_spec, build, focus_logically, Built};
 use maverick_core::types::{
     Client, Column, Dir, FullscreenPolicy, Monitor, PendingFocus, Rect, SizeHints, State, WinFlags,
     WindowId, Workspace,
@@ -19,6 +19,39 @@ use proptest::prelude::*;
 
 // The two `XSizeHints.flags` bits that carry a position claim, per ICCCM 4.1.2.3.
 const POSITION_BITS: u32 = SizeHints::U_S_POSITION | SizeHints::P_POSITION;
+
+// --- a monitor is usable from its constructor -------------------------------
+//
+// `Monitor::ws` / `ws_mut` are how every command path reaches a monitor's active
+// workspace, so a constructor that can leave a monitor with no workspace at all
+// turns a tag count of zero into a panic on the first command rather than into a
+// monitor. The model checker is the second, independent witness: a monitor with
+// no slots is not a well-formed state either.
+proptest! {
+    #[test]
+    fn a_monitor_is_usable_from_its_constructor_at_any_tag_count(
+        screen in arb_screen(),
+        n_tags in 0usize..=12,
+    ) {
+        let mut st = State::new();
+        st.monitors.push(Monitor::new(screen, n_tags));
+
+        // At least one slot must exist, tagged `0`, whatever was asked for.
+        prop_assert!(
+            !st.monitors[0].workspaces.is_empty(),
+            "a monitor built for {n_tags} tags has no workspace to work on"
+        );
+        let tag = st.monitors[0].ws_mut().tag;
+        prop_assert_eq!(st.monitors[0].ws().tag, tag);
+        prop_assert_eq!(st.monitors[0].active_ws, 0);
+
+        prop_assert!(
+            st.check_invariants().is_ok(),
+            "a monitor built for {n_tags} tags is not a well-formed state: {:?}",
+            st.check_invariants()
+        );
+    }
+}
 
 // --- the model checker as an oracle -----------------------------------------
 

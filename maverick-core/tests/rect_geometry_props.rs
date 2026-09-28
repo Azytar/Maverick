@@ -110,11 +110,13 @@ proptest! {
 // Whether both rects and the box they span have all four edges exactly
 // representable as `i32`, i.e. whether `union` can express the envelope without
 // saturating any of the edge helpers.
+//
+// The criterion is the *sum* `x + w`, not the extent alone: an extent wider than
+// `i32::MAX` is still exactly representable as an edge whenever the origin is
+// far enough left, and the edge helpers are required to report it.
 fn envelope_representable(a: Rect, b: Rect) -> bool {
     let edges_exact = |r: Rect| {
-        r.w <= i32::MAX as u32
-            && r.h <= i32::MAX as u32
-            && i64::from(r.x) + i64::from(r.w) <= i64::from(i32::MAX)
+        i64::from(r.x) + i64::from(r.w) <= i64::from(i32::MAX)
             && i64::from(r.y) + i64::from(r.h) <= i64::from(i32::MAX)
     };
     if !edges_exact(a) || !edges_exact(b) {
@@ -134,5 +136,103 @@ proptest! {
     fn area_is_computed_without_wrapping(w in arb_extent(), h in arb_extent()) {
         let a = Rect::new(0, 0, w, h).area();
         prop_assert_eq!(a, u64::from(w) * u64::from(h));
+    }
+}
+
+// The right edge is the origin plus the width, for every width the type admits.
+//
+// `w` is a `u32`, so the sum can leave the `i32` range in either direction, and
+// the answer is then the saturated limit — but saturation is a property of the
+// *sum*, not of the extent. An extent past `i32::MAX` whose origin is far enough
+// left still has an exactly representable right edge, and a helper that narrows
+// the extent before adding reports an edge short of the real one: a rect from
+// -2e9 that is 3e9 wide would claim to end at +147 483 647 instead of
+// +1e9, and every point between the two would be reported as outside a window
+// that contains it. Pointer hit-testing, `mon_at`, and occlusion culling all
+// read this edge.
+proptest! {
+    #[test]
+    fn containment_covers_the_whole_box_the_fields_describe(
+        r in arb_rect(),
+        px in any::<i64>(),
+        py in any::<i64>(),
+    ) {
+        let (w, h) = (i64::from(r.w), i64::from(r.h));
+        if w == 0 || h == 0 {
+            // A collapsed rect has no interior point to ask about.
+            return Ok(());
+        }
+        // Draw a point uniformly from the box `[x, x+w) × [y, y+h)`. Modular
+        // reduction keeps the draw uniform without narrowing the domain, which
+        // matters: the interesting widths are the ones no `rng.gen_range` over a
+        // small range would produce.
+        let (qx, qy) = (i64::from(r.x) + px.rem_euclid(w), i64::from(r.y) + py.rem_euclid(h));
+        if !(i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&qx)
+            || !(i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&qy)
+        {
+            // Past the coordinate limit there is no screen coordinate to test.
+            return Ok(());
+        }
+        prop_assert!(
+            r.contains(qx as i32, qy as i32),
+            "{:?} does not contain ({qx}, {qy}), a point of its own box",
+            r
+        );
+    }
+}
+
+// Rect containment answers exactly the question the two boxes pose, in both
+// directions.
+//
+// Occlusion culling and the workarea clamp compare whole rects: if `a` swallows
+// `b` then a click anywhere on `b` belongs to `a`, and a window outside the
+// workarea must be rejected. Both directions are read straight off the fields,
+// in `i64`, so the property states the semantics rather than restating the
+// helper under test.
+proptest! {
+    #[test]
+    fn rect_containment_agrees_with_the_boxes_it_describes(a in arb_rect(), b in arb_rect()) {
+        if b.w == 0 || b.h == 0 {
+            // A degenerate rect has no area, so "inside" is vacuous for it.
+            return Ok(());
+        }
+        let (bx1, by1) = (i64::from(b.x) + i64::from(b.w), i64::from(b.y) + i64::from(b.h));
+        if bx1 > i64::from(i32::MAX) || by1 > i64::from(i32::MAX) {
+            // `b`'s own far edges are not representable, so there is no edge
+            // for `a` to be compared against.
+            return Ok(());
+        }
+        let inside = i64::from(a.x) <= i64::from(b.x)
+            && i64::from(a.y) <= i64::from(b.y)
+            && bx1 <= i64::from(a.x) + i64::from(a.w)
+            && by1 <= i64::from(a.y) + i64::from(a.h);
+        prop_assert_eq!(
+            a.contains_rect(b),
+            inside,
+            "{:?} vs {:?}: the containment answer does not match the boxes",
+            a,
+            b
+        );
+    }
+}
+
+// The damage envelope covers both rects on the whole coordinate domain, with no
+// representability escape hatch.
+//
+// The animation damage path unions a window's old and new rect, and the damage
+// pass coalesces overlapping quads. A union that does not cover one of its
+// inputs leaves a stripe of stale pixels exactly where a window just moved, and
+// a coalescing pass that tests `a.contains_rect(b)` on such a union drops a
+// quad it should have merged. This claims the envelope unconditionally: the
+// saturating limit is the same limit both the union's edge and the covered
+// rect's edge reach, so containment still holds where the box is not
+// representable — it is only the *numeric* extent claims above that need an
+// exact edge.
+proptest! {
+    #[test]
+    fn the_union_covers_both_rects_whatever_the_coordinates(a in arb_rect(), b in arb_rect()) {
+        let u = a.union(b);
+        prop_assert!(u.contains_rect(a), "the envelope {:?} does not cover {:?}", u, a);
+        prop_assert!(u.contains_rect(b), "the envelope {:?} does not cover {:?}", u, b);
     }
 }
