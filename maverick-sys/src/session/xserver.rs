@@ -61,7 +61,7 @@
 
 use std::io;
 use std::io::Write;
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -214,18 +214,35 @@ impl DisplayClaim {
     /// Try to claim `display` for exclusive use. `Ok(None)` means another
     /// creator holds it; `Err` is a real filesystem error.
     pub fn try_acquire(display: Display) -> io::Result<Option<Self>> {
-        let file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(claim_path(display))
-        {
+        use rustix::fs::{Mode, OFlags};
+        // `O_NOFOLLOW` is load-bearing, not defensive. The path is
+        // `/tmp/.X<n>-mav`, so its name belongs to whoever plants it first, and
+        // without this the open follows a symlink and hands this process a
+        // *writable* descriptor on a file it did not choose. Nothing here writes
+        // today, so the immediate damage is only a lock taken on someone else's
+        // file — but the descriptor is writable and the file is not ours, and
+        // "we opened it" and "we created it" are not the same claim.
+        //
+        // ELOOP is the kernel's answer to "the final component is a symlink".
+        // It reads as `Ok(None)` rather than an error because that is what it
+        // means here: the slot is not one this process can hold, so the caller
+        // moves on to the next display exactly as it would for a claim another
+        // creator holds. Refusing every display whose path is a symlink would be
+        // correct too, but "someone else owns this number" is the truth and it
+        // keeps the scan going.
+        let file = match rustix::fs::open(
+            claim_path(display),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW,
+            Mode::RWXU,
+        ) {
             Ok(file) => file,
             // Held by another user. Their claim is as real as ours.
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Ok(None),
-            Err(e) => return Err(e),
+            Err(rustix::io::Errno::ACCESS | rustix::io::Errno::PERM) => return Ok(None),
+            // The path is a symlink, so the claim is not ours to make.
+            Err(rustix::io::Errno::LOOP) => return Ok(None),
+            Err(e) => return Err(std::io::Error::from_raw_os_error(e.raw_os_error())),
         };
+        let file = std::fs::File::from(file);
         // `flock` through a maintained wrapper: the `EWOULDBLOCK` case is the
         // interesting one, and reading it as "another creator holds the claim"
         // rather than as a generic error is the whole point of the call.
@@ -1035,5 +1052,69 @@ mod tests {
         };
         let err = spawn(&spec).expect_err("display 0 must be refused");
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    }
+
+    /// The claim file lives in a world-writable directory, so its name can be
+    /// taken by anyone on the machine before this process gets there. Following
+    /// that name onto whatever it points at would hand this process an open
+    /// descriptor on a file it did not create — and a *writable* one, on a path
+    /// chosen by whoever made the link.
+    ///
+    /// A link here means the slot is not ours to claim, so it must read as
+    /// "someone else holds this display" and let the scan move on, rather than
+    /// as a claim we won. Asserting the refusal is the point: the interesting
+    /// failure would be a success that silently targets the linked file.
+    #[test]
+    fn a_claim_path_that_is_a_symlink_is_refused_rather_than_followed() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("a private directory");
+        let target = dir.path().join("not-ours");
+        std::fs::write(&target, b"someone else's file").expect("write the target");
+
+        // A display high enough that nothing in this test environment owns it.
+        let display = Display(913);
+        let claim = claim_path(display);
+        let _ = std::fs::remove_file(&claim);
+        symlink(&target, &claim).expect("plant the symlink");
+
+        let outcome = DisplayClaim::try_acquire(display);
+        // Whatever the verdict, the target must not have been claimed: no lock
+        // we took, and the file untouched.
+        let _ = std::fs::remove_file(&claim);
+
+        match outcome {
+            Ok(None) => {}
+            Err(e) => assert_ne!(
+                e.raw_os_error(),
+                Some(libc::EACCES),
+                "a symlink is not another user's 0600 claim file"
+            ),
+            Ok(Some(_claim)) => panic!(
+                "the claim followed a symlink onto {}; a claim is only ever a \
+                 file this process created",
+                target.display()
+            ),
+        }
+        assert_eq!(
+            std::fs::read(&target).expect("the target is still readable"),
+            b"someone else's file",
+            "the linked-to file was modified"
+        );
+    }
+
+    /// A claim on a display whose file is genuinely absent still works. The
+    /// symlink refusal above must not be achieved by refusing to create, which
+    /// would leave every first-time display unusable.
+    #[test]
+    fn a_claim_on_a_free_display_is_still_granted() {
+        let display = Display(914);
+        let claim = claim_path(display);
+        let _ = std::fs::remove_file(&claim);
+        let held = DisplayClaim::try_acquire(display)
+            .expect("opening a new claim file cannot fail here")
+            .expect("a free display is claimable");
+        drop(held);
+        let _ = std::fs::remove_file(&claim);
     }
 }
