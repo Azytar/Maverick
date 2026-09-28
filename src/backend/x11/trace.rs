@@ -119,11 +119,28 @@ pub(super) fn init() {
     ENABLED.store(true, Ordering::Relaxed);
     // Anchor the trace's `Instant` clock against CLOCK_MONOTONIC, so a dump can
     // be lined up with an X11 client-side log without trusting wall time.
+    //
+    // `std::time::Instant` is `CLOCK_MONOTONIC` on Linux, so it is tempting to
+    // read the anchor through it. That does not work: `Instant` deliberately
+    // exposes only a *duration*, and lining this trace up with another process's
+    // log is exactly the case that needs the absolute value. Two `Instant`s
+    // measured here differ by their span, not by their position on the shared
+    // clock, so a dump anchored with one cannot be compared with a client-side
+    // timestamp at all. The raw read is what makes this record mean something
+    // across a process boundary, and `valid=` is kept because the call can fail
+    // and a trace that silently reported a zero anchor would be worse than one
+    // that says it could not read the clock.
     let mut timestamp = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
     record("clock_anchor_before", format_args!(""));
+    // SAFETY: `clock_gettime` is a pure read of the kernel's monotonic clock into
+    // a caller-owned `timespec`, with no precondition to establish and no pointer
+    // the callee retains: `&raw mut timestamp` is the address of a live local that
+    // outlives the call, and on the non-zero return path the struct is written
+    // before the value is read. The only failure the caller has to handle is the
+    // return code, which is checked immediately below.
     let valid = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut timestamp) } == 0;
     record(
         "clock_anchor_after",

@@ -701,15 +701,19 @@ fn signal_tree(wm: &ProcRef, mode: StopMode) -> bool {
         // here means it is already gone, which is the outcome we wanted.
         return proc::terminate(wm.pid, wm.start_time).is_ok();
     }
-    let sig = match mode {
-        StopMode::Graceful => libc::SIGTERM,
-        StopMode::Hard => libc::SIGKILL,
+    // The group id was just read from `/proc` for the process this record
+    // names, and only after `is_alive` proved the pid is still that process.
+    // `wm.pid == info.pgid` means the group is led by that same process, so the
+    // group cannot contain an unrelated caller's process. The signal is a typed
+    // `Signal` rather than a raw number: both arms are named signals, so the
+    // conversion is a lookup rather than a validation, and nothing here can
+    // express a signal the caller did not mean.
+    let signal = match mode {
+        StopMode::Graceful => rustix::process::Signal::TERM,
+        StopMode::Hard => rustix::process::Signal::KILL,
     };
-    // SAFETY: `killpg` with a group id that was just read from `/proc` for the
-    // process this record names, and only after `is_alive` proved the pid is
-    // still that process. `wm.pid == info.pgid` means the group is led by that
-    // same process, so the group cannot contain an unrelated caller's process.
-    let sent = unsafe { libc::killpg(info.pgid as libc::pid_t, sig) } == 0;
+    let sent = rustix::process::Pid::from_raw(info.pgid as rustix::process::RawPid)
+        .is_some_and(|pgid| rustix::process::kill_process_group(pgid, signal).is_ok());
     if !sent {
         // The group is already gone; fall back to the process itself so a
         // window manager that changed groups is still stopped.

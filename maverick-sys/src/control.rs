@@ -56,7 +56,6 @@
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::FileTypeExt;
-use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -104,33 +103,17 @@ pub const MAX_CMD_LEN: usize = 64 * 1024;
 /// Returns an error if the credentials cannot be read, which callers must treat
 /// as "not authorised" — an unverifiable peer is not an authorised one.
 pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
-    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: `cred` is a correctly sized, writable `ucred` and `len` says so.
-    // `getsockopt` writes at most `len` bytes into it. The descriptor is a
-    // live `AF_UNIX` socket, which is the one family `SO_PEERCRED` answers for.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            &mut cred as *mut libc::ucred as *mut libc::c_void,
-            &mut len,
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // A short answer is not an answer: `pid` is checked because a zero pid is
-    // what an uninitialised buffer looks like, and reading one anyway would
-    // authorise whoever happens to hold uid 0's slot.
-    if (len as usize) < std::mem::size_of::<libc::ucred>() || cred.pid <= 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "SO_PEERCRED returned a short answer",
-        ));
-    }
-    Ok(cred.uid)
+    // `socket_peercred` is `getsockopt(SO_PEERCRED)` with the buffer handling
+    // already done. The previous hand-rolled read had to defend explicitly
+    // against the shape of an uninitialised buffer: a `mem::zeroed()` `ucred`
+    // whose `pid` field of zero was indistinguishable from a real answer, so it
+    // needed a `cred.pid <= 0` rejection, and without it that buffer would have
+    // authorised whoever holds uid 0's slot. rustix's `UCred.pid` is a
+    // `Pid(NonZeroI32)`, so a zero pid has no representation to construct and
+    // the case is a type error rather than a runtime check that has to be
+    // remembered here.
+    let cred = rustix::net::sockopt::socket_peercred(stream)?;
+    Ok(cred.uid.as_raw())
 }
 
 /// Set a file's mode, for the socket this server owns.

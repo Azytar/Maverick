@@ -129,23 +129,19 @@ pub fn runtime_dir() -> PathBuf {
 /// effective uid on the other would refuse every peer rather than admit a wrong
 /// one.
 pub fn current_uid() -> u32 {
-    // SAFETY: `getuid(2)` takes no arguments, takes no pointer, has no
-    // precondition to establish and cannot fail — the kernel answers from the
-    // task's own credential struct, which is alive for the life of the call.
-    // There is no memory, aliasing or thread-safety obligation attached to it.
-    unsafe { libc::getuid() }
+    // No `unsafe` and no `SAFETY` note: `getuid` is an infallible kernel read
+    // that takes no argument and returns a value, which is exactly the shape of
+    // call a syscall wrapper can carry without a caller-supplied invariant.
+    rustix::process::getuid().as_raw()
 }
 
 /// The real group id of this process, as the kernel reports it.
 ///
 /// Recorded beside [`current_uid`] on a session record and never used as an
 /// authorization decision: ownership is a uid question, and the gid is
-/// descriptive. See [`current_uid`] for why it is the real gid and what the
-/// call's safety argument is.
+/// descriptive. See [`current_uid`] for why it is the real gid.
 pub fn current_gid() -> u32 {
-    // SAFETY: as in `current_uid` — `getgid(2)` takes no arguments, cannot
-    // fail, and reads the current task's credential struct in place.
-    unsafe { libc::getgid() }
+    rustix::process::getgid().as_raw()
 }
 
 /// Create the runtime directory and make it private (`0700`).

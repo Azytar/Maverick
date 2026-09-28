@@ -467,10 +467,21 @@ fn not_found() -> std::io::Error {
 }
 
 /// `kill(2)`, reporting what the kernel said instead of discarding it.
+///
+/// Deliberately still `libc` even though the crate has `rustix`: this function's
+/// contract is that a refused signal is reported with the **kernel's own errno**,
+/// which `a_refused_signal_is_not_reported_as_delivered` pins by sending an
+/// invalid signal number and requiring `EINVAL`. `rustix::process::Signal` is a
+/// `NonZeroI32` newtype over the *named* signals, so it would have to reject
+/// 0x7FFF here and the caller would see a locally-built error instead of the
+/// kernel's verdict. The property being tested is that the kernel is the one
+/// saying no, and only the raw call can keep that true.
 fn send(pid: u32, sig: libc::c_int) -> std::io::Result<()> {
     // SAFETY: `kill(2)` with a validated, positive pid. `pid_is` above already
     // proved the pid names the process we recorded, so the recycled-pid case
-    // that would hit the wrong target is closed before the signal is sent.
+    // that would hit the wrong target is closed before the signal is sent. The
+    // signal number is the caller's, and a bad one is answered by the kernel
+    // rather than being filtered here — see the note above.
     if unsafe { libc::kill(pid as libc::pid_t, sig) } == 0 {
         Ok(())
     } else {
@@ -481,9 +492,12 @@ fn send(pid: u32, sig: libc::c_int) -> std::io::Result<()> {
 /// True if the process is still alive (any state, including a zombie — the
 /// pid exists until it is reaped, and a zombie X server is still a leak).
 pub fn exists(pid: u32) -> bool {
-    // SAFETY: `kill(2)` signal 0 performs the permission/existence check
-    // without delivering anything.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    // `test_kill_process` is `kill(pid, 0)`: the kernel's permission and
+    // existence check without delivering anything. `Pid` is a `NonZeroI32`, so
+    // pid 0 — the process group, which is not a process — has no `Pid` and is
+    // reported as "does not exist" rather than signalling the caller's group.
+    rustix::process::Pid::from_raw(pid as rustix::process::RawPid)
+        .is_some_and(|p| rustix::process::test_kill_process(p).is_ok())
 }
 
 #[cfg(test)]
