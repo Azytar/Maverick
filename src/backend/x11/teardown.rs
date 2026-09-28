@@ -179,6 +179,26 @@ pub(crate) fn run_local(
 mod tests {
     use super::*;
 
+    /// Serialises the tests in this module against each other.
+    ///
+    /// `XDG_RUNTIME_DIR` is a process-global that `identity` re-reads on every
+    /// call rather than caching, which is what puts a test's record under a
+    /// directory of its own — and which also means two tests running at once can
+    /// have one restore the variable while the other is mid-flight, at which
+    /// point the record lands in the wrong directory and the removal being
+    /// asserted is asserted against nothing. One lock for the whole module,
+    /// taken by every test that sets it.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire [`TEST_LOCK`], ignoring poisoning: a failing teardown test leaves
+    /// no shared state behind beyond a directory of its own, and refusing to run
+    /// the others would turn one failure into a cascade.
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// A runtime directory of this test's own, so a test that writes a record
     /// cannot see — or be seen by — another test's.
     fn temp_runtime() -> std::path::PathBuf {
@@ -218,6 +238,7 @@ mod tests {
     /// process is two files, and both are removed by the local half alone.
     #[test]
     fn the_local_half_removes_the_record_and_the_socket() {
+        let _guard = test_lock();
         let dir = temp_runtime();
         // SAFETY: single-threaded test body, and the variable is restored before
         // the test returns. `XDG_RUNTIME_DIR` is read by `identity` on every
@@ -252,6 +273,7 @@ mod tests {
     /// empty id would take the process down on the way out.
     #[test]
     fn a_session_with_no_id_still_completes() {
+        let _guard = test_lock();
         let mut control = None;
         let report = run_local("", &mut control, TraceEnd::CleanExit);
         assert!(!report.ficha_removed, "there was no record to remove");
@@ -267,6 +289,7 @@ mod tests {
     /// one only on a connection that has not noticed yet.
     #[test]
     fn the_x_half_runs_only_for_a_clean_exit_over_a_live_connection() {
+        let _guard = test_lock();
         let cases = [
             // asked to stop, server still there: the normal case.
             (ShutdownReason::Clean, true, true),
@@ -289,6 +312,28 @@ mod tests {
         }
     }
 
+    /// A working connection can be borrowed, and borrowing it is the only way
+    /// the X half of a shutdown is reached.
+    ///
+    /// Needs a real X server, so it reads the one the environment provides and
+    /// says so when there is none rather than passing vacuously — an
+    /// `acquire` that always returned `None` would be caught by this wherever a
+    /// display exists, and the one branch no test here can reach is the
+    /// *refused* one, which is covered end to end by
+    /// `tests/xephyr-disconnect.sh` instead.
+    #[test]
+    fn a_working_connection_can_be_borrowed() {
+        let Ok((_dpy, conn, _screen)) = maverick_x11::open_x() else {
+            eprintln!("no X display: the borrow of a live connection is not covered here");
+            return;
+        };
+        assert!(
+            LiveX::acquire(&conn).is_some(),
+            "a connection that just opened must be borrowable: the X half of a \
+             shutdown is unreachable without this"
+        );
+    }
+
     /// The one thing a reason may change is the X half.
     ///
     /// A table over both reasons, and for each: whether the X half would run
@@ -298,6 +343,7 @@ mod tests {
     /// invisible on every run that ends cleanly.
     #[test]
     fn a_reason_may_skip_the_x_half_but_never_the_local_one() {
+        let _guard = test_lock();
         struct Case {
             reason: ShutdownReason,
             end: TraceEnd,
