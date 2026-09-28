@@ -232,14 +232,29 @@ impl ControlHub {
 
     /// Drain all pending commands. Called once per event-loop iteration on the
     /// WM thread. Never blocks.
+    ///
+    /// The self-pipe is drained *first* and the queue second, because the two
+    /// are one wakeup split in half: `push_command` enqueues the command and
+    /// then writes the byte, so the pipe's readability and the queue describe
+    /// the same arrivals and have to be taken together. Taking the queue first
+    /// leaves a window between the two steps in which a command that is already
+    /// enqueued has its byte discarded along with the stale ones — the WM then
+    /// finds an empty pipe, blocks in `poll(2)`, and leaves the command sitting
+    /// on the queue until an unrelated X event happens to wake it. `quit` then
+    /// times out and `dispatch` silently does nothing.
+    ///
+    /// This order cannot lose one. `push_command` writes the byte *after* the
+    /// command, so a byte still pending when the queue is taken necessarily
+    /// belongs to a command this call has just returned, and the next call
+    /// discards it: one spurious wakeup, never a missing one.
     pub fn drain_commands(&self) -> Vec<ControlCommand> {
+        self.drain_wake();
         let mut out = Vec::new();
         if let Ok(rx) = self.inner.cmd_rx.lock() {
             while let Ok(cmd) = rx.try_recv() {
                 out.push(cmd);
             }
         }
-        self.drain_wake();
         out
     }
 

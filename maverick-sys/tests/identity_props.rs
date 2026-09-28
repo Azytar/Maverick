@@ -8,11 +8,13 @@
 //! a cross-session collision waiting to happen.
 
 use maverick_sys::identity::{
-    is_valid_sid, meta_path, new_session_id, session_dir, sock_path, try_meta_path,
-    try_session_dir, try_sock_path, MAX_SID_LEN,
+    current_gid, current_uid, is_valid_sid, meta_path, new_session_id, session_dir, sock_path,
+    try_meta_path, try_session_dir, try_sock_path, MAX_SID_LEN,
 };
+use maverick_sys::session;
 use proptest::prelude::*;
 use std::io::ErrorKind;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 /// `sockaddr_un.sun_path` is 108 bytes on Linux; a longer path cannot be bound.
@@ -148,4 +150,143 @@ proptest! {
             }
         }
     }
+}
+
+// ── ownership ───────────────────────────────────────────────────────────────
+//
+// `getuid(2)` and `/proc/<pid>/status` are two different kernel interfaces to
+// the same credential, and `/proc` spells out which credential: its `Uid:` line
+// is `Real Effective Saved FS`, in that order. Reading the Real column is
+// therefore an independent statement of what Maverick's own answer has to be,
+// and it is the one Maverick actually needs — the control socket's
+// `SO_PEERCRED` check compares a peer's `cred->uid` against this process's, so
+// real-against-real is the only pairing that is not either always-refuse or
+// trivially true.
+
+/// The first number on `/proc/<pid>/status`'s `Uid:` / `Gid:` line.
+fn proc_credential(pid: u32, field: &str) -> u32 {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .unwrap_or_else(|e| panic!("/proc/{pid}/status must be readable for {field}: {e}"));
+    let line = status
+        .lines()
+        .find(|l| l.starts_with(field))
+        .unwrap_or_else(|| panic!("/proc/{pid}/status has no {field} line"));
+    line.split_whitespace()
+        .nth(1)
+        .unwrap_or_else(|| panic!("{field} line {line:?} carries no value"))
+        .parse()
+        .unwrap_or_else(|e| panic!("{field} line {line:?} is not numeric: {e}"))
+}
+
+/// The uid Maverick treats as its own is the *real* uid, not the effective one
+/// and not a number anything supplied. Every ownership decision in the crate —
+/// the control socket's peer check, a session record's `owner_uid`, the
+/// `$XDG_RUNTIME_DIR`-less path — routes through this one answer, so a wrong
+/// one is either a socket nobody can drive or a session anybody can claim.
+#[test]
+fn the_account_maverick_treats_as_its_own_is_the_real_uid() {
+    let me = std::process::id();
+    assert_eq!(
+        current_uid(),
+        proc_credential(me, "Uid:"),
+        "getuid(2) and /proc/<pid>/status disagree about this process's real uid"
+    );
+    // The session layer must not have grown a second answer of its own; it is
+    // the same value, and a divergence is how a record's owner and a socket's
+    // owner would end up compared against different numbers.
+    assert_eq!(
+        session::current_uid(),
+        current_uid(),
+        "the session layer must not answer the uid question separately"
+    );
+    assert_eq!(
+        current_gid(),
+        proc_credential(me, "Gid:"),
+        "getgid(2) and /proc/<pid>/status disagree about this process's real gid"
+    );
+    assert_eq!(session::current_gid(), current_gid());
+}
+
+/// The identity that decides who may talk to the control socket has to be the
+/// account the socket is actually created for. A peer check that compared some
+/// other number would refuse every legitimate `maverickctl` while authorising
+/// nobody, so this ties the three together: the uid the kernel reports, the uid
+/// the server recorded before it ever accepted a connection, and the uid that
+/// owns the socket file the server created.
+#[test]
+fn the_uid_a_control_socket_authorises_is_the_uid_that_owns_it() {
+    use maverick_sys::hub::ControlHub;
+    use std::os::unix::fs::PermissionsExt;
+
+    let name = format!("owncheck{}", std::process::id());
+    let sock = sock_path(&name);
+    let _ = std::fs::remove_dir_all(session_dir(&name));
+    let server =
+        maverick_sys::control::ControlServer::spawn(&name, "{}".to_string(), ControlHub::new())
+            .expect("the server binds");
+
+    let meta = std::fs::symlink_metadata(&sock).expect("the bound socket exists");
+    assert_eq!(
+        meta.uid(),
+        current_uid(),
+        "a file's owner is the effective uid, and Maverick does not change its credentials, so \
+         the socket must belong to the account whose uid it authorises"
+    );
+    assert_eq!(
+        meta.permissions().mode() & 0o777,
+        0o600,
+        "the control socket must be owner-only whatever the umask said"
+    );
+    assert_eq!(server.owner_uid(), current_uid());
+
+    // And the credentials the kernel reports for a connection from this process
+    // are that same uid, which is the whole basis of the check.
+    let stream = std::os::unix::net::UnixStream::connect(&sock).expect("connect");
+    assert_eq!(
+        maverick_sys::control::peer_uid(&stream).expect("peer credentials"),
+        current_uid()
+    );
+    drop(stream);
+    server.shutdown();
+    let _ = std::fs::remove_dir_all(session_dir(&name));
+}
+
+/// A record whose `owner_uid` is somebody else is refused, not honoured. The
+/// check is only worth anything if the uid it compares against is the kernel's
+/// rather than whatever the record says, so the two are pinned together here:
+/// a foreign owner is refused, this process's own owner is accepted, and a
+/// record that names no owner at all is read as this process's.
+#[test]
+fn a_session_record_is_answered_by_its_owner_against_the_kernel() {
+    let name = session::SessionName::parse(&format!("ownrec{}", std::process::id()))
+        .expect("a valid session name");
+    let foreign = current_uid().wrapping_add(1);
+    let doc = |uid: Option<&str>| {
+        format!(
+            r#"{{"name":"{name}","display":":1","state":"stopped","owner_uid":{}}}"#,
+            uid.unwrap_or("0")
+        )
+    };
+
+    // A record claiming a different uid must not resolve, and the refusal must
+    // name the session rather than reading as a missing one.
+    let path = session::spec_path(&name);
+    std::fs::create_dir_all(session::session_dir(&name)).expect("session dir");
+    std::fs::write(&path, doc(Some(&foreign.to_string()))).expect("write the record");
+    assert!(
+        session::read(&name).is_none(),
+        "a record owned by uid {foreign} must not be read as this process's"
+    );
+    match session::read_checked(&name) {
+        Err(session::SessionError::NotOwned(n)) => assert_eq!(n, name),
+        other => panic!("expected NotOwned, got {other:?}"),
+    }
+
+    // This process's own uid is accepted.
+    std::fs::write(&path, doc(Some(&current_uid().to_string()))).expect("write the record");
+    let read = session::read_checked(&name).expect("our own record is readable");
+    assert_eq!(read.owner_uid, current_uid());
+    assert_eq!(read.owner_gid, current_gid());
+
+    let _ = std::fs::remove_dir_all(session::session_dir(&name));
 }

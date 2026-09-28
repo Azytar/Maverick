@@ -202,6 +202,73 @@ proptest! {
     }
 }
 
+// A command that has been enqueued must be visible to the WM through at least
+// one of the two halves of the wakeup protocol — never neither.
+//
+// Enqueueing is two steps: `push_command` puts the command on the queue and
+// *then* writes a byte to the self-pipe the WM has in its `poll(2)` set. The
+// pipe's readability and the queue are two views of one arrival, so the WM has
+// to take them as a unit. Draining the queue first opens a window between the
+// two steps: a command enqueued in it is already on the queue, but its wakeup
+// byte is thrown away with the stale ones. The pipe is then not readable and
+// the command is not returned, and a WM with nothing else to do blocks in
+// `poll(2)` until an unrelated X event wakes it. `maverickctl quit` reports a
+// timeout; `dispatch` silently does nothing.
+//
+// The producer counts a command only *after* `push_command` returns, so any
+// count the consumer can read already had its byte written. Reading that count
+// before sampling the pipe is what makes the check sound: an unreadable pipe
+// after a drain that did not return the command can only have been drained by
+// the drain itself.
+#[test]
+fn an_enqueued_command_is_always_visible_to_the_next_poll() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Enough rounds that the window is hit on any machine; the whole loop is
+    /// a few hundred microseconds per round and the producer is never idle, so
+    /// `drained` reaches the bound well inside a second.
+    const DRAIN_GOAL: usize = 30_000;
+
+    let hub = ControlHub::new();
+    let published = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let producer = {
+        let hub = hub.clone();
+        let published = published.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if hub.push_command(ControlCommand::Reload) {
+                    published.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        })
+    };
+
+    let mut drained = 0usize;
+    let mut stranded = None;
+    while drained < DRAIN_GOAL {
+        drained += hub.drain_commands().len();
+        let enqueued = published.load(Ordering::SeqCst);
+        let readable = maverick_sys::wait_readable_fds(&[hub.wake_fd()], Some(Duration::ZERO));
+        if enqueued > drained && !readable {
+            stranded = Some((enqueued, drained));
+            break;
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    producer.join().expect("producer thread");
+
+    if let Some((enqueued, drained)) = stranded {
+        panic!(
+            "{enqueued} commands were enqueued but only {drained} came back, and the self-pipe \
+             was not readable: a command sitting on the queue with no pending wakeup is invisible \
+             to the window manager until some unrelated X event happens"
+        );
+    }
+}
+
 // The snapshot is the WM's cached view of its own state, read by the server
 // thread: every clone must see the last published value, verbatim, and the
 // fresh hub must start from the documented empty object.

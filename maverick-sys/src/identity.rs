@@ -109,8 +109,43 @@ pub fn runtime_dir() -> PathBuf {
     }
     // No XDG_RUNTIME_DIR: never fall back to /tmp (it's purged). Use the
     // standard /run/user/$UID, which the login session normally provides.
-    let uid = unsafe { libc::getuid() }; // getuid is always safe
-    PathBuf::from(format!("/run/user/{uid}/maverick"))
+    PathBuf::from(format!("/run/user/{}/maverick", current_uid()))
+}
+
+/// The real user id of this process, as the kernel reports it.
+///
+/// This is the crate's only point of contact with `getuid(2)`. Every other
+/// identity decision in Maverick — the control socket's `SO_PEERCRED` check
+/// ([`crate::control`]), a session record's `owner_uid`, the fallback path of
+/// [`runtime_dir`] — asks the kernel about *this* process, and a value that a
+/// caller could pass in would make each of those checks a suggestion.
+///
+/// **Real**, not effective: `SO_PEERCRED` answers with `cred->uid`, the uid the
+/// *real* credentials carry (`cred_to_ucred` in the kernel, and it has since
+/// the 2010 `af_unix` rewrite that stopped reporting `current_euid()`), so the
+/// only uid that can be compared against a peer's is this one. A process whose
+/// real and effective uids differ — a setuid launch, a `seteuid` — is not a
+/// state Maverick ever runs in, and pairing the real uid on one side with the
+/// effective uid on the other would refuse every peer rather than admit a wrong
+/// one.
+pub fn current_uid() -> u32 {
+    // SAFETY: `getuid(2)` takes no arguments, takes no pointer, has no
+    // precondition to establish and cannot fail — the kernel answers from the
+    // task's own credential struct, which is alive for the life of the call.
+    // There is no memory, aliasing or thread-safety obligation attached to it.
+    unsafe { libc::getuid() }
+}
+
+/// The real group id of this process, as the kernel reports it.
+///
+/// Recorded beside [`current_uid`] on a session record and never used as an
+/// authorization decision: ownership is a uid question, and the gid is
+/// descriptive. See [`current_uid`] for why it is the real gid and what the
+/// call's safety argument is.
+pub fn current_gid() -> u32 {
+    // SAFETY: as in `current_uid` — `getgid(2)` takes no arguments, cannot
+    // fail, and reads the current task's credential struct in place.
+    unsafe { libc::getgid() }
 }
 
 /// Create the runtime directory and make it private (`0700`).
