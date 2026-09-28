@@ -93,6 +93,32 @@ pub struct AppliedState {
     pub windows: std::collections::HashMap<WindowId, AppliedWindow>,
 }
 
+/// The geometry X11 will actually hold for a requested `(rect, border)`.
+///
+/// `ConfigureWindow` takes an INT16 origin and a CARD16 extent, so a request can
+/// ask for more than the protocol can express. The sink clamps before sending
+/// (a 0×0 configure is `BadValue` and the server drops it silently, and anything
+/// past CARD16 is not describable at all), which means the clamped value is what
+/// ends up on the server.
+///
+/// This is the *single* definition of that conversion, shared by the record and
+/// the sink, because the two must not be allowed to disagree: if `Applied` kept
+/// the raw value the diff would believe a window is still pending a change it has
+/// already sent, and re-emit it on every frame forever. The x/y origin is passed
+/// through unchanged — it is already an `i32` that the layout produced, and the
+/// synthetic `ConfigureNotify` and the request agree on how to present it.
+pub(crate) fn wire_geometry(geom: Rect, bw: u32) -> (Rect, u32) {
+    (
+        Rect::new(
+            geom.x,
+            geom.y,
+            geom.w.clamp(1, u16::MAX as u32),
+            geom.h.clamp(1, u16::MAX as u32),
+        ),
+        bw.min(u16::MAX as u32),
+    )
+}
+
 impl AppliedState {
     /// Diff the *desired* placement against what was last applied.
     ///
@@ -108,16 +134,22 @@ impl AppliedState {
         desired_bw: u32,
         geometry_dirty: bool,
     ) -> Option<(Rect, u32)> {
+        // Compare and record the *wire* geometry, not the request. The protocol
+        // is narrower than the model in both directions, and the clamped value
+        // is what X11 ends up holding — so recording the request would make the
+        // record disagree with the server permanently, and the next reconcile
+        // would either re-emit forever or (once the values coincide by luck)
+        // stop trying to fix a window that is already wrong. Doing it here,
+        // before the comparison, is what makes "applied" mean "has".
+        let (want_rect, want_bw) = wire_geometry(desired_rect, desired_bw);
         let prev = self.windows.entry(win).or_default();
-        let changed = geometry_dirty
-            || !prev.seen
-            || prev.rect != desired_rect
-            || prev.border_w != desired_bw;
+        let changed =
+            geometry_dirty || !prev.seen || prev.rect != want_rect || prev.border_w != want_bw;
         if changed {
-            prev.rect = desired_rect;
-            prev.border_w = desired_bw;
+            prev.rect = want_rect;
+            prev.border_w = want_bw;
             prev.seen = true;
-            Some((desired_rect, desired_bw))
+            Some((want_rect, want_bw))
         } else {
             None
         }
@@ -1145,10 +1177,15 @@ mod tests {
                 );
                 let row = rows.iter().find(|r| r.win == *win)
                     .expect("reconcile configured a window the layout does not manage");
-                prop_assert_eq!(*rect, row.rect, "effect for {} carries a foreign rect", win);
+                // The wire geometry, not the request: the protocol is narrower
+                // than the model, and the clamped value is what the server ends up
+                // holding, so that is what "the desired rect" means at this seam.
+                let (want_rect, _) = wire_geometry(row.rect, row.border);
+                prop_assert_eq!(*rect, want_rect, "effect for {} carries a foreign rect", win);
+                let (_, want_bw) = wire_geometry(row.rect, row.border);
                 prop_assert_eq!(
                     *border,
-                    row.border,
+                    want_bw,
                     "effect for {} carries a foreign border",
                     win
                 );
@@ -1161,11 +1198,125 @@ mod tests {
                 let w = applied.windows.get(&r.win)
                     .unwrap_or_else(|| panic!("window {} was left unapplied", r.win));
                 prop_assert!(w.seen, "window {} was never configured", r.win);
-                prop_assert_eq!(w.rect, r.rect, "window {} applied a stale rect", r.win);
-                prop_assert_eq!(w.border_w, r.border, "window {} applied a stale border", r.win);
+                let (want_rect, want_bw) = wire_geometry(r.rect, r.border);
+                prop_assert_eq!(w.rect, want_rect, "window {} applied a stale rect", r.win);
+                prop_assert_eq!(w.border_w, want_bw, "window {} applied a stale border", r.win);
             }
         }
 
+    }
+
+    /// `Applied` must record what X11 *has*, not what Maverick *asked for*.
+    ///
+    /// The wire is narrower than the model in both directions. `ConfigureWindow`
+    /// takes an INT16 origin and a CARD16 extent, so the sink clamps before it
+    /// sends — and the clamp is what X11 ends up holding. But the clamp lives in
+    /// `emit_geometry`, *after* `diff` has already written the unclamped value
+    /// into the record, so `Applied` can hold `w = 100_000` while the server has
+    /// `65_535`. From then on `prev.rect != desired_rect` is false and the window
+    /// is never re-emitted: the divergence is permanent, and no mechanism can
+    /// notice, because the only thing that reads the record is this same diff.
+    ///
+    /// The failure is the one `emit_geometry`'s own comment names — "leaving
+    /// Applied ahead of Real forever" — defended against the 0×0 lower bound and
+    /// not the upper one. It matters for the border too, twice over: the border
+    /// is published as `_NET_FRAME_EXTENTS`, which a client sizes its content
+    /// from, and it is written back into `client.geom`/`client.border_w`, which
+    /// is the rect hit-testing reads.
+    ///
+    /// Both halves are asserted, and the second one is the reason the fix has to
+    /// happen *here* rather than in the sink: if only the record were clamped
+    /// while the comparison kept using the raw desired rect, the very next
+    /// reconcile would see `clamped != raw` and configure every window on every
+    /// frame forever.
+    #[test]
+    fn applied_records_the_geometry_the_wire_can_carry() {
+        let mut applied = AppliedState::default();
+        let cases = [
+            // (requested w, requested h, requested bw) -> (on the wire)
+            (0u32, 0u32, 0u32),
+            (1, 1, 1),
+            (1920, 1080, 2),
+            (u16::MAX as u32, u16::MAX as u32, u16::MAX as u32),
+            // Past CARD16 in each field independently.
+            (100_000, 1080, 2),
+            (1920, 100_000, 2),
+            (1920, 1080, 100_000),
+            (u32::MAX, u32::MAX, u32::MAX),
+        ];
+        for (w, h, bw) in cases {
+            let want = Rect::new(0, 0, w, h);
+            let (got_rect, got_bw) = applied
+                .diff(1, want, bw, false)
+                .expect("a first apply must emit");
+            assert_eq!(
+                got_rect,
+                Rect::new(
+                    0,
+                    0,
+                    w.clamp(1, u16::MAX as u32),
+                    h.clamp(1, u16::MAX as u32)
+                ),
+                "the emitted geometry for {w}x{h} bw={bw} is not what the wire can carry"
+            );
+            assert_eq!(
+                got_bw,
+                bw.min(u16::MAX as u32),
+                "border {bw} exceeds CARD16"
+            );
+            // And the record must agree with what was emitted, or the next
+            // reconcile re-emits forever.
+            let rec = applied
+                .windows
+                .get(&1)
+                .expect("record exists after a first apply");
+            assert_eq!(
+                (rec.rect, rec.border_w),
+                (got_rect, got_bw),
+                "the record kept the raw desired value, so every later reconcile \
+                 would see a change and re-emit"
+            );
+        }
+    }
+
+    /// The convergence property behind the one above, stated on the cycle rather
+    /// than on a single call: a stable desired state must stop generating work,
+    /// and it must stay stopped for values the wire has to clamp.
+    #[test]
+    fn a_clamped_geometry_still_converges_in_one_request() {
+        let mut applied = AppliedState::default();
+        let state = {
+            let mut s = State::new();
+            let mut c = Client::new(1, 0, 0);
+            c.geometry_dirty = false;
+            s.clients.insert(1, c);
+            s
+        };
+        // A rect no protocol field can express in full.
+        let rows = vec![Row {
+            win: 1,
+            rect: Rect::new(0, 0, 100_000, 100_000),
+            border: 100_000,
+            dirty: false,
+            known: true,
+        }];
+        let desired = desired_for(&rows);
+
+        let first = reconcile(&desired, &state, &mut applied);
+        assert_eq!(first.len(), 1, "the first pass must configure the window");
+
+        for round in 2..=50 {
+            let effects = reconcile(&desired, &state, &mut applied);
+            assert!(
+                effects.is_empty(),
+                "round {round} re-emitted {} effects: a clamped geometry that \
+                 never reaches a fixed point configures the window on every frame \
+                 forever",
+                effects.len()
+            );
+        }
+    }
+    proptest! {
         /// Idempotence: a repeat of a reconcile that already ran emits nothing.
         /// The render loop calls this once per animating monitor per frame, so
         /// any churn here is a `configure_window` storm on the X server.
@@ -1271,10 +1422,11 @@ mod tests {
                         panic!("round {round} left window {} unapplied", row.win)
                     });
                     prop_assert!(w.seen, "round {} never configured {}", round, row.win);
-                    prop_assert_eq!(w.rect, row.rect, "round {} left {} stale", round, row.win);
+                    let (want_rect, want_bw) = wire_geometry(row.rect, row.border);
+                    prop_assert_eq!(w.rect, want_rect, "round {} left {} stale", round, row.win);
                     prop_assert_eq!(
                         w.border_w,
-                        row.border,
+                        want_bw,
                         "round {} left {} stale",
                         round,
                         row.win
@@ -1321,9 +1473,10 @@ mod tests {
             prop_assert_eq!(effects.len(), 1, "a re-mapped window needs one configure");
             match &effects[0] {
                 GeometryEffect::Configure { win, rect: r, border: b } => {
+                    let (want_rect, want_bw) = wire_geometry(rect, border);
                     prop_assert_eq!(*win, 7);
-                    prop_assert_eq!(*r, rect);
-                    prop_assert_eq!(*b, border);
+                    prop_assert_eq!(*r, want_rect);
+                    prop_assert_eq!(*b, want_bw);
                 }
             }
         }

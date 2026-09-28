@@ -68,7 +68,7 @@
 //! the silent error handler).
 
 use super::*;
-use crate::backend::x11::reconciler::{reconcile, GeometryEffect};
+use crate::backend::x11::reconciler::{reconcile, wire_geometry, GeometryEffect};
 use crate::core::commands::retarget_focus_to_window;
 use crate::core::desired::DesiredState;
 use crate::core::layout::{clamp_float_geom, normalize_float_geom, Phase};
@@ -913,17 +913,23 @@ impl WindowManager {
         // Captured before the mutable borrow below flips geom/border_w.
         let is_fullscreen = client.is_fullscreen();
 
-        // Clamp before the wire: a 0 width/height is a server `BadValue`
-        // (rejected, leaving Applied ahead of Real forever). The synthetic
-        // notify below already clamps; the configure itself must too.
-        let wire_w = geom.w.clamp(1, u16::MAX as u32);
-        let wire_h = geom.h.clamp(1, u16::MAX as u32);
-        let wire_bw = bw.min(u16::MAX as u32);
+        // The wire geometry is defined once, in the reconciler that records it,
+        // so the record and the request cannot disagree: a `ConfigureWindow`
+        // origin is INT16 and its extent is CARD16, so a request can ask for more
+        // than the protocol can express — a 0×0 configure is `BadValue` and the
+        // server drops it silently, leaving Applied ahead of Real forever, and
+        // anything past CARD16 is not describable at all. `geom`/`bw` arrive
+        // already clamped from `AppliedState::diff`; re-deriving them here with
+        // the same function is an idempotent backstop for the callers that reach
+        // this sink directly.
+        let (wire, wire_bw) = wire_geometry(geom, bw);
+        let wire_w = wire.w;
+        let wire_h = wire.h;
         let _ = self.conn.configure_window(
             win,
             &ConfigureWindowAux::new()
-                .x(geom.x)
-                .y(geom.y)
+                .x(wire.x)
+                .y(wire.y)
                 .width(wire_w)
                 .height(wire_h)
                 .border_width(wire_bw),
@@ -950,24 +956,31 @@ impl WindowManager {
             .send_event(false, win, EventMask::STRUCTURE_NOTIFY, event);
 
         // `_NET_FRAME_EXTENTS` mirror (single writer): the published extents
-        // must equal the border actually applied. Publish `[bw × 4]` only when
-        // it changed — `emit_geometry` also fires for pure moves, where a
-        // property rewrite would be pure protocol noise.
-        if self.frame_extents.get(&win) != Some(&bw) {
+        // must equal the border actually applied, and a client sizes its content
+        // from them — so this publishes the *wire* border, not the requested
+        // one. They differ whenever the request exceeds CARD16, and publishing
+        // the request would tell the client to lay out for a border the server
+        // never had. Publish `[bw × 4]` only when it changed — `emit_geometry`
+        // also fires for pure moves, where a property rewrite would be pure
+        // protocol noise.
+        if self.frame_extents.get(&win) != Some(&wire_bw) {
             let _ = self.conn.change_property32(
                 PropMode::REPLACE,
                 win,
                 self.atoms.net_frame_extents,
                 AtomEnum::CARDINAL,
-                &[bw, bw, bw, bw],
+                &[wire_bw, wire_bw, wire_bw, wire_bw],
             );
-            self.frame_extents.insert(win, bw);
+            self.frame_extents.insert(win, wire_bw);
         }
 
         if let Some(c) = self.engine.state.clients.get_mut(&win) {
             if write_client_geom {
-                c.geom = geom;
-                c.border_w = bw;
+                // The wire geometry, not the request: `client.geom` is the rect
+                // hit-testing and the pointer warp read, so it has to be the
+                // rect the server is actually holding.
+                c.geom = wire;
+                c.border_w = wire_bw;
             }
             c.geometry_dirty = false;
         }
