@@ -619,6 +619,90 @@ proptest! {
     }
 }
 
+// The flag and hint constants are the only place Maverick agrees with the
+// *outside* about what a number means. Every other property in this file reads
+// them symbolically — `WinFlags::FLOAT` wherever a float is expected — so they
+// stay self-consistent under any redefinition and would all pass if `FLOAT`
+// were silently moved to bit 4. Their wire values are protocol commitments:
+// `WinFlags` mirrors `_NET_WM_STATE`, and `SizeHints` mirrors ICCCM 4.1.2.3's
+// `XSizeHints.flags`.
+//
+// So this table is stated as literals, not in terms of the constants. It also
+// pins the two structural facts the rest of the WM relies on and that no other
+// test asserts: the used bits are exactly 0..=9, and no two constants share a
+// bit. `MAXIMIZED_H` is deliberately *not* adjacent to `MAXIMIZED_V` — the two
+// EWMH axes are independent states, and nothing else in the tree would notice
+// if the pair collapsed onto neighbouring bits and a single-axis maximize began
+// reading as a full one.
+#[test]
+fn the_ewmh_and_icccm_bit_layout_is_the_one_the_protocol_defines() {
+    assert_eq!(WinFlags::FLOAT, 1 << 0, "_NET_WM_STATE_FLOAT");
+    assert_eq!(WinFlags::FULLSCREEN, 1 << 1, "_NET_WM_STATE_FULLSCREEN");
+    assert_eq!(WinFlags::URGENT, 1 << 2, "_NET_WM_STATE_DEMANDS_ATTENTION");
+    assert_eq!(WinFlags::NO_FOCUS, 1 << 3, "ICCCM 4.1.7 InputHint false");
+    assert_eq!(WinFlags::FIXED, 1 << 4, "ICCCM 4.1.2.3 P_MIN == P_MAX");
+    assert_eq!(
+        WinFlags::MAXIMIZED_V,
+        1 << 5,
+        "_NET_WM_STATE_MAXIMIZED_VERT"
+    );
+    assert_eq!(WinFlags::STICKY, 1 << 6);
+    assert_eq!(WinFlags::FS_WAS_FLOAT, 1 << 7);
+    assert_eq!(
+        WinFlags::MAXIMIZED_H,
+        1 << 8,
+        "_NET_WM_STATE_MAXIMIZED_HORZ"
+    );
+    assert_eq!(WinFlags::FLOAT_NATIVE, 1 << 9);
+    assert_eq!(
+        WinFlags::MAXIMIZED,
+        WinFlags::MAXIMIZED_V | WinFlags::MAXIMIZED_H
+    );
+
+    assert_eq!(SizeHints::U_S_POSITION, 1 << 0, "XUSPosition");
+    assert_eq!(SizeHints::U_S_SIZE, 1 << 1, "XUSSize");
+    assert_eq!(SizeHints::P_POSITION, 1 << 2, "XPosition");
+    assert_eq!(SizeHints::P_SIZE, 1 << 3, "XPSize");
+    assert_eq!(SizeHints::P_MIN_SIZE, 1 << 4, "XPMinSize");
+    assert_eq!(SizeHints::P_MAX_SIZE, 1 << 5, "XPMaxSize");
+    assert_eq!(SizeHints::P_RESIZE_INC, 1 << 6, "XPResizeInc");
+    assert_eq!(SizeHints::P_ASPECT, 1 << 7, "XPAspect");
+    assert_eq!(SizeHints::P_BASE_SIZE, 1 << 8, "XPBaseSize");
+    assert_eq!(SizeHints::P_WIN_GRAVITY, 1 << 9, "XPWinGravity");
+
+    // Every bit is distinct, and the used range is exactly 0..=9.
+    let used = [
+        WinFlags::FLOAT,
+        WinFlags::FULLSCREEN,
+        WinFlags::URGENT,
+        WinFlags::NO_FOCUS,
+        WinFlags::FIXED,
+        WinFlags::MAXIMIZED_V,
+        WinFlags::STICKY,
+        WinFlags::FS_WAS_FLOAT,
+        WinFlags::MAXIMIZED_H,
+        WinFlags::FLOAT_NATIVE,
+    ];
+    let mut all = 0u16;
+    for (i, f) in used.iter().enumerate() {
+        assert_eq!(
+            f.count_ones(),
+            1,
+            "flag {i} ({f:#06x}) must occupy exactly one bit"
+        );
+        assert_eq!(
+            all & f,
+            0,
+            "flag {i} ({f:#06x}) shares a bit with an earlier one"
+        );
+        all |= f;
+    }
+    assert_eq!(
+        all, 0x03FF,
+        "bits 0..=9 are in use and 10..=15 are reserved"
+    );
+}
+
 // `set`, `clear` and `toggle` are a set algebra over one word, which is what the
 // WM's transition code assumes when it composes several rules at once.
 proptest! {

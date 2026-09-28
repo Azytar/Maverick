@@ -68,6 +68,18 @@ proptest! {
             );
             return Ok(());
         }
+        // Before the step repairs it, a poisoned camera must look *animated* to
+        // whoever is scheduling. The gap test below is `|NaN - target| > 0.5`,
+        // and a comparison against NaN is false — so a camera holding a NaN
+        // reports itself settled unless the non-finite check is consulted first.
+        // The scheduler polls exactly this predicate, so getting it wrong parks
+        // a poisoned camera instead of asking for the repair step.
+        prop_assert!(
+            cam.needs_update(),
+            "a camera holding a non-finite field reported itself settled: \
+             pos={} target={} v={}",
+            cam.position, cam.target, cam.velocity
+        );
         prop_assert!(!cam.step(dt), "a recovered camera reported motion");
         prop_assert!(cam.position.is_finite(), "position stayed poisoned: {}", cam.position);
         prop_assert!(cam.target.is_finite(), "target stayed poisoned: {}", cam.target);
@@ -392,8 +404,134 @@ proptest! {
     }
 }
 
-// `spring_smooth` never lets a poisoned input poison the animated value, never
-// overshoots its target, and snaps exactly onto it once it is close enough.
+// The settle envelope's own boundary.
+//
+// `arrival_is_reported_honestly_and_a_non_positive_delta_never_moves_the_camera`
+// draws its offset uniformly from `0.0..=2.0`, so it lands exactly on the
+// threshold only by luck, and the inclusive/exclusive choice at `gap == 0.5`
+// and `|velocity| == 0.01` is therefore unobserved — `>` and `>=` agree on
+// every input that test generates. That boundary is a real decision: it is what
+// separates "one more frame of animation" from "install the exact endpoint", and
+// it is the predicate the frame scheduler polls.
+//
+// These are probed by bit pattern rather than by sampling, because the values
+// that matter are the neighbours of a threshold, and a uniform distribution over
+// reals almost never produces one.
+const SETTLE_POSITION: f32 = 0.5; // CAMERA_SETTLE_POSITION, px
+const SETTLE_VELOCITY: f32 = 0.01; // CAMERA_SETTLE_VELOCITY, px/s
+
+/// The `f32` `k` representable steps away from `v`, by construction rather than
+/// by arithmetic — `0.5` is exact but `0.01` is not, so `0.01 + 1e-9` is just
+/// `0.01` and only the bit pattern names its neighbour.
+fn ulp_away(v: f32, k: i32) -> f32 {
+    f32::from_bits((v.to_bits() as i32 + k) as u32)
+}
+
+/// A camera holding a non-finite field must look *animated* to whoever is
+/// scheduling it, whatever else it holds.
+///
+/// This is not a restatement of the recovery path: `step` repairs a poisoned
+/// camera, but the frame scheduler polls `needs_update` to decide whether to
+/// ask for that step at all. A camera that reports itself settled is never
+/// stepped, so it is never repaired — the poison simply persists, and whatever
+/// divides by it produces garbage. The comparison is `|position - target| >
+/// 0.5`, and every comparison against a NaN gap is *false*, so the
+/// non-finite check is the only thing standing between a NaN camera and a
+/// scheduler that thinks it is done.
+///
+/// The velocity is deliberately at rest here, so the verdict cannot be reached
+/// through the motion test at all: the finiteness check is the sole thing
+/// deciding the answer. The poison is NaN rather than an infinity for the same
+/// reason — an infinite *target* still makes `|position - target| > 0.5` true,
+/// so the verdict would be reached by accident and the finiteness check would go
+/// unexercised. A NaN gap compares false against everything, which is exactly
+/// the case the check exists to catch.
+#[test]
+fn a_camera_poisoned_in_any_single_field_still_looks_animated() {
+    for poisoned in ["position", "target", "velocity"] {
+        let mut cam = Camera::new(0.0);
+        // At rest, and finite in every field this case does not poison.
+        cam.position = 1_000.0;
+        cam.target = 1_000.0;
+        cam.velocity = 0.0;
+        match poisoned {
+            "position" => cam.position = f32::NAN,
+            "target" => cam.target = f32::NAN,
+            _ => cam.velocity = f32::NAN,
+        }
+        assert!(
+            cam.needs_update(),
+            "a camera poisoned in {poisoned} reported itself settled, so the \
+             scheduler would never ask for the step that repairs it"
+        );
+    }
+}
+
+#[test]
+fn a_camera_exactly_at_both_settle_thresholds_is_settled() {
+    for k in [-2i32, -1, 0] {
+        let gap = ulp_away(SETTLE_POSITION, k);
+        let vel = ulp_away(SETTLE_VELOCITY, k);
+        for (d, v) in [(gap, vel), (gap, 0.0), (0.0, vel)] {
+            let mut cam = Camera::new(0.0);
+            cam.position = d;
+            cam.target = 0.0;
+            cam.velocity = v;
+            assert!(
+                !cam.needs_update(),
+                "a camera at gap={d} ({:?}) and |v|={v} ({:?}) is inside the \
+                 envelope, so it must report settled",
+                d.to_bits(),
+                v.to_bits()
+            );
+        }
+    }
+}
+
+#[test]
+fn one_representable_step_outside_a_settle_threshold_still_animates() {
+    for k in [1i32, 2] {
+        let gap = ulp_away(SETTLE_POSITION, k);
+        let vel = ulp_away(SETTLE_VELOCITY, k);
+        for (d, v) in [(gap, vel), (gap, 0.0), (0.0, vel)] {
+            let mut cam = Camera::new(0.0);
+            cam.position = d;
+            cam.target = 0.0;
+            cam.velocity = v;
+            assert!(
+                cam.needs_update(),
+                "a camera at gap={d} ({:?}) or |v|={v} ({:?}) is outside the \
+                 envelope, so it must still animate",
+                d.to_bits(),
+                v.to_bits()
+            );
+        }
+    }
+}
+
+// The velocity half of the predicate, on its own, and with the sign the caller
+// actually produces: `step` publishes a signed velocity, and `abs` is what makes
+// the verdict direction-independent.
+#[test]
+fn the_settle_verdict_does_not_depend_on_the_direction_of_motion() {
+    for v in [
+        ulp_away(SETTLE_VELOCITY, -1),
+        SETTLE_VELOCITY,
+        ulp_away(SETTLE_VELOCITY, 1),
+    ] {
+        for sign in [1.0f32, -1.0] {
+            let mut cam = Camera::new(0.0);
+            cam.velocity = v * sign;
+            assert_eq!(
+                cam.needs_update(),
+                v > SETTLE_VELOCITY,
+                "|v|={v} travelling {} must have the same verdict as the other way",
+                if sign > 0.0 { "right" } else { "left" }
+            );
+        }
+    }
+}
+
 //
 // The closed form (`k` saturating to 1 for a long frame) exists precisely
 // because the Euler step it replaced overshot for long frames: an overshooting
