@@ -703,6 +703,55 @@ fn the_ewmh_and_icccm_bit_layout_is_the_one_the_protocol_defines() {
     );
 }
 
+// A column added and then removed again must leave the workspace exactly as it
+// found it. This is the round trip every float↔fullscreen transition makes —
+// `apply_fullscreen_topology` promotes a float into a column and demotes it
+// back — and it is the only way a single user-visible toggle pair can leave a
+// permanent mark on the workspace.
+//
+// The pointer that drifts is `focus.column_idx`, and it is load-bearing twice
+// over: `ideal_scroll` reads it to decide where the camera rests, and
+// `best_focus` reads it to decide which window the keyboard goes to. A drift of
+// one is not cosmetic — it centres the camera on a neighbour and sends focus to
+// a window the user never selected, and it accumulates every time the toggle is
+// used.
+#[test]
+fn adding_a_column_and_removing_it_again_restores_the_workspace() {
+    for n in 1..=5usize {
+        for active in 0..n {
+            let mut ws = Workspace::new(0);
+            for i in 0..n {
+                ws.add_tiled(1000 + i as u32, 0.5);
+            }
+            // Put the focus where the case is about, rather than wherever
+            // `add_tiled` happened to leave it (which is the last column).
+            ws.focus.column_idx = active;
+            // Add one more column, exactly as a promoted float is added, then
+            // take it back out. `add_tiled` places the new column after the
+            // focus and moves the focus onto it, so the pair has to be
+            // symmetric.
+            ws.add_tiled(9999, 0.5);
+            ws.remove_window(9999);
+
+            assert_eq!(
+                ws.focus.column_idx, active,
+                "{n} columns, focus {active}: the add/remove round trip left the \
+                 focus on column {} — the camera centres the wrong column and \
+                 best_focus disagrees with mon.focused",
+                ws.focus.column_idx
+            );
+            assert_eq!(
+                ws.columns.len(),
+                n,
+                "{n} columns, focus {active}: the round trip changed the column count"
+            );
+            let want: Vec<WindowId> = (0..n).map(|i| 1000 + i as u32).collect();
+            let got: Vec<WindowId> = ws.columns.iter().flat_map(|c| c.windows.clone()).collect();
+            assert_eq!(got, want, "{n} columns, focus {active}: the tree changed");
+        }
+    }
+}
+
 // `set`, `clear` and `toggle` are a set algebra over one word, which is what the
 // WM's transition code assumes when it composes several rules at once.
 proptest! {

@@ -866,10 +866,26 @@ impl Workspace {
         // column happened to occupy the clamped index, which mis-centers the
         // camera (`ideal_scroll`) and lets `best_focus`/`focused_win` move focus
         // to a neighbour.
+        //
+        // The focused column can itself be among the dropped ones, and then the
+        // count above misses it. `add_tiled` puts a new column at
+        // `focus.column_idx + 1` and moves the focus onto it, so removing that
+        // column — which is exactly what a float↔fullscreen round trip does —
+        // drops the focused column and leaves the pointer one place too far
+        // right. That is a drift rather than a clamp, so it survives the
+        // `.min()` below and repeats on every use of the toggle: the camera ends
+        // up centring a neighbour and `best_focus` names a window the user never
+        // selected. Counting the focused column itself makes the pair symmetric,
+        // so the pointer lands back on the column it started from.
+        let focus_is_dropped = self
+            .columns
+            .get(target)
+            .is_some_and(|c| c.windows.is_empty());
         let removed_before = self.columns[..target.min(self.columns.len())]
             .iter()
             .filter(|c| c.windows.is_empty())
-            .count();
+            .count()
+            + usize::from(focus_is_dropped);
 
         let had = self.columns.len();
         self.columns.retain(|col| !col.windows.is_empty());
