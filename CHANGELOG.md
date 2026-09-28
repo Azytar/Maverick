@@ -7,6 +7,68 @@ All notable changes to this project are documented here. Format follows
 
 ### Fixed
 
+- **A control command could sit in the queue forever.** `ControlHub::drain_commands`
+  read the command queue before the self-pipe, while `push_command` puts the
+  command on the queue and only then writes the wakeup byte. A command enqueued
+  in that window had its byte discarded with the stale ones, and a settled window
+  manager asks `wait_timeout` for no timeout at all — so it blocked in `poll`
+  until an unrelated X event arrived. `maverickctl quit` timed out after two
+  seconds and `dispatch` did nothing at all; 128 commands, the queue's whole
+  capacity, could be stranded in a single drain. The pipe is now read first,
+  which cannot lose a wakeup: the producer writes the byte *after* the command,
+  so a byte still pending when the queue is taken necessarily belongs to a
+  command this call already returned.
+
+- **A rectangle reported a far edge it did not have.** `Rect::right` and
+  `Rect::bottom` saturated the operand instead of the sum, so `x`/`y` — `i32` —
+  combined with a `u32` width or height could leave the `i32` range, and the
+  helper reported an edge short of the real one whenever the origin was far
+  enough left. A rect at `x = -2_000_000_000` that is `3_000_000_000` wide has a
+  right edge of `+1_000_000_000`, which `i32` can express; the old helper
+  reported `+147_483_647`. Two billion pixels of a real window were classified as
+  outside it by the pointer hit test, `State::mon_at` and the occlusion cull. The
+  sum is now formed in `i64` and the result saturated, which is exact whenever
+  the far edge is representable and identical to the old behaviour wherever it
+  is not.
+
+- **`SIGHUP` killed the window manager without running its cleanup.** It was the
+  one signal a user reaches that was left on its inherited default, and because
+  cleanup is only reached by the event loop returning, ending a `startx` session
+  by closing the terminal left the session record in the runtime directory and
+  the control socket bound — with `maverickctl prune` the only way to clear
+  them. It now takes the same bounded shutdown every other stop signal gets.
+
+- **`Monitor::new` could build a monitor that panicked on first use.** The
+  constructor honoured `n_tags` verbatim while `reconcile_workspaces` clamped it
+  to at least one, so a zero tag count produced a monitor whose `ws()` asserts —
+  on the path the backend's RandR and Xinerama detection actually calls.
+
+- **The delegated image decoder spent more time not decoding than decoding.**
+  `decode_external` tried `ffmpeg` first, but `-f image2pipe -pix_fmt rgb24`
+  leaves the muxer to choose an encoder, it chooses the one matching the input,
+  and ffmpeg wrote a JPEG stream to stdout. The PPM parser rejected that and the
+  loop moved on to ImageMagick, so the pixels were never wrong — but every
+  delegated decode paid a full spawn-and-discard first. Measured over ten
+  decodes, that wasted spawn cost 143 ms per invocation against ImageMagick's
+  18 ms, so probing ffmpeg first spent about eight times the latency of the
+  decoder that would have answered. The order is now ImageMagick first, ffmpeg
+  last, and `-vcodec ppm` makes that last resort able to decode at all rather
+  than fail.
+
+- **A swapchain could be created with an extent the spec forbids.** The check for
+  the `0xFFFFFFFF` "you choose" marker looked only at `current_extent.width`,
+  while `vkCreateSwapchainKHR` requires the image extent to equal
+  `currentExtent` whenever the surface has one. The per-axis clamp also now
+  orders the surface's min and max before clamping, because `u32::clamp` panics
+  when its minimum exceeds its maximum — a driver report could crash the
+  compositor while it did nothing but present.
+
+- **Driver-supplied strings were read without bounds.** `CStr::from_ptr` over
+  the raw `deviceName` and `extension_name` arrays assumed the driver
+  NUL-terminated them. They now go through ash's own bounded accessors, so a
+  driver that does not cannot make the read run past the array; an unterminated
+  device name is reported as unnamed rather than read off the end.
+
 - **A stopped session claimed every process on the machine.** `process list` on a
   stopped session reported 200+ processes beginning at pid 1, and `process kill`
   would terminate any of them, reporting success. Two independent causes, both
@@ -45,8 +107,6 @@ All notable changes to this project are documented here. Format follows
   non-zero status — the same rule `msg` already applied to the same protocol.
   A peer that closes without answering is also now a failure rather than a
   silent success.
-
-### Changed
 
 - **The installer installs for the current user by default.** A bare
   `./install.sh` now installs into `$HOME/.local` and needs no privileges;
@@ -201,6 +261,30 @@ All notable changes to this project are documented here. Format follows
   gained a new context" path now settles the rect through the new pure helper
   `layout::settle_float_in_workarea` so the first arrange of the new context
   has nothing to correct (one configure, zero visible jumps).
+
+### Changed
+
+- **`libc` is now used in `maverick-sys` for exactly one reason, and it is
+  written down.** Signal disposition has no safe alternative here: rustix does
+  not implement `sigaction` — its own `src/not_implemented.rs` carries a literal
+  `not_implemented!(sigaction)` — so `SA_NOCLDWAIT`, `SA_RESTART` and the
+  `extern "C"` trampolines are irreducible regardless of what else migrates.
+  Everything around them moved to rustix, which was already a direct dependency
+  and already in the lockfile, so **no package was added**. The peer-credential
+  read is the one that mattered: it started from a zeroed `ucred`, where a zero
+  pid is indistinguishable from a real answer and only a defensive check stood
+  between that and authorising whoever holds uid 0's slot. rustix's `UCred.pid`
+  is a `Pid(NonZeroI32)`, so that value has no representation to construct.
+
+  Two sites deliberately keep `libc`. `proc.rs`'s `send` passes the caller's
+  signal number straight through so a refused signal is reported with the
+  *kernel's* `EINVAL`; rustix's `Signal` covers only the named signals and would
+  have rejected an invalid number locally, which is the exact thing a test
+  asserts against. And the compositor trace's clock anchor keeps
+  `clock_gettime(CLOCK_MONOTONIC)`, because lining a trace dump up with another
+  process's log needs the absolute value and `std::time::Instant` exposes only a
+  duration.
+
 
 ### Changed
 
