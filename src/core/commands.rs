@@ -974,6 +974,28 @@ impl Command for ToggleFloat {
         if ws_i >= state.monitors[mi].workspaces.len() {
             return CommandReport::new(cmds);
         }
+        // A fullscreen window may only be a float if it is an *exclusive*
+        // overlay. `FullscreenPolicy::True` is one wherever it lives —
+        // `present_into` rewrites its entry to `mon.screen` regardless of the
+        // list it is in — but `FullscreenPolicy::Normal` means "a ribbon column
+        // that happens to fill the screen", and both places that know how to
+        // present that look at `ws.columns` only. Floating one would therefore
+        // present it as an ordinary workarea float while
+        // `_NET_WM_STATE_FULLSCREEN` still tells the client it fills the screen.
+        //
+        // The state is reachable — fullscreen, navigate to a sibling column
+        // (which yields exclusive presentation and demotes the policy to
+        // Normal, keeping the FULLSCREEN flag), then float it — so the toggle is
+        // refused here rather than the state being made presentable. Leaving
+        // fullscreen first is the user's to ask for; a keybinding that silently
+        // dropped a fullscreen would be the more surprising half.
+        if state
+            .clients
+            .get(&win)
+            .is_some_and(|c| c.is_fullscreen() && !c.is_fullscreen_overlay())
+        {
+            return CommandReport::new(cmds);
+        }
         if is_float {
             state.monitors[mi].workspaces[ws_i].remove_window(win);
             state.monitors[mi].workspaces[ws_i].add_tiled(win, cfg.column_width);

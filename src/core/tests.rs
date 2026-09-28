@@ -4472,6 +4472,103 @@ mod unit_tests {
         );
     }
 
+    /// Whether `win` sits in a column, which is the only place a non-exclusive
+    /// fullscreen window is presented from: `fs_ctx` decides the fullscreen
+    /// ribbon columns from `ws.columns` and `present_into` defers to it.
+    fn is_fullscreen_ribbon_column(
+        state: &crate::types::State,
+        mi: usize,
+        ws_i: usize,
+        win: crate::types::WindowId,
+    ) -> bool {
+        state.monitors[mi].workspaces[ws_i]
+            .columns
+            .iter()
+            .any(|c| c.windows.contains(&win))
+    }
+
+    // A fullscreen window's *presentation* depends on its policy, and only one
+    // of the two policies survives being a float.
+    //
+    // `FullscreenPolicy::True` is an exclusive overlay: `present_into` rewrites
+    // its entry to `mon.screen` whatever list the window happens to live in, so
+    // a True-policy fullscreen float is well defined. `FullscreenPolicy::Normal`
+    // is the opposite — it means "a ribbon column that happens to fill the
+    // screen" — and both places that know how to present it look at `ws.columns`
+    // only (`fs_ctx` decides which columns are fullscreen ribbon columns;
+    // `present_into`'s overlay branch requires the True policy). So a Normal
+    // fullscreen window in `ws.floats` is presented as an ordinary workarea
+    // float while `_NET_WM_STATE_FULLSCREEN` still tells the client it fills the
+    // screen. Nothing bridges that, and nothing notices.
+    //
+    // The state is reachable: tile a window, fullscreen it, navigate to a
+    // sibling column — which yields exclusive presentation and drops the policy
+    // to Normal, keeping the FULLSCREEN flag — then float it.
+    //
+    // So the invariant is precise, and narrower than "never both": a fullscreen
+    // window that is *not* an exclusive overlay must be a column.
+    #[test]
+    fn only_an_exclusive_overlay_may_be_a_floating_fullscreen() {
+        use crate::core::commands::{Command, FocusDirection, ToggleFloat, ToggleFullscreen};
+        use crate::types::{Client, Dir, FullscreenPolicy, Rect};
+
+        for policy in [FullscreenPolicy::True, FullscreenPolicy::Normal] {
+            let mut engine = setup_engine();
+            let mi = engine.state.sel_mon;
+            let ws_i = engine.state.monitors[mi].active_ws;
+            // Two tiled columns, so horizontal navigation has somewhere to go.
+            for win in [1u32, 2] {
+                let mut c = Client::new(win, mi, ws_i);
+                c.geom = Rect::new(0, 0, 800, 600);
+                c.saved_geom = c.geom;
+                engine.state.add_client(c);
+                engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, 1.0);
+            }
+            engine.state.monitors[mi].focused = Some(1);
+            engine.state.monitors[mi].focus_stack = vec![1, 2];
+
+            // Fullscreen window 1, then navigate to its sibling.
+            ToggleFullscreen(Some(1)).execute(&mut engine.state, &mut engine.cfg);
+            {
+                let c = engine.state.clients.get_mut(&1).expect("client 1");
+                assert!(c.is_fullscreen(), "the window must be fullscreen");
+                c.fullscreen_policy = policy;
+            }
+            FocusDirection(Dir::Right).execute(&mut engine.state, &mut engine.cfg);
+            {
+                let c = engine.state.clients.get(&1).expect("client 1");
+                assert_eq!(
+                    c.fullscreen_policy,
+                    FullscreenPolicy::Normal,
+                    "navigating away is what demotes the policy, and is what                      makes the float case reachable"
+                );
+            }
+
+            // Now float it.
+            ToggleFloat(Some(1)).execute(&mut engine.state, &mut engine.cfg);
+            let c = engine.state.clients.get(&1).expect("client 1");
+            if c.is_float() {
+                assert!(
+                    c.is_fullscreen_overlay(),
+                    "a floating fullscreen window must be an exclusive overlay: a \
+                     Normal-policy one is presented as an ordinary float while \
+                     _NET_WM_STATE_FULLSCREEN still claims the screen"
+                );
+            } else {
+                // The toggle was refused, so the window is still a column — and a
+                // Normal-policy fullscreen column is the *legitimate* ribbon
+                // fullscreen, which `fs_ctx` sizes and the camera targets. What
+                // must never happen is the window being in neither list, where no
+                // presentation path reaches it at all.
+                assert!(
+                    !c.is_fullscreen() || is_fullscreen_ribbon_column(&engine.state, mi, ws_i, 1),
+                    "a fullscreen window left in neither ws.columns nor an \
+                     exclusive overlay is presented by no path at all"
+                );
+            }
+        }
+    }
+
     // `WinFlags::STICKY` is a modifier of `FLOAT`, not an independent flag: its
     // own documentation says a sticky window "is treated as floating: it is
     // excluded from the column layout and shown on every workspace of its
