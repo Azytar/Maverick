@@ -908,6 +908,104 @@ else
 fi
 echo
 
+# ── 16. a lost X server leaves no record of itself ───────────────────────────
+echo "16. X server loss"
+# The X server is killed *directly*, read from `session list --json`. Going
+# through `session stop` would make every assertion below vacuous: that path runs
+# `lifecycle::teardown`, which calls `identity::cleanup_meta` itself, so the
+# record would be gone whether or not the window manager ever did anything.
+#
+# A window manager that loses its X server still has to make its own record
+# truthful: no identity file, no control socket, and a log that says which half
+# of the teardown ran. Run twice, because the two configurations fail in
+# different ways: with the compositor compiled out, every X call in the teardown
+# is a void request that fails silently, so a shutdown that runs the X half
+# anyway looks perfect; with the compositor on, dropping it releases GLX
+# resources on a display whose server is gone, and libX11 answers that with an
+# I/O error rather than with a return value.
+for XD_NOCOMP in "" "--no-compositor"; do
+    XDNAME="xdis${XD_NOCOMP:+-nc}"
+    "$MAVERICKCTL_BIN" session remove "$XDNAME" --force >/dev/null 2>&1
+    XD_EXTRA=""
+    [ -n "$XD_NOCOMP" ] && XD_EXTRA="compositor off" || XD_EXTRA="compositor on"
+    # shellcheck disable=SC2086
+    if "$MAVERICKCTL_BIN" session create "$XDNAME" --binary "$MAVERICK_BIN" \
+            --resolution 640x480 $XD_NOCOMP >/dev/null 2>&1; then
+        ok "[$XD_EXTRA] the session was created"
+    else
+        bad "[$XD_EXTRA] could not create the session"
+        continue
+    fi
+    # A real window in it, so the compositor owns real state at the moment the
+    # server dies. Without one there is nothing for the compositor's teardown to
+    # reach, and the compositor case would quietly stop testing anything.
+    XAUTHORITY="$XDG_RUNTIME_DIR/maverick/$XDNAME/Xauthority" \
+        "$CLIENT" >/dev/null 2>&1 &
+    XDC=$!
+    sleep 1
+    read -r XD_XPID XD_WMPID <<EOF
+$("$MAVERICKCTL_BIN" session list --json | python3 -c "
+import json,sys
+try:
+    s = next(x for x in json.load(sys.stdin)['sessions'] if x['name']=='$XDNAME')
+    print(s['x_pid'] or 0, s['pid'] or 0)
+except Exception:
+    print(0, 0)")
+EOF
+    if [ "${XD_XPID:-0}" = "0" ]; then
+        bad "[$XD_EXTRA] the session reports no X server pid"
+        kill -9 "$XDC" 2>/dev/null
+        "$MAVERICKCTL_BIN" session remove "$XDNAME" --force >/dev/null 2>&1
+        continue
+    fi
+    kill -9 "$XDC" 2>/dev/null
+    kill -9 "$XD_XPID" 2>/dev/null
+    XD_GONE=0
+    for i in $(seq 1 60); do
+        kill -0 "$XD_WMPID" 2>/dev/null || { XD_GONE=1; break; }
+        sleep 0.1
+    done
+    if [ "$XD_GONE" = 1 ]; then
+        ok "[$XD_EXTRA] the window manager exited after its X server was killed"
+    else
+        bad "[$XD_EXTRA] the window manager survived the death of its X server"
+        kill -9 "$XD_WMPID" 2>/dev/null
+    fi
+    XD_DIR="$XDG_RUNTIME_DIR/maverick/$XDNAME"
+    if [ -e "$XD_DIR/$XDNAME.json" ]; then
+        bad "[$XD_EXTRA] the identity record outlived the process ($XD_DIR/$XDNAME.json)"
+    else
+        ok "[$XD_EXTRA] the identity record is gone"
+    fi
+    if [ -e "$XD_DIR/control.sock" ]; then
+        bad "[$XD_EXTRA] the control socket outlived the process"
+    else
+        ok "[$XD_EXTRA] the control socket is gone"
+    fi
+    XD_LOG="$XD_DIR/maverick.log"
+    if grep -q 'X11 connection lost' "$XD_LOG" 2>/dev/null; then
+        ok "[$XD_EXTRA] the log says the connection was lost"
+    else
+        bad "[$XD_EXTRA] the log never mentions the lost connection"
+    fi
+    if grep -q 'X teardown skipped' "$XD_LOG" 2>/dev/null; then
+        ok "[$XD_EXTRA] the log says the X half of the teardown was skipped"
+    else
+        bad "[$XD_EXTRA] the log does not say the X teardown was skipped"
+    fi
+    # libX11's I/O error handler prints this and exits; one after the disconnect
+    # means the shutdown reached back into a server that was already gone.
+    XD_AFTER=$(awk '/X11 connection lost/{seen=1} seen' "$XD_LOG" 2>/dev/null \
+        | grep -c 'broken (explicit kill or server shutdown)' || true)
+    if [ "${XD_AFTER:-0}" -eq 0 ]; then
+        ok "[$XD_EXTRA] no request reached the dead server"
+    else
+        bad "[$XD_EXTRA] $XD_AFTER 'X connection broken' line(s) after the disconnect"
+    fi
+    "$MAVERICKCTL_BIN" session remove "$XDNAME" --force >/dev/null 2>&1
+done
+echo
+
 echo "-------------------------------------------"
 printf 'passed %d, failed %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
