@@ -66,10 +66,29 @@ fn the_real_chain() -> Signal {
         .on_sigcont(libc::SIGCONT)
 }
 
+/// How long a test waits for a condition the kernel satisfies essentially at
+/// once, before deciding the condition never arrived.
+///
+/// This bounds the *test harness*, not the behaviour under test. An installed
+/// handler is delivered within microseconds and an `SA_NOCLDWAIT` child is
+/// reaped by the kernel as it exits, so neither outcome depends on elapsed
+/// time. The bound exists only so that a genuinely absent handler turns into a
+/// failed test rather than a hung test binary, and a generous value costs
+/// nothing when the condition holds.
+///
+/// It is set well above the time the condition needs because these tests
+/// mutate *this process's* signal dispositions while holding only an in-process
+/// mutex. That serialises the tests against each other, not against the
+/// scheduler: on a loaded machine the test thread can be descheduled for whole
+/// seconds, and a short bound then reports a handler that worked perfectly as
+/// one that was never installed. A tight deadline here manufactures failures
+/// that are load artefacts, which is the one thing a signal test must not do.
+const SETTLE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Poll `flag` to a deadline rather than sleeping: the property is "the handler
 /// ran", and how quickly the kernel gets round to it is not the test's business.
 fn wait_for(mut flag: impl FnMut() -> bool) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + SETTLE_DEADLINE;
     loop {
         if flag() {
             return true;
@@ -174,7 +193,7 @@ fn children_are_auto_reaped_rather_than_left_as_zombies() {
     let pid = child.id();
     drop(child);
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + SETTLE_DEADLINE;
     while let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         let state = stat
             .rsplit_once(')')
