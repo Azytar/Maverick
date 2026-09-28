@@ -638,12 +638,13 @@ impl WindowManager {
     /// Give up on the compositor without releasing anything, then drop it.
     ///
     /// Required, not an optimisation. `Compositor::drop` runs `disable()`, whose
-    /// `renderer.destroy()` reaches `glXDestroyWindow`; on a display whose
-    /// server is gone that call lands in libX11's I/O error handler, which
-    /// prints "X connection … broken" and calls `exit(1)`. Nothing unwinds, no
-    /// other destructor runs, and the process is gone before it can remove its
-    /// identity record or write its trace — so the destructor that looks like
-    /// tidying is the thing that has to be stopped.
+    /// `renderer.destroy()` reaches `glXDestroyWindow` on a display whose server
+    /// is gone. That request does not report failure: it returns success into a
+    /// connection libX11 has already given up on, and the process is then ended
+    /// by libX11's I/O error handler at the next operation that waits for a
+    /// reply or at the display's close — with no unwinding, so nothing else in
+    /// the shutdown runs and the session's record is never corrected. The
+    /// destructor that looks like tidying is the thing that has to be stopped.
     fn abandon_compositor(&mut self) {
         if let Some(mut compositor) = self.compositor.take() {
             compositor.abandon();
