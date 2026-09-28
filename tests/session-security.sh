@@ -44,8 +44,21 @@ echo "   session:     $SESSION"
 echo
 
 # ── 0. a session to attack ────────────────────────────────────────────────────
-if ! "$MAVERICKCTL_BIN" session list 2>/dev/null | grep -qE "^${SESSION}[[:space:]]"; then
-    echo "creating session '$SESSION'…"
+# A session that exists but is not *running* is worse than no session: every
+# assertion below reads a file the running session would have written, so a
+# crashed leftover produces two failures that say nothing about permissions or
+# about authentication. `crashed` and `stopped` are exactly the states to
+# recreate; `running` is the one to keep, since that is the state under test.
+# Only existence was checked before, which is why a session killed by an
+# unrelated test run turned this suite red with no product change involved.
+SEC_STATE=$("$MAVERICKCTL_BIN" session list 2>/dev/null | awk -v s="$SESSION" '$1==s {print $NF; exit}')
+if [ "$SEC_STATE" != "running" ]; then
+    if [ -n "$SEC_STATE" ]; then
+        echo "removing '$SESSION' (state: ${SEC_STATE:-unknown}) and creating it fresh…"
+        "$MAVERICKCTL_BIN" session remove "$SESSION" --force >/dev/null 2>&1 || true
+    else
+        echo "creating session '$SESSION'…"
+    fi
     "$MAVERICKCTL_BIN" session create "$SESSION" --binary "$MAVERICK_BIN" \
         --resolution 640x480 >/dev/null || { echo "could not create the session"; exit 1; }
 fi
