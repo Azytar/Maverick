@@ -14,16 +14,14 @@
 //! returns out of the middle of the function and everything after it is gone.
 //! Both halves of this module exist so that cannot happen again:
 //!
-//! - [`teardown_local`] carries no connection of any kind, so it is structurally
+//! - [`run_local`] carries no connection of any kind, so it is structurally
 //!   incapable of issuing an X request and cannot be skipped by one.
 //! - [`LiveX`] is the only way to reach the connection, and it is only
 //!   constructible while the connection still works, so the X half cannot be
 //!   *entered* with a dead connection.
 //!
-//! The two together are what let [`WindowManager::shutdown`] say which half it
+//! The two together are what let `WindowManager::shutdown` say which half it
 //! skipped and why, instead of losing both and reporting nothing.
-//!
-//! [`WindowManager::shutdown`]: super::WindowManager::shutdown
 
 use maverick_sys::ControlServer;
 use maverick_x11::XConn;
@@ -58,8 +56,11 @@ pub enum ShutdownReason {
 ///   and issued requests anyway would be trusting a liveness check over the
 ///   event that produced the shutdown in the first place.
 /// - the connection is still usable, because a request on a dead one does not
-///   fail — it can reach `glXDestroyWindow`, whose I/O error handler ends the
-///   process with no unwinding and no local teardown.
+///   report that it failed. It reaches the server that is not there, returns
+///   success, and leaves the connection in a state where libX11's I/O error
+///   handler ends the process without unwinding — at the next operation that
+///   waits for a reply, or at the display's close — which is after the local
+///   half would have run.
 ///
 /// The local half is not in this table because it has no condition: it runs
 /// every time.
@@ -74,9 +75,9 @@ pub(crate) const fn runs_x_half(reason: ShutdownReason, x_live: bool) -> bool {
 /// permission to issue an X request, and there is no other way to obtain one.
 ///
 /// This is what makes "cannot be called with a dead connection" a property of
-/// the types rather than of a review: [`teardown_x`](super::WindowManager) takes
-/// one, and a `None` from `acquire` is the only alternative, which is the local
-/// half alone.
+/// the types rather than of a review: the window manager's X half of a shutdown
+/// takes one, and a `None` from `acquire` is the only alternative — which is the
+/// local half, alone.
 pub(crate) struct LiveX<'a> {
     conn: &'a XConn,
 }

@@ -3696,13 +3696,14 @@ impl Compositor {
 
     /// Give up on every X/GLX resource without issuing a request.
     ///
-    /// Required, not an optimisation: `Drop` calls [`Self::disable`], whose
-    /// `renderer.destroy()` reaches `glXDestroyWindow`, and on a display whose
-    /// server is gone that call lands in libX11's I/O error handler — which
-    /// prints "X connection … broken" and calls `exit(1)`. Nothing unwinds, no
-    /// other destructor runs, and the process is gone before it can remove its
-    /// identity record or write its trace. The destructor that looks like
-    /// tidying is the thing that has to be stopped.
+    /// Required, not an optimisation. `Drop` calls [`Self::disable`], whose
+    /// `renderer.destroy()` reaches `glXDestroyWindow` on a display whose server
+    /// is gone — and a request like that does not come back as an error. It is
+    /// written to a socket with no peer, returns success, and leaves the
+    /// connection in a state where libX11's I/O error handler ends the process
+    /// without unwinding: no other destructor, no `Drop` of the fields around
+    /// this one, no record of the session written on the way out. The destructor
+    /// that looks like tidying is the thing that has to be stopped.
     ///
     /// Setting `disabled` first makes `disable()` a no-op on the way out of
     /// `drop`, while Rust still frees the CPU-side state. The server is already
