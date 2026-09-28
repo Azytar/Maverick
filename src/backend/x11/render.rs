@@ -204,6 +204,27 @@ const MAX_MASKED_FRAME: u32 = i16::MAX as u32 + 1;
 /// narrowed. A frame past [`MAX_MASKED_FRAME`] has no exact mask; describing the
 /// part that fits is strictly better than wrapping, and matches what the
 /// compositor already does for the overlay shape (`update_overlay_shape`).
+/// The outer frame a window's border produces: the window plus the border on
+/// both sides, in each axis.
+///
+/// `bw` here is the model's border, which is user config and therefore bounded
+/// by nothing this arithmetic can assume — `userconfig` copies `border_width`
+/// into `Cfg` without a range check, `SetBorderWidth` overwrites it from IPC, and
+/// `manage` copies it into `Client::border_w`. A `border_width` of 2147483648 in
+/// the config file reaches here, and plain `2 * bw` overflows `u32` at
+/// `bw >= 2^31`, which a debug build traps ("attempt to multiply with overflow")
+/// rather than wrapping.
+///
+/// A frame is a description of pixels, so saturating is the honest failure: one
+/// that cannot be represented is clamped rather than wrapped into a frame that
+/// describes nothing. It is factored out of `sync_rounded_frame` — which needs a
+/// live display — so the arithmetic can be exercised without one; that is the
+/// only thing keeping the saturating operators honest.
+pub(crate) fn outer_frame(geom: Rect, bw: u32) -> (u32, u32) {
+    let frame = bw.saturating_mul(2);
+    (geom.w.saturating_add(frame), geom.h.saturating_add(frame))
+}
+
 fn rounded_frame_regions(w: u32, h: u32, radius: i32, bw: u32) -> (Vec<Rectangle>, Vec<Rectangle>) {
     let w = w.min(MAX_MASKED_FRAME);
     let h = h.min(MAX_MASKED_FRAME);
@@ -1007,18 +1028,10 @@ impl WindowManager {
             } else {
                 self.engine.cfg.corner_radius as i32
             };
-            // The frame is the window plus the border on both sides. `bw` here
-            // is the model's border, which is user config and therefore not
-            // bounded by anything the arithmetic below can assume — `2 * bw`
-            // overflows `u32` at `bw >= 2^31`, which a `border_width` of
-            // 2147483648 in the config file reaches, and a debug build traps it
-            // ("attempt to multiply with overflow") rather than wrapping. The
-            // frame is a description of pixels, so saturating is the correct
-            // failure: a frame that cannot be represented is clamped, exactly as
-            // `rounded_frame_regions` clamps it to CARD16.
-            let frame = bw.saturating_mul(2);
-            let outer_w = geom.w.saturating_add(frame);
-            let outer_h = geom.h.saturating_add(frame);
+            // The frame is the window plus the border on both sides; see
+            // `outer_frame` for why that arithmetic is saturating and why it
+            // lives outside this method.
+            let (outer_w, outer_h) = outer_frame(geom, bw);
             // The Shape `BOUNDING` mask depends only on (outer_w, outer_h, r,
             // bw), never on position. `emit_geometry` fires on every Configure
             // effect, including pure moves (camera scroll re-Configures every
@@ -2990,6 +3003,63 @@ mod tests {
                 w, h, r, bw
             );
         }
+    }
+
+    /// A `border_width` of 2147483648 in the config file reaches the frame
+    /// arithmetic, and plain `2 * bw` overflows `u32` there — which a debug
+    /// build traps rather than wrapping. `outer_frame` is factored out of
+    /// `sync_rounded_frame` precisely so this is testable without a display;
+    /// before that, the saturating operators had no way to be exercised at all,
+    /// and a sabotage audit confirmed they survived.
+    #[test]
+    fn an_unrepresentable_border_saturates_the_frame_instead_of_trapping() {
+        for bw in [
+            0u32,
+            1,
+            2,
+            1_000_000,
+            1 << 30,
+            (1 << 31) - 1,
+            1 << 31,
+            u32::MAX,
+        ] {
+            let (w, h) = outer_frame(Rect::new(0, 0, 1920, 1080), bw);
+            assert!(w > 0 && h > 0, "a frame must stay positive for bw={bw}");
+            assert_eq!(w, 1920u32.saturating_add(bw.saturating_mul(2)));
+            assert_eq!(h, 1080u32.saturating_add(bw.saturating_mul(2)));
+        }
+        // The exact value a config file can carry, named rather than generated.
+        // `1 + 2 * 2^31` is 4294967297, one past `u32::MAX`: wrapping would give
+        // 1 and plain `2 * bw` would have trapped before reaching this line.
+        let (w, h) = outer_frame(Rect::new(0, 0, 1, 1), 2_147_483_648);
+        assert_eq!(
+            w,
+            u32::MAX,
+            "the frame saturates at u32::MAX, it does not wrap"
+        );
+        assert_eq!(h, u32::MAX, "same on the other axis");
+    }
+
+    /// The two CARD16 boundaries are different clamps and must not be confused:
+    /// `outer_frame` saturates the *extent* arithmetic, and
+    /// `rounded_frame_regions` then reduces the result to what an `i16` origin
+    /// can address. A `border_width` of 40 000 produces a frame that is
+    /// representable as an extent and not as an origin.
+    #[test]
+    fn the_frame_clamp_and_the_mask_clamp_are_both_reached() {
+        let bw = 40_000;
+        let (outer_w, outer_h) = outer_frame(Rect::new(0, 0, 1, 1_000), bw);
+        assert_eq!(
+            (outer_w, outer_h),
+            (80_001, 81_000),
+            "frame is 1 px plus 2*bw"
+        );
+        let (outer, _) = rounded_frame_regions(outer_w, outer_h, 10, bw);
+        assert_eq!(
+            mask_extents(&outer),
+            (0, 0, MAX_MASKED_FRAME as i32, MAX_MASKED_FRAME as i32),
+            "and the mask clamps that frame to the i16 origin range"
+        );
     }
 
     /// The reproducer for the wrap above, pinned so the exact arithmetic stays
