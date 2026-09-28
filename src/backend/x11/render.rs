@@ -312,12 +312,33 @@ pub(crate) fn adopt_float_request(g: Rect) -> Rect {
 /// every client-driven geometry sink re-parks with it, so a client that resizes
 /// itself while parked can never resurrect its window onto the workspace the
 /// user is actually looking at.
+/// The park has to survive the X server, not just Maverick.
+///
+/// `ConfigureWindow`'s x is INT16 and an out-of-range x is *silently truncated*
+/// rather than rejected — measured on X.Org 1.24.1, `x = -65735` is stored as
+/// `-199`, with no protocol error. A park at `-(w + 200)` therefore only stays
+/// left of the origin while `w + 200` fits in INT16, i.e. `w <= 32568`. Past
+/// that the negation wraps, and a client that had resized its float to 63 417 px
+/// would have its park land at `x = -199` — a window that covers the whole
+/// workspace the user is actually looking at, which is the exact outcome the
+/// park exists to prevent.
+///
+/// The leftmost coordinate the server can hold is `i16::MIN`, so no window
+/// wider than the remainder of that range can be parked off-screen to the left
+/// at all. Such a window is clamped to the widest that can, *for as long as it
+/// stays parked*: the size describes hidden pixels, the un-park re-sends the
+/// real `Client::geom` (see `hide_offscreen`), and a parked window's own
+/// `ConfigureRequest` is answered by re-parking rather than adopted, so nothing
+/// the client can observe depends on the parked width.
 pub(crate) fn parked_rect(g: Rect) -> Rect {
-    // i32 conversion is saturating: a pathological width must not overflow the
-    // negation and park the window at an absurd (visible) coordinate.
-    let w = g.w.min(i32::MAX as u32) as i32;
-    let off_x = w.saturating_add(200).saturating_neg();
-    Rect::new(off_x, g.y, g.w, g.h)
+    // `-(w + MARGIN)` must stay inside INT16, so this is the widest window whose
+    // whole frame still fits left of the origin.
+    const MARGIN: i32 = 200;
+    const MAX_OFFSCREEN_W: u32 = (-(i16::MIN as i32) - MARGIN) as u32;
+
+    let w = g.w.min(MAX_OFFSCREEN_W);
+    let off_x = w as i32 + MARGIN;
+    Rect::new(-off_x, g.y, w, g.h)
 }
 
 /// How many `transient_parent` links a single ownership question may follow.
@@ -3104,12 +3125,10 @@ mod tests {
             let parked = parked_rect(Rect::new(4321, y, w, h));
             prop_assert!(parked.x < 0, "a parked window must sit left of the origin: x={}", parked.x);
             prop_assert!(
-                parked.y == y && parked.w == w && parked.h == h,
-                "parking moves a window, it does not resize it: {:?}",
+                parked.y == y && parked.h == h,
+                "parking moves a window, it does not resize it vertically: {:?}",
                 parked
             );
-            let wire_right = i64::from(parked.x) + i64::from(w.min(u16::MAX as u32));
-            prop_assert!(wire_right <= 0, "a parked window must not reach x=0: right={}", wire_right);
             prop_assert_eq!(
                 parked_rect(Rect::new(-9999, y, w, h)),
                 parked,
@@ -3121,7 +3140,68 @@ mod tests {
                 "re-parking a parked window must not move it"
             );
         }
+    }
 
+    /// The invariant `prop_parked_rect_is_off_screen_and_stable` has to be
+    /// stated against, because the arithmetic above it was not: the X server
+    /// does not receive the rect Maverick holds. `ConfigureWindow`'s x/y are
+    /// INT16 and its width/height are CARD16, and the server *silently*
+    /// truncates an out-of-range x rather than raising `BadValue` — measured on
+    /// X.Org 1.24.1, `x = -65735` is stored as `-199`, with no error.
+    ///
+    /// So a park at `-(w + 200)` only stays off-screen while `w + 200` fits in
+    /// INT16, i.e. `w <= 32568`. Above that the negation wraps and the window
+    /// lands back on the screen the user is looking at — at a width of 65 535 it
+    /// covers it entirely. The whole point of the park is that a client resizing
+    /// itself while parked cannot resurrect its window on the active workspace,
+    /// so the property has to be checked on the geometry the server keeps.
+    #[test]
+    fn the_server_never_stores_a_parked_window_on_screen() {
+        // The x the server keeps, for the x Maverick sends.
+        let server_x = |x: i32| x as i16 as i32;
+        // The w the server keeps, for the w Maverick sends.
+        let server_w = |w: u32| w.clamp(1, u16::MAX as u32) as i32;
+
+        for w in (0u32..=u16::MAX as u32).step_by(97) {
+            let parked = parked_rect(Rect::new(0, 0, w, 10));
+            let right = server_x(parked.x) + server_w(parked.w);
+            assert!(
+                right <= 0,
+                "a parked {w}px window is stored at x={} and reaches {right}, \
+                 which is on screen",
+                server_x(parked.x)
+            );
+        }
+    }
+
+    /// The width that actually broke: `-(w + 200)` left INT16 at `w = 32569`,
+    /// and by `w = 65535` the negation had wrapped so far that the server stored
+    /// `x = -199` — a 65 535 px window covering the whole screen. The server is
+    /// handed the *parked* width, not the client's, so that is what the right
+    /// edge has to be measured against.
+    #[test]
+    fn a_parked_window_wider_than_int16_cannot_come_back_on_screen() {
+        let parked = parked_rect(Rect::new(0, 0, 65_535, 10));
+        assert_eq!(
+            parked.x as i16 as i32, parked.x,
+            "a park at {} must be representable as the INT16 the server stores, \
+             or the server keeps {} instead",
+            parked.x, parked.x as i16 as i32
+        );
+        let right = (parked.x as i16 as i32) + parked.w.min(u16::MAX as u32) as i32;
+        assert!(
+            right <= 0,
+            "the stored geometry reaches x={right}: a parked window is visible"
+        );
+        // And the window is still parked, i.e. narrower than the client asked for
+        // but never on screen.
+        assert!(
+            parked.w < 65_535,
+            "a window too wide for INT16 parking must be narrowed, not left covering the screen"
+        );
+    }
+
+    proptest! {
         /// `WM_TRANSIENT_FOR` is unvalidated client input — a client can point
         /// a window at itself or two windows at each other — so the ownership
         /// walk is bounded and fail-safe. Both obligations are checked against
