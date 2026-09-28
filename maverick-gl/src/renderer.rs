@@ -1740,6 +1740,22 @@ impl Renderer {
     /// are cached per program, so an earlier, already-replaced `ShaderId` would
     /// write its uniforms into whichever locations that program's own layout
     /// happened to leave at the cached indices.
+    /// Draw a full-screen quad with a caller-supplied program.
+    ///
+    /// The program bound before this call is restored afterwards. Binding a
+    /// foreign program changes the GL *current* program, and every `glUniform*`
+    /// in `draw`/`draw_raw` addresses a location belonging to `self.prog`. A
+    /// `glUniform*` naming a program that is not current raises
+    /// `GL_INVALID_OPERATION` and the uniform is not written, so leaving a
+    /// foreign program bound would make the next window quad submit against the
+    /// wrong program — and `end_frame` checks `glGetError`, so that error
+    /// would tear the compositor down.
+    ///
+    /// This is not hypothetical plumbing: the compositor draws its shader
+    /// wallpaper through here and then draws windows, floats and the HUD through
+    /// `draw`/`draw_raw` in the same frame, so any user GLSL wallpaper
+    /// (`.glsl`/`.frag`/`.vert`/`.shader`/`.fs`) would otherwise cost the user
+    /// their compositor.
     pub fn draw_shader(&mut self, s: ShaderId, out: Rect, time: f32, dt: f32) {
         let gl = &self.gl;
         // SAFETY: `s.0` is a program `compile_fragment` linked and
@@ -1765,6 +1781,11 @@ impl Renderer {
             (gl.glUniform2f)(self.wp_u_resolution, out.w as f32, out.h as f32);
             (gl.glUniform1f)(self.wp_u_delta_time, dt);
             (gl.glDrawArrays)(GL_TRIANGLES, 0, 6);
+            // Hand the current program back. The window/HUD draws that follow in
+            // the same frame write `self.prog`'s uniform locations, so leaving
+            // `s.0` bound is not a cosmetic leak — it invalidates every one of
+            // them.
+            (gl.glUseProgram)(self.prog);
         }
     }
     pub fn destroy_shader(&mut self, shader: ShaderId) {
