@@ -185,10 +185,12 @@ pub fn clear_x_error() {
     LAST_X_ERROR.with(|c| c.set(0));
 }
 
-/// Take (and clear) the X error recorded since the last `clear_x_error`.
+/// Take (and clear) the X error recorded since the last [`clear_x_error`].
 ///
-/// Only meaningful after a round trip — `XDisplay::sync` — because X errors
-/// are asynchronous.
+/// Only meaningful after a round trip — [`XDisplay::sync`] — because X errors are
+/// asynchronous. On the connection [`open_x`] builds, see that function's docs:
+/// libXlib does not read protocol errors there, so this in practice answers
+/// `None` whatever the server said.
 pub fn take_x_error() -> Option<u8> {
     LAST_X_ERROR.with(|c| {
         let v = c.get();
@@ -482,6 +484,41 @@ mod tests {
                 prop_assert_eq!(take_x_error(), None, "no error was recorded since the clear");
                 prop_assert_eq!(take_x_error(), None, "take must clear what it reported");
             }
+        }
+
+        /// The clear/take pair is the whole contract of the cell, and it is
+        /// exercised here by writing the cell directly.
+        ///
+        /// The alternative is to provoke a real protocol error, and on the
+        /// connection `open_x` builds that cannot reach the handler at all — the
+        /// cell is never written, so every assertion about it would be about an
+        /// always-empty cell and would pass no matter what `clear_x_error` and
+        /// `take_x_error` did. Writing it directly is what makes these assertions
+        /// about the two functions rather than about the server.
+        #[test]
+        fn a_stale_error_is_discarded_and_a_taken_one_reported_once(code in 1u8..=255) {
+            LAST_X_ERROR.with(|c| c.set(code));
+            clear_x_error();
+            prop_assert_eq!(
+                take_x_error(),
+                None,
+                "clear_x_error left a recorded error in place, so a later request \\
+                 would be blamed for the previous one's failure"
+            );
+
+            LAST_X_ERROR.with(|c| c.set(code));
+            prop_assert_eq!(
+                take_x_error(),
+                Some(code),
+                "take_x_error did not report the error that was recorded"
+            );
+            prop_assert_eq!(
+                take_x_error(),
+                None,
+                "take_x_error reported the same error twice, so a caller that \\
+                 takes without clearing would act on a failure that is already \
+                 handled"
+            );
         }
     }
 }
