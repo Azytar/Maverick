@@ -713,7 +713,17 @@ impl WindowManager {
                 if now_empty {
                     cam.snap(0.0)
                 } else {
-                    cam.target = scroll
+                    // Through `retarget`, not the `target` field. `retarget` is
+                    // the single place that drops stale momentum when the
+                    // destination actually moves, and this teardown *does* move
+                    // it: closing a window under a held `Mod4+]` leaves the
+                    // spring travelling at tens of thousands of px/s toward the
+                    // old offset, and writing `target` underneath it kept that
+                    // velocity, so the ribbon first shot several thousand pixels
+                    // past the new destination and eased back over seconds. The
+                    // same arithmetic through `retarget` zeroes the velocity and
+                    // the excursion never happens.
+                    cam.retarget(scroll)
                 }
             }
             let _ = self.arrange(mon_i);

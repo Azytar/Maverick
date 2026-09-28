@@ -124,6 +124,69 @@ proptest! {
     }
 }
 
+/// Why `retarget` exists, and what bypassing it costs.
+///
+/// `retarget` is the only sanctioned way to move the destination, and its
+/// contract includes dropping stale momentum so a reversal does not first carry
+/// the camera *further* in the direction it was already going. The `unmanage`
+/// teardown is exactly that case: closing a window under a held scroll key
+/// re-derives the destination for the shorter ribbon while the spring is still
+/// in flight, and it used to reach into the `target` field directly.
+///
+/// The consequence is not overshoot — the scroll spring is at ζ ≈ 1.01, so it
+/// does not overshoot at all, and a test claiming it did would be wrong. The
+/// consequence is *direction*: with the velocity kept, the ribbon keeps sliding
+/// the way the user was already scrolling while the destination has been placed
+/// behind it, and only turns around once its own acceleration catches up. That
+/// is the visible glitch, and it is measured here as the first frame's movement.
+#[test]
+fn a_reversal_through_retarget_turns_around_immediately_and_a_field_write_does_not() {
+    // A scroll in flight, as the teardown finds it: 2962 px from the origin,
+    // heading for 11 448 at 61 997 px/s. The window closes and the destination
+    // for the shorter ribbon is back at 0.
+    let (position, old_target, velocity, new_target) =
+        (2962.536f32, 11_448.0f32, 61_997.457f32, 0.0f32);
+
+    let one_frame = |mut cam: Camera| -> f32 {
+        cam.step(1.0 / 60.0);
+        cam.position
+    };
+
+    // Writing the field keeps the velocity, so the camera travels a further
+    // ~1033 px *away* from a destination that now sits behind it.
+    let mut raw = Camera::new(position);
+    raw.target = old_target;
+    raw.velocity = velocity;
+    raw.target = new_target;
+    let raw_after = one_frame(raw);
+    assert_eq!(
+        raw.velocity, velocity,
+        "the raw write consumed the momentum"
+    );
+    assert!(
+        raw_after > position,
+        "with the destination behind it at {new_target}, the camera went from \
+         {position} to {raw_after} — it kept scrolling the old way"
+    );
+
+    // Going through the sanctioned entry point drops the momentum, so the very
+    // first frame already moves toward the new destination.
+    let mut fixed = Camera::new(position);
+    fixed.target = old_target;
+    fixed.velocity = velocity;
+    fixed.retarget(new_target);
+    let fixed_after = one_frame(fixed);
+    assert_eq!(
+        fixed.velocity, 0.0,
+        "retarget kept momentum from the old direction"
+    );
+    assert!(
+        fixed_after < position,
+        "a retarget onto {new_target} must move the camera toward it from the \
+         first frame, but it went {position} -> {fixed_after}"
+    );
+}
+
 // A non-finite destination is refused outright, not stored: the compositor reads
 // `target` for settled geometry, so a poisoned target would move every tile.
 proptest! {
