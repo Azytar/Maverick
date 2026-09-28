@@ -531,7 +531,14 @@ impl WindowManager {
                 if was_empty {
                     cam.snap(scroll)
                 } else {
-                    cam.target = scroll
+                    // Through `retarget`, for the same reason as the teardown
+                    // path below: a new window lengthens the ribbon, so the
+                    // destination moves, and `retarget` is the only writer that
+                    // drops the momentum the spring is still carrying from an
+                    // earlier scroll. Writing the field keeps it, and the ribbon
+                    // then slides the way it was already going while its
+                    // destination has been placed behind it.
+                    cam.retarget(scroll)
                 }
             }
         }

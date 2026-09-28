@@ -69,9 +69,37 @@ fn strip_test_module(src: &str) -> String {
 fn code_lines_containing(src: &str, needle: &str) -> Vec<(usize, String)> {
     src.lines()
         .enumerate()
-        .filter(|(_, l)| l.contains(needle))
-        .map(|(i, l)| (i + 1, l.trim().to_string()))
+        .filter_map(|(i, raw)| {
+            // Comments discuss `camera.target` constantly and say nothing about
+            // writing it, so they are not findings. Cut at the first `//`; a
+            // `//` inside a string literal would be a false cut, and there is
+            // none in the code these tests look at.
+            let code = raw.split("//").next().unwrap_or("").trim();
+            (!code.is_empty() && code.contains(needle)).then(|| (i + 1, code.to_string()))
+        })
         .collect()
+}
+
+/// Lines that assign through a `.target` field, as opposed to reading one or
+/// comparing against it.
+///
+/// The comparison exclusion is what keeps this from flagging
+/// `prev.rect != desired_rect`-style predicates: whitespace removed, `x.target==y`
+/// and `x.target >= y` both contain `.target=`, so the char after the `=` decides.
+fn target_assignments(src: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (n, line) in code_lines_containing(src, ".target") {
+        let packed = line.replace(' ', "");
+        let Some(eq) = packed.find(".target=") else {
+            continue;
+        };
+        let after = packed[eq + ".target=".len()..].chars().next();
+        if matches!(after, Some('=') | Some('>') | Some('<')) {
+            continue;
+        }
+        out.push((n, line));
+    }
+    out
 }
 
 /// A window's scroll target must move through `Camera::retarget`, never through
@@ -90,6 +118,14 @@ fn code_lines_containing(src: &str, needle: &str) -> Vec<(usize, String)> {
 /// against a raw field write on the primitive, so it passed either way.
 #[test]
 fn no_production_code_writes_the_camera_target_field() {
+    // The pattern is any `.target` assignment, not the literal
+    // `camera.target =`: the binding a caller happens to use (`cam.target`,
+    // `ws.camera.target`, `monitors[i].workspaces[0].camera.target`) is exactly
+    // what a bypass would look like, and a check that only matches one spelling
+    // of it is not a check. There are no production `.target` writes to allowlist
+    // — the only writers are `Camera::retarget` and `Camera::snap`, which
+    // assign through `self`, and both are below the `#[cfg(test)]` cut in
+    // `maverick-core`, not here.
     let offenders: Vec<String> = [
         "backend/x11/manage.rs",
         "backend/x11/events.rs",
@@ -103,7 +139,7 @@ fn no_production_code_writes_the_camera_target_field() {
     .iter()
     .map(|f| (*f, production_source(f)))
     .flat_map(|(f, src)| {
-        code_lines_containing(src, "camera.target =")
+        target_assignments(src)
             .into_iter()
             .map(move |(n, t)| format!("{f}:{n}: {t}"))
     })
