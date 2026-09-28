@@ -63,9 +63,19 @@ pub const GL_INFO_LOG_LENGTH: GLenum = 0x8B84;
 /// new GL call is one line here and nothing else.
 ///
 /// Every field is an `unsafe extern "C"` pointer resolved through
-/// `glXGetProcAddressARB` (or `dlsym` for core symbols): calling one requires
-/// a context current on the calling thread, and the pointer stays valid only
-/// while the libGL that produced it remains mapped.
+/// `glXGetProcAddressARB` (or `dlsym` for core symbols). The one
+/// `unsafe { ... }` the macro emits per entry point is not 49 separate
+/// contracts: each one is `Lib::cast_fn`'s, and that function's `# Safety`
+/// section is the whole story — a pointer to a function of this exact
+/// signature, from this mapping, with the driver's context current on the
+/// calling thread.
+///
+/// What the macro deliberately does *not* do is check that a context is current
+/// before an entry point is called. It cannot: `load` runs before any context
+/// exists, and the calls happen in `renderer.rs`, not here. The affinity
+/// invariant is `Renderer`'s, and it is enforced by the type system there
+/// (`Renderer` holds the context as a raw pointer, so it is neither `Send` nor
+/// `Sync`).
 macro_rules! gl_api {
     ( $( fn $name:ident ( $($arg:ident : $argty:ty),* $(,)? ) $(-> $ret:ty)? ; )+ ) => {
         #[allow(non_snake_case)]
@@ -76,6 +86,11 @@ macro_rules! gl_api {
         impl Gl {
             pub fn load(lib: &Lib) -> Result<Self, String> {
                 Ok(Self {
+                    // SAFETY: `sym` answered a symbol resolved from `lib`'s own
+                    // mapping for exactly `name`, and `cast_fn`'s contract for
+                    // that is a pointer to a function of the signature written
+                    // on the line below — which is the field's own type, so the
+                    // two cannot drift apart.
                     $( $name: unsafe {
                         Lib::cast_fn(lib.sym(stringify!($name))?)
                     }, )+
@@ -178,11 +193,27 @@ gl_api! {
 
 impl Gl {
     /// `glGetString` as a Rust `String` (empty when the driver returns NULL).
+    ///
+    /// Every caller passes a core `GL_VENDOR`/`GL_RENDERER`/`GL_VERSION`, so
+    /// the "unrecognised enum" case — where the driver sets `GL_INVALID_ENUM`
+    /// and returns NULL — is handled by the null branch rather than
+    /// contemplated.
     pub fn get_string(&self, name: GLenum) -> String {
+        // SAFETY: `self.glGetString` is a core-profile 3.3 entry point resolved
+        // from the mapping that is still open, and a `glGet*` query needs no
+        // current context. The pointer it returns is the driver's own storage
+        // for that name, valid until the next `glGetString` with the same
+        // `name` or until the context is destroyed — and the string is copied
+        // out on the very next line, with no GL call in between.
         let p = unsafe { (self.glGetString)(name) };
         if p.is_null() {
             return String::new();
         }
+        // SAFETY: a non-null `glGetString` result is a NUL-terminated string
+        // (the GL spec guarantees the terminator is part of the returned
+        // bytes), and it is still mapped here because the copy below is the
+        // first thing that happens after the call. `CStr::from_ptr` scans only
+        // to that terminator, so nothing past the string is read.
         unsafe { std::ffi::CStr::from_ptr(p.cast::<c_char>()) }
             .to_string_lossy()
             .into_owned()
@@ -192,6 +223,8 @@ impl Gl {
     /// the queue is empty. Used after initialization, TFP binds, and frame
     /// submission so a failed draw cannot stay hidden.
     pub fn take_error(&self) -> GLenum {
+        // SAFETY: same preconditions as `get_string` — a core entry point from
+        // a mapping that is never closed, and a query that needs no context.
         unsafe { (self.glGetError)() }
     }
 }
