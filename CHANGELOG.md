@@ -7,6 +7,14 @@ All notable changes to this project are documented here. Format follows
 
 ### Fixed
 
+- **A display claim could be pointed at any file on the machine.** The claim
+  file is `/tmp/.X<n>-mav`, so its name belongs to whoever creates it first, and
+  a symlink planted there before the scanner arrived was followed: the open
+  returned a *writable* handle on whatever the link pointed at, and the exclusive
+  claim was then taken on that file. The open now carries `O_NOFOLLOW`, and a
+  link at the claim path reads as "someone else holds this display" so the scan
+  moves to the next number rather than failing.
+
 - **A control command could sit in the queue forever.** `ControlHub::drain_commands`
   read the command queue before the self-pipe, while `push_command` puts the
   command on the queue and only then writes the wakeup byte. A command enqueued
