@@ -174,14 +174,15 @@ mod poll_timeout_tests {
         // blocked. Targeting the calling thread makes the delivery
         // deterministic.
         let pid = std::process::id() as libc::pid_t;
-        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::pid_t;
+        let tid = unsafe { libc::gettid() };
         std::thread::spawn(move || {
             // Give the poll a moment to actually block, then interrupt it.
             std::thread::sleep(std::time::Duration::from_millis(50));
             // SAFETY: `tgkill(tgid, tid, sig)` aimed at the thread that is
-            // blocked in poll, whose handler is installed above.
+            // blocked in poll, whose handler is installed above. Both ids came
+            // from the kernel for this process and this thread.
             unsafe {
-                libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGUSR1);
+                libc::tgkill(pid, tid, libc::SIGUSR1);
             }
         });
         let start = std::time::Instant::now();
