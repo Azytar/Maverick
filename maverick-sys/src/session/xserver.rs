@@ -230,9 +230,18 @@ impl DisplayClaim {
         // creator holds. Refusing every display whose path is a symlink would be
         // correct too, but "someone else owns this number" is the truth and it
         // keeps the scan going.
+        // `O_CLOEXEC` is stated rather than inherited from a helper, because
+        // `rustix::fs::open` does not add it and `std::fs::OpenOptions` did.
+        // Losing it is not cosmetic: the X server is exec'd while this claim is
+        // held, and an inherited descriptor would keep the `flock` alive for the
+        // whole life of that server — so the next creator of the same display
+        // would be told it is in use by a session that is already running. The
+        // claim is meant to be released when this process drops it, and the
+        // kernel releasing the lock on process death is part of what makes a
+        // crashed creator unable to strand a display number.
         let file = match rustix::fs::open(
             claim_path(display),
-            OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::RWXU,
         ) {
             Ok(file) => file,
