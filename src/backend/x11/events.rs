@@ -563,6 +563,19 @@ impl WindowManager {
             // `ViewWorkspace` via `Effect::SetCurrentDesktop` and must NOT be
             // reset to 0 on every monitor topology change.
             self.update_ewmh_desktop_count()?;
+
+            // The second of the two families the backend writes that the checker
+            // constrains. Hotplug replaces `state.monitors` wholesale and re-homes
+            // orphaned clients, which moves clause #1 (every `active_ws` in range
+            // for its tag count), #4 (a window in exactly one placement) and #5
+            // (a client's `monitor`/`workspace` agreeing with the tree that holds
+            // it) — and it happens outside the command pipeline, so the engine's
+            // post-command check never sees it. A truncation, a re-homed orphan
+            // that lands outside its tag count, or a client left naming a monitor
+            // that no longer exists is exactly the corruption these clauses were
+            // written to catch, and this is the one place it can happen.
+            #[cfg(debug_assertions)]
+            self.engine.state.assert_invariants();
             self.update_workarea()?;
 
             // Keep the wallpaper output layout in sync with the new topology so a

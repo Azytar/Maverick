@@ -1198,6 +1198,18 @@ impl WindowManager {
                 mon.focus_stack.retain(|&x| x != w);
                 mon.focus_stack.push(w);
             }
+            // The focus mirror is one of only two families of state the backend
+            // writes that `check_invariants` actually constrains (clauses #8/#8b:
+            // every focus-slot entry is a known client, and no duplicates). The
+            // engine runs the check after every command, but this write is
+            // outside the command pipeline — the module's own rule is that
+            // `mon.focused` and `focus_stack` are written by this sink *and* by
+            // `focus_logically` — so without a check here a caller naming a dead
+            // or foreign window would pass through a debug build unchallenged.
+            // `assert_invariants` is `#[cfg(debug_assertions)]`, so this costs
+            // nothing in a release build.
+            #[cfg(debug_assertions)]
+            self.engine.state.assert_invariants();
             // Verify the server accepted the focus (and fix it if an external
             // XSetInputFocus raced us). No polling: this runs only on a focus
             // action we just issued.
