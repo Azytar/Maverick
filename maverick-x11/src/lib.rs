@@ -27,16 +27,29 @@
 //! The silent error handler exists because a window manager races clients by
 //! nature (a window can die between the query that listed it and the request
 //! that redirects it), so X errors are routine — while Xlib's default handler
-//! terminates the process. The handler records the code synchronously, and
-//! because X errors are asynchronous the only correct read sequence is
-//! `clear_x_error` → request → [`XDisplay::sync`] → `take_x_error`.
+//! terminates the process. The handler records the code synchronously, so the
+//! intended read sequence is `clear_x_error` → request → [`XDisplay::sync`] →
+//! `take_x_error`.
 //!
-//! That signal describes **Xlib and GLX requests only**. Protocol errors on
-//! requests x11rb issues are reported by libxcb to x11rb itself
-//! (`Cookie::reply` answers `Err(ReplyError::X11Error(..))`) and never reach
-//! Xlib's handler, so the window manager's XCB paths use `checked_void!` rather
-//! than this cell. Both halves are exercised against a real server in
-//! `tests/x_error_signal.rs`.
+//! **That sequence does not actually work on this crate's connection, and the
+//! docs on [`XDisplay::sync`] say so with the measurement.** `open_x` gives the
+//! event queue to XCB, so libXlib never reads protocol errors off the socket —
+//! they are left for x11rb — and the handler is not called for a request the
+//! server rejected. Two things follow, and both are load-bearing for callers:
+//!
+//! * The recorded code describes **Xlib and GLX requests only** *and* only ones
+//!   libXlib reads. Protocol errors on requests x11rb issues are reported by
+//!   libxcb to x11rb itself (`Cookie::reply` answers
+//!   `Err(ReplyError::X11Error(..))`), which is what the window manager's XCB
+//!   paths use `checked_void!` for.
+//! * The compositor's GLX probes with `take_x_error` are **best-effort**: they
+//!   cannot see a failure, so a caller must not branch on a negative answer as
+//!   though it meant the request succeeded. In `maverick-gl`'s renderer that
+//!   makes the per-visual fbconfig check a no-op; see
+//!   `Renderer::texture_from_pixmap`.
+//!
+//! `tests/x_error_signal.rs` measures all of this against a real server rather
+//! than asserting it, so a change in either direction is visible.
 //!
 //! # Thread safety
 //!
@@ -98,7 +111,6 @@ extern "C" {
     pub fn XFree(data: *mut c_void) -> c_int;
     pub fn XSync(dpy: *mut Display, discard: c_int) -> c_int;
     pub fn XSetErrorHandler(handler: XErrorHandler) -> XErrorHandler;
-    pub fn XGetErrorHandler() -> XErrorHandler;
 }
 
 #[link(name = "X11-xcb")]
@@ -291,14 +303,28 @@ impl XDisplay {
     /// never dequeues into Xlib's own buffer, so the events stay in XCB where
     /// the window manager reads them.
     ///
-    /// It is also the barrier a protocol error crosses. X errors are
-    /// asynchronous, so `take_x_error` says nothing useful until the server has
-    /// been reached and its answer read; this is the only call in the crate
-    /// that guarantees that has happened.
+    /// **This is not a barrier for X protocol errors, and nothing here may rely
+    /// on it being one.** Because `open_x` hands the event queue to XCB with
+    /// `XSetEventQueueOwner`, libXlib does not read protocol errors off the
+    /// socket: they are left there for x11rb. Measured on this crate's own
+    /// `open_x` connection, an asynchronous request that the server rejects is
+    /// *not* reported to the error handler by `XFlush`, by this function, or by
+    /// `XEventsQueued` — zero handler invocations, so
+    /// [`take_x_error`] answers `None` after a request that certainly failed.
+    /// `tests/x_error_signal.rs` pins that behaviour so it cannot change
+    /// quietly.
+    ///
+    /// The flip side is worse: a *synchronous* Xlib request that fails on this
+    /// connection desynchronises libXlib from the socket, libXlib reports an I/O
+    /// error, and its default handler calls `exit(1)` — the whole window manager
+    /// goes down. So do not provoke X errors through Xlib here; the compositor
+    /// reads x11rb's per-request errors with `checked_void!` instead, and the
+    /// GLX paths that probe with [`take_x_error`] are best-effort.
     pub fn sync(self) {
         // SAFETY: `self.0` is a live `Display*` for the whole process (the type
         // is not `Drop`, so nothing the caller can reach closes it) and
-        // `XSync` takes only the display and a discard flag.
+        // `XSync` takes only the display and a discard flag. It makes no
+        // assumption about which side of the shared socket reads the reply.
         unsafe { XSync(self.0, 0) };
     }
 

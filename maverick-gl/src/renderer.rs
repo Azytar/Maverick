@@ -1406,6 +1406,21 @@ impl Renderer {
         // config silently yields a texture full of the wrong channels. Later
         // pixmaps of the same visual skip the sync — it would stall every
         // interactive resize.
+        //
+        // **This check cannot fire.** `clear_x_error` → `glXCreatePixmap` →
+        // `sync` → `take_x_error` is the intended way to see an asynchronous
+        // GLX failure, but `open_x` hands the event queue to XCB, so libXlib
+        // never reads protocol errors off the socket and the handler is not
+        // called: measured at zero invocations for a request that certainly
+        // failed (`maverick-x11`'s `tests/x_error_signal.rs`, which is also why
+        // `XDisplay::sync`'s doc says it is not an error barrier). `glx_pixmap`
+        // is therefore trusted unconditionally and the `Err` branch below is
+        // unreachable on this connection.
+        //
+        // Detecting the mismatch needs a driver-local signal rather than an X
+        // error — checking `glGetError` after the `glXBindTexImageEXT` in
+        // `Renderer::bind` would do it — which needs a real GLX server to
+        // validate, so it is not done here.
         let verify = self.verified.insert(visual.id);
         if verify {
             maverick_x11::clear_x_error();
