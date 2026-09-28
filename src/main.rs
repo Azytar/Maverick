@@ -295,31 +295,11 @@ fn main() {
     std::env::set_var("MAVERICK_INSTANCE", &sid);
 
     maverick_sys::detach_from_terminal();
-    let uninstalled = maverick_sys::Signal::new()
-        .ignore(libc::SIGPIPE)
-        .on_sigterm(libc::SIGTERM)
-        // SIGINT takes the same route as SIGTERM: `on_sigterm` records the
-        // quit flag for whichever signal it is given, and the event loop turns
-        // that flag into the same `begin_shutdown` a control-socket `quit` and
-        // `Mod4+Shift+Q` use. Registering it is what makes the inherited
-        // disposition irrelevant — a non-interactive shell sets SIGINT to
-        // `SIG_IGN` in any job it starts with `&`, and without a handler of our
-        // own a backgrounded Maverick could not be stopped with Ctrl-C at all,
-        // and one that was stopped ran none of its cleanup.
-        //
-        // It also stops that `SIG_IGN` reaching the applications we start:
-        // an ignored disposition survives `exec`, so an inherited one would
-        // hand every autostarted client a SIGINT it can never act on.
-        .on_sigterm(libc::SIGINT)
-        // SIGQUIT is the same hole, and it is the one a user reaches for next
-        // (Ctrl-\), so leaving it out made the handler above half a fix: a
-        // shell sets *both* dispositions to `SIG_IGN` for a backgrounded job,
-        // so a backgrounded window manager was unstoppable by SIGQUIT, ran
-        // none of its cleanup, and passed that `SIG_IGN` to every client it
-        // started. Registering it costs nothing and closes both halves.
-        .on_sigterm(libc::SIGQUIT)
-        .on_sigcont(libc::SIGCONT)
-        .install();
+    let mut dispositions = maverick_sys::Signal::new().ignore(libc::SIGPIPE);
+    for &sig in STOP_SIGNALS {
+        dispositions = dispositions.on_sigterm(sig);
+    }
+    let uninstalled = dispositions.on_sigcont(libc::SIGCONT).install();
     // A disposition that did not install is a window manager that is missing
     // one of the guarantees it is about to depend on, so say which one rather
     // than that "a handler" is missing: they are not interchangeable, and the
@@ -432,6 +412,35 @@ fn main() {
 // Detaching and signal setup live in `maverick-sys`, the only place in the
 // project that touches libc FFI. See `detach_from_terminal` and `Signal` there.
 
+/// Every signal that must mean "shut down cleanly", not merely "stop existing".
+///
+/// The set is a named fact rather than a chain threaded through `main` so that
+/// a test can pin it: a signal that reaches this list acquires a handler, and a
+/// signal missing from it is left on its inherited default, which for every
+/// signal here means the process dies without running `cleanup()`. All of them
+/// share one route — [`maverick_sys::Signal::on_sigterm`] records the quit flag,
+/// and the event loop turns that flag into the same `begin_shutdown` a
+/// control-socket `quit` and `Mod4+Shift+Q` use. The list is a superset of
+/// "the signals a user might reasonably type", and that is the point: a signal
+/// nobody registered is a signal whose cleanup silently does not happen.
+///
+/// * `SIGTERM` — the ordinary stop, and the one every other entry is a
+///   variation of.
+/// * `SIGINT` — a non-interactive shell sets `SIGINT` to `SIG_IGN` in any job
+///   it starts with `&`, and an ignored disposition survives `exec`, so
+///   without a handler of our own a backgrounded Maverick could not be stopped
+///   with `Ctrl-C` at all, one that was stopped ran none of its cleanup, and
+///   every autostarted client inherited a `SIGINT` it can never act on.
+/// * `SIGQUIT` — the same hole and the next key a user reaches for (`Ctrl-\`),
+///   so leaving it out made the entry above half a fix.
+/// * `SIGHUP` — the terminal going away, which for a `startx` launch is the
+///   session ending. A display-manager launch is not sent `SIGHUP`, so the only
+///   source of one is a terminal that went away, and that is precisely a
+///   shutdown. Unhandled it kept the default terminate action, which skips
+///   `cleanup()` and left the identity record in the runtime directory and the
+///   control socket bound for the next start to trip over.
+const STOP_SIGNALS: &[libc::c_int] = &[libc::SIGTERM, libc::SIGINT, libc::SIGQUIT, libc::SIGHUP];
+
 /// Describe the signal dispositions that did not install, naming the guarantee
 /// each one is holding up.
 ///
@@ -463,7 +472,7 @@ fn uninstalled_report(uninstalled: &[libc::c_int]) -> Option<String> {
     // name, and must not be reported as if it had one.
     let consequence = |sig: libc::c_int| -> Option<&'static str> {
         Some(match sig {
-            libc::SIGTERM | libc::SIGINT | libc::SIGQUIT => {
+            libc::SIGHUP | libc::SIGTERM | libc::SIGINT | libc::SIGQUIT => {
                 "the window manager cannot be stopped by signal and will not run its cleanup"
             }
             libc::SIGCONT => "keyboard grabs are not restored after a suspend",
@@ -480,7 +489,7 @@ fn uninstalled_report(uninstalled: &[libc::c_int]) -> Option<String> {
         consequences.extend(consequence(sig));
     }
     // The three stop signals share one consequence, so a report naming all of
-    // them must not repeat it three times.
+    // them must not repeat it once per signal.
     names.sort_unstable();
     names.dedup();
     consequences.sort_unstable();
@@ -528,7 +537,7 @@ fn signal_name(sig: libc::c_int) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::uninstalled_report;
+    use super::{signal_name, uninstalled_report, STOP_SIGNALS};
 
     /// The only state in which the process may claim a signal-controlled
     /// lifecycle at all.
@@ -573,6 +582,63 @@ mod tests {
         }
         assert!(report.contains("cannot be stopped"), "{report}");
         assert!(report.contains("zombies"), "{report}");
+    }
+
+    /// `SIGHUP` must shut the window manager down rather than kill it.
+    ///
+    /// It is the terminal going away, which under a `startx` launch is the user
+    /// ending the session, and it was absent from `STOP_SIGNALS` while sitting
+    /// in the name table below — so closing the terminal left the identity
+    /// record in the runtime directory and the control socket bound, with no
+    /// path to either except `maverickctl prune`.
+    ///
+    /// This names `SIGHUP` on its own instead of comparing the whole constant
+    /// against a list spelled out again here. A list comparison is vacuous: any
+    /// edit that removes an entry can remove the matching entry from the
+    /// expectation in the same breath, and the test keeps passing while the
+    /// behaviour it was written for regresses. A single named signal has no
+    /// such second copy to lose.
+    #[test]
+    fn a_terminal_hangup_shuts_the_window_manager_down() {
+        assert!(
+            STOP_SIGNALS.contains(&libc::SIGHUP),
+            "SIGHUP must be a stop signal: without a handler it keeps the default \
+             terminate action, which skips cleanup() and strands the identity \
+             record and the control socket"
+        );
+    }
+
+    /// A duplicate entry would install the same disposition twice and make the
+    /// refusal report name a signal the user cannot act on twice.
+    #[test]
+    fn the_stop_signals_are_distinct() {
+        let mut seen = STOP_SIGNALS.to_vec();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(before, seen.len(), "STOP_SIGNALS lists a signal twice");
+    }
+
+    /// Every stop signal must also be one this crate can name in a report. A
+    /// refusal the user cannot read is a refusal they cannot act on, and the
+    /// two lists are maintained separately, so the coupling is asserted rather
+    /// than assumed.
+    #[test]
+    fn every_stop_signal_can_be_named_in_a_refusal_report() {
+        for &sig in STOP_SIGNALS {
+            assert!(
+                signal_name(sig).is_some(),
+                "signal {sig} shuts the window manager down but has no name, so \
+                 a refused install of it would be reported as unrecognised"
+            );
+            assert!(
+                uninstalled_report(&[sig])
+                    .expect("a stop signal always loses a guarantee")
+                    .contains("cannot be stopped"),
+                "signal {sig} shuts down but its refusal is not reported as \
+                 costing the stop guarantee"
+            );
+        }
     }
 
     /// A signal this crate does not configure has no consequence it can name.
