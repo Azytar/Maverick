@@ -38,6 +38,45 @@
 //! than this cell. Both halves are exercised against a real server in
 //! `tests/x_error_signal.rs`.
 //!
+//! # A synchronous Xlib request cannot be used to provoke an X error
+//!
+//! Measured on a real server, the two statements above leave production with no
+//! way to *populate* this cell, and one obvious way to try that is fatal.
+//!
+//! [`open_x`] hands the event queue to XCB
+//! (`XSetEventQueueOwner(dpy, XCB_OWNS_EVENT_QUEUE)`) so the window manager and
+//! the compositor share one sequence-number space. A synchronous Xlib request —
+//! one that does its own round trip, such as `XGetGeometry` — expects to find its
+//! reply in a queue Xlib no longer owns. Issuing one against a drawable that
+//! produces `BadDrawable` was measured to end in
+//!
+//! ```text
+//! X connection to :71 broken (explicit kill or server shutdown).
+//! ```
+//!
+//! which is libX11's **I/O** error handler, not its error handler. This crate
+//! replaces the error handler and leaves the I/O one at its default, and the
+//! default I/O handler calls `exit(1)`: the process goes down with no unwinding,
+//! no `Drop`, and no cleanup. Isolating the ingredient confirms the queue
+//! ownership is the cause and the silent handler is not — with
+//! `XSetEventQueueOwner` alone the same request is fatal, and with the silent
+//! handler alone the same request returns an error the handler swallows.
+//!
+//! Two consequences a caller has to know:
+//!
+//! * **Do not reach for a synchronous Xlib request to produce an X error.** Use
+//!   an x11rb request and read `ReplyError::X11Error` from it, which is what
+//!   `checked_void!` does. `XSync` is the one Xlib round trip that is safe,
+//!   because it cannot itself be the request that failed.
+//! * **The cell is therefore effectively write-only from production's point of
+//!   view.** Every request that can carry an error in the window manager goes
+//!   through x11rb, so `take_x_error` returns `None` there by construction. It
+//!   remains as a guard for a future Xlib or GLX call, and a caller that adds
+//!   one must verify it does not round-trip.
+//!
+//! The tests that would have to provoke an error through Xlib are
+//! `#[ignore]`d for this reason; see `tests/x_error_signal.rs`.
+//!
 //! # Thread safety
 //!
 //! [`XDisplay`] is `Send` and deliberately **not** `Sync`; the reasoning is on

@@ -95,6 +95,12 @@ fn provoke_bad_window(dpy: &XDisplay) {
     dpy.sync();
 }
 
+// A synchronous Xlib request is fatal once `open_x` has given the event
+// queue to XCB, and provoking an X error needs exactly that. See the module
+// docs: the request ends in libX11's default I/O handler, which calls exit(1).
+// The property stays recorded here for whoever next adds an Xlib or GLX call
+// and has to re-establish it.
+#[ignore = "provoking an X error requires a synchronous Xlib request, which is fatal here"]
 #[test]
 fn open_x_replaces_an_existing_handler_and_does_not_chain_to_it() {
     if maverick_x11::open_x().is_err() {
@@ -131,6 +137,12 @@ fn open_x_replaces_an_existing_handler_and_does_not_chain_to_it() {
     );
 }
 
+// A synchronous Xlib request is fatal once `open_x` has given the event
+// queue to XCB, and provoking an X error needs exactly that. See the module
+// docs: the request ends in libX11's default I/O handler, which calls exit(1).
+// The property stays recorded here for whoever next adds an Xlib or GLX call
+// and has to re-establish it.
+#[ignore = "provoking an X error requires a synchronous Xlib request, which is fatal here"]
 #[test]
 fn installing_the_silent_handler_twice_changes_nothing() {
     if maverick_x11::open_x().is_err() {

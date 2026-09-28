@@ -166,13 +166,14 @@ impl Lib {
     ///
     /// The size of `T` is settled here, at compile time, and not by the caller:
     /// the `const` block below rejects any `T` a plain data pointer cannot
-    /// carry. That is the check `transmute_copy` does not do — it would copy
-    /// `size_of::<T>()` bytes out of an `size_of::<*mut c_void>()` source, so an
-    /// oversized `T` yields a value with uninitialised tail bytes (instant UB)
-    /// while the compiler stays silent. Here that instantiation is a build
-    /// failure, and a GL entry point declared to return a struct by value — the
-    /// only way a wrong `T` could reach this — would be rejected at the
-    /// declaration instead of producing garbage at the call.
+    /// carry. That is the check `transmute_copy` does not do. It is not that the
+    /// unchecked form would quietly produce garbage — `std` guards that case, and
+    /// a `T` wider than the pointer source panics at runtime with "cannot
+    /// transmute_copy if Dst is larger than Src". What the compiler does *not*
+    /// object to is a `T` of the same width but a different shape, and a build
+    /// failure is the right place to reject that: a GL entry point declared to
+    /// return a struct by value — the only way a wrong `T` could reach this —
+    /// is caught where it is written rather than at the call.
     pub unsafe fn cast_fn<T>(p: *mut c_void) -> T {
         const { assert!(size_of::<T>() == size_of::<*mut c_void>()) };
         debug_assert!(!p.is_null());
