@@ -2511,6 +2511,119 @@ mod proptests {
         });
     }
 
+    /// A workarea change must re-derive the scroll target.
+    ///
+    /// `camera.target` is a pixel offset, not a fraction: it is only meaningful
+    /// against the ribbon it was computed for, so any event that changes the
+    /// workarea invalidates it. A target that is not re-derived afterwards points
+    /// into a ribbon that no longer exists. That is not cosmetic. Park the camera
+    /// on the last of twelve full-width columns, then shrink the screen the way a
+    /// real `RandR` mode change does, and the target lands thousands of pixels past
+    /// the end of the shorter ribbon: the focused column is drawn off the side of
+    /// the monitor, and because `hide_offscreen` never parks the *active*
+    /// workspace, every other window stays mapped too. The user is left with an
+    /// empty desktop that nothing recovers, until an unrelated focus, grow,
+    /// workspace or dock command happens to call `ideal_scroll` itself.
+    ///
+    /// The oracle is the observable — does the focused window still land inside
+    /// the monitor — so it holds whatever mechanism re-derives the target. A dock
+    /// strut, a resolution change and a monitor hotplug all have to satisfy it,
+    /// and only the first two did.
+    #[test]
+    fn a_workarea_change_leaves_the_focused_column_on_the_screen() {
+        let r = Ribbon {
+            screen: Rect::new(0, 0, 1920, 1080),
+            reserved: vec![],
+            gaps_inner: 4,
+            gaps_outer: 0,
+            border_w: 2,
+            smart_gaps: false,
+            accordion_boost: 0.0,
+            // Twelve full-width columns, so the ribbon is twelve screens long and
+            // the camera is genuinely scrolled away from the origin.
+            columns: vec![(1.0, 1, 0.0); 12],
+            focus_col: 11,
+            cam_pos: 0.0,
+            cam_target: 0.0,
+            cam_velocity: 0.0,
+            zoom: 1.0,
+            overview: false,
+            zoomed: false,
+            page_zoom: 1.0,
+        };
+        let mut state = r.state();
+        let cfg = r.cfg();
+
+        // Park the camera on the focus the way every command does, so the target
+        // under test is a real one rather than a free draw.
+        let old_target = {
+            let State {
+                clients, monitors, ..
+            } = &mut state;
+            let mon = &mut monitors[0];
+            let fs = fs_ctx(clients, mon.ws(), mon.screen);
+            let want = ideal_scroll(mon.ws(), &cfg, mon.workarea, fs);
+            mon.ws_mut().camera.snap(want);
+            want
+        };
+        let focused = state.monitors[0]
+            .ws()
+            .focused_win()
+            .expect("a column is focused");
+        assert!(
+            old_target > 1_000.0,
+            "fixture must leave the camera genuinely scrolled, got {old_target}"
+        );
+
+        // A RandR mode change: the screen moves and `recalc_geometry` is the only
+        // writer — the two statements the RandR handler performs, and then it
+        // re-derives the target, which is the whole of the fix.
+        let old_screen = state.monitors[0].screen;
+        let new_screen = Rect::new(0, 0, 800, 1080);
+        {
+            let State {
+                clients, monitors, ..
+            } = &mut state;
+            monitors[0].screen = new_screen;
+            monitors[0].recalc_geometry();
+            let mon = &mut monitors[0];
+            let fs = fs_ctx(clients, mon.ws(), mon.screen);
+            let want = ideal_scroll(mon.ws(), &cfg, mon.workarea, fs);
+            mon.ws_mut().camera.retarget(want);
+        }
+
+        assert!(
+            state.monitors[0].ws().camera.target < old_target,
+            "a shorter ribbon must target a smaller offset, not keep {old_target}"
+        );
+
+        let mut placements = Vec::new();
+        let mut scratch = RibbonScratch::default();
+        arrange(
+            &state,
+            0,
+            &cfg,
+            &LayoutRegistry::new(),
+            Phase::Settled,
+            &mut placements,
+            &mut scratch,
+        );
+        let rect = placements
+            .iter()
+            .find(|p| p.0 == focused)
+            .map(|p| p.1)
+            .expect("the focused window of the active workspace is placed");
+        assert!(
+            rect.right() > new_screen.x && rect.x < new_screen.right(),
+            "the focused window is at {rect:?} after {}x{} -> {}x{}: entirely off \
+             the monitor, so the desktop looks empty while every window is mapped",
+            old_screen.w,
+            old_screen.h,
+            new_screen.w,
+            new_screen.h
+        );
+    }
+
     /// `ideal_scroll` exists for one reason: the focused column must end up
     /// fully visible. The projection it feeds maps a camera offset `cam` to the
     /// world span `[cam - cx/alpha, cam - cx/alpha + wa.w/alpha]`, so a correct

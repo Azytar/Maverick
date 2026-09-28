@@ -215,7 +215,7 @@ impl WindowManager {
     /// later focus/grow command happens to call `ideal_scroll` itself — at
     /// which point the camera covers the whole accumulated gap in one animated
     /// jump, which reads as a sudden bounce rather than a stale target.
-    fn retarget_cameras(&mut self, mon_idx: usize) {
+    pub(super) fn retarget_cameras(&mut self, mon_idx: usize) {
         if mon_idx >= self.engine.state.monitors.len() {
             return;
         }

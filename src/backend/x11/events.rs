@@ -518,6 +518,19 @@ impl WindowManager {
                 // Re-clamp floats and re-lay every monitor's tree.
                 for i in 0..self.engine.state.monitors.len() {
                     self.reposition_floats(i)?;
+                    // Same ordering rule as `apply_dock_strut`: a monitor whose
+                    // screen changed has a different workarea, so every
+                    // workspace's scroll target has to be re-derived *before*
+                    // the projection that writes `client.geom` from it. Without
+                    // this the target stays at the old offset in pixels while
+                    // the ribbon re-lays out at the new width — after a shrink it
+                    // can sit thousands of pixels past the end of the ribbon, so
+                    // every window is mapped and none is on screen, and nothing
+                    // recovers it until an unrelated focus/grow/workspace command
+                    // happens to call `ideal_scroll` itself. The re-homed orphans
+                    // above make this worse: they land on the surviving monitor
+                    // and lengthen its ribbon without anyone retargeting.
+                    self.retarget_cameras(i);
                     self.arrange(i)?;
                 }
             } else {
@@ -531,6 +544,12 @@ impl WindowManager {
                 // Reposition floating windows to stay within the new workarea.
                 for i in 0..self.engine.state.monitors.len() {
                     self.reposition_floats(i)?;
+                    // A resolution change is a workarea change, and a workarea
+                    // change is a scroll-target change. Same ordering rule as
+                    // `apply_dock_strut` and as the topology branch above: the
+                    // retarget has to precede the projection, or `client.geom` is
+                    // written from a target that is now outside the ribbon.
+                    self.retarget_cameras(i);
                     self.arrange(i)?;
                 }
             }
