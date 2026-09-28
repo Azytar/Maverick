@@ -201,8 +201,28 @@ pub fn reconcile(
     state: &State,
     applied: &mut AppliedState,
 ) -> Vec<GeometryEffect> {
+    // Coalesce before diffing. A window reachable from two placements is illegal
+    // — `check_invariants` #4 rejects it by name and no producer creates one —
+    // but the reconciler must still converge if it happens, because that check
+    // is a debug-only one and a release build has nothing else to stop it.
+    //
+    // Diffing both entries against a record the other just overwrote makes every
+    // round re-emit both, so the window ping-pongs between two geometries and
+    // takes two `configure_window`s per arrange, indefinitely. The placement list
+    // is ordered back-to-front, so the *last* entry for a window is the one
+    // nearest the top of the stack, and last-write-wins is both the cheapest
+    // deterministic policy and the one that matches the raise order.
+    let mut last_index: std::collections::HashMap<WindowId, usize> =
+        std::collections::HashMap::with_capacity(desired.windows.len());
+    for (i, dw) in desired.windows.iter().enumerate() {
+        last_index.insert(dw.window, i);
+    }
+
     let mut out = Vec::new();
-    for dw in &desired.windows {
+    for (i, dw) in desired.windows.iter().enumerate() {
+        if last_index[&dw.window] != i {
+            continue;
+        }
         let dirty = state
             .clients
             .get(&dw.window)
@@ -1315,6 +1335,76 @@ mod tests {
                 effects.len()
             );
         }
+    }
+    /// The reconciler must be *total*: it converges for any `DesiredState`,
+    /// including one the model checker rejects.
+    ///
+    /// A window reachable from two placements is illegal — `check_invariants`
+    /// #4 rejects it by name, and no production path produces one, since every
+    /// mutator that moves a window between a column and `floats` removes it
+    /// from the old list first. So this is defence in depth, not a live bug. It
+    /// matters anyway, because the check is a *debug* one: in a release build
+    /// nothing rejects a producer that gets this wrong, and the consequence is
+    /// not a wrong rect but a window that ping-pongs between two geometries and
+    /// takes two `configure_window`s per arrange, forever.
+    ///
+    /// The oracle is convergence, not correctness: a second round must emit
+    /// nothing, whatever the input said. Last-write-wins is the right policy to
+    /// settle on — the placement list is ordered back-to-front, so the entry that
+    /// survives is the one nearest the top of the stack.
+    #[test]
+    fn a_duplicate_desired_entry_still_converges() {
+        let mut state = State::new();
+        for win in [1u32, 2] {
+            let mut c = Client::new(win, 0, 0);
+            c.geometry_dirty = false;
+            state.clients.insert(win, c);
+        }
+        // The same window in two places with different geometry — the shape a
+        // producer bug would produce.
+        let desired = DesiredState {
+            windows: vec![
+                DesiredWindow {
+                    window: 1,
+                    rect: Rect::new(0, 0, 100, 100),
+                    border: 2,
+                    mapped: true,
+                },
+                DesiredWindow {
+                    window: 2,
+                    rect: Rect::new(200, 0, 100, 100),
+                    border: 2,
+                    mapped: true,
+                },
+                DesiredWindow {
+                    window: 1,
+                    rect: Rect::new(500, 500, 80, 80),
+                    border: 2,
+                    mapped: true,
+                },
+            ],
+            raise: vec![1, 2],
+        };
+
+        let mut applied = AppliedState::default();
+        for round in 1..=64 {
+            let effects = reconcile(&desired, &state, &mut applied);
+            if round > 1 {
+                assert!(
+                    effects.is_empty(),
+                    "round {round} emitted {} effects: a duplicate entry that never \
+                     reaches a fixed point configures the window on every frame forever",
+                    effects.len()
+                );
+            }
+        }
+        // And the window settled on one of the two geometries, not on neither.
+        let rec = applied.windows.get(&1).expect("window 1 was applied");
+        assert!(
+            rec.rect == Rect::new(0, 0, 100, 100) || rec.rect == Rect::new(500, 500, 80, 80),
+            "window 1 settled on {:?}, which is neither of the two desired rects",
+            rec.rect
+        );
     }
     proptest! {
         /// Idempotence: a repeat of a reconcile that already ran emits nothing.
