@@ -122,6 +122,27 @@ fn rounded_rectangles(w: i32, h: i32, r: i32) -> Vec<Rectangle> {
             height: h.max(0) as u16,
         }];
     }
+    // Two bands of at most `r` rectangles each, and a `ShapeRectangles` request
+    // that cannot hold them all does not fail — it kills the connection, because
+    // the length field wraps to zero and the server reads the remainder as more
+    // requests. `corner_radius` reaches here unclamped from the config file, so
+    // the bound is the protocol's, not the user's.
+    //
+    // The arithmetic, which is easy to get wrong: one call emits at most
+    // `2r + 1` rectangles (a row per band, plus the middle band), and
+    // `rounded_frame_regions` calls this twice — once for the outer frame, once
+    // for the inset client region — so a request carries at most `4r + 2`.
+    // `corner_radius = 16383` therefore asks for 65534 rectangles, not the 32766
+    // the two-band reading suggests. The slack of 2 is the middle bands.
+    let r = r.min(((MAX_MASK_RECTS - 2) / 4) as i32);
+    if r <= 0 {
+        return vec![Rectangle {
+            x: 0,
+            y: 0,
+            width: w.max(0) as u16,
+            height: h.max(0) as u16,
+        }];
+    }
 
     let mut rects = Vec::with_capacity(2 * r as usize + 1);
     // The middle band only exists when the corner zones leave a gap between
@@ -176,13 +197,43 @@ fn rounded_rectangles(w: i32, h: i32, r: i32) -> Vec<Rectangle> {
 
 /// The largest frame a Shape mask can describe exactly.
 ///
-/// `x11rb`'s `Rectangle` carries the origin as INT16 and the extent as CARD16,
-/// so the *origin* is the binding constraint, not the extent: the bottom corner
-/// row sits at `h - 1 - i` and the band's origin at `(w - width) / 2`, and both
-/// have to stay inside `i16::MAX` for every arc row. A frame larger than
-/// `i16::MAX + 1` on either axis therefore has no exact mask however the extent
-/// is clamped, so this is where the narrowing has to stop.
-const MAX_MASKED_FRAME: u32 = i16::MAX as u32 + 1;
+/// Both halves of an `x11rb::Rectangle` are **signed** 16-bit, and the binding
+/// constraint is the *right/bottom edge*, not the origin: the bottom corner row
+/// sits at `h - 1 - i` and the band's origin at `(w - width) / 2`, and a
+/// rectangle whose edge reaches `i16::MAX + 1` has that edge clamped down.
+///
+/// Measured against Xvfb / X.Org 21.1.24, one rectangle at a known origin:
+///
+/// ```text
+/// origin 0, w 32767 -> extents 32767x1   (exact)
+/// origin 0, w 32768 -> extents 32767x1   (edge clamped: 1 px short)
+/// origin 0, w 65535 -> extents 32767x1   (edge clamped)
+/// origin 32767, w 1 -> 0 rects           (the band empties, silently discarded)
+/// ```
+///
+/// The last row is the reason this is `i16::MAX` and not `i16::MAX + 1`: an
+/// earlier version of this constant allowed 32768, which left a 1 px strip of
+/// every window's right and bottom edge unmasked — square corners on a frame the
+/// user asked to be rounded — and a band at the last representable origin was
+/// dropped entirely, with no protocol error either time.
+const MAX_MASKED_FRAME: u32 = i16::MAX as u32;
+
+/// The most rectangles one `ShapeRectangles` request can carry.
+///
+/// A `SHAPE` `Rectangles` request is a 20-byte header plus 8 bytes per rectangle,
+/// and the length field counts *words*, which caps a request at 262 140 bytes
+/// unless BIG-REQUESTS is negotiated. Maverick does not negotiate it. So
+/// `(262_140 - 20) / 8 = 32765` rectangles is the ceiling — measured on Xvfb by
+/// bisection: 32765 accepted, the 32766th rejected with `BadLength`.
+///
+/// Exceeding it is not a rejected request, it is a dead window manager.
+/// `x11rb` computes the length field as `u16::try_from(len / 4).unwrap_or(0)`, so
+/// an over-long request sends a length of **zero** and the server parses the
+/// trailing 256 KB as further requests. The caller is the corner radius, which
+/// emits one rectangle per row in each of two bands, and `userconfig` copies
+/// `corner_radius` into `Cfg` with no bound — so `corner_radius = 16383` with a
+/// frame of 32768 px is a config value that kills the connection.
+const MAX_MASK_RECTS: usize = 32_765;
 
 /// Outer region and inset client region, both expressed relative to their own
 /// top-left. Translating the outer region by -bw aligns their circle centers.
@@ -3014,6 +3065,81 @@ mod tests {
                 "the mask must cover the whole representable frame for w={} h={} r={} bw={}",
                 w, h, r, bw
             );
+        }
+    }
+
+    /// The mask has to be a request the server will accept, and both ends of that
+    /// were wrong by measurement against Xvfb / X.Org 21.1.24.
+    ///
+    /// **The extent is signed too, and `MAX_MASKED_FRAME` was one too high.** A
+    /// rectangle's right/bottom edge is INT16, and an edge reaching
+    /// `i16::MAX + 1` is clamped down — so a 32768 px frame was masked as 32767,
+    /// leaving a 1 px strip of every window's right and bottom edge square on a
+    /// frame the user asked to be rounded. A band placed at the last
+    /// representable origin was discarded outright, with no protocol error.
+    #[test]
+    fn the_masked_frame_never_reaches_past_the_signed_extent() {
+        assert_eq!(
+            MAX_MASKED_FRAME, 32_767,
+            "the extent is INT16 too: one past i16::MAX is clamped, not exact"
+        );
+        for (w, h) in [
+            (32_767u32, 1u32),
+            (32_768, 1),
+            (65_535, 65_535),
+            (u32::MAX, u32::MAX),
+        ] {
+            let (outer, _) = rounded_frame_regions(w, h, 0, 0);
+            for rect in &outer {
+                let edge = i32::from(rect.x) + i32::from(rect.width);
+                assert!(
+                    edge <= MAX_MASKED_FRAME as i32,
+                    "a mask rectangle reaches {edge}, past the {MAX_MASKED_FRAME} \
+                     the server will store ({rect:?} for a {w}x{h} frame)"
+                );
+            }
+        }
+    }
+
+    /// A mask that does not fit in one request does not fail — it ends the
+    /// window manager. `x11rb` writes the length field as
+    /// `u16::try_from(len / 4).unwrap_or(0)`, so an over-long `ShapeRectangles`
+    /// sends a length of zero and the server parses the rest as further requests.
+    /// Measured ceiling: 32765 rectangles accepted, the 32766th rejected with
+    /// `BadLength`; 32765 = (262 140 - 20) / 8.
+    ///
+    /// `corner_radius` reaches here with no bound at all — `userconfig` copies it
+    /// into `Cfg` unclamped — so this is reachable from a config file, and the
+    /// radius is the only thing that scales the rectangle count: two bands of one
+    /// rectangle per row.
+    #[test]
+    fn a_mask_request_can_never_exceed_the_servers_maximum_length() {
+        assert_eq!(
+            MAX_MASK_RECTS,
+            (262_140 - 20) / 8,
+            "derived from the request size"
+        );
+        for radius in [0i32, 1, 255, 16_382, 16_383, 16_384, 1_000_000, i32::MAX] {
+            for (w, h) in [
+                (MAX_MASKED_FRAME, MAX_MASKED_FRAME),
+                (u32::MAX, u32::MAX),
+                (1, MAX_MASKED_FRAME),
+                (MAX_MASKED_FRAME, 1),
+            ] {
+                for (outer, inner) in [
+                    rounded_frame_regions(w, h, radius, 0),
+                    rounded_frame_regions(w, h, radius, 40_000),
+                ] {
+                    let n = outer.len() + inner.len();
+                    assert!(
+                        n <= MAX_MASK_RECTS,
+                        "r={radius} on a {w}x{h} frame produced {n} rectangles, \
+                         which is {} bytes against a 262 140 byte limit — the \
+                         length field wraps to 0 and the connection dies",
+                        n * 8 + 20
+                    );
+                }
+            }
         }
     }
 
