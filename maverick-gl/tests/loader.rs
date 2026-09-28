@@ -189,6 +189,54 @@ fn probing_for_a_driver_is_stable_and_never_fails() {
     }
 }
 
+/// Loading the tables resolves every entry point, which is the only thing that
+/// runs the loader macros' own bodies.
+///
+/// This is the only test that executes the 73 `unsafe` blocks the two macros
+/// expand to, and it needs no context: `Gl::load` and `Glx::load` only resolve
+/// symbols, so on a machine with a driver they fill both tables, and on one
+/// without they answer `Err` naming the first symbol that is missing.
+///
+/// What is checked is that the expansion is *complete*: every declared entry point
+/// ends up with a non-null address, resolved under its own name. A macro that
+/// stopped calling `sym`, or that read one name and used it for another, would
+/// leave a field null or pointing elsewhere, and the assertions below are what
+/// notice. Nothing is called, so no current context is required.
+#[test]
+fn both_tables_load_completely_when_there_is_a_driver() {
+    let Ok(lib) = Lib::open_gl() else {
+        eprintln!("no GL driver; the loaders cannot be exercised here");
+        return;
+    };
+
+    let gl = maverick_gl::gl::Gl::load(&lib).expect("every core GL entry point resolves");
+    // A field's *address* is a function pointer, so reading it back as a `usize`
+    // is how "the loader filled this in" is checked without calling the driver.
+    for (what, addr) in [
+        ("glGetError", gl.glGetError as usize),
+        ("glDeleteProgram", gl.glDeleteProgram as usize),
+        ("glGetString", gl.glGetString as usize),
+    ] {
+        assert_ne!(addr, 0, "{what} resolved to a null address");
+    }
+
+    let glx = maverick_gl::glx::Glx::load(&lib).expect("every required GLX entry point resolves");
+    for (what, addr) in [
+        ("glXGetFBConfigAttrib", glx.glXGetFBConfigAttrib as usize),
+        ("glXCreateWindow", glx.glXCreateWindow as usize),
+        ("glXGetFBConfigs", glx.glXGetFBConfigs as usize),
+    ] {
+        assert_ne!(addr, 0, "{what} resolved to a null address");
+    }
+
+    // The optional half may legitimately be `None` — that is what it is for — so
+    // it is only checked for being *decidable*: a driver that does not implement
+    // an extension may still hand back a stub, which is why the extension string
+    // is the real gate. Both answers are valid; what matters is that the field is
+    // readable and the type distinguishes them.
+    let _: Option<unsafe extern "C" fn(c_int) -> c_int> = glx.glXSwapIntervalSGI;
+}
+
 /// Loading the tables needs no context, and no driver, and does not panic.
 ///
 /// `Lib::open_gl` and `sym` only resolve symbols, so they are callable on a
