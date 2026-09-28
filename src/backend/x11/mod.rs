@@ -105,8 +105,12 @@ pub(crate) mod reconciler;
 mod render;
 mod rootwall;
 mod struts;
+mod teardown;
+pub use teardown::ShutdownReason;
+use teardown::{runs_x_half, LiveX};
 mod trace;
 use trace::trace;
+use trace::TraceEnd;
 #[cfg(test)]
 mod tests;
 use pointer::DragState;
@@ -507,64 +511,156 @@ impl WindowManager {
             }
         }
     }
-    /// Tear down WM-owned X resources (grabs, root event mask, EWMH props,
-    /// check window) and remove the control socket / identity ficha. Safe to
-    /// call before `exec` in `restart`.
-    pub fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Shut the window manager down, running the X half only when there is
+    /// still something to talk to and the local half always.
+    ///
+    /// This is the only exit from the backend. `why` is a statement about the
+    /// *session* — why it is ending — and it reaches the trace header verbatim;
+    /// whether the X half runs is decided separately, by whether the connection
+    /// can still carry a request ([`teardown::runs_x_half`]).
+    ///
+    /// The X half's error is captured rather than propagated. Every request in
+    /// it is best-effort and a failure there is not this process's problem to
+    /// solve, while the local half is the only thing standing between a dead
+    /// window manager and a record of itself that outlives it. So the X half is
+    /// reported and the local half runs regardless, and only the local half's
+    /// own outcome — which cannot fail — is returned.
+    pub fn shutdown(&mut self, why: ShutdownReason) -> Result<(), Box<dyn std::error::Error>> {
+        // Cloned rather than borrowed so the connection borrow below does not
+        // alias `self`: `teardown_x` needs `&mut self` for the compositor and
+        // the client list, and a borrow of `self.conn` would make those two
+        // borrows conflict even though they name the same connection.
+        let conn = self.conn.clone();
+        let live = LiveX::acquire(&conn);
+        let ran_x = runs_x_half(why, live.is_some());
+        let x_error = if ran_x {
+            self.teardown_x(live.as_ref().expect("a live connection was just taken"))
+                .err()
+        } else {
+            self.abandon_compositor();
+            None
+        };
+
+        if ran_x {
+            if let Some(error) = &x_error {
+                log::warn!("maverick: X teardown reported an error ({error}); the session record is still being written");
+            }
+        } else {
+            log::warn!("maverick: X teardown skipped — the X server is gone, so there is nothing left to release");
+        }
+        // The trace reports the X half as it actually went, not as the reason
+        // asked for: a clean exit that found no connection is still a lost
+        // connection, and `x_teardown=full` must never be written for a teardown
+        // that released nothing.
+        let local = teardown::run_local(
+            &self.session_id,
+            &mut self.control,
+            if ran_x {
+                TraceEnd::CleanExit
+            } else {
+                TraceEnd::XConnectionLost
+            },
+        );
+        if let Some(error) = &local.trace.error {
+            log::warn!(
+                "compositor trace dump {}: {error}",
+                local.trace.path.display()
+            );
+        } else if local.trace.written {
+            log::info!(
+                "compositor trace: {} records written to {}",
+                local.trace.records,
+                local.trace.path.display()
+            );
+        }
+        log::debug!(
+            "shutdown: identity record removed={}, control socket released={}",
+            local.ficha_removed,
+            local.control_dropped
+        );
+        Ok(())
+    }
+
+    /// Release the WM-owned X resources: the compositor, the grabs, the root
+    /// event mask, the EWMH properties, the check window and the root pixmap.
+    ///
+    /// Takes the [`LiveX`] borrow, so this cannot be *called* with a connection
+    /// that has already failed — the whole point of the split. Every request
+    /// goes out over `x`, never over `self.conn`, so the request and the proof
+    /// that issuing it was safe are the same object.
+    ///
+    /// The `flush` at the end is the one request here whose failure is reported
+    /// rather than ignored: it is the request that tells the server everything
+    /// above it, so an error from it means none of the rest can be relied on
+    /// either. It is also the reason this half and the local half cannot share a
+    /// function — on a dead connection it returns in 0 ms, and a `?` here would
+    /// skip everything after it, which is the entire local half.
+    fn teardown_x(&mut self, x: &LiveX<'_>) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(mut compositor) = self.compositor.take() {
             compositor.disable();
         }
-        let _ = self.conn.ungrab_key(0u8, self.root, ModMask::ANY);
+        let conn = x.conn();
+        let _ = conn.ungrab_key(0u8, self.root, ModMask::ANY);
 
         // A drag in flight holds an active pointer grab: release it so
         // `restart`/`quit` never depends on the server disconnect to free it.
         if self.drag.is_some() {
-            let _ = self.conn.ungrab_pointer(x11rb::CURRENT_TIME);
+            let _ = conn.ungrab_pointer(x11rb::CURRENT_TIME);
             self.drag = None;
         }
 
         // Restore root event mask: remove SUBSTRUCTURE_REDIRECT so that
         // the next WM doesn't fail on startup.
-        let _ = self.conn.change_window_attributes(
+        let _ = conn.change_window_attributes(
             self.root,
             &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),
         );
 
         for win in self.engine.state.clients.keys() {
-            let _ = self
-                .conn
-                .ungrab_button(ButtonIndex::ANY, *win, ModMask::ANY);
+            let _ = conn.ungrab_button(ButtonIndex::ANY, *win, ModMask::ANY);
         }
 
-        let _ = self
-            .conn
-            .delete_property(self.root, self.atoms.net_supporting_wm_check);
-        let _ = self
-            .conn
-            .delete_property(self.root, self.atoms.net_active_window);
-        let _ = self
-            .conn
-            .delete_property(self.root, self.atoms.net_client_list);
-        let _ = self.conn.destroy_window(self.check_win);
+        let _ = conn.delete_property(self.root, self.atoms.net_supporting_wm_check);
+        let _ = conn.delete_property(self.root, self.atoms.net_active_window);
+        let _ = conn.delete_property(self.root, self.atoms.net_client_list);
+        let _ = conn.destroy_window(self.check_win);
 
         // The last root pixmap has no successor that would release it, so it is
         // freed here rather than on the next install.
         if let Some(pm) = self.last_root_pixmap.take() {
-            let _ = self.conn.free_pixmap(pm);
+            let _ = conn.free_pixmap(pm);
         }
 
-        self.conn.flush()?;
-
-        // Tear down the control socket + identity ficha so external tools stop
-        // listing this (now dead) instance. The ControlServer thread stops when
-        // its handle is dropped at the end of the process; explicitly remove the
-        // on-disk meta here.
-        if !self.session_id.is_empty() {
-            maverick_sys::identity::cleanup_meta(&self.session_id);
-        }
-        drop(self.control.take());
-        trace::dump();
+        conn.flush()?;
         Ok(())
+    }
+
+    /// Give up on the compositor without releasing anything, then drop it.
+    ///
+    /// Required, not an optimisation. `Compositor::drop` runs `disable()`, whose
+    /// `renderer.destroy()` reaches `glXDestroyWindow`; on a display whose
+    /// server is gone that call lands in libX11's I/O error handler, which
+    /// prints "X connection … broken" and calls `exit(1)`. Nothing unwinds, no
+    /// other destructor runs, and the process is gone before it can remove its
+    /// identity record or write its trace — so the destructor that looks like
+    /// tidying is the thing that has to be stopped.
+    fn abandon_compositor(&mut self) {
+        if let Some(mut compositor) = self.compositor.take() {
+            compositor.abandon();
+            drop(compositor);
+        }
+    }
+
+    /// Tear down WM-owned X resources (grabs, root event mask, EWMH props,
+    /// check window) and remove the control socket / identity ficha. Safe to
+    /// call before `exec` in `restart`.
+    ///
+    /// The clean-exit spelling of [`Self::shutdown`], kept for `restart` and the
+    /// fatal-event-loop arm. It is safe on a dead connection too: the X half is
+    /// skipped rather than attempted, so calling it from an error path that
+    /// happens to be a connection loss costs the X half and nothing else.
+    pub fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.shutdown(ShutdownReason::Clean)
     }
     fn run_once(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::io::AsRawFd;
