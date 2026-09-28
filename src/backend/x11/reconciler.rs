@@ -245,6 +245,28 @@ pub fn reconcile(
     out
 }
 
+/// Repair a window whose reported geometry contradicts the record.
+///
+/// A [`ConfigureObservation::Stale`] verdict means X11 is not showing what the
+/// record says we applied, so the record has just proved itself wrong — and
+/// repairing it by diffing the model against that same record cannot work,
+/// because for every writer of `AppliedState` the model's rect *is* the
+/// recorded one. The `Stale` arm was therefore a no-op: correct as a storm guard
+/// against our own late echo, and structurally unable to do the one thing its
+/// name promises.
+///
+/// So the repair invalidates the record instead. `forget` is exactly that
+/// primitive, and its effect is bounded rather than a storm: the re-asserted
+/// configure restores the record to the model, so the echo it generates is
+/// `Compliant`, and the echo that caused all this was already in flight. A
+/// window whose position X11 holds for a reason Maverick did not ask for — a
+/// client that reparented off the root and moved freely, say — is therefore
+/// corrected on the next arrange instead of diverging for the rest of the
+/// session.
+pub fn reassert_stale(applied: &mut AppliedState, win: WindowId) {
+    applied.forget(win);
+}
+
 /// The verdict of comparing an external `ConfigureNotify` against `Applied`.
 ///
 /// The caller acts on the verdict in `on_configure_notify`: `Compliant` does
@@ -1404,6 +1426,67 @@ mod tests {
             rec.rect == Rect::new(0, 0, 100, 100) || rec.rect == Rect::new(500, 500, 80, 80),
             "window 1 settled on {:?}, which is neither of the two desired rects",
             rec.rect
+        );
+    }
+    /// A `Stale` verdict must be *repairable*, and the repair must still be
+    /// bounded.
+    ///
+    /// `Stale` means X11 reports a geometry other than the recorded one, i.e.
+    /// the record has been contradicted. For every writer of `AppliedState` the
+    /// model's rect is the recorded rect, so re-asserting the model against the
+    /// record emits nothing — the arm is a no-op, correct against our own late
+    /// echo and structurally unable to do what its name says. The fix invalidates
+    /// the record first, which is what makes the model something to re-assert
+    /// *to*.
+    ///
+    /// The second half is the part that makes it safe: a repair that is not
+    /// bounded is worse than no repair, because it turns a contradiction into a
+    /// configure storm. Here the bound is one extra request per contradiction —
+    /// the re-asserted configure restores the record, so its own echo is
+    /// `Compliant`, and the contradicting echo was already in flight.
+    #[test]
+    fn a_stale_echo_is_repaired_and_the_repair_is_bounded() {
+        let model = Rect::new(0, 0, 100, 100);
+        let foreign = Rect::new(4000, 4000, 640, 480); // what X11 really holds
+        let mut applied = AppliedState::default();
+        let mut state = State::new();
+        let mut c = Client::new(1, 0, 0);
+        c.geometry_dirty = false;
+        state.clients.insert(1, c);
+
+        // We applied `model`; X11 now reports something else entirely.
+        assert_eq!(
+            applied.diff(1, model, 2, false),
+            Some((model, 2)),
+            "the first apply must emit"
+        );
+        let verdict = classify_configure(foreign, 2, &applied.windows[&1]);
+        assert_eq!(
+            verdict,
+            ConfigureObservation::Stale,
+            "a report that differs from the record must be Stale"
+        );
+
+        // The repair: invalidate the contradicted record, then re-assert.
+        reassert_stale(&mut applied, 1);
+        let repair = applied.diff(1, model, 2, false);
+        assert_eq!(
+            repair,
+            Some((model, 2)),
+            "after a Stale verdict the model must be re-emittable, or the \
+             divergence is permanent"
+        );
+
+        // Bounded: the echo the repair generated is our own and agrees.
+        assert_eq!(
+            classify_configure(model, 2, &applied.windows[&1]),
+            ConfigureObservation::Compliant,
+            "the repair's own echo must be Compliant, or the repair loops"
+        );
+        assert_eq!(
+            applied.diff(1, model, 2, false),
+            None,
+            "the repair must not re-emit once the record matches the model"
         );
     }
     proptest! {

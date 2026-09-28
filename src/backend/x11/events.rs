@@ -353,12 +353,16 @@ impl WindowManager {
                     match verdict {
                         // Our own echo: X11 agrees, nothing to do.
                         Some(reconciler::ConfigureObservation::Compliant) | None => {}
-                        // Stale echo: re-assert the *model*, never the reported
-                        // rect. When X11 already matches the model — the normal
-                        // case, because the divergence is our own older request —
-                        // the reconciler's diff emits nothing at all, so a stale
-                        // echo costs a hash lookup and no protocol traffic.
+                        // Stale echo: X11 is not showing what the record says we
+                        // applied, so the record is suspect. Invalidate it before
+                        // re-asserting — diffing the model against the same record
+                        // that just proved itself wrong can never emit anything,
+                        // which made this arm a pure no-op. The cost is bounded:
+                        // the re-asserted configure restores the record to the
+                        // model, so its own echo is `Compliant`, and the echo that
+                        // triggered this was already in flight.
                         Some(reconciler::ConfigureObservation::Stale) => {
+                            reconciler::reassert_stale(&mut self.applied, e.window);
                             self.apply_geom(e.window, model_rect, model_bw, true)?;
                         }
                     }
