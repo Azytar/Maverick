@@ -174,9 +174,39 @@ fn rounded_rectangles(w: i32, h: i32, r: i32) -> Vec<Rectangle> {
     rects
 }
 
+/// The largest frame a Shape mask can describe exactly.
+///
+/// `x11rb`'s `Rectangle` carries the origin as INT16 and the extent as CARD16,
+/// so the *origin* is the binding constraint, not the extent: the bottom corner
+/// row sits at `h - 1 - i` and the band's origin at `(w - width) / 2`, and both
+/// have to stay inside `i16::MAX` for every arc row. A frame larger than
+/// `i16::MAX + 1` on either axis therefore has no exact mask however the extent
+/// is clamped, so this is where the narrowing has to stop.
+const MAX_MASKED_FRAME: u32 = i16::MAX as u32 + 1;
+
 /// Outer region and inset client region, both expressed relative to their own
 /// top-left. Translating the outer region by -bw aligns their circle centers.
+///
+/// # Why the frame is clamped here
+///
+/// A Shape `BOUNDING` mask is a union of X11 rectangles, so its geometry travels
+/// as CARD16/INT16. The frame the caller derives is `geom + 2*bw`, and `bw` is
+/// user config: `userconfig` copies `border_width` into `Cfg` without a bound,
+/// `SetBorderWidth` overwrites it from IPC, and `manage` copies it into
+/// `Client::border_w`. A `border_width` of 40 000 therefore asks for an 80 001 px
+/// frame, and narrowing that with `as` is a *modulo*, not a saturation — the
+/// server receives a mask a fraction of the frame's size, anchored at a wrapped
+/// (possibly negative) origin. Worse, a dimension above `i32::MAX` arrives as a
+/// negative `i32`, and `rounded_rectangles` then clamps the radius against a
+/// negative bound, which `Ord::clamp` treats as a programming error and aborts on.
+///
+/// So the frame is clamped to what the protocol can describe *before* it is
+/// narrowed. A frame past [`MAX_MASKED_FRAME`] has no exact mask; describing the
+/// part that fits is strictly better than wrapping, and matches what the
+/// compositor already does for the overlay shape (`update_overlay_shape`).
 fn rounded_frame_regions(w: u32, h: u32, radius: i32, bw: u32) -> (Vec<Rectangle>, Vec<Rectangle>) {
+    let w = w.min(MAX_MASKED_FRAME);
+    let h = h.min(MAX_MASKED_FRAME);
     let radius = radius.clamp(0, (w.min(h) / 2) as i32);
     let inset = bw.saturating_mul(2);
     (
@@ -943,8 +973,18 @@ impl WindowManager {
             } else {
                 self.engine.cfg.corner_radius as i32
             };
-            let outer_w = geom.w + 2 * bw;
-            let outer_h = geom.h + 2 * bw;
+            // The frame is the window plus the border on both sides. `bw` here
+            // is the model's border, which is user config and therefore not
+            // bounded by anything the arithmetic below can assume — `2 * bw`
+            // overflows `u32` at `bw >= 2^31`, which a `border_width` of
+            // 2147483648 in the config file reaches, and a debug build traps it
+            // ("attempt to multiply with overflow") rather than wrapping. The
+            // frame is a description of pixels, so saturating is the correct
+            // failure: a frame that cannot be represented is clamped, exactly as
+            // `rounded_frame_regions` clamps it to CARD16.
+            let frame = bw.saturating_mul(2);
+            let outer_w = geom.w.saturating_add(frame);
+            let outer_h = geom.h.saturating_add(frame);
             // The Shape `BOUNDING` mask depends only on (outer_w, outer_h, r,
             // bw), never on position. `emit_geometry` fires on every Configure
             // effect, including pure moves (camera scroll re-Configures every
@@ -2885,10 +2925,10 @@ mod tests {
         ) {
             let (outer, _inner) = rounded_frame_regions(w, h, r, bw);
             // `w`/`h` are already the outer frame (the caller adds the border),
-            // and anything past CARD16 cannot be described, so the mask is
-            // defined against the representable part of it.
-            let rw = w.min(u32::from(u16::MAX));
-            let rh = h.min(u32::from(u16::MAX));
+            // and anything past the protocol's representable frame cannot be
+            // described, so the mask is defined against that part of it.
+            let rw = w.min(MAX_MASKED_FRAME);
+            let rh = h.min(MAX_MASKED_FRAME);
             for rect in &outer {
                 let (x, y) = (i32::from(rect.x), i32::from(rect.y));
                 let (rw2, rh2) = (i32::from(rect.width), i32::from(rect.height));
@@ -2935,9 +2975,10 @@ mod tests {
         let (outer, _) = rounded_frame_regions(outer_w, outer_h, 10, bw);
         assert_eq!(
             mask_extents(&outer),
-            (0, 0, i32::from(u16::MAX), outer_h.min(u32::from(u16::MAX)) as i32),
-            "an 80 001 px frame must be described against the 65 535 px the protocol \
+            (0, 0, MAX_MASKED_FRAME as i32, MAX_MASKED_FRAME as i32),
+            "an 80 001 px frame must be described against the {} px the protocol \
              can express, not wrapped down to {}",
+            MAX_MASKED_FRAME,
             80_001 % 65_536
         );
     }
