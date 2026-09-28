@@ -1,10 +1,21 @@
 //! What the GL/GLX loader promises, checked without a context.
 //!
-//! A real GL context cannot be created reliably in CI — no DRM node, no
-//! hardware, or a driver that answers `glXCreateContextAttribsARB` with NULL —
-//! so the tests here cover the part of the boundary that holds *before* one
+//! These tests cover the part of the boundary that holds *before* a context
 //! exists: the shapes of the entry points the loader hands out, and what the
-//! loader does on a machine with no driver at all.
+//! loader does on a machine with no driver at all. They need no display.
+//!
+//! That division used to be justified by a claim that a real context could not
+//! be created here — "no DRM node, no hardware, or a driver that answers
+//! `glXCreateContextAttribsARB` with NULL". All three are true of a bare CI
+//! box and none of them applies to one with an X server, which is what
+//! exercising this crate's renderer needs anyway. Mesa's software rasteriser
+//! needs no DRM node, and against `Xvfb` it answers `glXCreateContextAttribsARB`
+//! with a direct 3.3-core context (`glXIsDirect` 1, which `Renderer::new`
+//! requires) with `GLX_EXT_texture_from_pixmap`,
+//! `GLX_ARB_create_context` and `GLX_ARB_create_context_profile` all present.
+//! The live coverage lives in `renderer::live_gl`, which is opt-in via
+//! `MAVERICK_GL_LIVE=1` and a `DISPLAY` so an ordinary `cargo test` still opens
+//! nothing on a desktop.
 //!
 //! # What is checked, and what is compile-checked instead
 //!

@@ -22,6 +22,20 @@ pub type GLsizeiptr = isize;
 
 pub const GL_FALSE: GLboolean = 0;
 pub const GL_NO_ERROR: GLenum = 0;
+/// `GL_INVALID_OPERATION` — the error a `glUniform*` naming a program that is
+/// not current raises (GL 3.3 §2.3.1: "if the current program object is not
+/// `program`, `INVALID_OPERATION` is generated").
+pub const GL_INVALID_OPERATION: GLenum = 0x0502;
+/// `GL_INVALID_ENUM`.
+pub const GL_INVALID_ENUM: GLenum = 0x0500;
+/// `GL_CURRENT_PROGRAM` — the `glGetIntegerv` query that names the program a
+/// `glUniform*` would write to.
+pub const GL_CURRENT_PROGRAM: GLenum = 0x8B8D;
+/// `GL_ACTIVE_UNIFORMS` — how many uniforms a linked program actually has, as
+/// opposed to the number of names the source mentions. Needed to tell a
+/// location that merely *exists* in another program from one that means
+/// something there.
+pub const GL_ACTIVE_UNIFORMS: GLenum = 0x8B86;
 
 pub const GL_TRIANGLES: GLenum = 0x0004;
 pub const GL_DEPTH_TEST: GLenum = 0x0B71;
@@ -128,6 +142,7 @@ gl_api! {
     fn glUseProgram(prog: GLuint);
     fn glDeleteProgram(prog: GLuint);
     fn glGetUniformLocation(prog: GLuint, name: *const GLchar) -> GLint;
+    fn glGetUniformfv(prog: GLuint, location: GLint, params: *mut GLfloat);
 
     fn glUniform1i(loc: GLint, v0: GLint);
     fn glUniform1f(loc: GLint, v0: GLfloat);

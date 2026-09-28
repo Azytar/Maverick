@@ -1745,17 +1745,36 @@ impl Renderer {
     /// The program bound before this call is restored afterwards. Binding a
     /// foreign program changes the GL *current* program, and every `glUniform*`
     /// in `draw`/`draw_raw` addresses a location belonging to `self.prog`. A
-    /// `glUniform*` naming a program that is not current raises
-    /// `GL_INVALID_OPERATION` and the uniform is not written, so leaving a
-    /// foreign program bound would make the next window quad submit against the
-    /// wrong program — and `end_frame` checks `glGetError`, so that error
-    /// would tear the compositor down.
+    /// `glUniform*` naming a program that is not current leaves that uniform
+    /// stale, and the compositor draws its shader wallpaper through here before
+    /// drawing windows, floats and the HUD — so any user GLSL wallpaper
+    /// (`.glsl`/`.frag`/`.vert`/`.shader`/`.fs`, reachable from config and from
+    /// `maverickctl set-wallpaper`) would otherwise cost the user their
+    /// compositor.
     ///
-    /// This is not hypothetical plumbing: the compositor draws its shader
-    /// wallpaper through here and then draws windows, floats and the HUD through
-    /// `draw`/`draw_raw` in the same frame, so any user GLSL wallpaper
-    /// (`.glsl`/`.frag`/`.vert`/`.shader`/`.fs`) would otherwise cost the user
-    /// their compositor.
+    /// # What the failure actually looks like
+    ///
+    /// The misdirection splits by *location index*, because a `glUniform*`
+    /// resolves against the currently bound program:
+    ///
+    /// - an index the current program also owns is written **into that
+    ///   program**, silently and with no error at all, leaving the intended
+    ///   program stale. Both programs link the same vertex shader, so `u_dst` is
+    ///   index 0 in both and a window quad's destination rect is handed to the
+    ///   wallpaper shader without a word from the driver;
+    /// - an index it does not own raises `GL_INVALID_OPERATION`.
+    ///
+    /// `draw_raw` writes ten uniforms against the wallpaper program's five, so
+    /// the second group is what `end_frame`'s `glGetError` check sees — and that
+    /// is the check the compositor's survival hinges on. On a driver that laid
+    /// all ten indices out shared, the same defect would degrade from "the
+    /// compositor destroys itself" to "windows drawn by the wallpaper shader
+    /// with stale uniforms", and `end_frame` would report no error at all.
+    ///
+    /// The restore is therefore load-bearing twice over, and `GL_CURRENT_PROGRAM`
+    /// after this call is asserted in `renderer::live_gl` — which needs
+    /// `MAVERICK_GL_LIVE=1` and a `DISPLAY`; see `tests/loader.rs` for why the
+    /// contextless tests are not the place for it.
     pub fn draw_shader(&mut self, s: ShaderId, out: Rect, time: f32, dt: f32) {
         let gl = &self.gl;
         // SAFETY: `s.0` is a program `compile_fragment` linked and
@@ -3446,5 +3465,735 @@ mod property_tests {
                 );
             }
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Live GLX harness
+//
+// The unit tests above all stop short of a context, on the grounds (recorded in
+// `tests/loader.rs`) that CI has no DRM node, no hardware, and a driver that
+// answers `glXCreateContextAttribsARB` with NULL. That is a statement about a
+// bare machine, not about a machine with an X server: with `Xvfb` running,
+// Mesa's llvmpipe answers GLX 1.4, `GLX_ARB_create_context` and
+// `GLX_ARB_create_context_profile` are advertised, and a direct 3.3-core
+// context is handed out. Everything below therefore runs for real.
+//
+// The drawable is a plain child window of the root rather than a Composite
+// overlay. `Renderer::new` hands its `overlay` XID straight to
+// `glXCreateWindow`, and the invariant under test — *which program is current
+// after `draw_shader`* — is a property of the context, not of the drawable:
+// `glUseProgram` and every `glUniform*` behave identically on an overlay and
+// on an ordinary window. So the cheapest drawable that satisfies
+// `glXCreateWindow`'s contract is the one used here.
+//
+// # Running
+//
+// ```text
+// Xvfb :91 -screen 0 1920x1080x24 &
+// MAVERICK_GL_LIVE=1 DISPLAY=:91 cargo test -p maverick-gl --lib -- --nocapture --test-threads=1
+// ```
+//
+// Both the display *and* the opt-in variable are required, so an ordinary
+// `cargo test` on a developer's desktop never opens a window on it.
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod live_gl {
+    use super::*;
+    use maverick_x11::open_x;
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{
+        ConnectionExt as _, CreateWindowAux, Screen, VisualClass, WindowClass,
+    };
+    use x11rb::COPY_DEPTH_FROM_PARENT;
+
+    /// A user GLSL wallpaper, in the shape `compile_fragment` documents: the
+    /// fixed contract uniforms plus `out vec4 frag`. Every declared uniform is
+    /// actually read, so none of `wp_u_*` is optimised out to `-1` and a
+    /// uniform write in `draw_shader` cannot be silently discarded.
+    const WALLPAPER_FRAG: &str = r#"#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform float u_time;
+uniform vec2  u_resolution;
+uniform float u_delta_time;
+void main() {
+    float wave = 0.5 + 0.5 * sin(u_time + length(v_uv * u_resolution) * 0.01);
+    frag = vec4(wave * u_delta_time, v_uv, 1.0);
+}
+"#;
+
+    const SCREEN_W: u32 = 320;
+    const SCREEN_H: u32 = 240;
+
+    /// A `Renderer` on a real context, torn down with it.
+    struct Live(Option<Renderer>);
+
+    impl Live {
+        fn get(&mut self) -> &mut Renderer {
+            self.0.as_mut().expect("a Live always holds its renderer")
+        }
+    }
+
+    impl Drop for Live {
+        fn drop(&mut self) {
+            if let Some(r) = self.0.as_mut() {
+                r.destroy();
+            }
+        }
+    }
+
+    /// Bring up the renderer on `$DISPLAY`, or `None` when this environment
+    /// cannot (no display, no opt-in, or a driver that will not give out a
+    /// direct 3.3-core context).
+    fn live() -> Option<Live> {
+        if std::env::var_os("DISPLAY").is_none() {
+            eprintln!("skipped: no DISPLAY");
+            return None;
+        }
+        if std::env::var_os("MAVERICK_GL_LIVE").is_none() {
+            eprintln!("skipped: set MAVERICK_GL_LIVE=1 to run against a live GLX context");
+            return None;
+        }
+        let (dpy, conn, screen_num) = match open_x() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("skipped: open_x failed: {e}");
+                return None;
+            }
+        };
+        let screen = &conn.setup().roots[screen_num];
+        let root_visual = screen.root_visual;
+        let visuals = screen_visuals(screen);
+        // A plain child of the root in the root visual: the smallest drawable
+        // `glXCreateWindow` accepts, and enough for everything below.
+        let win = match conn.generate_id() {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("skipped: generate_id: {e}");
+                return None;
+            }
+        };
+        if let Err(e) = conn
+            .create_window(
+                COPY_DEPTH_FROM_PARENT,
+                win,
+                screen.root,
+                0,
+                0,
+                SCREEN_W as u16,
+                SCREEN_H as u16,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                root_visual,
+                &CreateWindowAux::new(),
+            )
+            .map_err(|e| e.to_string())
+            .and_then(|c| c.check().map_err(|e| e.to_string()))
+        {
+            eprintln!("skipped: create_window: {e}");
+            return None;
+        }
+        if let Err(e) = conn
+            .map_window(win)
+            .map_err(|e| e.to_string())
+            .and_then(|c| c.check().map_err(|e| e.to_string()))
+        {
+            eprintln!("skipped: map_window: {e}");
+            return None;
+        }
+        let _ = conn.flush();
+        match Renderer::new(
+            dpy,
+            screen_num as i32,
+            win,
+            root_visual,
+            &visuals,
+            SCREEN_W,
+            SCREEN_H,
+        ) {
+            Ok(r) => {
+                eprintln!(
+                    "live GL: {} / {} / {}",
+                    r.info.vendor, r.info.renderer, r.info.version
+                );
+                Some(Live(Some(r)))
+            }
+            Err(e) => {
+                eprintln!("skipped: Renderer::new: {e}");
+                None
+            }
+        }
+    }
+
+    /// The screen's visual table, flattened exactly as the compositor's
+    /// `screen_visuals` does — `Renderer::new` refuses to run if the root
+    /// visual is absent from it, so a test that guessed would not be testing
+    /// the same table production passes.
+    fn screen_visuals(screen: &Screen) -> Vec<VisualFormat> {
+        let mut out = Vec::new();
+        for d in &screen.allowed_depths {
+            for v in &d.visuals {
+                let direct =
+                    v.class == VisualClass::TRUE_COLOR || v.class == VisualClass::DIRECT_COLOR;
+                let bits = |m: u32| if direct { m.count_ones() as u8 } else { 0 };
+                let colour = (v.red_mask | v.green_mask | v.blue_mask).count_ones() as u8;
+                out.push(VisualFormat {
+                    id: v.visual_id,
+                    depth: d.depth,
+                    red_bits: bits(v.red_mask),
+                    green_bits: bits(v.green_mask),
+                    blue_bits: bits(v.blue_mask),
+                    alpha_bits: colour.saturating_sub(
+                        v.red_mask.count_ones() as u8
+                            + v.green_mask.count_ones() as u8
+                            + v.blue_mask.count_ones() as u8,
+                    ),
+                    direct,
+                });
+            }
+        }
+        out
+    }
+
+    /// `GL_CURRENT_PROGRAM`: the program a `glUniform*` call would write to.
+    /// This is the whole question the fix turns on — `draw`/`draw_raw` name
+    /// `self.prog`'s locations, so the value here decides whether those writes
+    /// land or raise `GL_INVALID_OPERATION`.
+    fn current_program(r: &Renderer) -> GLuint {
+        let mut v: GLint = -1;
+        // SAFETY: a core `glGetIntegerv` on the context current on this thread,
+        // writing one `GLint` into a live local.
+        unsafe { (r.gl.glGetIntegerv)(GL_CURRENT_PROGRAM, &mut v) };
+        v as GLuint
+    }
+
+    /// Read `self.prog`'s `u_dst` back with `glGetUniformfv`. Naming the
+    /// program explicitly makes this a read of the *window* program whatever
+    /// happens to be current, which is what lets a stale value be told apart
+    /// from a missing one.
+    fn read_u_dst(r: &Renderer) -> [GLfloat; 4] {
+        let mut v = [GLfloat::NAN; 4];
+        // SAFETY: `r.prog` is the linked window program and `r.u_dst` one of its
+        // active uniform locations, so this asks the driver for four floats it
+        // will write into `v`.
+        unsafe { (r.gl.glGetUniformfv)(r.prog, r.u_dst, v.as_mut_ptr()) };
+        v
+    }
+
+    fn quad(dst: [f32; 4]) -> DrawQuad {
+        DrawQuad {
+            dst,
+            src: [0.0, 0.0, 1.0, 1.0],
+            size: [dst[2] - dst[0], dst[3] - dst[1]],
+            radius: 0.0,
+            border_width: 0.0,
+            border_color: [0.0; 4],
+            opacity: 1.0,
+            filter: Filter::Nearest,
+        }
+    }
+
+    /// A CPU-side texture for `Renderer::draw` (which takes `&mut Texture`,
+    /// unlike `draw_raw`'s handle).
+    fn cpu_texture(r: &mut Renderer) -> Texture {
+        let mut tex: GLuint = 0;
+        // SAFETY: one `GLuint` out-parameter on a context current here, writing
+        // one freshly generated texture name.
+        unsafe { (r.gl.glGenTextures)(1, &mut tex) };
+        Texture::new_cpu(tex, 4, 4)
+    }
+
+    // ── the fix ──────────────────────────────────────────────────────────────
+
+    /// `draw_shader` binds a caller-supplied program and must hand the window
+    /// program back. Without the restore, `GL_CURRENT_PROGRAM` stays on the
+    /// wallpaper program for the rest of the frame.
+    #[test]
+    fn draw_shader_hands_the_window_program_back() {
+        let Some(mut l) = live() else { return };
+        let r = l.get();
+        let shader = r
+            .compile_fragment(WALLPAPER_FRAG)
+            .expect("wallpaper compiles");
+        assert_ne!(shader.0, r.prog, "the wallpaper must be its own program");
+
+        r.begin_frame(SCREEN_W, SCREEN_H, true);
+        // Attribute before the call, so a failure below is the restore's and
+        // not `begin_frame`'s.
+        assert_eq!(
+            current_program(r),
+            r.prog,
+            "begin_frame must leave the window program current"
+        );
+
+        r.draw_shader(
+            shader,
+            Rect {
+                x: 0,
+                y: 0,
+                w: SCREEN_W,
+                h: SCREEN_H,
+            },
+            1.5,
+            0.016,
+        );
+
+        assert_eq!(
+            current_program(r),
+            r.prog,
+            "draw_shader left the wallpaper program (0x{:x}) current instead of the \
+             window program (0x{:x})",
+            shader.0,
+            r.prog,
+        );
+    }
+
+    // ── the production symptom ───────────────────────────────────────────────
+
+    /// What the user actually loses: `end_frame` answers false and
+    /// `mod.rs` answers that with `compositor.take(); disable()`. The frame
+    /// below is the compositor's own order — shader wallpaper first, then the
+    /// window quads, then present.
+    #[test]
+    fn a_shader_wallpaper_frame_still_reports_no_gl_error() {
+        let Some(mut l) = live() else { return };
+        let r = l.get();
+        let shader = r
+            .compile_fragment(WALLPAPER_FRAG)
+            .expect("wallpaper compiles");
+
+        r.begin_frame(SCREEN_W, SCREEN_H, true);
+        r.draw_shader(
+            shader,
+            Rect {
+                x: 0,
+                y: 0,
+                w: SCREEN_W,
+                h: SCREEN_H,
+            },
+            1.5,
+            0.016,
+        );
+        r.draw_raw(
+            TextureHandle(0),
+            TextureHandle(0),
+            false,
+            &quad([8.0, 8.0, 88.0, 68.0]),
+        );
+
+        assert!(
+            r.end_frame(),
+            "end_frame reported a GL error after a shader-wallpaper frame; the \
+             compositor answers that by destroying itself"
+        );
+    }
+
+    /// The same frame, but naming the error instead of only its consequence.
+    /// `GL_INVALID_OPERATION` (0x502) is the documented error for a
+    /// `glUniform*` naming a program that is not current.
+    #[test]
+    fn the_window_quad_after_a_shader_wallpaper_raises_no_invalid_operation() {
+        let Some(mut l) = live() else { return };
+        let r = l.get();
+        let shader = r
+            .compile_fragment(WALLPAPER_FRAG)
+            .expect("wallpaper compiles");
+
+        r.begin_frame(SCREEN_W, SCREEN_H, true);
+        r.draw_shader(
+            shader,
+            Rect {
+                x: 0,
+                y: 0,
+                w: SCREEN_W,
+                h: SCREEN_H,
+            },
+            1.5,
+            0.016,
+        );
+        r.draw_raw(
+            TextureHandle(0),
+            TextureHandle(0),
+            false,
+            &quad([8.0, 8.0, 88.0, 68.0]),
+        );
+
+        let err = r.gl.take_error();
+        assert_eq!(
+            err, GL_NO_ERROR,
+            "GL error 0x{err:x} after the window quad \
+             (0x502 = GL_INVALID_OPERATION, 0x500 = GL_INVALID_ENUM)"
+        );
+    }
+
+    // ── the read-back oracle ────────────────────────────────────────────────
+
+    /// `u_dst` read back from the window program after a frame that goes
+    /// wallpaper → window quad.
+    ///
+    /// The two control frames matter: they show the oracle *can* see a write,
+    /// so a stale answer in the middle frame is the shader frame's doing and not
+    /// a read-back that never worked. They also pin what "stale" means here —
+    /// the previous frame's value, not zero.
+    #[test]
+    fn a_window_quad_after_a_shader_wallpaper_writes_its_destination_rect() {
+        let Some(mut l) = live() else { return };
+        let r = l.get();
+        let shader = r
+            .compile_fragment(WALLPAPER_FRAG)
+            .expect("wallpaper compiles");
+        let wallpaper = Rect {
+            x: 0,
+            y: 0,
+            w: SCREEN_W,
+            h: SCREEN_H,
+        };
+
+        // Control 1: no wallpaper. `draw_raw` writes `u_dst`, and the read-back
+        // must see it.
+        r.begin_frame(SCREEN_W, SCREEN_H, true);
+        r.draw_raw(
+            TextureHandle(0),
+            TextureHandle(0),
+            false,
+            &quad([1.0, 2.0, 3.0, 4.0]),
+        );
+        assert_eq!(
+            read_u_dst(r),
+            [1.0, 2.0, 3.0, 4.0],
+            "control frame 1: a plain window quad must write u_dst"
+        );
+
+        // The frame under test: wallpaper first, then the window quad.
+        r.begin_frame(SCREEN_W, SCREEN_H, true);
+        r.draw_shader(shader, wallpaper, 1.5, 0.016);
+        r.draw_raw(
+            TextureHandle(0),
+            TextureHandle(0),
+            false,
+            &quad([40.0, 50.0, 60.0, 70.0]),
+        );
+        let after_shader_frame = read_u_dst(r);
+        assert_eq!(
+            after_shader_frame,
+            [40.0, 50.0, 60.0, 70.0],
+            "the window quad after draw_shader did not write u_dst: it reads back \
+             {after_shader_frame:?}, which is frame 1's value — the write was \
+             addressed to a program that was not current"
+        );
+
+        // Control 2: back to a plain frame, to show the oracle still works and
+        // the previous failure was specific to the shader frame.
+        r.begin_frame(SCREEN_W, SCREEN_H, true);
+        r.draw_raw(
+            TextureHandle(0),
+            TextureHandle(0),
+            false,
+            &quad([80.0, 90.0, 100.0, 110.0]),
+        );
+        assert_eq!(
+            read_u_dst(r),
+            [80.0, 90.0, 100.0, 110.0],
+            "control frame 2: a plain window quad must write u_dst"
+        );
+    }
+
+    // ── ordering ────────────────────────────────────────────────────────────
+
+    /// `draw_raw` → `draw_shader` → `draw`: the other order the compositor can
+    /// produce, and the one where the *later* call (`draw`, not `draw_raw`) is
+    /// the victim. `draw` binds no program either, so it is exactly as exposed.
+    #[test]
+    fn draw_raw_then_shader_then_draw_leaves_the_window_program_current() {
+        let Some(mut l) = live() else { return };
+        let r = l.get();
+        let shader = r
+            .compile_fragment(WALLPAPER_FRAG)
+            .expect("wallpaper compiles");
+        let mut tex = cpu_texture(r);
+
+        r.begin_frame(SCREEN_W, SCREEN_H, true);
+        r.draw_raw(
+            TextureHandle(0),
+            TextureHandle(0),
+            false,
+            &quad([4.0, 4.0, 44.0, 44.0]),
+        );
+        r.draw_shader(
+            shader,
+            Rect {
+                x: 0,
+                y: 0,
+                w: SCREEN_W,
+                h: SCREEN_H,
+            },
+            1.5,
+            0.016,
+        );
+        r.draw(&mut tex, &quad([60.0, 60.0, 120.0, 140.0]));
+
+        assert_eq!(
+            current_program(r),
+            r.prog,
+            "draw_shader left the wallpaper program current, so the draw() that \
+             followed addressed the wrong program's uniforms"
+        );
+        assert_eq!(
+            r.gl.take_error(),
+            GL_NO_ERROR,
+            "the draw() after draw_shader raised a GL error"
+        );
+        assert_eq!(
+            read_u_dst(r),
+            [60.0, 60.0, 120.0, 140.0],
+            "the draw() after draw_shader did not write u_dst"
+        );
+        assert!(r.end_frame(), "end_frame reported a GL error");
+    }
+
+    /// Which orderings the wrong-program case is reachable from, bounded on both
+    /// sides so the fix is not over- or under-claimed.
+    ///
+    /// **Not reachable** when the wallpaper is the last thing drawn:
+    /// `draw_shader` writes `wp_u_*` at locations of the program it has just
+    /// made current, so nothing is misdirected and the frame is clean even with
+    /// the restore removed. This holds in both states by design.
+    #[test]
+    fn a_shader_wallpaper_drawn_last_leaves_a_clean_frame() {
+        let Some(mut l) = live() else { return };
+        let r = l.get();
+        let shader = r
+            .compile_fragment(WALLPAPER_FRAG)
+            .expect("wallpaper compiles");
+
+        r.begin_frame(SCREEN_W, SCREEN_H, true);
+        r.draw_raw(
+            TextureHandle(0),
+            TextureHandle(0),
+            false,
+            &quad([4.0, 4.0, 44.0, 44.0]),
+        );
+        assert_eq!(
+            read_u_dst(r),
+            [4.0, 4.0, 44.0, 44.0],
+            "the quad drew first, prog current"
+        );
+        // Wallpaper last. `draw_shader`'s own writes all target the program it
+        // just bound, so this is correct whether or not it restores.
+        r.draw_shader(
+            shader,
+            Rect {
+                x: 0,
+                y: 0,
+                w: SCREEN_W,
+                h: SCREEN_H,
+            },
+            1.5,
+            0.016,
+        );
+        assert_eq!(
+            r.gl.take_error(),
+            GL_NO_ERROR,
+            "a wallpaper drawn last must not raise an error in either state"
+        );
+        assert!(
+            r.end_frame(),
+            "end_frame reported a GL error for a wallpaper-last frame"
+        );
+    }
+
+    /// **Not reachable** across a frame boundary either: `begin_frame` rebinds
+    /// the window program, so a leak in frame *N* cannot poison frame *N+1*.
+    /// This is what makes the defect a single-frame teardown rather than
+    /// permanent misrendering — the compositor dies on the first bad frame
+    /// instead, which is why the symptom is so blunt.
+    #[test]
+    fn a_leak_does_not_cross_a_frame_boundary() {
+        let Some(mut l) = live() else { return };
+        let r = l.get();
+        let shader = r
+            .compile_fragment(WALLPAPER_FRAG)
+            .expect("wallpaper compiles");
+
+        // Frame A: wallpaper only, so the leak (if any) is left standing.
+        r.begin_frame(SCREEN_W, SCREEN_H, true);
+        r.draw_shader(
+            shader,
+            Rect {
+                x: 0,
+                y: 0,
+                w: SCREEN_W,
+                h: SCREEN_H,
+            },
+            1.5,
+            0.016,
+        );
+        assert!(r.end_frame());
+
+        // Frame B: no wallpaper at all. `begin_frame` must have healed it.
+        r.begin_frame(SCREEN_W, SCREEN_H, true);
+        r.draw_raw(
+            TextureHandle(0),
+            TextureHandle(0),
+            false,
+            &quad([7.0, 8.0, 9.0, 10.0]),
+        );
+        assert_eq!(
+            read_u_dst(r),
+            [7.0, 8.0, 9.0, 10.0],
+            "begin_frame must rebind the window program, so a previous frame's \
+             program cannot poison this one"
+        );
+        assert_eq!(r.gl.take_error(), GL_NO_ERROR, "frame B must be clean");
+        assert!(r.end_frame());
+    }
+
+    // ── the mechanism the fix defends against ───────────────────────────────
+
+    /// Why the restore is load-bearing, stated independently of `draw_shader`:
+    /// a `glUniform*` naming a program that is not current never reaches that
+    /// program, so the window program keeps whatever it held before.
+    ///
+    /// Which way that failure shows up depends on the *location index*, and the
+    /// two shapes are not the same bug — measured on Mesa 26.2 / llvmpipe:
+    ///
+    /// - an index the **current** program also owns is written there, silently.
+    ///   No error at all; the value goes to the wrong program and the intended
+    ///   one keeps a stale value. This is the dangerous shape, because nothing
+    ///   reports it.
+    /// - an index the current program does **not** own raises
+    ///   `GL_INVALID_OPERATION`, and again leaves the intended program unwritten.
+    ///
+    /// `draw_raw` writes ten uniforms across both shapes, which is why
+    /// production gets the loud one: the window program has 10 active uniforms
+    /// and the wallpaper program 5, so `u_tex`/`u_opacity`/`u_radius`/
+    /// `u_border_*` name nothing at all over there, while `u_dst`/`u_size`
+    /// land on wallpaper uniforms by coincidence. `end_frame` only sees the
+    /// loud one — the silent half is why the symptom is "the compositor dies"
+    /// and not "the compositor dies *or* silently draws the wrong thing".
+    #[test]
+    fn a_uniform_write_against_a_non_current_program_never_reaches_that_program() {
+        let Some(mut l) = live() else { return };
+        let r = l.get();
+        let shader = r
+            .compile_fragment(WALLPAPER_FRAG)
+            .expect("wallpaper compiles");
+
+        // Seed the window program, so "unwritten" reads as "stale", not "zero".
+        r.begin_frame(SCREEN_W, SCREEN_H, true);
+        r.draw_raw(
+            TextureHandle(0),
+            TextureHandle(0),
+            false,
+            &quad([5.0, 6.0, 7.0, 8.0]),
+        );
+        assert_eq!(
+            read_u_dst(r),
+            [5.0, 6.0, 7.0, 8.0],
+            "write with the right program"
+        );
+        assert_eq!(
+            r.gl.take_error(),
+            GL_NO_ERROR,
+            "no error with the right program"
+        );
+
+        // SAFETY: a live program of this context, a live `GLint` out-parameter,
+        // and a core `glGetProgramiv` query with the context current here.
+        let mut wallpaper_slots: GLint = 0;
+        unsafe { (r.gl.glGetProgramiv)(shader.0, GL_ACTIVE_UNIFORMS, &mut wallpaper_slots) };
+        let window_locs = [
+            ("u_dst", r.u_dst),
+            ("u_src", r.u_src),
+            ("u_res", r.u_res),
+            ("u_flip", r.u_flip),
+            ("u_tex", r.u_tex),
+            ("u_opacity", r.u_opacity),
+            ("u_radius", r.u_radius),
+            ("u_size", r.u_size),
+            ("u_border_width", r.u_border_width),
+            ("u_border_color", r.u_border_color),
+        ];
+        // The shared case: `u_dst`, which the wallpaper program also owns at the
+        // same index because both link `VERTEX_SRC`.
+        let (shared_name, shared_loc) = window_locs[0];
+        assert_eq!(shared_name, "u_dst");
+        assert_eq!(
+            r.wp_u_dst, shared_loc,
+            "this test's silent half assumes the wallpaper program owns u_dst at \
+             index {shared_loc}; it answers {}. Pick another shared uniform if a \
+             driver ever lays them out differently.",
+            r.wp_u_dst
+        );
+        assert!(
+            (0..wallpaper_slots).contains(&shared_loc),
+            "the wallpaper program must own index {shared_loc} for the silent half"
+        );
+        // A window-program index the wallpaper program has no uniform at.
+        let out_of_range = window_locs
+            .iter()
+            .find(|(_, l)| *l >= wallpaper_slots)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no window-program uniform sits at or above the wallpaper \
+                     program's {wallpaper_slots} slots, so the loud half cannot run"
+                )
+            });
+        assert!(out_of_range.1 >= wallpaper_slots);
+
+        // Both writes, with the wallpaper program current.
+        // SAFETY: `shader.0` is a live program of the current context and the
+        // uniform calls are ordinary immediate writes. The second one is
+        // *expected* to be rejected — the driver raises the error flag and
+        // leaves the window program's state alone.
+        unsafe {
+            (r.gl.glUseProgram)(shader.0);
+            (r.gl.glUniform4f)(shared_loc, 9.0, 9.0, 9.0, 9.0);
+        }
+        assert_eq!(
+            r.gl.take_error(),
+            GL_NO_ERROR,
+            "a location the current program also owns is accepted against it"
+        );
+
+        let mut other = [GLfloat::NAN; 4];
+        // SAFETY: `wp_u_dst` is `u_dst`'s active location in `shader.0`.
+        unsafe { (r.gl.glGetUniformfv)(shader.0, r.wp_u_dst, other.as_mut_ptr()) };
+        assert_eq!(
+            other,
+            [9.0, 9.0, 9.0, 9.0],
+            "the shared-index write must have landed in the program that *was* \
+             current, which is what makes the failure silent"
+        );
+        assert_eq!(
+            read_u_dst(r),
+            [5.0, 6.0, 7.0, 8.0],
+            "the window program's u_dst must be untouched"
+        );
+
+        // SAFETY: as above. `{}` is a window-program location with no counterpart
+        // in the wallpaper program, so the driver must refuse it.
+        unsafe {
+            (r.gl.glUseProgram)(shader.0);
+            (r.gl.glUniform1f)(out_of_range.1, 42.0);
+        }
+        assert_eq!(
+            r.gl.take_error(),
+            GL_INVALID_OPERATION,
+            "writing {} ({}) with a program that has no uniform at that index \
+             must raise GL_INVALID_OPERATION",
+            out_of_range.0,
+            out_of_range.1
+        );
+        let mut kept = [GLfloat::NAN; 4];
+        // SAFETY: `out_of_range.1` is an active location of `r.prog`, which is
+        // still linked; four floats are read into `kept`.
+        unsafe { (r.gl.glGetUniformfv)(r.prog, out_of_range.1, kept.as_mut_ptr()) };
+        assert_eq!(
+            kept[0], 0.0,
+            "the rejected write must not have reached the window program"
+        );
     }
 }
