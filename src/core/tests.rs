@@ -4472,6 +4472,84 @@ mod unit_tests {
         );
     }
 
+    // `WinFlags::STICKY` is a modifier of `FLOAT`, not an independent flag: its
+    // own documentation says a sticky window "is treated as floating: it is
+    // excluded from the column layout and shown on every workspace of its
+    // monitor", and `apply_rules` establishes the pair at map time for exactly
+    // that reason ("a sticky tile would fight the tiling geometry of every
+    // workspace"). Every transition that stops a window floating must therefore
+    // stop it being sticky, or the window is left in a state the layout has no
+    // meaning for: `hide_offscreen` exempts sticky windows from parking (so it
+    // is never hidden) while `arrange` only places the *active* workspace (so it
+    // is never drawn) — it stays on screen over a workspace the user is not
+    // looking at, and nothing brings it back.
+    #[test]
+    fn a_window_that_stops_floating_stops_being_sticky() {
+        use crate::core::commands::{Command, ToggleFloat, ToggleFullscreen};
+        use crate::types::{Client, WinFlags};
+
+        let sticky_float = |engine: &Engine, win: u32| -> bool {
+            engine
+                .state
+                .clients
+                .get(&win)
+                .is_some_and(|c| c.is_sticky() && c.is_float())
+        };
+
+        // Tearing off a sticky float: the user asked for a tile, so the window
+        // is no longer a float and must not claim to be a sticky one.
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        let mut c = Client::new(1, mi, ws_i);
+        c.flags.set(WinFlags::FLOAT);
+        c.flags.set(WinFlags::STICKY);
+        engine.state.add_client(c);
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(1);
+        engine.state.monitors[mi].focused = Some(1);
+
+        assert!(
+            sticky_float(&engine, 1),
+            "fixture must start as a sticky float"
+        );
+        ToggleFloat(Some(1)).execute(&mut engine.state, &mut engine.cfg);
+        let c = engine.state.clients.get(&1).unwrap();
+        assert!(!c.is_float(), "ToggleFloat must tile the window");
+        assert!(
+            !c.is_sticky(),
+            "a window that stopped floating must not stay sticky: it would be \
+             neither parked (hide_offscreen exempts sticky) nor placed (arrange \
+             only projects the active workspace)"
+        );
+
+        // A sticky float promoted into the ribbon by fullscreen. The promotion is
+        // what makes it a column, so the same rule applies.
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        let mut c = Client::new(1, mi, ws_i);
+        c.flags.set(WinFlags::FLOAT);
+        c.flags.set(WinFlags::STICKY);
+        c.geom = Rect::new(10, 10, 200, 100);
+        c.saved_geom = c.geom;
+        engine.state.add_client(c);
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(1);
+        engine.state.monitors[mi].focused = Some(1);
+
+        assert!(
+            sticky_float(&engine, 1),
+            "fixture must start as a sticky float"
+        );
+        ToggleFullscreen(Some(1)).execute(&mut engine.state, &mut engine.cfg);
+        let c = engine.state.clients.get(&1).unwrap();
+        assert!(c.is_fullscreen(), "the window must be fullscreen");
+        assert!(!c.is_float(), "fullscreen promotes the float into a column");
+        assert!(
+            !c.is_sticky(),
+            "a column is not a float, so it cannot be a sticky float either"
+        );
+    }
+
     // Origin vs layout mode: `ToggleFloat` must never blur the window's floating
     // ORIGIN (`WinFlags::FLOAT_NATIVE`), so a born-floating window (dialog,
     // splash, transient, rule) stays distinguishable from a tile the user tore

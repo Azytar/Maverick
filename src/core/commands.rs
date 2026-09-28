@@ -182,6 +182,10 @@ pub fn apply_fullscreen_topology(
                 policy: c.fullscreen_policy,
             });
             c.flags.clear(WinFlags::FLOAT);
+            // A column is not a float, so it cannot be a sticky float: leaving
+            // `STICKY` set would exempt the window from parking while the ribbon
+            // never projects it, stranding it on screen over another workspace.
+            c.flags.clear(WinFlags::STICKY);
             c.flags.set(WinFlags::FS_WAS_FLOAT);
         }
     } else {
@@ -975,6 +979,16 @@ impl Command for ToggleFloat {
             state.monitors[mi].workspaces[ws_i].add_tiled(win, cfg.column_width);
             if let Some(c) = state.clients.get_mut(&win) {
                 c.flags.clear(WinFlags::FLOAT);
+                // `STICKY` modifies a float, not a window: a sticky float rides
+                // above every workspace of its monitor, and a sticky *tile* is a
+                // state the layout has no meaning for. `hide_offscreen` exempts
+                // sticky windows from parking, so a sticky tile is never hidden,
+                // and `arrange` only projects the active workspace, so it is
+                // never drawn either — it just stays on screen over whichever
+                // workspace the user moved to. Tearing a window off is the user
+                // overriding the rule that made it float, so it overrides the
+                // stickiness that rule attached too.
+                c.flags.clear(WinFlags::STICKY);
             }
         } else {
             state.monitors[mi].workspaces[ws_i].remove_window(win);

@@ -635,7 +635,7 @@ impl WindowManager {
                 .state
                 .clients
                 .iter()
-                .filter(|(_, c)| c.monitor == mon_idx && c.is_sticky())
+                .filter(|(_, c)| c.monitor == mon_idx && c.is_sticky() && c.is_float())
                 .map(|(w, _)| *w),
         );
         self.hide_mon_vec.extend(
@@ -757,7 +757,7 @@ impl WindowManager {
         // include them in the base layer regardless of which workspace is
         // active.
         for (&win, c) in &self.engine.state.clients {
-            if c.monitor == mon_idx && c.is_sticky() {
+            if c.monitor == mon_idx && c.is_sticky() && c.is_float() {
                 order.push(win);
             }
         }
