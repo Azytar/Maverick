@@ -1,3 +1,27 @@
+//! Live-driver tests: everything here needs a Vulkan driver, a display and a
+//! real window, so every test is `#[ignore]`d and skips itself unless
+//! `MAVERICK_VK_SMOKE=1` is set.
+//!
+//! They are `#[ignore]`d rather than absent because the object-lifetime
+//! questions they answer — is the teardown legal with a frame in flight, does the
+//! surface survive its X connection — can only be answered by a driver, and by
+//! the Khronos validation layer rather than by any host-side assertion. A CI box
+//! without a GPU gets a green suite and these are exactly the checks it cannot
+//! run.
+//!
+//! To run them on a machine that has a driver:
+//!
+//! ```sh
+//! cargo test -p maverick-vk --test smoke -- --ignored --nocapture --test-threads=1
+//! MAVERICK_VK_SMOKE=1 MAVERICK_VK_VALIDATION=1 \
+//!     cargo test -p maverick-vk --test smoke -- --ignored --nocapture --test-threads=1
+//! ```
+//!
+//! Without `MAVERICK_VK_SMOKE=1` each test prints the reason it skipped and
+//! passes. `--test-threads=1` matters for the validation check, which re-executes
+//! this same test binary as a child and reads the child's stderr: a concurrent
+//! test would interleave its output into that stream.
+
 use maverick_vk::{SurfaceTarget, Vulkan};
 use maverick_x11::open_x;
 use x11rb::connection::Connection;
@@ -177,17 +201,21 @@ fn spawn_test_window<C: Connection>(conn: &C, screen_num: usize) -> u32 {
 /// Whether the check can observe anything at all: without the layer installed
 /// no validation error is ever printed and the assertion would pass vacuously.
 fn validation_layer_available() -> bool {
-    // SAFETY: `load` only dlopens the Vulkan loader; no Vulkan object involved.
+    // SAFETY: `load` only dlopens the Vulkan loader; no Vulkan object is involved
+    // and the only thing it needs from the host is a loader Maverick can speak.
     let Ok(entry) = (unsafe { ash::Entry::load() }) else {
         return false;
     };
-    // SAFETY: a live loader entry is what enumeration requires.
+    // SAFETY: `entry` is the live loader just loaded, and the layer list is
+    // driver-reported data about layers rather than an object, so there is no
+    // handle validity or lifetime question left to answer.
     let Ok(props) = (unsafe { entry.enumerate_instance_layer_properties() }) else {
         return false;
     };
     props.iter().any(|p| {
-        // SAFETY: `layer_name` is a NUL-terminated C string owned by the list.
-        let name = unsafe { std::ffi::CStr::from_ptr(p.layer_name.as_ptr()) };
-        name == c"VK_LAYER_KHRONOS_validation"
+        // `layer_name_as_c_str` is `ash`'s bounded reader, so a layer that
+        // failed to NUL-terminate its own name yields `Err` rather than a read
+        // past the end of the array.
+        p.layer_name_as_c_str() == Ok(c"VK_LAYER_KHRONOS_validation")
     })
 }

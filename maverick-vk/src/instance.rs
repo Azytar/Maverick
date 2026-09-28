@@ -37,6 +37,19 @@ pub struct Instance {
 // Invoked by the loader from whichever thread reports the error, so it may
 // touch nothing that belongs to the instance. Returning `vk::FALSE` keeps a
 // validation error from aborting the process.
+//
+// # Safety
+//
+// This is the C ABI of `PFN_vkDebugUtilsMessengerCallbackEXT`, and the loader —
+// not this crate — guarantees the four arguments: `p_callback_data` is a valid
+// pointer to a `VkDebugUtilsMessengerCallbackDataEXT` that stays valid for the
+// duration of the call, and `data.p_message` is a NUL-terminated UTF-8 string
+// that does the same. Nothing is derived from `user_data`, which is null here,
+// and nothing is retained: the `&CStr` is read and dropped before returning.
+// The body therefore only has to trust the message pointer, which it does by
+// treating a non-UTF-8 message as text to discard rather than as a reason to
+// trust the rest of the struct. It also runs on a driver thread, so it holds no
+// lock and allocates only the `&str` views it prints.
 unsafe extern "system" fn debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     message_types: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -68,6 +81,11 @@ impl Instance {
     /// Khronos validation layer is actually present; if the layer is missing we
     /// proceed without it rather than failing.
     pub fn new(enable_validation: bool) -> Result<Self, VkError> {
+        // SAFETY: `Entry::load` only `dlopen`s the Vulkan loader and looks up
+        // `vkGetInstanceProcAddr`; no Vulkan object exists yet, so the only thing
+        // it needs from the host is a loader that reports a version Maverick can
+        // speak. Its failure is reported as `VkError::Loader`, which is why a
+        // machine with no Vulkan driver gets an error rather than a crash.
         let entry = unsafe { ash::Entry::load()? };
 
         let app_info = vk::ApplicationInfo::default()
@@ -98,6 +116,16 @@ impl Instance {
             .enabled_extension_names(&ext_ptrs)
             .enabled_layer_names(&layer_ptrs);
 
+        // SAFETY: `entry` is the live loader, and the two pointer arrays are
+        // built from the two `Vec`s directly above and live until the end of
+        // this scope, so the `*const c_char` pointers the create info holds stay
+        // valid for the call. `ext_names` is `REQUIRED_EXTENSIONS` — surface and
+        // xcb-surface, both of which the loader must support for an X11 window
+        // and both of which it is asked to check — plus debug-utils only when the
+        // Khronos layer is confirmed present, so a machine without it still
+        // boots. The layer list is empty in the same case. `app_info` requests
+        // Vulkan 1.2, which the loader's own version negotiation has already
+        // established, and a null `pAllocator` is always compatible.
         let handle = unsafe { entry.create_instance(&create_info, None) }
             .map_err(|r| VkError::Instance(r.to_string()))?;
 
@@ -116,6 +144,13 @@ impl Instance {
                         | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
                 )
                 .pfn_user_callback(Some(debug_callback));
+            // SAFETY: `debug_utils` is one of the extensions the instance was
+            // created with above, and the create info's only pointer is
+            // `debug_callback`, a plain `fn` item that needs no capture and
+            // outlives the call. The returned messenger is kept in the same
+            // struct as the loader that owns its entry points, and is destroyed
+            // before the instance in `Drop`; no `user_data` is passed, so
+            // `debug_callback` has nothing to keep alive.
             match unsafe { loader.create_debug_utils_messenger(&ci, None) } {
                 Ok(messenger) => Some((loader, messenger)),
                 // Debug output is optional: a driver that refuses the
@@ -143,10 +178,17 @@ impl Instance {
 }
 
 fn has_validation_layer(entry: &ash::Entry) -> Result<bool, VkError> {
+    // SAFETY: `entry` is the live loader; the returned slice is the driver
+    // listing its layers into an array `ash` owns for this call and the list is
+    // dropped at the end of it, so nothing is borrowed across a driver call.
     let props = unsafe { entry.enumerate_instance_layer_properties() }?;
     Ok(props
         .iter()
-        .any(|p| unsafe { CStr::from_ptr(p.layer_name.as_ptr()) } == VALIDATION_LAYER))
+        // `layer_name_as_c_str` is `ash`'s bounded reader rather than a raw
+        // `CStr::from_ptr`: a layer that failed to NUL-terminate its own name
+        // yields `Err` and simply does not match, where treating the array as a C
+        // string would have read past its end.
+        .any(|p| p.layer_name_as_c_str() == Ok(VALIDATION_LAYER)))
 }
 
 impl Drop for Instance {
@@ -155,10 +197,20 @@ impl Drop for Instance {
         // instance first would leave `destroy_debug_utils_messenger` calling
         // into freed loader state.
         if let Some((loader, messenger)) = self.debug.take() {
+            // SAFETY: both handles come from the same `create_debug_utils_messenger`
+            // call, the loader holds the entry points of the instance still alive
+            // below, and no callback into this crate is in flight — validation
+            // reports are not a queue operation, so the destroy waits for nothing.
+            // A NULL `pAllocator` matches the one the messenger was created with.
             unsafe {
                 loader.destroy_debug_utils_messenger(messenger, None);
             }
         }
+        // SAFETY: `self.handle` is the instance this struct created and destroys
+        // nowhere else. Every child object has already gone: the messenger above,
+        // and in `Vulkan` the surface, the device and the swapchain, whose field
+        // order places them all before this one. A NULL `pAllocator` matches the
+        // one the instance was created with.
         unsafe {
             self.handle.destroy_instance(None);
         }

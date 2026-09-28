@@ -109,6 +109,66 @@ fn extent_uses_current_when_fixed() {
     );
 }
 
+/// The "you choose" sentinel is `0xFFFFFFFF` in *both* fields. A driver that
+/// reported one real size and one sentinel has said it owns the size, and
+/// `vkCreateSwapchainKHR` requires that size to be used exactly, so a helper
+/// that only looked at one axis would hand back a size the surface never agreed
+/// to.
+#[test]
+fn extent_uses_current_when_only_one_axis_is_real() {
+    let caps = vk::SurfaceCapabilitiesKHR {
+        min_image_extent: vk::Extent2D {
+            width: 16,
+            height: 16,
+        },
+        max_image_extent: vk::Extent2D {
+            width: 2048,
+            height: 2048,
+        },
+        current_extent: vk::Extent2D {
+            width: u32::MAX,
+            height: 600,
+        },
+        ..Default::default()
+    };
+    assert_eq!(
+        clamp_extent(&caps, 10, 10),
+        vk::Extent2D {
+            width: u32::MAX,
+            height: 600
+        }
+    );
+}
+
+/// A driver that reported its minimum extent above its maximum must not take
+/// the process down: `u32::clamp` panics on that pair. The bounds are ordered
+/// instead, so the window is the pair read the right way round and a request
+/// inside it is still honoured — this is a window, not a fallback to one bound.
+#[test]
+fn extent_survives_an_inverted_window() {
+    let caps = vk::SurfaceCapabilitiesKHR {
+        min_image_extent: vk::Extent2D {
+            width: 2048,
+            height: 2048,
+        },
+        max_image_extent: vk::Extent2D {
+            width: 16,
+            height: 16,
+        },
+        current_extent: vk::Extent2D {
+            width: u32::MAX,
+            height: u32::MAX,
+        },
+        ..Default::default()
+    };
+    let inside = clamp_extent(&caps, 800, 600);
+    assert_eq!(inside.width, 800);
+    assert_eq!(inside.height, 600);
+    let outside = clamp_extent(&caps, 4096, 4096);
+    assert_eq!(outside.width, 2048);
+    assert_eq!(outside.height, 2048);
+}
+
 #[test]
 fn image_count_plus_one_capped() {
     let caps = vk::SurfaceCapabilitiesKHR {
@@ -123,6 +183,24 @@ fn image_count_plus_one_capped() {
         ..Default::default()
     };
     assert_eq!(choose_image_count(&open), 3);
+}
+
+/// A minimum of `u32::MAX` has no room for the `+ 1`; wrapping would ask for
+/// zero images, which can never present a frame.
+#[test]
+fn image_count_does_not_overflow_at_the_top_of_the_range() {
+    let caps = vk::SurfaceCapabilitiesKHR {
+        min_image_count: u32::MAX,
+        max_image_count: 0,
+        ..Default::default()
+    };
+    assert_eq!(choose_image_count(&caps), u32::MAX);
+    let capped = vk::SurfaceCapabilitiesKHR {
+        min_image_count: u32::MAX,
+        max_image_count: 4,
+        ..Default::default()
+    };
+    assert_eq!(choose_image_count(&capped), 4);
 }
 
 #[test]
