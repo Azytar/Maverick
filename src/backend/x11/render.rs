@@ -2864,6 +2864,99 @@ mod tests {
             );
         }
 
+        /// A Shape `BOUNDING` mask is a union of X11 rectangles, so its extent
+        /// travels in CARD16 (`Rectangle::width`/`height` are `u16`). A frame
+        /// wider than `u16::MAX` therefore has no exact mask, and narrowing it
+        /// with `as` does not clamp — it wraps, and the server is handed a
+        /// rectangle covering a fraction of the frame at the wrong offset.
+        ///
+        /// `border_width` is attacker-of-self supplied and unclamped all the way
+        /// from the config file (`userconfig` -> `Cfg::border_w` -> `SetBorderWidth`
+        /// IPC), and the frame is `geom + 2*bw`, so the unrepresentable case is
+        /// reachable from an ordinary `border_width = 40000`. The mask must stay
+        /// inside the *representable* frame — `min(w, u16::MAX)` — and must never
+        /// wrap below it.
+        #[test]
+        fn prop_rounded_frame_mask_never_wraps_the_card16_boundary(
+            w in 60_000u32..=200_000,
+            h in 1u32..=4_000,
+            r in 0i32..=2_000,
+            bw in 0u32..=60_000,
+        ) {
+            let (outer, _inner) = rounded_frame_regions(w, h, r, bw);
+            // `w`/`h` are already the outer frame (the caller adds the border),
+            // and anything past CARD16 cannot be described, so the mask is
+            // defined against the representable part of it.
+            let rw = w.min(u32::from(u16::MAX));
+            let rh = h.min(u32::from(u16::MAX));
+            for rect in &outer {
+                let (x, y) = (i32::from(rect.x), i32::from(rect.y));
+                let (rw2, rh2) = (i32::from(rect.width), i32::from(rect.height));
+                prop_assert!(
+                    x >= 0 && y >= 0,
+                    "mask starts outside the frame at ({}, {}) for w={} h={} r={} bw={}",
+                    x, y, w, h, r, bw
+                );
+                prop_assert!(
+                    x + rw2 <= rw as i32,
+                    "mask reaches {} but the representable frame ends at {} (narrowed {} \
+                     from a wrapped width) for w={} h={} r={} bw={}",
+                    x + rw2, rw, rw2, w, h, r, bw
+                );
+                prop_assert!(
+                    y + rh2 <= rh as i32,
+                    "mask reaches {} but the representable frame ends at {} for w={} h={} r={} bw={}",
+                    y + rh2, rh, w, h, r, bw
+                );
+            }
+            prop_assert_eq!(
+                mask_extents(&outer),
+                (0, 0, rw as i32, rh as i32),
+                "the mask must cover the whole representable frame for w={} h={} r={} bw={}",
+                w, h, r, bw
+            );
+        }
+    }
+
+    /// The reproducer for the wrap above, pinned so the exact arithmetic stays
+    /// visible. `sync_rounded_frame` builds the frame as `geom + 2*bw` and hands
+    /// that to `rounded_frame_regions`, so a `border_width` of 40 000 around a
+    /// 1 px client asks for an 80 001 px frame — and `80_001 as u16` is 14 465,
+    /// a mask covering an eighth of the frame at the wrong size.
+    #[test]
+    fn a_forty_thousand_pixel_border_does_not_wrap_the_mask() {
+        let bw = 40_000;
+        let geom = Rect::new(0, 0, 1, 1_000);
+        // The frame the caller actually derives, reproduced rather than re-derived.
+        let outer_w = geom.w + 2 * bw;
+        let outer_h = geom.h + 2 * bw;
+        assert_eq!((outer_w, outer_h), (80_001, 81_000));
+
+        let (outer, _) = rounded_frame_regions(outer_w, outer_h, 10, bw);
+        assert_eq!(
+            mask_extents(&outer),
+            (0, 0, i32::from(u16::MAX), outer_h.min(u32::from(u16::MAX)) as i32),
+            "an 80 001 px frame must be described against the 65 535 px the protocol \
+             can express, not wrapped down to {}",
+            80_001 % 65_536
+        );
+    }
+
+    /// `rounded_rectangles` takes `i32` and clamps the radius with
+    /// `r.clamp(0, w.min(h) / 2)`, which panics whenever the upper bound is
+    /// below zero. A frame dimension above `i32::MAX` arrives as a *negative*
+    /// `i32` through the `u32 as i32` narrowing at the call site, so the clamp
+    /// would be asked to clamp against `-1` and abort the process.
+    #[test]
+    fn a_frame_wider_than_i32_max_does_not_panic_the_radius_clamp() {
+        // `u32::MAX - 1` narrows to `-2`, and `-2 / 2` is `-1`.
+        let (outer, inner) = rounded_frame_regions(u32::MAX - 1, 1_000, 10, 0);
+        for rect in outer.iter().chain(inner.iter()) {
+            assert!(rect.width > 0 && rect.height > 0, "empty mask rectangle");
+        }
+    }
+
+    proptest! {
         /// The mask is anchored at the window's *outer* top-left corner, so
         /// every corner row has to leave the same inset on the left as on the
         /// right and the middle band has to span the full width. An asymmetric
