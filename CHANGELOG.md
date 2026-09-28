@@ -7,6 +7,30 @@ All notable changes to this project are documented here. Format follows
 
 ### Fixed
 
+- **Losing the X server left a stale identity record and lost the compositor
+  trace.** A window manager whose X server was killed exited without running its
+  teardown at all, so its identity record stayed in the runtime directory
+  describing a session that no longer existed — a phantom `STALE` entry in
+  `maverickctl list`, a worse error for any tool aimed at it, and one more
+  directory per lost server — and the whole in-memory compositor trace was
+  discarded without a word in the log. Calling the existing teardown on that
+  path was not enough: its `flush` fails immediately on a dead connection, which
+  returned out of the middle of the function and skipped the record removal and
+  the trace dump that followed it.
+
+  The teardown is now split in two. The X half takes a borrow of the connection
+  that can only be obtained while the connection still works, so it cannot be
+  entered with a dead one; the local half takes no connection at all, so it
+  cannot be skipped by a failed request, and it runs on every exit path. The
+  compositor is given up rather than released when the server is gone: dropping
+  it runs GLX teardown, and a GLX request on a display whose server has died
+  reaches libX11's I/O error handler, which prints "X connection … broken" and
+  calls `exit(1)` — no unwinding, no destructor, no record.
+
+  The compositor trace header now states how the session ended and whether the X
+  half of the teardown ran, and a dump that cannot be written says so instead of
+  being silently absent. `SIGHUP` remains reported as a clean exit: the two share
+  a shutdown, and the trace says which half ran, not which signal asked.
 - **A display claim could be pointed at any file on the machine.** The claim
   file is `/tmp/.X<n>-mav`, so its name belongs to whoever creates it first, and
   a symlink planted there before the scanner arrived was followed: the open

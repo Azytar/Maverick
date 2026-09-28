@@ -10,7 +10,9 @@
 //! The buffer is thread-local and owned by the WM thread, so `record` needs no
 //! locking on the event-loop hot path; a secondary thread simply gets its own
 //! empty buffer. `init()` installs it before the X connection is opened,
-//! `dump()` writes and releases it during `cleanup()`.
+//! `dump()` writes and releases it during the shutdown, on *every* exit path —
+//! including the one where the X server died, which is the path that used to
+//! lose the whole buffer without a word in the log.
 
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
@@ -218,42 +220,144 @@ pub(super) fn begin_frame() {
     }
 }
 
-/// Write the buffer out and disable tracing for the rest of the process. The
-/// header line is the format contract: it pins the clock, the units and the two
-/// caveats every reader has to keep in mind — a `swap` that returned is not
-/// proof the frame was presented, and a window whose geometry was set to 0 for
-/// an off-screen tile is not evidence of a GL present.
-pub(super) fn dump() {
-    if !ENABLED.swap(false, Ordering::Relaxed) {
-        return;
-    }
-    let buffer = BUFFER.with(|slot| slot.borrow_mut().take());
-    if let Some(buffer) = buffer {
-        let result = (|| -> io::Result<()> {
-            let mut out = io::BufWriter::new(std::fs::File::create(&buffer.path)?);
-            writeln!(
-                out,
-                "# maverick_compositor_trace_v1 clock=Instant units=ns x_time=server_ms capacity={} dropped={} truncated={} swap_returned_is_not_visible=true off_geometry_is_not_gl_present=true",
-                buffer.capacity, buffer.dropped, buffer.truncated
-            )?;
-            writeln!(
-                out,
-                "# ns\tturn\tframe\tevent\tfields (frame is latest begun GL attempt; startup=0)"
-            )?;
-            for record in buffer.records {
-                write!(
-                    out,
-                    "{}\t{}\t{}\t{}\t",
-                    record.ns, record.turn, record.frame, record.event
-                )?;
-                out.write_all(&record.bytes[..record.len])?;
-                writeln!(out)?;
-            }
-            out.flush()
-        })();
-        if let Err(error) = result {
-            eprintln!("compositor trace dump {}: {error}", buffer.path.display());
+/// Why the trace is being written, and — because the two are the same fact —
+/// whether the X half of the shutdown ran.
+///
+/// The header reports `end=<this>` and `x_teardown=<full|skipped>` from one
+/// value rather than two, so the two fields cannot disagree: a dump that said
+/// `end=clean_exit x_teardown=skipped` would be claiming a full teardown while
+/// admitting nothing was torn down. The only way the X half is skipped is that
+/// the connection was gone, so a skipped X half is always reported as a lost
+/// connection even when the shutdown had been requested as a clean one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TraceEnd {
+    /// The window manager was asked to stop, and the X server was there.
+    CleanExit,
+    /// The X server died first, so there was nothing left to talk to.
+    XConnectionLost,
+}
+
+impl TraceEnd {
+    /// The token the header carries for this outcome.
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::CleanExit => "clean_exit",
+            Self::XConnectionLost => "x_connection_lost",
         }
+    }
+
+    /// Whether the X half of the shutdown actually ran, which is what
+    /// `x_teardown=` reports: `full` for a clean exit, `skipped` for a lost
+    /// connection.
+    pub(super) fn x_teardown(self) -> &'static str {
+        match self {
+            Self::CleanExit => "full",
+            Self::XConnectionLost => "skipped",
+        }
+    }
+}
+
+impl fmt::Display for TraceEnd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What [`dump`] actually did.
+///
+/// The dump used to report a failed write with an `eprintln!` of its own and
+/// return nothing, so its caller could not say whether the ring buffer had been
+/// preserved — which is the only question that matters on the exit path where
+/// the buffer is the last remaining evidence of the session. A caller that wants
+/// the outcome must look at it; [`dump`] no longer prints, so there is exactly
+/// one place that decides how loudly a lost trace is reported.
+#[derive(Debug)]
+pub(super) struct DumpReport {
+    /// True only if the whole file was written and flushed. A partial write is
+    /// reported as not written, because a reader cannot tell a truncated dump
+    /// from a complete one.
+    pub(super) written: bool,
+    /// Records that reached the file. Zero when nothing was written.
+    pub(super) records: usize,
+    /// The file the dump targeted. Empty when tracing was never enabled, which
+    /// is why a caller must test `written` or `error` rather than read this.
+    pub(super) path: PathBuf,
+    /// The `io` error that stopped the write, if any.
+    pub(super) error: Option<String>,
+}
+
+impl DumpReport {
+    /// Nothing to report: tracing was off, so there was never a buffer to write.
+    /// A function rather than a constant because an empty `PathBuf` is not
+    /// constructible in a `const` at the workspace's MSRV.
+    fn not_enabled() -> Self {
+        Self {
+            written: false,
+            records: 0,
+            path: PathBuf::new(),
+            error: None,
+        }
+    }
+}
+
+/// Write the buffer out and disable tracing for the rest of the process. The
+/// header line is the format contract: it pins the clock, the units, how the
+/// session ended, and the caveats every reader has to keep in mind — a `swap`
+/// that returned is not proof the frame was presented, and a window whose
+/// geometry was set to 0 for an off-screen tile is not evidence of a GL
+/// present.
+///
+/// `end` is the outcome being recorded, not a note about it: see [`TraceEnd`].
+/// Nothing is printed here — the caller owns the reporting, so a shutdown that
+/// knows more than this function does (why the X half was skipped, say) can say
+/// it in the same breath as the dump's own result.
+pub(super) fn dump(end: TraceEnd) -> DumpReport {
+    if !ENABLED.swap(false, Ordering::Relaxed) {
+        return DumpReport::not_enabled();
+    }
+    let Some(buffer) = BUFFER.with(|slot| slot.borrow_mut().take()) else {
+        return DumpReport::not_enabled();
+    };
+    let records = buffer.records.len();
+    let path = buffer.path.clone();
+    let result = (|| -> io::Result<()> {
+        let mut out = io::BufWriter::new(std::fs::File::create(&path)?);
+        writeln!(
+            out,
+            "# maverick_compositor_trace_v1 clock=Instant units=ns x_time=server_ms capacity={} dropped={} truncated={} end={end} x_teardown={} swap_returned_is_not_visible=true off_geometry_is_not_gl_present=true",
+            buffer.capacity,
+            buffer.dropped,
+            buffer.truncated,
+            end.x_teardown(),
+        )?;
+        writeln!(
+            out,
+            "# ns\tturn\tframe\tevent\tfields (frame is latest begun GL attempt; startup=0)"
+        )?;
+        for record in buffer.records {
+            write!(
+                out,
+                "{}\t{}\t{}\t{}\t",
+                record.ns, record.turn, record.frame, record.event
+            )?;
+            out.write_all(&record.bytes[..record.len])?;
+            writeln!(out)?;
+        }
+        out.flush()
+    })();
+    match result {
+        Ok(()) => DumpReport {
+            written: true,
+            records,
+            path,
+            error: None,
+        },
+        Err(error) => DumpReport {
+            written: false,
+            records,
+            path,
+            error: Some(error.to_string()),
+        },
     }
 }
 
@@ -418,6 +522,97 @@ mod tests {
         assert_eq!(buffer.truncated, 1);
         assert_eq!(buffer.records.len(), 1);
         assert_eq!(buffer.records[0].len, PAYLOAD);
+    }
+
+    /// Install a buffer whose dump goes to a file of this test's own, and hand
+    /// back that path. The name carries a per-test counter because the buffer is
+    /// thread-local but the filesystem is not, and two tests dumping at once
+    /// must not read each other's file.
+    fn init_buffer_dumping_to(name: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "maverick-trace-{}-{unique}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        BUFFER.with(|slot| {
+            *slot.borrow_mut() = Some(Buffer {
+                start: Instant::now(),
+                path: path.clone(),
+                records: Vec::with_capacity(16),
+                turn: 0,
+                frame: 0,
+                dropped: 0,
+                truncated: 0,
+                last_frame: None,
+                capacity: 16,
+            });
+        });
+        ENABLED.store(true, Ordering::Relaxed);
+        path
+    }
+
+    /// Every dump must say how the session ended, whichever end it was.
+    ///
+    /// This is the header a reader opens the file for: a trace that cannot say
+    /// whether the X half of the shutdown ran is exactly the trace that is
+    /// needed when the X server died. Each end is checked on its own instead of
+    /// against a table spelled out twice, so an edit that moves one token cannot
+    /// move its expectation with it.
+    #[test]
+    fn the_header_says_how_the_session_ended() {
+        for (end, token, teardown) in [
+            (TraceEnd::CleanExit, "clean_exit", "full"),
+            (TraceEnd::XConnectionLost, "x_connection_lost", "skipped"),
+        ] {
+            let _guard = test_lock();
+            let path = init_buffer_dumping_to("end");
+            record("probe", format_args!("i=0"));
+            let report = dump(end);
+            assert!(report.written, "{token}: {report:?}");
+            assert_eq!(report.records, 1, "{token}");
+            let header = std::fs::read_to_string(&path).expect("dump was written");
+            let header = header.lines().next().expect("a header line");
+            assert!(
+                header.contains(&format!("end={token} x_teardown={teardown}")),
+                "header for {token} does not report the outcome: {header}"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// A dump that could not write says so, and says where it tried, instead of
+    /// being indistinguishable from tracing that was never switched on.
+    #[test]
+    fn a_dump_that_cannot_write_reports_where_and_why() {
+        let _guard = test_lock();
+        let path = init_buffer_dumping_to("unwritable");
+        // A directory is not a file: `File::create` on it fails on every write.
+        std::fs::create_dir_all(&path).expect("temp dir is usable");
+        let report = dump(TraceEnd::CleanExit);
+        assert!(!report.written, "a failed write must not report as written");
+        assert!(
+            report.error.is_some(),
+            "a failed write must carry its error"
+        );
+        assert_eq!(report.path, path, "a failed write must name its target");
+        std::fs::remove_dir(&path).expect("temp dir is removable");
+    }
+
+    /// With tracing off there is no buffer and nothing to say, which is not an
+    /// error: the report has to distinguish "never enabled" from "tried and
+    /// failed" so a caller can stay quiet about the common case.
+    #[test]
+    fn a_dump_with_tracing_off_reports_nothing_and_no_error() {
+        let _guard = test_lock();
+        ENABLED.store(false, Ordering::Relaxed);
+        BUFFER.with(|slot| *slot.borrow_mut() = None);
+        let report = dump(TraceEnd::CleanExit);
+        assert!(!report.written);
+        assert_eq!(report.records, 0);
+        assert_eq!(report.path, PathBuf::new(), "no file was ever targeted");
+        assert!(report.error.is_none(), "never enabled is not a failure");
     }
 }
 

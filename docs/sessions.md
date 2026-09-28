@@ -284,6 +284,16 @@ The logs survive a crash — they are the reason a crashed session is worth keep
 a record of. `session stop` then reaps the orphaned X server, frees the display
 and leaves the log; `session remove` deletes the directory.
 
+The reverse order is handled by the window manager itself, because a tool can
+only clean up what it is asked to. When the X server dies first, the window
+manager runs the half of its teardown that needs no server — removing its
+identity record and its control socket, and writing the compositor trace with
+`end=x_connection_lost x_teardown=skipped` — so an X server's death is a
+reported state rather than a record left behind. It issues no X or GLX request
+on the way out, which is the part that matters: a request on a display whose
+server is gone does not fail, it reaches libX11's I/O error handler, and that
+ends the process without unwinding.
+
 `session remove` refuses to delete a *running* session's record. That would leave
 a window manager running with nothing to address it by, which is the orphan the
 record exists to prevent.

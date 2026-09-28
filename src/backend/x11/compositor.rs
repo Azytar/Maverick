@@ -144,6 +144,13 @@ mod placeholder {
         }
         #[inline(always)]
         pub fn disable(&mut self) {}
+        /// Nothing to give up: the stub holds no X or GLX resource, so there is
+        /// no destructor that could reach a dead server. The real compositor's
+        /// `abandon` exists for that destructor; this one keeps the two
+        /// interchangeable, which is what lets the shutdown code below the
+        /// feature gate be written once.
+        #[inline(always)]
+        pub fn abandon(&mut self) {}
         #[inline(always)]
         pub fn debug_dump(&self) -> String {
             String::new()

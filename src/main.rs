@@ -11,7 +11,10 @@
 //! `log::init` → parse args → `--check-config`? (exits) → detach + signals →
 //! write identity + spawn control socket → `config::load_config` →
 //! `WindowManager::new` → autostart → `state.running = true` → `run()` →
-//! `cleanup()` on a clean exit, or `cleanup_meta` + `exit(1)` if init failed.
+//! `WindowManager::shutdown(why)` on every exit out of the loop — a clean stop
+//! or a lost X server, which takes the X half of the teardown only if there is
+//! still a server to take it from — or `cleanup_meta` + `exit(1)` if init
+//! failed.
 //!
 //! # Invariants
 //!
@@ -381,15 +384,19 @@ fn main() {
             match manager.run() {
                 Ok(()) => {
                     // A loop that returns with `running` still set means the X
-                    // connection died; there is nothing to clean up against.
-                    let disconnected = manager.engine.state.running;
-                    if disconnected {
+                    // connection died. That is the reason for the shutdown, not
+                    // a reason to skip one: the X half is the only part that
+                    // needs a server, and the record of this session has to be
+                    // corrected whether or not one is left to talk to.
+                    let why = if manager.engine.state.running {
                         log::warn!("maverick: X server disconnected — exiting");
+                        backend::x11::ShutdownReason::XConnectionLost
                     } else {
                         log::info!("maverick exiting cleanly");
-                        if let Err(e) = manager.cleanup() {
-                            log::warn!("cleanup error: {e}");
-                        }
+                        backend::x11::ShutdownReason::Clean
+                    };
+                    if let Err(e) = manager.shutdown(why) {
+                        log::warn!("shutdown error: {e}");
                     }
                 }
                 Err(e) => {

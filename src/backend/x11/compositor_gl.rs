@@ -3694,6 +3694,24 @@ impl Compositor {
         self.renderer.destroy();
     }
 
+    /// Give up on every X/GLX resource without issuing a request.
+    ///
+    /// Required, not an optimisation: `Drop` calls [`Self::disable`], whose
+    /// `renderer.destroy()` reaches `glXDestroyWindow`, and on a display whose
+    /// server is gone that call lands in libX11's I/O error handler — which
+    /// prints "X connection … broken" and calls `exit(1)`. Nothing unwinds, no
+    /// other destructor runs, and the process is gone before it can remove its
+    /// identity record or write its trace. The destructor that looks like
+    /// tidying is the thing that has to be stopped.
+    ///
+    /// Setting `disabled` first makes `disable()` a no-op on the way out of
+    /// `drop`, while Rust still frees the CPU-side state. The server is already
+    /// gone, so the GLX and X resources this would have released are gone with
+    /// it; what is left to release is the memory, and that needs no request.
+    pub fn abandon(&mut self) {
+        self.disabled = true;
+    }
+
     /// Repair the bottom→top order from the server.
     ///
     /// This is the *recovery* path, not the steady state: the order is normally
