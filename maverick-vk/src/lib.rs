@@ -2,7 +2,8 @@
 //!
 //! Brings Vulkan up on X11 and presents frames cleared with
 //! `vkCmdClearColorImage`. There is no shader, pipeline or render pass, and
-//! nothing in the workspace links this crate: the `compositor-vulkan` feature
+//! nothing in the workspace links this crate, and the `compositor-vulkan`
+//! feature that once named it has been removed
 //! is empty, so the backend is exercised only by its own tests.
 //!
 //! The owned objects are `instance → surface → device → swapchain` plus a

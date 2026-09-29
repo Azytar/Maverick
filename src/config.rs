@@ -12,11 +12,11 @@
 //!
 //! # Invariants
 //!
-//! `compositor_enabled` is gated on both `Cfg::compositor.enabled` and the
-//! absence of `MAVERICK_NO_COMPOSITOR`, so the env var can veto a config that
-//! asks for the compositor. Maverick has no compositor: `[compositor]` is
-//! parsed and kept inert so existing configurations still load, and
-//! `compositor_enabled` reports only what the configuration asked for.
+//! Maverick has no compositor, and `MAVERICK_NO_COMPOSITOR` is no longer read:
+//! there is nothing for it to veto. A `[compositor]` table in an existing config
+//! is still parsed, because it is the historical home of the
+//! `stiffness`/`damping` animation aliases, but every other key in it is inert
+//! and reported as ignored rather than silently accepted.
 
 use std::path::Path;
 

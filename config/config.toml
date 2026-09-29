@@ -53,15 +53,13 @@ overview_zoom_min = 0.25
 # part of the compiled default too, so they exist even with no config file.
 auto_workspace_binds = true
 
-# Master switch for the built-in OpenGL/GLX compositor. Enabled by.default and
-# falls back automatically to the plain ConfigureWindow path when GL is
-# unavailable or another compositor owns the screen. Disable it to keep the
-# legacy X11 Shape corner-radius path, or to run an external compositor via
-# autostart (see MAVERICK_NO_COMPOSITOR to disable for a single run).
-# Prefer `[compositor].enabled` for new configs; `compositor_enabled` under
-# `[general]` is a deprecated alias (kept for compat, commented to avoid
-# warnings in `maverick --check-config`).
-# compositor_enabled = true
+# There is no built-in compositor to switch on: Maverick draws through X11 and
+# nothing else. `compositor_enabled` under `[general]` and the `[compositor]`
+# table are both still accepted, so a config written for the old compositor
+# loads, and both report themselves as ignored at startup rather than looking
+# applied. An external compositor still works — start it from `autostart` — and
+# Maverick publishes `_NET_WM_BYPASS_COMPOSITOR` and
+# `_NET_WM_WINDOW_OPACITY` on its own windows for it to honour.
 
 # Scroll-camera spring constants now live under `[animations]` (see below).
 # The old `general.camera_stiffness` / `camera_damping` aliases are deprecated
@@ -90,24 +88,18 @@ tag_names = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 #         catppuccin-mocha, catppuccin-latte
 theme = "catppuccin-mocha"
 
-[compositor]
-# Master switch for the compositor. `false` forces pure X11 WM.
-# enabled = true
-# Backend selection: "opengl" (default, requires compositor-opengl feature)
-# or "vulkan" (requires compositor-vulkan feature). Mismatched backend
-# emits an actionable error at startup and falls back to the X11 path.
-# backend = "opengl"
-# VSync mode: "on" (default, interval 1), "off" (tearing, lowest latency),
-# "adaptive" (tear with VRR, -1 when available else 1).
-# vsync = "on"
-# Allow a single fullscreen window to bypass compositing (latency).
-# fullscreen_bypass = true
+# Maverick has no compositor: it draws through X11 and nothing else. There is
+# nothing to enable here, and `enabled`, `backend`, `vsync` and
+# `fullscreen_bypass` in a `[compositor]` table are reported as ignored at load
+# time rather than silently accepted. The table itself is still read because it
+# used to be the home of the `stiffness`/`damping` aliases below.
 
 [animations]
-# Master switch for spring animations (scroll, zoom, accordion).
-# `false` snaps instantly to the target and never requests animation frames,
-# while still allowing the compositor to run vsync/damage frames.
-# enabled = true
+# Spring animation tuning, kept for the camera. Geometry itself is never
+# interpolated: every state change is written to X11 in one configure at its
+# final position.
+# stiffness = 220.0
+# damping = 30.0
 # Spring tuning for the scroll camera.
 # stiffness = 220.0
 # damping = 30.0
@@ -121,11 +113,12 @@ normal  = 0x45475a        # catppuccin-mocha surface
 focused = 0x89b4fa        # catppuccin-mocha blue
 urgent  = 0xf38ba8        # catppuccin-mocha red
 
-# Native wallpaper (requires the compositor). The source type is inferred from
-# the file extension: .png/.jpg/.jpeg/.webp/.avif/.bmp/.qoi/.ppm/.ff → image
-# (PNG decoded natively; the rest via ffmpeg); .glsl/.frag/.vert/.shader/.fs →
-# GLSL fragment shader (compiled on the GPU). `path = null` (default) disables
-# it. Applied at startup, or live via `maverickctl wallpaper set <path>`,
+# Native wallpaper, painted onto the root pixmap. The source type is inferred
+# from the file extension: .png/.jpg/.jpeg/.webp/.avif/.bmp/.qoi/.ppm/.ff →
+# image (PNG decoded natively; the rest via ffmpeg); .glsl/.frag/.vert/.shader/
+# .fs → GLSL fragment shader, which needs a GPU pipeline and so is not drawn on
+# the root path. `path = null` (default) disables it. Applied at startup, or
+# live via `maverickctl wallpaper set <path>`,
 # `maverickctl wallpaper clear`, `maverickctl wallpaper mode <fill|fit|
 # stretch|center>`. A `~` in the path is expanded to $HOME.
 [wallpaper]
@@ -281,8 +274,8 @@ action = "page_snap:left"         # …and left
 # `honor_initial_state = true` here to let a window keep its launch state, or
 # opt a single app in with `[[rules]] honor_initial_state = true`.
 
-# A game that should get a real, exclusive fullscreen overlay (bypasses the
-# compositor, lives outside the scrolling ribbon, in any layout).
+# A game that should get a real, exclusive fullscreen overlay: edge-to-edge,
+# outside the scrolling ribbon, in any layout.
 [[rules]]
 class = "steam"
 true_fullscreen = true
