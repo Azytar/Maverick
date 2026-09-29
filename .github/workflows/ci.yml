@@ -21,8 +21,13 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
+        run: cargo test --workspace --all-features
+      - name: Test (default features)
+        # The only features left are the two diagnostic trace builds, so this
+        # is what catches a trace-only build breaking. It is the configuration
+        # the release binary ships.
         run: cargo test --workspace
 
   # install.sh is plain bash — check its syntax so it cannot silently bitrot.
@@ -37,7 +42,7 @@ jobs:
         run: python3 tests/install-smoke.py
 
   x11-smoke:
-    name: X11 smoke (no compositor)
+    name: X11 smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +50,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install isolated Xvfb test dependencies
         run: sudo apt-get update && sudo apt-get install -y xvfb x11-utils libx11-dev libxcb1-dev
-      - name: Build supported profile
-        run: cargo build --release --no-default-features -p maverick -p maverick-sys
+      - name: Build release profile
+        # There is no `default` feature and no compositor to leave out, so this
+        # is the profile the WM ships. `--no-default-features` used to mean
+        # "the pure X11 WM" here; that build is now the only build.
+        run: cargo build --release -p maverick -p maverick-sys
       - name: Xvfb stacking regression
         run: python3 tests/xvfb-stacking.py
