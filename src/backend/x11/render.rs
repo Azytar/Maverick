@@ -1247,11 +1247,12 @@ impl WindowManager {
             // nothing in a release build.
             #[cfg(debug_assertions)]
             self.engine.state.assert_invariants();
-            // Verify the server accepted the focus (and fix it if an external
-            // XSetInputFocus raced us). No polling: this runs only on a focus
-            // action we just issued.
-            self.reconcile_focus()?;
-
+            // No `reconcile_focus` here. `mon.focused` was written above, so for
+            // a request the server accepted `logical == real` and the settle is
+            // a no-op. For one it refused, the focus moved without us and the
+            // server sends the `FocusOut` that hands repair to the event path —
+            // probing here would re-ask for the answer every time we change
+            // focus, on the thread that has to keep draining input.
             let col = if urgent {
                 self.engine.cfg.col_urgent
             } else {
@@ -1374,7 +1375,9 @@ impl WindowManager {
                 self.root,
                 self.last_event_time,
             );
-            self.reconcile_focus()?;
+            // Nothing to settle: `mon.focused` is already `None`, so logical and
+            // real agree. A window that grabbed focus back generates the
+            // `FocusIn` the event path settles against.
             let _ = self.conn.change_property32(
                 PropMode::REPLACE,
                 self.root,
@@ -1421,10 +1424,14 @@ impl WindowManager {
     /// `GetInputFocus` to learn the real X focus, then — if it diverges from the
     /// logical focus (`mon.focused`) — re-issues `set_input_focus` and repaints
     /// the two affected borders. No polling, no per-frame work.
+    /// Learn the real X input focus from the server and settle against it.
+    ///
+    /// `GetInputFocus` blocks the event-loop thread, so this is for the callers
+    /// that have no other way to learn where the focus went — chiefly
+    /// `FocusOut`, which names the window that lost it and not the one that took
+    /// it. A `FocusIn` already holds the answer; use [`Self::settle_focus`].
     pub(super) fn reconcile_focus(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Mirror the real X focus from the server. `None` means the root (no
-        // client) is focused.
-        let real = match self.conn.get_input_focus() {
+        let probed = match self.conn.get_input_focus() {
             Ok(cookie) => match cookie.reply() {
                 Ok(reply) => {
                     let f = reply.focus;
@@ -1438,6 +1445,21 @@ impl WindowManager {
             },
             Err(_) => self.engine.state.x11_input_focus,
         };
+        self.settle_focus(probed)
+    }
+
+    /// Settle the WM's logical focus against a real focus the caller already
+    /// holds.
+    ///
+    /// Every `FocusIn` names the window that took the focus, so a handler that
+    /// has one already knows what `GetInputFocus` would answer — and knows it
+    /// more accurately, since a probe issued afterwards reports where focus has
+    /// since *moved*, not where it was when the event was generated. Asking
+    /// anyway costs a blocking round trip on the single event-loop thread.
+    pub(super) fn settle_focus(
+        &mut self,
+        real: Option<Window>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // X may report a child or another unmanaged window as the input
         // focus. The state mirror represents managed clients only; keeping an
         // unknown XID here violates the state invariant during normal GTK
