@@ -15,9 +15,10 @@
 //! `compositor_enabled` is gated on both `Cfg::compositor.enabled` and the
 //! absence of `MAVERICK_NO_COMPOSITOR`, so the env var can veto a config that
 //! asks for the compositor. `validate_compositor_backend` is a no-op when
-//! neither `compositor-opengl` nor `compositor-vulkan` is compiled and when the
-//! compositor is disabled, and otherwise rejects a requested backend that lacks
-//! its feature.
+//! `compositor-opengl` is not compiled and when the compositor is disabled, and
+//! otherwise rejects a requested backend that this build cannot provide. There is
+//! no Vulkan backend: the feature that once named one selected no crate and has
+//! been removed.
 
 use std::path::Path;
 
@@ -540,7 +541,7 @@ pub fn validate_compositor_backend(cfg: &Cfg) -> Result<(), String> {
     // build (dwm-style). There the `[compositor]` table is inert — the WM
     // always runs on the classic X11 path — so the section is simply ignored:
     // nothing to validate, no error, no warning.
-    if !cfg!(feature = "compositor-opengl") && !cfg!(feature = "compositor-vulkan") {
+    if !cfg!(feature = "compositor-opengl") {
         return Ok(());
     }
     // The backend is never consulted when the compositor is off (`enabled =
@@ -563,18 +564,13 @@ pub fn validate_compositor_backend(cfg: &Cfg) -> Result<(), String> {
                 )
             }
         }
-        CompositorBackend::Vulkan => {
-            if cfg!(feature = "compositor-vulkan") {
-                Ok(())
-            } else {
-                Err(
-                    "compositor.backend = \"vulkan\" requested but this binary was built without \
-                     the `compositor-vulkan` feature; rebuild with `--features compositor-vulkan` \
-                     or set `backend = \"opengl\"`"
-                        .to_string(),
-                )
-            }
-        }
+        CompositorBackend::Vulkan => Err(
+            "compositor.backend = \"vulkan\" requested but this Maverick has no Vulkan \
+             backend: the feature was a placeholder that never selected a crate, and \
+             it has been removed. Set `backend = \"opengl\"`, or disable the compositor \
+             with `[compositor] enabled = false`"
+                .to_string(),
+        ),
     }
 }
 

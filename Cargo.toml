@@ -7,9 +7,12 @@ members = [
     "maverick-gl",
     "maverick-toml",
     "maverick-img",
-    "maverick-vk",
 ]
-exclude = []
+# `maverick-vk` is an unwired Vulkan/X11 bootstrap. No crate depends on it, so
+# it is unreachable from any build and its 3489 lines are never linked into the
+# WM. It is excluded rather than deleted so the work is not thrown away, and so
+# it stops appearing in workspace-wide `--workspace` test and clippy runs.
+exclude = ["maverick-vk"]
 resolver = "2"
 
 # Centralised versions for shared dev-dependencies. Every entry here must be
@@ -57,11 +60,12 @@ maverick-x11 = { path = "maverick-x11" }
 # the keymap itself is still read with core `GetKeyboardMapping`.
 # `allow-unsafe-code` is what makes `x11rb::xcb_ffi::XCBConnection` available so
 # the WM and any renderer backend can share one connection.
-# `composite`/`damage`/`xfixes` are gated behind `compositor-opengl` so a
-# `--no-default-features` build does not pull compositor X extensions. Sync is
-# a small, capability-checked X11 protocol feature used by the optional fence.
+# `composite`/`damage`/`xfixes`/`sync` are gated behind `compositor-opengl` so a
+# `--no-default-features` build does not pull compositor X extensions. `sync`
+# is a small, capability-checked X11 protocol feature, but its only use site is
+# the XSync fence in the GL backend, so it belongs with the others.
 x11rb = { version = "0.13", default-features = false, features = [
-    "randr", "shape", "sync", "xkb", "allow-unsafe-code",
+    "randr", "shape", "xkb", "allow-unsafe-code",
 ] }
 # OpenGL/GLX compositor backend. Optional: build with `--no-default-features`
 # for a pure X11 WM, or `--features compositor-opengl` to enable it.
@@ -94,9 +98,7 @@ input-trace = []
 # `cargo build --features window-trace`.
 window-trace = []
 # OpenGL/GLX compositor backend.
-compositor-opengl = ["dep:maverick-gl", "x11rb/composite", "x11rb/damage", "x11rb/xfixes"]
-# Placeholder for a future Vulkan backend. Not yet wired.
-compositor-vulkan = []
+compositor-opengl = ["dep:maverick-gl", "x11rb/composite", "x11rb/damage", "x11rb/sync", "x11rb/xfixes"]
 
 [profile.release]
 opt-level = 3
