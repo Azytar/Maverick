@@ -361,11 +361,6 @@ impl Session {
                 .is_some_and(|i| i.start_time == 0 || i.start_time == self.wm.start_time)
     }
 
-    /// The X server is up, independently of the WM.
-    pub fn xserver_is_up(&self) -> bool {
-        self.xserver.is_alive()
-    }
-
     /// The state the record *should* have, given what is actually running.
     ///
     /// Derived, never stored on its own: it is what makes a crashed session

@@ -117,14 +117,6 @@ pub fn find_by_name(name: &str) -> Option<InstanceInfo> {
         .find(|i| i.name == name || i.session_id == name)
 }
 
-/// Find instances whose display matches (e.g. ":1").
-pub fn find_by_display(display: &str) -> Vec<InstanceInfo> {
-    list_instances()
-        .into_iter()
-        .filter(|i| i.display == display)
-        .collect()
-}
-
 /// Ask a single instance (by session id) to quit via its control socket.
 /// Returns the server reply or an error if it can't be reached.
 ///

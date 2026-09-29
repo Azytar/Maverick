@@ -469,19 +469,6 @@ pub fn session_target(c: &Ctl, args: &[String]) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Dispatch an action line to a session's window manager, for a subcommand
-/// that has already resolved its target.
-pub fn dispatch_to(view: &crate::session::SessionView, action: &str) -> Result<(), String> {
-    // The window manager answers with the action's own report; anything that is
-    // not a plain `ok` means it refused, and the refusal is the message the
-    // user needs — not "the command failed".
-    match control::dispatch(&view.sid, action) {
-        Ok(report) if report.trim() == "ok" => Ok(()),
-        Ok(report) => Err(report),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
 /// Print the top-level usage page.
 ///
 /// `to_stderr` distinguishes being *asked* for help from being *told* you used
