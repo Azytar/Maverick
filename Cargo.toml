@@ -3,7 +3,6 @@ members = [
     "maverick-core",
     "maverick-sys",
     "maverick-x11",
-    "maverick-render",
     "maverick-gl",
     "maverick-toml",
     "maverick-img",
@@ -50,7 +49,6 @@ maverick-core = { path = "maverick-core" }
 maverick-sys = { path = "maverick-sys" }
 maverick-toml = { path = "maverick-toml" }
 maverick-img = { path = "maverick-img" }
-maverick-render = { path = "maverick-render" }
 libc = "0.2"
 # Core X11 connection bootstrap lives in `maverick-x11`, independent from any
 # renderer backend. The WM always needs X11; the compositor does not.
