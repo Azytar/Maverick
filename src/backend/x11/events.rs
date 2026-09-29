@@ -62,8 +62,6 @@
 use super::render::adopt_float_request;
 
 use super::*;
-#[cfg(feature = "compositor-opengl")]
-use x11rb::protocol::damage::NotifyEvent as DamageNotifyEvent;
 
 impl WindowManager {
     pub(super) fn on_map_request(
@@ -100,9 +98,6 @@ impl WindowManager {
         if self.docks.contains_key(&e.window) {
             self.remove_dock(e.window)?;
         }
-        if let Some(c) = self.compositor.as_mut() {
-            c.on_destroy(e.window);
-        }
         Ok(())
     }
 
@@ -110,12 +105,6 @@ impl WindowManager {
         &mut self,
         e: UnmapNotifyEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Drop the window's texture the moment it unmaps, whatever the cause —
-        // its off-screen pixmap is gone and the compositor must not draw stale
-        // (or freed) contents. `c.on_unmap` is a no-op for untracked windows.
-        if let Some(c) = self.compositor.as_mut() {
-            c.on_unmap(e.window);
-        }
         // Drop the duplicate `UnmapNotify` the X server delivers to the root
         // (SubstructureNotify) for an unmap it forwards on behalf of the client:
         // only the variant targeted at the window itself (`e.event == e.window`)
@@ -370,23 +359,6 @@ impl WindowManager {
             }
         }
 
-        // Keep the compositor's cached outer rect in sync (render-only) so the
-        // live transform and texture crop match; also track restacking. This runs
-        // for every managed or override-redirect child and is idempotent.
-        if let Some(c) = self.compositor.as_mut() {
-            c.on_configure(
-                e.window,
-                e.x as i32,
-                e.y as i32,
-                e.width as u32,
-                e.height as u32,
-                e.border_width as u32,
-            );
-            if e.event == self.root {
-                let above = (e.above_sibling != x11rb::NONE).then_some(e.above_sibling);
-                c.on_restack(e.window, above);
-            }
-        }
         Ok(())
     }
 
@@ -396,7 +368,6 @@ impl WindowManager {
     /// the topology actually changed — same monitor count and geometry means
     /// nothing to do, so repeated events cause no reflow.
     pub(super) fn handle_monitor_change(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.frame_period = detect_frame_period(&self.conn, self.root);
         let setup = self.conn.setup();
         let screen = &setup.roots[self.screen_num];
         let new_mons = detect_monitors(&self.conn, screen, &self.engine.cfg)?;
@@ -578,22 +549,9 @@ impl WindowManager {
             self.engine.state.assert_invariants();
             self.update_workarea()?;
 
-            // Keep the wallpaper output layout in sync with the new topology so a
-            // native wallpaper covers every (possibly resized/rearranged) monitor.
-            if let Some(comp) = self.compositor.as_mut() {
-                let outs: Vec<crate::types::Rect> = self
-                    .engine
-                    .state
-                    .monitors
-                    .iter()
-                    .map(|m| m.screen)
-                    .collect();
-                comp.set_outputs(&outs);
-            } else {
-                // No compositor: re-paint the root-pixmap wallpaper so it
-                // covers the new (possibly resized/rearranged) monitors.
-                self.apply_root_wallpaper();
-            }
+            // Re-paint the root-pixmap wallpaper so it covers the new
+            // (possibly resized/rearranged) monitors.
+            self.apply_root_wallpaper();
         }
         Ok(())
     }
@@ -619,8 +577,10 @@ impl WindowManager {
         }
 
         // `_NET_WM_BYPASS_COMPOSITOR`: EWMH hint 1=force ON, 2=force bypass. Handled
-        // even on DELETE (property removed → None). Policy re-evaluates each
-        // `run_once` via `bypass_candidate`, so no compositor call needed.
+        // even on DELETE (property removed -> None), and mirrored into the client
+        // record the same way `WM_HINTS` is. Maverick publishes this property on
+        // its own fullscreen windows (see `manage.rs`) for *external* compositors;
+        // it consumes none itself.
         if e.atom == self.atoms.net_wm_bypass_compositor {
             if e.state == Property::DELETE {
                 if let Some(cl) = self.engine.state.clients.get_mut(&e.window) {
@@ -664,21 +624,6 @@ impl WindowManager {
             return Ok(());
         }
 
-        // `_NET_WM_WINDOW_OPACITY`: deletion resets the source to fully opaque;
-        // handle this before the generic DELETE guard or stale opacity remains.
-        if e.atom == self.atoms.net_wm_window_opacity {
-            if let Some(c) = self.compositor.as_mut() {
-                let opacity = (e.state != Property::DELETE)
-                    .then(|| {
-                        read_window_opacity(&self.conn, e.window, self.atoms.net_wm_window_opacity)
-                    })
-                    .flatten()
-                    .unwrap_or(1.0);
-                c.on_opacity(e.window, opacity);
-                return Ok(());
-            }
-        }
-
         if e.state == Property::DELETE {
             return Ok(());
         }
@@ -693,66 +638,6 @@ impl WindowManager {
             // `WM_NORMAL_HINTS` is handled by its own early arm above (fresh
             // `client.hints` for the float snap); anything else just flows to
             // `publish_state()` below.
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "compositor-opengl")]
-    pub(super) fn on_xfixes_selection_notify(
-        &mut self,
-        e: x11rb::protocol::xfixes::SelectionNotifyEvent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let keep = self
-            .compositor
-            .as_mut()
-            .is_none_or(|c| c.selection_owner_changed(e.selection, e.owner));
-        if !keep {
-            if let Some(mut c) = self.compositor.take() {
-                c.disable();
-            }
-            self.apply_root_wallpaper();
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "compositor-opengl")]
-    pub(super) fn on_shape_notify(
-        &mut self,
-        e: x11rb::protocol::shape::NotifyEvent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(c) = self.compositor.as_mut() {
-            c.on_shape(e.affected_window, e.shaped);
-        }
-        Ok(())
-    }
-
-    pub(super) fn on_create_notify(
-        &mut self,
-        e: CreateNotifyEvent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(c) = self.compositor.as_mut() {
-            c.on_create(e.window);
-        }
-        Ok(())
-    }
-
-    pub(super) fn on_map_notify(
-        &mut self,
-        e: MapNotifyEvent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(c) = self.compositor.as_mut() {
-            c.on_map(e.window);
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "compositor-opengl")]
-    pub(super) fn on_damage_notify(
-        &mut self,
-        e: DamageNotifyEvent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(c) = self.compositor.as_mut() {
-            c.on_damage(e.drawable, &e);
         }
         Ok(())
     }
@@ -1067,21 +952,6 @@ impl WindowManager {
             self.schedule_keyboard_refresh();
         }
     }
-}
-
-/// Read `_NET_WM_WINDOW_OPACITY` (a 32-bit CARDINAL in `0..=0xFFFFFFFF`, where
-/// the max value means fully opaque) and normalise it to `0.0..=1.0`. Returns
-/// `None` when the property is absent or unreadable, so the caller keeps the
-/// current opacity.
-fn read_window_opacity(conn: &maverick_x11::XConn, win: Window, atom: Atom) -> Option<f32> {
-    let ty = u32::from(AtomEnum::CARDINAL);
-    let reply = conn
-        .get_property(false, win, atom, ty, 0, 1)
-        .ok()?
-        .reply()
-        .ok()?;
-    let raw = reply.value32()?.next()?;
-    Some(raw as f32 / 0xFFFF_FFFFu32 as f32)
 }
 
 /// Read `_NET_WM_BYPASS_COMPOSITOR` (CARDINAL 0/1/2). Returns `None` when absent.

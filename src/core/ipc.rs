@@ -151,14 +151,7 @@ pub fn query_json(state: &State, cfg: &Cfg, topic: &str) -> String {
 /// supply it from the backend.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BackendFacts {
-    /// The GL compositor is initialised and driving presentation.
-    pub compositor_active: bool,
-    /// The configured backend name (`opengl`, `vulkan`), whether or not it came
-    /// up — the difference between "asked for OpenGL" and "running OpenGL" is
-    /// the first thing worth knowing about a compositor.
-    pub compositor_backend: &'static str,
-    /// Animations are enabled by configuration (independent of the compositor:
-    /// the analytic spring path runs without one).
+    /// Animations are enabled by configuration.
     pub animations: bool,
 }
 
@@ -218,17 +211,7 @@ pub fn inspect_json(state: &State, cfg: &Cfg, facts: &BackendFacts) -> String {
     } else {
         s.push_str("\"monitor\":null,");
     }
-    write!(
-        s,
-        "\"compositor\":{{\"backend\":\"{}\",\"active\":{}}},",
-        facts.compositor_backend, facts.compositor_active
-    )
-    .unwrap();
-    write!(s, "\"animations\":{},", facts.animations).unwrap();
-    // The configuration's opinion, kept beside the live one: a session that
-    // asked for the compositor and did not get it is a bug worth seeing, and
-    // the two values are only distinguishable if both are reported.
-    write!(s, "\"compositor_requested\":{}", cfg.compositor.enabled).unwrap();
+    write!(s, "\"animations\":{}", facts.animations).unwrap();
     s.push('}');
     s
 }
@@ -510,10 +493,8 @@ mod tests {
 
     /// `inspect` is the one document assembled from two sources — `State` and
     /// the backend's own facts — so both halves have to appear, and the
-    /// compositor's *configured* backend has to be distinguishable from whether
-    /// it came up.
     #[test]
-    fn the_inspect_document_reports_totals_layout_and_compositor() {
+    fn the_inspect_document_reports_totals_layout_and_animations() {
         use crate::types::Client;
         let mut state = crate::types::State::new();
         state.monitors.push(crate::types::Monitor::new(
@@ -537,11 +518,7 @@ mod tests {
             }
         }
         let cfg = crate::config::Cfg::default();
-        let facts = BackendFacts {
-            compositor_active: true,
-            compositor_backend: "opengl",
-            animations: true,
-        };
+        let facts = BackendFacts { animations: true };
         let doc = inspect_json(&state, &cfg, &facts);
         let v = parses(&doc);
 
@@ -556,10 +533,14 @@ mod tests {
             2,
             "two tiled columns, one float"
         );
-        let compositor = v.get("compositor").expect("compositor");
-        assert_eq!(compositor.str_field("backend"), "opengl");
-        assert!(compositor.bool_field("active"));
         assert!(v.bool_field("animations"));
+        // Maverick has no compositor, so the document must not report one:
+        // a `compositor` key here would be a claim about a subsystem that no
+        // longer exists, and a tool reading it would branch on a fiction.
+        assert!(
+            v.get("compositor").is_none(),
+            "inspect still reports a compositor"
+        );
         // And the monitor the user can actually see.
         let mon = v.get("monitor").expect("monitor");
         assert_eq!(
@@ -590,7 +571,7 @@ mod tests {
     /// up, and claiming otherwise would report a session as composited when
     /// nothing says it is.
     #[test]
-    fn default_backend_facts_do_not_claim_a_compositor() {
+    fn default_backend_facts_claim_nothing_the_wm_cannot_do() {
         let state = crate::types::State::new();
         let doc = inspect_json(
             &state,
@@ -598,10 +579,11 @@ mod tests {
             &BackendFacts::default(),
         );
         let v = parses(&doc);
-        assert!(!v
-            .get("compositor")
-            .expect("compositor")
-            .bool_field("active"));
+        assert!(
+            !v.bool_field("animations"),
+            "default facts must not claim animation"
+        );
+        assert!(v.get("compositor").is_none());
     }
 
     /// The state snapshot is what every client polls, so the screen size added

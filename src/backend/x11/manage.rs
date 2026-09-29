@@ -486,9 +486,6 @@ impl WindowManager {
                 ),
         );
         let _ = self.conn.shape_select_input(win, true);
-        if let Some(compositor) = self.compositor.as_mut() {
-            compositor.on_border_color(win, self.engine.cfg.col_normal);
-        }
 
         self.grab_buttons(win, false)?;
 

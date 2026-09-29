@@ -664,14 +664,6 @@ impl WindowManager {
         // Overlay stacking: presented windows above tiles, popups of presented
         // windows above the overlay, focused window on top (or peek).
         self.stack_overlay(mon_idx);
-        // When the compositor owns the screen, the new (settled) geometry must
-        // trigger a redraw — the overlay is what's actually visible, not the
-        // window's live X geometry.
-        if let Some(c) = self.compositor.as_mut() {
-            c.invalidate();
-        }
-        // The live projection for this monitor is now stale; the frame loop
-        // recomputes it (and only it) on the next composited frame.
         self.engine.state.monitors[mon_idx].layout_dirty = true;
         Ok(())
     }
@@ -741,13 +733,7 @@ impl WindowManager {
                 // X11 configure are updated.
                 let off_rect = parked_rect(client.geom);
                 let bw = client.border_w;
-                let on_other_ws = client.workspace != self.engine.state.monitors[mon_idx].active_ws;
                 self.apply_geom(win, off_rect, bw, false)?;
-                if on_other_ws {
-                    if let Some(c) = self.compositor.as_mut() {
-                        c.set_hidden(win, true);
-                    }
-                }
                 if let Some(c) = self.engine.state.clients.get_mut(&win) {
                     c.wm_hidden = true;
                 }
@@ -759,9 +745,6 @@ impl WindowManager {
                 let real_rect = Rect::new(gx, gy, client.geom.w, client.geom.h);
                 let bw = client.border_w;
                 self.apply_geom(win, real_rect, bw, false)?;
-                if let Some(c) = self.compositor.as_mut() {
-                    c.set_hidden(win, false);
-                }
                 if let Some(c) = self.engine.state.clients.get_mut(&win) {
                     c.wm_hidden = false;
                 }
@@ -1007,7 +990,12 @@ impl WindowManager {
                 .border_width(wire_bw),
         );
 
-        super::trace::trace!("geometry_applied", "win={win} x={} y={} w={wire_w} h={wire_h} bw={wire_bw} gl_active={} server_confirmed=false", geom.x, geom.y, self.compositor.is_some());
+        super::trace::trace!(
+            "geometry_applied",
+            "win={win} x={} y={} w={wire_w} h={wire_h} bw={wire_bw} server_confirmed=false",
+            geom.x,
+            geom.y
+        );
         let event = ConfigureNotifyEvent {
             response_type: CONFIGURE_NOTIFY_EVENT,
             sequence: 0,
@@ -1068,13 +1056,11 @@ impl WindowManager {
     }
 
     fn sync_rounded_frame(&mut self, win: Window, geom: Rect, bw: u32, is_fullscreen: bool) {
-        if (self.engine.cfg.corner_radius > 0 && self.compositor.is_none())
-            || self.shape_mask_cache.contains_key(&win)
-        {
+        if self.engine.cfg.corner_radius > 0 || self.shape_mask_cache.contains_key(&win) {
             // Fullscreen is always square, niri-style — border-0 and edge-to-
             // edge, so a rounded mask has no desktop behind it to reveal and
             // just chops the content under a curved clip instead.
-            let r = if is_fullscreen || self.compositor.is_some() {
+            let r = if is_fullscreen {
                 0
             } else {
                 self.engine.cfg.corner_radius as i32
@@ -1274,11 +1260,6 @@ impl WindowManager {
             let _ = self
                 .conn
                 .change_window_attributes(w, &ChangeWindowAttributesAux::new().border_pixel(col));
-            // The GL compositor paints its own stroke from the same color;
-            // keeping it in sync here means the ring follows focus changes.
-            if let Some(compositor) = self.compositor.as_mut() {
-                compositor.on_border_color(w, col);
-            }
             self.grab_buttons(w, true)?;
 
             let serial = self.engine.state.next_serial();
@@ -1423,9 +1404,6 @@ impl WindowManager {
         let _ = self
             .conn
             .change_window_attributes(win, &ChangeWindowAttributesAux::new().border_pixel(col));
-        if let Some(compositor) = self.compositor.as_mut() {
-            compositor.on_border_color(win, col);
-        }
         let _ = self.grab_buttons(win, false);
         Ok(())
     }
@@ -1595,9 +1573,6 @@ impl WindowManager {
                     w,
                     &ChangeWindowAttributesAux::new().border_pixel(col),
                 );
-                if let Some(compositor) = self.compositor.as_mut() {
-                    compositor.on_border_color(w, col);
-                }
             }
         } else {
             let _ = self.conn.set_input_focus(
@@ -1614,9 +1589,6 @@ impl WindowManager {
                     old,
                     &ChangeWindowAttributesAux::new().border_pixel(self.engine.cfg.col_normal),
                 );
-                if let Some(compositor) = self.compositor.as_mut() {
-                    compositor.on_border_color(old, self.engine.cfg.col_normal);
-                }
             }
         }
 

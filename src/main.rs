@@ -79,7 +79,6 @@
 
 mod backend;
 mod bench_arrange;
-mod compositor_policy;
 mod config;
 pub mod core;
 mod log;

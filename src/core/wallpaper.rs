@@ -1,42 +1,19 @@
-//! Wallpaper domain + GPU seam.
+//! Wallpaper domain.
 //!
 //! Re-exports of the pure model from `maverick-core` (`WallpaperMode`,
 //! `WallpaperSource`/`WallpaperSpec`, `GpuImage`, `compute_wallpaper_rects`,
-//! `shader_is_animated`) plus the `WallpaperGpu` trait — the GL abstraction the
-//! core calls instead of speaking GL. No X11 here: parsing and geometry stay in
-//! `maverick-core`, and all GL calls and shader compilation live in the x11/GL
-//! backend (`GlWallpaper`); a future Vulkan backend implements the same trait.
+//! `shader_is_animated`) plus the decoded RGBA buffer type. Parsing and geometry
+//! live in `maverick-core`; decoding lives in `maverick-img`; painting the
+//! wallpaper onto the root pixmap is `backend::x11::rootwall`.
 //!
-//! Invariants: `ShaderId` is opaque and backend-owned; this module duplicates
-//! no state.
+//! There is no GPU seam. The wallpaper is drawn by X11 alone, so the core
+//! forwards no textures or shader handles to any backend — it holds the
+//! wallpaper *description* and nothing else.
 
-pub use maverick_core::wallpaper::WallpaperMode as _WallpaperModeCheck;
 /// Re-exported pure helpers/types from `maverick-core`.
 pub use maverick_core::wallpaper::{
     compute_wallpaper_rects, shader_is_animated, GpuImage, WallpaperMode, WallpaperSource,
     WallpaperSpec,
 };
-/// RGBA image buffer shared with `WallpaperGpu::upload_image`.
+/// RGBA image buffer produced by `maverick_img::decode`.
 pub use maverick_img::Rgba8;
-
-/// The GPU abstraction the wallpaper needs. Implemented by the x11/GL backend
-/// (`GlWallpaper`); a future Vulkan backend implements the same trait. The core
-/// only ever calls these methods — it never speaks OpenGL.
-///
-/// `ShaderId` is the backend's own opaque program/pipeline handle (GL:
-/// `GLuint`). The core treats it as opaque, only forwarding it back to the
-/// backend, so it does not define its own copy here.
-#[cfg(feature = "compositor-opengl")]
-pub trait WallpaperGpu {
-    fn upload_image(&mut self, img: &Rgba8) -> Result<GpuImage, String>;
-    fn compile_shader(&mut self, frag: &str) -> Result<maverick_gl::ShaderId, String>;
-    fn draw_image(&mut self, img: &GpuImage, dst: crate::types::Rect, src_uv: [f32; 4]);
-    fn draw_shader(
-        &mut self,
-        s: maverick_gl::ShaderId,
-        out: crate::types::Rect,
-        time: f32,
-        dt: f32,
-    );
-    fn release(&mut self, img: GpuImage);
-}

@@ -3,7 +3,6 @@ members = [
     "maverick-core",
     "maverick-sys",
     "maverick-x11",
-    "maverick-gl",
     "maverick-toml",
     "maverick-img",
 ]
@@ -50,31 +49,20 @@ maverick-sys = { path = "maverick-sys" }
 maverick-toml = { path = "maverick-toml" }
 maverick-img = { path = "maverick-img" }
 libc = "0.2"
-# Core X11 connection bootstrap lives in `maverick-x11`, independent from any
-# renderer backend. The WM always needs X11; the compositor does not.
+# The X11 connection bootstrap lives in `maverick-x11` and is the WM's only
+# windowing-system dependency. There is no renderer backend: Maverick draws
+# through X11 alone, so the WM needs nothing else to be correct.
 maverick-x11 = { path = "maverick-x11" }
 # `xkb` is used only to *subscribe* to keyboard-map changes (XkbMapNotify /
 # XkbNewKeyboardNotify), which core `MappingNotify` does not always deliver —
 # the keymap itself is still read with core `GetKeyboardMapping`.
 # `allow-unsafe-code` is what makes `x11rb::xcb_ffi::XCBConnection` available so
-# the WM and any renderer backend can share one connection.
-# `composite`/`damage`/`xfixes`/`sync` are gated behind `compositor-opengl` so a
-# `--no-default-features` build does not pull compositor X extensions. `sync`
-# is a small, capability-checked X11 protocol feature, but its only use site is
-# the XSync fence in the GL backend, so it belongs with the others.
+# the bootstrap can hand back the one connection the WM uses.
 x11rb = { version = "0.13", default-features = false, features = [
     "randr", "shape", "xkb", "allow-unsafe-code",
 ] }
-# OpenGL/GLX compositor backend. Optional: build with `--no-default-features`
-# for a pure X11 WM, or `--features compositor-opengl` to enable it.
-maverick-gl = { path = "maverick-gl", optional = true }
 
 [dev-dependencies]
-# The GL backend stays an *optional* dependency, deliberately not repeated
-# here: repeating it under `[dev-dependencies]` would make `cargo test` pull
-# maverick-gl in even for a `--no-default-features` build, defeating the
-# "pure X11 WM" configuration this manifest advertises. Tests that need the
-# backend reach it through the `compositor-opengl` feature instead.
 proptest.workspace = true
 # `tests/child_lifecycle.rs` hands a real file to `maverick_img` to exercise the
 # external-converter fallback, so it needs a private directory that cleans
@@ -82,21 +70,17 @@ proptest.workspace = true
 tempfile.workspace = true
 
 [features]
-# Default build includes the OpenGL compositor backend.
-default = ["compositor-opengl"]
-# Diagnostic build: emits a structured "INPUT-TRACE" log on every input/focus
-# decision so the fullscreen+pointer-loss root cause can be confirmed live in
-# Xephyr. Off by default (no runtime cost, no extra deps). Enabled with
-# `cargo build --features input-trace`.
+# There is no `default` feature: the window manager has no optional subsystems.
+# The features that remain are diagnostic builds with no runtime cost and no
+# extra dependencies.
+# Emits a structured "INPUT-TRACE" log on every input/focus decision so the
+# fullscreen+pointer-loss root cause can be confirmed live in Xephyr. Enabled
+# with `cargo build --features input-trace`.
 input-trace = []
-# Diagnostic build: emits a structured "WINDOW-TRACE" log on every
-# reconcile/focus boundary so the desired→applied→real→x11_focus pipeline can be
-# confirmed live in Xephyr against a real client. Off by
-# default (no runtime cost, no extra deps). Enabled with
-# `cargo build --features window-trace`.
+# Emits a structured "WINDOW-TRACE" log on every reconcile/focus boundary so
+# the desired→applied→real→x11_focus pipeline can be confirmed live in Xephyr
+# against a real client. Enabled with `cargo build --features window-trace`.
 window-trace = []
-# OpenGL/GLX compositor backend.
-compositor-opengl = ["dep:maverick-gl", "x11rb/composite", "x11rb/damage", "x11rb/sync", "x11rb/xfixes"]
 
 [profile.release]
 opt-level = 3

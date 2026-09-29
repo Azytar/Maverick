@@ -54,13 +54,22 @@ const FORBIDDEN: &[(&str, &str)] = &[
 /// rule in `src/main.rs`, silently skipping the window manager's own 42 source
 /// files. Enumerating real paths makes that class of mistake a non-zero
 /// assertion instead of a silent pass.
+/// Enumerating real paths makes that class of mistake a non-zero
+/// assertion instead of a silent pass — which is how this list earned its
+/// current contents. It used to name `maverick-gl/src` and `maverick-vk/src`,
+/// neither of which is linked into the WM, while omitting `maverick-toml`, which
+/// is. The walk found nothing to complain about and reported success over a
+/// short list.
+///
+/// This is the dependency set of the `maverick` binary. Update it whenever a
+/// dependency is added or removed: the missing-directory assertion below is
+/// what makes that failure loud rather than silent.
 const WM_SOURCE_DIRS: &[&str] = &[
     "src",
     "maverick-core/src",
-    "maverick-gl/src",
     "maverick-img/src",
     "maverick-sys/src",
-    "maverick-vk/src",
+    "maverick-toml/src",
     "maverick-x11/src",
 ];
 

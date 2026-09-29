@@ -30,16 +30,13 @@ use crate::log;
 use crate::types::Rect;
 
 impl super::WindowManager {
-    /// Draw `[wallpaper]` onto the root window (no-op on the compositor path,
-    /// when no path is configured, or when the source is a GLSL shader).
+    /// Draw `[wallpaper]` onto the root window (no-op when no path is
+    /// configured, or when the source is a GLSL shader).
     pub(super) fn apply_root_wallpaper(&mut self) {
-        if self.compositor.is_some() {
-            return; // the compositor paints its own background
-        }
         let Some(path) = self.engine.cfg.wallpaper.path.clone() else {
             return;
         };
-        // Shaders are a compositor feature; the root path draws images only.
+        // Shaders need a GL pipeline to run; the root path draws images only.
         if !matches!(
             self.engine.state.wallpaper.source,
             WallpaperSource::Image(_)

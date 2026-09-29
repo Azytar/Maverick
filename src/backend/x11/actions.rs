@@ -48,76 +48,10 @@ impl WindowManager {
     pub(super) fn do_action(&mut self, action: Action) -> Result<(), Box<dyn std::error::Error>> {
         let _action_trace = super::trace::Span::new("action");
         super::trace::trace!("action_input", "action={action:?}");
-        let is_toggle = matches!(action, Action::ToggleFloat);
-        let (tw, old_float, old_geom, old_layout, old_dirty, old_reasons) = if is_toggle {
-            let mi = self.engine.state.sel_mon;
-            let (f, g, ld) = if let Some(m) = self.engine.state.monitors.get(mi) {
-                if let Some(w) = m.focused {
-                    if let Some(c) = self.engine.state.clients.get(&w) {
-                        (Some((w, c.is_float())), c.geom, m.layout_dirty)
-                    } else {
-                        (None, Rect::default(), m.layout_dirty)
-                    }
-                } else {
-                    (None, Rect::default(), m.layout_dirty)
-                }
-            } else {
-                (None, Rect::default(), false)
-            };
-            let d = self
-                .compositor
-                .as_ref()
-                .is_some_and(crate::backend::x11::compositor::Compositor::needs_frame);
-            let r = self.compositor.as_ref().map_or(
-                0u8,
-                crate::backend::x11::compositor::Compositor::dirty_reasons_bits,
-            );
-            (f, f.map(|(_, fl)| fl), g, ld, d, r)
-        } else {
-            (None, None, Rect::default(), false, false, 0u8)
-        };
         let state_trace = super::trace::Span::new("state_action");
         let effects = self.engine.dispatch(action);
         drop(state_trace);
         self.run_effects(effects)?;
-        if let Some((w, _old_fl)) = tw {
-            let mi = self.engine.state.sel_mon;
-            let new_float = self
-                .engine
-                .state
-                .clients
-                .get(&w)
-                .is_some_and(crate::types::Client::is_float);
-            let new_geom = self
-                .engine
-                .state
-                .clients
-                .get(&w)
-                .map_or(Rect::default(), |c| c.geom);
-            let new_layout = self
-                .engine
-                .state
-                .monitors
-                .get(mi)
-                .is_some_and(|m| m.layout_dirty);
-            let new_dirty = self
-                .compositor
-                .as_ref()
-                .is_some_and(crate::backend::x11::compositor::Compositor::needs_frame);
-            let new_reasons = self.compositor.as_ref().map_or(
-                0u8,
-                crate::backend::x11::compositor::Compositor::dirty_reasons_bits,
-            );
-            if let Some(comp) = self.compositor.as_ref() {
-                if comp.float_trace {
-                    log::info!(
-                        "[FLOAT] toggle win={:#x} old_floating={} new_floating={} old_geometry={:?} target_geometry={:?} layout_dirty={}->{} comp_dirty={}->{} dirty_reasons={:#x}->{:#x}",
-                        w, old_float.unwrap_or(false), new_float, old_geom, new_geom, old_layout, new_layout,
-                        old_dirty, new_dirty, old_reasons, new_reasons
-                    );
-                }
-            }
-        }
         Ok(())
     }
 
@@ -176,14 +110,7 @@ impl WindowManager {
             Effect::Spawn(cmd) => self.spawn(&cmd),
             Effect::Quit => self.begin_shutdown(),
             Effect::Restart => self.restart(),
-            Effect::SetWallpaper => {
-                // Push the engine's current wallpaper spec into the compositor.
-                // A decode/compile failure there logs once and leaves the
-                // wallpaper disabled — it never takes the WM down.
-                if let Some(comp) = self.compositor.as_mut() {
-                    comp.set_wallpaper(&self.engine.state.wallpaper);
-                }
-            }
+            Effect::SetWallpaper => self.apply_root_wallpaper(),
             Effect::PublishIpcState => self.publish_state(),
         }
         Ok(())
@@ -343,16 +270,13 @@ impl WindowManager {
                     // only touched here (the WM thread), which is exactly why
                     // querying has to happen through this queue.
                     let json = if topic == "inspect" {
-                        // `inspect` is the one topic that also needs what only
-                        // the backend knows — whether the compositor actually
-                        // came up — so it is built here rather than from a
-                        // `State` snapshot that cannot honestly record it.
-                        let facts = crate::core::ipc::BackendFacts {
-                            compositor_active: self.compositor.is_some(),
-                            compositor_backend: compositor_backend_name(&self.engine.cfg),
-                            animations: crate::config::animations_enabled(&self.engine.cfg),
-                        };
-                        crate::core::ipc::inspect_json(&self.engine.state, &self.engine.cfg, &facts)
+                        crate::core::ipc::inspect_json(
+                            &self.engine.state,
+                            &self.engine.cfg,
+                            &crate::core::ipc::BackendFacts {
+                                animations: crate::config::animations_enabled(&self.engine.cfg),
+                            },
+                        )
                     } else {
                         crate::core::ipc::query_json(&self.engine.state, &self.engine.cfg, &topic)
                     };
@@ -427,32 +351,6 @@ impl WindowManager {
         }
 
         self.engine.cfg = cfg;
-        let wants_compositor = crate::config::compositor_enabled(&self.engine.cfg)
-            && crate::config::validate_compositor_backend(&self.engine.cfg).is_ok();
-        if !wants_compositor {
-            if let Some(mut compositor) = self.compositor.take() {
-                compositor.disable();
-            }
-            self.apply_root_wallpaper();
-        } else if self.compositor.is_none() {
-            match compositor::Compositor::init(
-                self.conn.clone(),
-                self.dpy,
-                self.root,
-                self.screen_num,
-                self.check_win,
-                &self.engine.cfg,
-            ) {
-                Some(mut compositor) => {
-                    compositor.set_wallpaper(&self.engine.state.wallpaper);
-                    self.compositor = Some(compositor);
-                    log::info!("reload: compositor enabled");
-                }
-                None => {
-                    log::warn!("reload: compositor initialization failed; staying on X11 path");
-                }
-            }
-        }
         self.engine.apply_camera_cfg();
         self.keymap = build_keymap(&self.engine.cfg);
         self.grab_keys()?;
@@ -461,25 +359,14 @@ impl WindowManager {
         // startup path does this too; without it `reload` would silently ignore
         // `[wallpaper]` changes (the wallpaper is only read from config here,
         // never from IPC state — IPC `wallpaper set` updates `state` directly).
-        if let Some(comp) = self.compositor.as_mut() {
-            if let Some(path) = self.engine.cfg.wallpaper.path.clone() {
-                self.engine.state.wallpaper.source =
-                    crate::core::wallpaper::WallpaperSource::from_path(path.into());
-                self.engine.state.wallpaper.mode = self.engine.cfg.wallpaper.mode;
-            } else {
-                self.engine.state.wallpaper.source = crate::core::wallpaper::WallpaperSource::None;
-            }
-            comp.set_wallpaper(&self.engine.state.wallpaper);
+        if let Some(path) = self.engine.cfg.wallpaper.path.clone() {
+            self.engine.state.wallpaper.source =
+                crate::core::wallpaper::WallpaperSource::from_path(path.into());
+            self.engine.state.wallpaper.mode = self.engine.cfg.wallpaper.mode;
         } else {
-            // No compositor: re-paint the root-pixmap wallpaper from the
-            // freshly reloaded config (same trigger as startup).
-            if let Some(path) = self.engine.cfg.wallpaper.path.clone() {
-                self.engine.state.wallpaper.source =
-                    crate::core::wallpaper::WallpaperSource::from_path(path.into());
-                self.engine.state.wallpaper.mode = self.engine.cfg.wallpaper.mode;
-            }
-            self.apply_root_wallpaper();
+            self.engine.state.wallpaper.source = crate::core::wallpaper::WallpaperSource::None;
         }
+        self.apply_root_wallpaper();
 
         // Republish EWMH desktop state for external bars/taskbars. Only the
         // count/names need a refresh here — `_NET_CURRENT_DESKTOP` must NOT be
@@ -533,19 +420,5 @@ impl WindowManager {
             hub.publish_state(json.clone());
             self.last_state_json = json;
         }
-    }
-}
-
-/// The compositor backend name to report, as configured.
-///
-/// Read from the configuration rather than from the compile-time features
-/// because the two are not the same question: a build can have OpenGL
-/// compiled in and still be configured for Vulkan, and `inspect` has to be
-/// able to say which was asked for even when the answer is "neither is
-/// running".
-fn compositor_backend_name(cfg: &crate::config::Cfg) -> &'static str {
-    match cfg.compositor.backend {
-        crate::config::CompositorBackend::OpenGl => "opengl",
-        crate::config::CompositorBackend::Vulkan => "vulkan",
     }
 }

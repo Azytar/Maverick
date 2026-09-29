@@ -97,7 +97,8 @@ struct UserConfig {
     rules: Vec<RuleEntry>,
     autostart: Option<AutostartCfg>,
     wallpaper: Option<WallpaperEntry>,
-    /// `[compositor]` table. Mirrors `config::CompositorCfg`.
+    /// `[compositor]` table. Maverick has no compositor; the table survives only
+    /// as the deprecated home of the `stiffness`/`damping` animation aliases.
     compositor: Option<CompositorEntry>,
     /// `[animations]` table. Mirrors `config::AnimationsCfg`.
     animations: Option<AnimationsEntry>,
@@ -105,10 +106,6 @@ struct UserConfig {
 
 #[derive(Debug, Default)]
 struct CompositorEntry {
-    enabled: Option<bool>,
-    fullscreen_bypass: Option<bool>,
-    backend: Option<String>,
-    vsync: Option<String>,
     /// Deprecated spring spellings. They carry no compositor state: the values
     /// are folded onto `Cfg::animations` by `apply_compositor`, which runs
     /// before `apply_animations` so the `[animations]` table wins a tie.
@@ -528,11 +525,11 @@ fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>, diag: &mut D
 
 /// Map one `[compositor]` key onto the model.
 ///
-/// `stiffness`/`camera_stiffness`/`damping`/`camera_damping` are deprecated
-/// spellings of the `[animations]` keys of the same meaning: they still apply
-/// their value (onto `Cfg::animations`, see `apply_compositor`) and add a
-/// deprecation warning. A wrong-typed value is skipped with a warning, a
-/// non-positive one reported as an error — identical to `[animations]`.
+/// Maverick has no compositor, so only the deprecated `stiffness`/`damping`
+/// spring spellings still mean anything here: they apply their value onto
+/// `Cfg::animations` and add a deprecation warning. Every other key is reported
+/// as ignored rather than dropped in silence, so a config written for the old
+/// compositor says so instead of looking applied.
 fn apply_compositor_key(
     c: &mut CompositorEntry,
     key: &str,
@@ -540,16 +537,6 @@ fn apply_compositor_key(
     diag: &mut Diagnostics,
 ) {
     match key {
-        "enabled" => set_bool(&mut c.enabled, key, value, diag),
-        "fullscreen_bypass" => set_bool(&mut c.fullscreen_bypass, key, value, diag),
-        "backend" => {
-            if let Some(s) = value.as_str() {
-                c.backend = Some(s.to_string());
-            } else {
-                diag.errors
-                    .push("compositor.backend must be 'opengl'|'vulkan'".to_string());
-            }
-        }
         // Deprecated spring spellings, kept as aliases onto the animation model:
         // the value is carried to `Cfg::animations` by `apply_compositor` and
         // range-checked by the same helper the `[animations]` table uses, so a
@@ -566,19 +553,11 @@ fn apply_compositor_key(
             ));
             set_f32(&mut c.damping, key, value, diag);
         }
-        "vsync" => {
-            if let Some(s) = value.as_str() {
-                c.vsync = Some(s.to_string());
-            } else if let Some(b) = value.as_bool() {
-                c.vsync = Some(if b {
-                    "on".to_string()
-                } else {
-                    "off".to_string()
-                });
-            } else {
-                diag.errors
-                    .push("compositor.vsync must be 'on'|'off'|'adaptive'".to_string());
-            }
+        "enabled" | "backend" | "fullscreen_bypass" | "vsync" => {
+            diag.warnings.push(format!(
+                "[compositor].{key} is ignored: Maverick has no compositor and draws \
+                 through X11"
+            ));
         }
         _ => {}
     }
@@ -600,34 +579,10 @@ fn apply_animations_key(
 }
 
 /// Fold a parsed `[compositor]` table into the compiled `Cfg`.
+///
+/// Only the deprecated spring constants survive; they belong to the animation
+/// model, not to a compositor that no longer exists.
 fn apply_compositor(cfg: &mut Cfg, c: CompositorEntry, diag: &mut Diagnostics) {
-    if let Some(v) = c.enabled {
-        cfg.compositor.enabled = v;
-    }
-    if let Some(v) = c.fullscreen_bypass {
-        cfg.compositor.fullscreen_bypass = v;
-    }
-    if let Some(s) = c.backend {
-        match crate::config::CompositorBackend::from_str(&s) {
-            Ok(b) => cfg.compositor.backend = b,
-            Err(e) => diag.errors.push(e),
-        }
-    }
-    if let Some(s) = c.vsync {
-        match s.to_ascii_lowercase().as_str() {
-            "on" | "true" | "1" | "vsync" => cfg.compositor.vsync = crate::config::VsyncMode::On,
-            "off" | "false" | "0" | "none" => cfg.compositor.vsync = crate::config::VsyncMode::Off,
-            "adaptive" | "tear" | "mailbox" => {
-                cfg.compositor.vsync = crate::config::VsyncMode::Adaptive
-            }
-            _ => diag.errors.push(format!(
-                "compositor.vsync must be 'on'|'off'|'adaptive'; ignoring '{s}'"
-            )),
-        }
-    }
-    // The spring constants live on `Cfg::animations`, so a deprecated
-    // `[compositor]` spelling has to reach across to the animation model
-    // instead of writing compositor state.
     if let Some(v) = c.stiffness {
         set_spring(&mut cfg.animations.stiffness, "stiffness", v, diag);
     }
@@ -846,12 +801,6 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
         apply_wallpaper(&mut cfg, wp, diag);
     }
 
-    // Validate compositor backend against compiled features — actionable error
-    // when the user requests a backend that was not built.
-    if let Err(e) = crate::config::validate_compositor_backend(&cfg) {
-        diag.errors.push(e);
-    }
-
     normalize_tag_names(&mut cfg);
     cfg
 }
@@ -965,8 +914,12 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     if let Some(v) = general.warp_cursor {
         cfg.warp_cursor = v;
     }
-    if let Some(v) = general.compositor_enabled {
-        cfg.compositor.enabled = v;
+    if general.compositor_enabled.is_some() {
+        diag.warnings.push(
+            "general.compositor_enabled is ignored: Maverick has no compositor and draws \
+             through X11"
+                .into(),
+        );
     }
     if let Some(v) = general.camera_stiffness {
         if v > 0.0 {
@@ -1819,31 +1772,57 @@ commands = [["example", "--flag"]]
     }
 
     #[test]
-    fn compositor_table_enables_and_disables_bypass() {
-        // Each key of the table is applied independently: turning the
-        // compositor off must not reset the rest of it.
-        let user = parse_string("[compositor]\nenabled = false\n");
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        assert!(!cfg.compositor.enabled);
-        assert!(cfg.compositor.fullscreen_bypass); // default preserved
-
-        let user = parse_string("[compositor]\nenabled = true\nfullscreen_bypass = false\n");
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        assert!(cfg.compositor.enabled);
-        assert!(!cfg.compositor.fullscreen_bypass);
-
-        let user = parse_string("[compositor]\nfullscreen_bypass = true\n");
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        assert!(cfg.compositor.fullscreen_bypass);
+    fn compositor_keys_are_parsed_but_reported_as_ignored() {
+        // Maverick has no compositor, so a config written for one must still
+        // load — and must say the keys did nothing, rather than looking applied.
+        for body in [
+            "[compositor]\nenabled = false\n",
+            "[compositor]\nbackend = \"vulkan\"\n",
+            "[compositor]\nfullscreen_bypass = false\n",
+            "[compositor]\nvsync = \"adaptive\"\n",
+        ] {
+            let mut diag = Diagnostics::default();
+            let user = parse_user(body, &mut diag).expect("valid TOML");
+            let cfg = merge_config(compiled_config(), user, &mut diag);
+            assert!(
+                diag.errors.is_empty(),
+                "{body} produced errors: {:?}",
+                diag.errors
+            );
+            assert!(
+                diag.warnings.iter().any(|w| w.contains("is ignored")),
+                "{body} did not report the key as ignored: {:?}",
+                diag.warnings
+            );
+            // Nothing about the merged config may move.
+            let base = compiled_config();
+            assert!(
+                (cfg.animations.stiffness - base.animations.stiffness).abs() < f32::EPSILON,
+                "{body}"
+            );
+            assert!(
+                (cfg.animations.damping - base.animations.damping).abs() < f32::EPSILON,
+                "{body}"
+            );
+            assert_eq!(cfg.animations.enabled, base.animations.enabled, "{body}");
+        }
     }
 
     #[test]
-    fn general_compositor_enabled_alias_still_works() {
-        // The pre-`[compositor]` spelling must keep working: configs in the wild
-        // still carry it.
-        let user = parse_string("[general]\ncompositor_enabled = false\n");
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        assert!(!cfg.compositor.enabled);
+    fn general_compositor_enabled_alias_is_parsed_but_ignored() {
+        // The pre-`[compositor]` spelling is still accepted so a config in the
+        // wild loads; it is reported as ignored, not honoured.
+        let mut diag = Diagnostics::default();
+        let user =
+            parse_user("[general]\ncompositor_enabled = false\n", &mut diag).expect("valid TOML");
+        let _cfg = merge_config(compiled_config(), user, &mut diag);
+        assert!(
+            diag.warnings
+                .iter()
+                .any(|w| w.contains("general.compositor_enabled is ignored")),
+            "{:?}",
+            diag.warnings
+        );
     }
 
     #[test]
@@ -2061,13 +2040,13 @@ border_width = 0
         // `diag.errors` is NOT an unusable signal: a rejected value is recorded
         // while every other value in the file is merged in, so a reload must
         // still adopt this config.
-        let path = write_temp("[general]\ngaps = 17\n\n[compositor]\nbackend = 7\n");
+        let path = write_temp("[general]\ngaps = 17\n\n[animations]\nstiffness = -4\n");
         let (source, cfg, diag) = load_from_path_classified(&path);
         assert_eq!(source, ConfigSource::UserFile);
         assert_eq!(cfg.gaps_inner, 17);
         assert_eq!(cfg.gaps_outer, 17);
         assert!(
-            diag.errors.iter().any(|e| e.contains("compositor.backend")),
+            diag.errors.iter().any(|e| e.contains("stiffness")),
             "{:?}",
             diag.errors
         );

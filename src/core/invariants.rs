@@ -47,7 +47,6 @@ fn default_cfg() -> Cfg {
         warp_cursor: false,
         accordion_boost: 0.30,
         overview_zoom_min: 0.25,
-        compositor: crate::config::CompositorCfg::default(),
         col_normal: 0,
         col_focused: 0,
         col_urgent: 0,

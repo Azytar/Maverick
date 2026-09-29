@@ -81,8 +81,6 @@ use x11rb::COPY_DEPTH_FROM_PARENT;
 use maverick_x11::{XConn, XDisplay};
 
 use crate::backend::atoms::Atoms;
-use crate::backend::x11::compositor::DirtyReason;
-use crate::backend::x11::framesched::FrameScheduler;
 use crate::config::Cfg;
 use crate::core::layout::{
     arrange, fixed_size_hints, ideal_scroll, parse_wm_normal_hints, snap_float_to_hints,
@@ -93,10 +91,8 @@ use crate::log;
 use crate::types::*;
 
 mod actions;
-mod compositor;
 mod events;
 mod ewmh;
-mod framesched;
 mod hubevents;
 mod input;
 mod manage;
@@ -320,16 +316,9 @@ pub struct WindowManager {
     /// `CurrentTime`, which a few strict toolkits (some Java/Emacs builds)
     /// refuse to act on.
     last_event_time: u32,
-    /// Timestamp of the previous animation frame, for `dt` in `tick_animations`.
-    last_frame: Instant,
-    /// True while any camera/zoom/accordion spring is still moving; drives the
-    /// frame-clock timeout (high rate while animating, idle indefinite otherwise).
+    /// Always false. The loop is idle, so nothing consumes it; kept so the
+    /// "is anything moving" question has one answer at every call site.
     animating: bool,
-    /// Nominal fallback period when no presentation-completion feedback is
-    /// available. It is a rate limit, not a replacement for GLX vsync.
-    frame_period: std::time::Duration,
-    /// Deadline for the next continuous animation frame, when pacing is needed.
-    animation_due: Option<Instant>,
     /// Per-monitor cached stacking order (top-to-bottom) so `stack_overlay`
     /// only re-issues `raise()` when the order actually changed, instead of
     /// re-raising every float/popup on every animation frame.
@@ -339,30 +328,6 @@ pub struct WindowManager {
     /// the covering→not-covering transition. Re-raising it every frame would
     /// push floats below the bar.
     fs_covering: std::collections::HashMap<usize, Option<WindowId>>,
-    /// The OpenGL/GLX compositor, if enabled and a GL driver was available at
-    /// startup. While `Some`, every animation frame is drawn here (GPU
-    /// transforms + vsync) instead of re-`ConfigureWindow`ing each window. Falls
-    /// back to `None` (the classic X11 path) on `MAVERICK_NO_COMPOSITOR`, a
-    /// missing driver, or a runtime GL error.
-    compositor: Option<compositor::Compositor>,
-}
-
-/// Render a frame's dirty reasons as one human-readable phrase.
-///
-/// Built as a single string rather than collecting the reasons and joining
-/// them: this is called on the compositor's per-turn path, and the
-/// intermediate `Vec` was a second allocation to produce a message most runs
-/// never print. The reason list is also what a user is asked to paste into a
-/// bug report, so it stays in the same order the scheduler reports.
-fn describe_reasons(sched: &framesched::FrameScheduler) -> String {
-    let mut out = String::new();
-    for reason in sched.reasons().map(framesched::FrameReason::as_str) {
-        if !out.is_empty() {
-            out.push_str(", ");
-        }
-        out.push_str(reason);
-    }
-    out
 }
 
 impl WindowManager {
@@ -377,7 +342,6 @@ impl WindowManager {
             Event::ClientMessage(e) => self.on_client_message(e)?,
             Event::ConfigureNotify(e) => self.on_configure_notify(e)?,
             Event::ConfigureRequest(e) => self.on_configure_request(e)?,
-            Event::CreateNotify(e) => self.on_create_notify(e)?,
             Event::DestroyNotify(e) => self.on_destroy(e)?,
             Event::EnterNotify(e) => self.on_enter(e)?,
             Event::FocusIn(e) => self.on_focus_in(e)?,
@@ -392,11 +356,10 @@ impl WindowManager {
                     crate::log::config_trace(
                         "key_raw",
                         format_args!(
-                            "keycode={} state={:#06x} group={} compositor_actual={} event={e:?}",
+                            "keycode={} state={:#06x} group={} event={e:?}",
                             e.detail,
                             u16::from(e.state),
-                            (u16::from(e.state) >> 13) & 3,
-                            self.compositor.is_some()
+                            (u16::from(e.state) >> 13) & 3
                         ),
                     );
                 }
@@ -408,17 +371,10 @@ impl WindowManager {
                 result?;
             }
             Event::MappingNotify(e) => self.on_mapping(&e),
-            Event::MapNotify(e) => self.on_map_notify(e)?,
             Event::MapRequest(e) => self.on_map_request(e)?,
             Event::MotionNotify(e) => self.on_motion(e)?,
             Event::PropertyNotify(e) => self.on_property(e)?,
             Event::UnmapNotify(e) => self.on_unmap(e)?,
-            #[cfg(feature = "compositor-opengl")]
-            Event::DamageNotify(e) => self.on_damage_notify(e)?,
-            #[cfg(feature = "compositor-opengl")]
-            Event::XfixesSelectionNotify(e) => self.on_xfixes_selection_notify(e)?,
-            #[cfg(feature = "compositor-opengl")]
-            Event::ShapeNotify(e) => self.on_shape_notify(e)?,
             // RandR change events (config/grab selected in `setup_root`): both
             // the 1.5 `NotifyEvent` (crtc/output changes) and the classic
             // `ScreenChangeNotifyEvent` funnel into the same re-detect handler as
@@ -527,9 +483,9 @@ impl WindowManager {
     /// own outcome — which cannot fail — is returned.
     pub fn shutdown(&mut self, why: ShutdownReason) -> Result<(), Box<dyn std::error::Error>> {
         // Cloned rather than borrowed so the connection borrow below does not
-        // alias `self`: `teardown_x` needs `&mut self` for the compositor and
-        // the client list, and a borrow of `self.conn` would make those two
-        // borrows conflict even though they name the same connection.
+        // alias `self`: `teardown_x` needs `&mut self` for the client list, and
+        // a borrow of `self.conn` would make those two borrows conflict even
+        // though they name the same connection.
         let conn = self.conn.clone();
         let live = LiveX::acquire(&conn);
         let ran_x = runs_x_half(why, live.is_some());
@@ -537,7 +493,6 @@ impl WindowManager {
             self.teardown_x(live.as_ref().expect("a live connection was just taken"))
                 .err()
         } else {
-            self.abandon_compositor();
             None
         };
 
@@ -596,9 +551,6 @@ impl WindowManager {
     /// function — on a dead connection it returns in 0 ms, and a `?` here would
     /// skip everything after it, which is the entire local half.
     fn teardown_x(&mut self, x: &LiveX<'_>) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(mut compositor) = self.compositor.take() {
-            compositor.disable();
-        }
         let conn = x.conn();
         let _ = conn.ungrab_key(0u8, self.root, ModMask::ANY);
 
@@ -633,23 +585,6 @@ impl WindowManager {
 
         conn.flush()?;
         Ok(())
-    }
-
-    /// Give up on the compositor without releasing anything, then drop it.
-    ///
-    /// Required, not an optimisation. `Compositor::drop` runs `disable()`, whose
-    /// `renderer.destroy()` reaches `glXDestroyWindow` on a display whose server
-    /// is gone. That request does not report failure: it returns success into a
-    /// connection libX11 has already given up on, and the process is then ended
-    /// by libX11's I/O error handler at the next operation that waits for a
-    /// reply or at the display's close — with no unwinding, so nothing else in
-    /// the shutdown runs and the session's record is never corrected. The
-    /// destructor that looks like tidying is the thing that has to be stopped.
-    fn abandon_compositor(&mut self) {
-        if let Some(mut compositor) = self.compositor.take() {
-            compositor.abandon();
-            drop(compositor);
-        }
     }
 
     /// Tear down WM-owned X resources (grabs, root event mask, EWMH props,
@@ -687,303 +622,32 @@ impl WindowManager {
         self.flush_client_list()?;
         self.conn.flush()?;
         drop(flush_trace);
-        trace!(
-            "geometry_flush_returned",
-            "gl_active={} actual_visible=false",
-            self.compositor.is_some()
-        );
+        trace!("geometry_flush_returned", "actual_visible=false");
 
-        // Drain X11 + control-socket events *before* deciding the frame: a
-        // freshly arrived DamageNotify/ConfigureNotify must feed this turn's
-        // `FrameScheduler`, not the one after the present, or the frame is
-        // composed from a refresh of stale input state.
+        // Drain every X11 + control-socket event that is already queued before
+        // the loop settles, so a burst is handled in one pass rather than one
+        // pass per wakeup.
         while let Some(ev) = self.conn.poll_for_event()? {
             self.dispatch(ev)?;
         }
 
-        // Advance camera (and accordion/zoom) springs. While anything is still
-        // moving we use a refresh-derived deadline; once the scene settles the
-        // loop parks on X11 plus the control self-pipe. Presentation and
-        // animated-wallpaper state are included here so their dt uses the same
-        // active-clock policy as the camera.
-        let compositor_animating = self
-            .compositor
-            .as_ref()
-            .is_some_and(|c| c.presentation_animating() || c.wallpaper_animating());
-        let was_animating = self.animating || compositor_animating;
-        let now = Instant::now();
-        // `dt` is the time since the previous turn's animation phase. Because
-        // the loop presents at most once per turn, that span *is* the
-        // present-to-present interval — including the time `glXSwapBuffers`
-        // spends blocked on the retrace, which is most of the frame and must be
-        // the integrated elapsed time (seed one refresh on the idle→animating
-        // edge so a scroll does not jump by the whole idle gap; bound only
-        // pathological multi-second catch-up while active) lives in
-        // `framesched::clamp_frame_dt` so it is unit-testable.
-        let raw_dt = (now - self.last_frame).as_secs_f32();
-        let dt = crate::backend::x11::framesched::clamp_frame_dt(raw_dt, was_animating);
-        self.last_frame = now;
-        trace!(
-            "wm_dt",
-            "raw_s={raw_dt} clamped_s={dt} was_animating={was_animating}"
-        );
+        // Snap every spring straight to its target: dwm-style, zero animation.
+        // Every state change has already landed on its final geometry through
+        // the single `Effect::ArrangeMonitor` -> `arrange` (Phase::Settled)
+        // path, so there is nothing to interpolate and nothing to reconfigure
+        // per frame. Leaving the logical state settled is what makes the
+        // integer `ConfigureWindow` rect the final rect.
+        self.engine.state.snap_animations();
+        self.anim_per_mon.clear();
+        self.animating = false;
 
-        // Single authoritative frame scheduler for this turn. Built once from
-        // the animation flag (set by the tick below) and the dirty reasons
-        // accumulated since the last present. Both the render gate and the wait
-        // timeout read this one object, so no subsystem can request a redundant
-        // render and multiple reasons (Damage×N, Geometry, Animation, …) coalesce
-        // into a single pending frame.
-        let mut sched;
-
-        if let Some(comp) = self.compositor.as_mut() {
-            // Composition policy (per-output fullscreen bypass). Pure decision
-            // (see `crate::compositor_policy`): for each monitor, engage bypass on
-            // the single eligible fullscreen window, or disengage it.
-            // `engage_bypass`/`disengage_bypass` are no-ops when the mode is
-            // unchanged, so re-evaluating every turn is stable and free of cycles.
-            // Bypass never touches VSync — it only removes Maverick's redirection
-            // of that one window.
-            if self.engine.cfg.compositor.fullscreen_bypass {
-                let nmon = self.engine.state.monitors.len();
-                for i in 0..nmon {
-                    // The policy is the single source of truth: it returns the
-                    // mode for this output. When it says `Bypass` we resolve the
-                    // concrete candidate window; otherwise we disengage.
-                    let win = if crate::compositor_policy::mode_for(
-                        &self.engine.cfg,
-                        &self.engine.state,
-                        i,
-                    ) == crate::compositor_policy::CompositionMode::Bypass
-                    {
-                        crate::compositor_policy::bypass_candidate(
-                            &self.engine.cfg,
-                            &self.engine.state,
-                            i,
-                        )
-                    } else {
-                        None
-                    };
-                    match win {
-                        Some(w) => comp.engage_bypass(i, w),
-                        None => comp.disengage_bypass(i),
-                    }
-                }
-            } else {
-                comp.disengage_all_bypass();
-            }
-            // Compositor path: the camera samples an analytical damped
-            // transition for each elapsed slice. The live layout reads the
-            // animated camera value and is drawn by the GPU. Substeps remain a
-            // defensive bound for the remaining exponential presentation
-            // springs, but the camera trajectory is not Euler/FPS-dependent.
-            // Swap interval 1 (set at init) paces the present from inside
-            // `end_frame`, so there is no explicit vblank wait here — the flip
-            // is scheduled by the server for the next retrace. The WM's settled
-            // geometry was already written by whichever action triggered the
-            // change, so no per-frame `ConfigureWindow` storm.
-            let nmon = self.engine.state.monitors.len();
-            if self.anim_per_mon.len() != nmon {
-                self.anim_per_mon = vec![false; nmon];
-            }
-            let anim_enabled = crate::config::animations_enabled(&self.engine.cfg);
-            let mut anim = false;
-            if anim_enabled {
-                for sub in compositor::substep_bounds(dt) {
-                    anim |= self
-                        .engine
-                        .state
-                        .tick_animations_multi(sub, &mut self.anim_per_mon);
-                }
-            } else {
-                self.engine.state.snap_animations();
-                self.anim_per_mon.fill(false);
-            }
-            self.animating = anim;
-            // If the last animated tick snapped to its endpoint, the next
-            // scheduler would otherwise see no reason to render and the GPU
-            // could retain the previous (up to 0.5 px) transform indefinitely.
-            // Queue one compositor frame that installs the exact endpoint.
-            if framesched::needs_endpoint_frame(was_animating, anim) {
-                comp.invalidate();
-            }
-            // Diagnostic snapshot: the compositor trace deliberately records the
-            // logical target, the animated camera value, and the exact delta used
-            // for this turn.  Keeping these in the same monotonic trace stream
-            // makes retarget/FPS regressions measurable without changing the hot
-            // path when tracing is disabled.
-            if trace::enabled() {
-                for (mi, mon) in self.engine.state.monitors.iter().enumerate() {
-                    let ws = mon.ws();
-                    trace!(
-                        "camera_tick",
-                        "monitor={} target={} current={} velocity={} raw_dt_s={} dt_s={} animating={}",
-                        mi,
-                        ws.camera.target,
-                        ws.camera.position,
-                        ws.camera.velocity,
-                        raw_dt,
-                        dt,
-                        anim,
-                    );
-                }
-            }
-            // Advance the wallpaper animation clock with the same clamped `dt` the
-            // WM springs use (no separate timer). A static wallpaper leaves
-            // `wallpaper_animating` false and the loop goes idle.
-            comp.tick_wallpaper(dt);
-            // Build the single turn scheduler from the WM-side animation flag,
-            // the wallpaper animation flag, and the compositor's *why* (its
-            // reason bits), so the render-loop decision is explicit and testable.
-            // Idle stays free: when the scheduler reports no reason we do no GL
-            // work and the wait phase blocks on X11/control.
-            sched = FrameScheduler::from_compositor(
-                self.animating || comp.presentation_animating(),
-                comp.wallpaper_animating(),
-                comp.dirty_reasons(),
-            );
-            if log::enabled(log::DEBUG) {
-                log::debug!(
-                    "compositor: scheduling frame (animating={}, dirty={}): {}",
-                    sched.is_animating(),
-                    sched.has_dirty(),
-                    describe_reasons(&sched)
-                );
-            }
-            if comp.comp_trace {
-                log::info!(
-                    "x11 compositor decision dirty={} reasons={}",
-                    comp.dirty_reasons_bits() != 0,
-                    comp.dirty_reasons_bits()
-                );
-            }
-            let wants_frame = sched.needs_frame();
-            trace!("scheduler", "gl_active=true needs_frame={wants_frame} dirty={} reasons={} wm_animation={} presentation_animation={} wallpaper_animation={}", comp.dirty_reasons_bits(), sched.trace_bits(), self.animating, comp.presentation_animating(), comp.wallpaper_animating());
-            if wants_frame {
-                trace::begin_frame();
-                if comp.float_trace {
-                    let mut fids: Vec<WindowId> = Vec::new();
-                    for (mi, mon) in self.engine.state.monitors.iter().enumerate() {
-                        for ws in &mon.workspaces {
-                            fids.extend(ws.floats.iter().copied());
-                        }
-                        for (&w, c) in &self.engine.state.clients {
-                            if c.monitor == mi && c.is_sticky() && c.is_float() {
-                                fids.push(w);
-                            }
-                        }
-                    }
-                    comp.set_debug_floats(&fids);
-                }
-                // Presentation state is owned by the compositor; the WM only
-                // supplies state/cfg and the animation flags.
-                let prepare_trace = trace::Span::new("prepare");
-                comp.prepare_frame(
-                    &mut self.engine.state,
-                    &self.engine.cfg,
-                    &self.layout_registry,
-                    &self.anim_per_mon,
-                    dt,
-                );
-                drop(prepare_trace);
-                let render_trace = trace::Span::new("render");
-                // A GL failure is reported through the render result and
-                // disables the compositor; release builds use panic=abort, so
-                // there is no unreliable catch_unwind fallback here.
-                let ok = comp.render();
-                drop(render_trace);
-                trace!("frame_returned", "ok={ok}");
-                if !ok {
-                    log::warn!("compositor: GL error — disabling, falling back to X11 path");
-                    if let Some(c) = self.compositor.as_mut() {
-                        c.disable();
-                    }
-                    self.compositor = None;
-                    // The desktop must not go black: paint the configured
-                    // wallpaper on the root (feh-style) and keep going.
-                    self.apply_root_wallpaper();
-                }
-                // The frame clock is deliberately *not* re-seeded here.
-                // `last_frame` was already stamped at the top of the animation
-                // phase, so the next turn's `dt` spans one whole turn — which,
-                // with exactly one present per turn, is precisely the
-                // inter-present interval. Re-seeding after the present would
-                // subtract the present itself from `dt`, and with swap interval 1
-                // the present is almost the entire frame, leaving the springs
-                // advanced by only the loop overhead of each 16.7 ms frame.
-            }
-        } else {
-            // No compositor: dwm-style, zero animation. Every state change has
-            // already landed on its final geometry through the single
-            // `Effect::ArrangeMonitor` → `arrange` (Phase::Settled) path, so
-            // there is nothing to animate and nothing to reconfigure per
-            // frame. The camera springs snap straight to their target so the
-            // logical state stays settled; the loop then parks on X11 plus the
-            // control self-pipe exactly like a settled compositor.
-            self.engine.state.snap_animations();
-            self.anim_per_mon.fill(false);
-            self.animating = false;
-            sched = FrameScheduler::from_compositor(false, false, DirtyReason::NONE);
-        }
-
-        // The present (if any) just consumed the accumulated dirty reasons; only
-        // an ongoing animation keeps the loop tight. Clear the dirty bits from
-        // the same scheduler so the wait phase consults one authoritative
-        // decision instead of rebuilding it (which would duplicate the NEED_FRAME
-        // logic and could drift).
-        let after_trace = trace::Span::new("after_present");
-        sched.after_present(
-            self.animating
-                || self
-                    .compositor
-                    .as_ref()
-                    .is_some_and(compositor::Compositor::presentation_animating),
-        );
-        let vsync_on = self
-            .compositor
-            .as_ref()
-            .is_some_and(compositor::Compositor::vsync_active);
-        self.animation_due =
-            if sched.is_continuous() && framesched::should_wait_after_swap(vsync_on) {
-                Some(Instant::now() + self.frame_period)
-            } else {
-                None
-            };
-
-        drop(after_trace);
-        trace!(
-            "after_present_state",
-            "reasons={} wm_animation={} presentation_animation={}",
-            sched.trace_bits(),
-            self.animating,
-            self.compositor
-                .as_ref()
-                .is_some_and(compositor::Compositor::presentation_animating)
-        );
-
-        // Wait on X11 plus the control self-pipe. A continuous animation has a
-        // refresh-derived rate limit; a settled WM blocks indefinitely, so idle
-        // does not wake on a heartbeat timer.
+        // Block on X11 plus the control self-pipe. With nothing animating the
+        // loop is idle, so the poll has no frame deadline: no heartbeat, no
+        // timer. Every other bound the loop owns lives in `wait_timeout` — never
+        // sleep past a pending keyboard refresh or the shutdown deadline.
         let fd = self.conn.as_raw_fd();
-        let requested_timeout = sched.timeout_ms();
-        let mut timeout = requested_timeout.map(std::time::Duration::from_millis);
-        if sched.is_continuous() {
-            if let Some(due) = self.animation_due {
-                timeout = Some(due.saturating_duration_since(Instant::now()));
-            }
-        }
-        // Every bound the loop owns, in one place: see `wait_timeout`. Never
-        // sleep past a pending keyboard refresh, or the coalescing window would
-        // stretch to the idle timeout.
-        let timeout = wait_timeout(timeout, self.kbd_refresh_due, self.shutdown_deadline);
+        let timeout = wait_timeout(None, self.kbd_refresh_due, self.shutdown_deadline);
 
-        trace!(
-            "scheduler_wait",
-            "requested_ms={:?} effective_ms={:?} reasons={}",
-            requested_timeout,
-            timeout.map(|d| d.as_millis()),
-            sched.trace_bits()
-        );
         if timeout != Some(std::time::Duration::ZERO) {
             let wait_trace = trace::Span::new("wait");
             let mut fds = vec![fd];
@@ -1024,14 +688,10 @@ impl WindowManager {
         crate::log::config_trace(
             "event_loop_start",
             format_args!(
-                "compositor_requested={} compositor_actual={}",
-                self.engine.cfg.compositor.enabled,
-                self.compositor.is_some()
+                "presentation=x11_settled animations_enabled={} trace={}",
+                crate::config::animations_enabled(&self.engine.cfg),
+                trace::enabled(),
             ),
-        );
-        crate::log::config_trace(
-            "scheduler_policy",
-            format_args!("compositor_actual={} animations_enabled={} off_path=snap_animations on_path=analytic_substeps idle_poll=block pacing=swap_only existing_trace_enabled={}", self.compositor.is_some(), crate::config::animations_enabled(&self.engine.cfg), trace::enabled()),
         );
         while self.engine.state.running {
             if let Err(e) = self.run_once() {
@@ -1078,7 +738,6 @@ impl WindowManager {
         let root = screen.root;
         let depth = screen.root_depth;
         let visual = screen.root_visual;
-        let frame_period = detect_frame_period(&conn, root);
 
         log::info!(
             "maverick: X11 connected root={} {}x{}",
@@ -1177,74 +836,6 @@ impl WindowManager {
         let (raw_keymap, raw_kpk, raw_min, numlock) = (ks.keysyms, ks.kpk, ks.min, ks.numlock);
         let keymap = build_keymap(&engine.cfg);
 
-        // Bring up the compositor (if enabled and GL is available). It claims
-        // `_NET_WM_CM_S0`, redirects every subwindow to Manual, and sets up the
-        // GLX context. On any failure it logs and returns `None`, leaving the WM
-        // on the classic `ConfigureWindow` path.
-        crate::log::config_trace(
-            "compositor_init_start",
-            format_args!(
-                "requested={} actual=false skipped_off={}",
-                engine.cfg.compositor.enabled,
-                !crate::config::compositor_enabled(&engine.cfg)
-            ),
-        );
-        let mut compositor = if crate::config::compositor_enabled(&engine.cfg) {
-            if let Err(e) = crate::config::validate_compositor_backend(&engine.cfg) {
-                log::warn!("compositor: {e}; staying on X11 path");
-                None
-            } else {
-                compositor::Compositor::init(
-                    conn.clone(),
-                    dpy,
-                    root,
-                    screen_num,
-                    check_win,
-                    &engine.cfg,
-                )
-            }
-        } else {
-            None
-        };
-
-        crate::log::config_trace(
-            "compositor_init_end",
-            format_args!(
-                "requested={} actual={} skipped_off={}",
-                engine.cfg.compositor.enabled,
-                compositor.is_some(),
-                !crate::config::compositor_enabled(&engine.cfg)
-            ),
-        );
-        if crate::log::config_trace_enabled() {
-            crate::log::config_trace(
-                "xkb_init_start",
-                format_args!("phase=fetch_after_compositor diagnostic_only=true"),
-            );
-            match fetch_keyboard_state(&conn) {
-                Ok(after) => {
-                    crate::log::config_trace("xkb_init_end", format_args!("phase=fetch_after_compositor diagnostic_only=true status=ok"));
-                    crate::log::config_trace(
-                        "keyboard_snapshot_after_compositor",
-                        format_args!("applied=false min={} kpk={} raw={:?} xkb={} xkb_group={} numlock={:#x} scroll={:#x}", after.min, after.kpk, after.keysyms, after.xkb.is_some(), after.xkb_group, after.numlock, after.scroll),
-                    );
-                    crate::log::config_trace(
-                        "keyboard_compare_compositor",
-                        format_args!("raw_equal={} xkb_equal={} locks_equal={} range_equal={} applied=false", raw_keymap == after.keysyms, ks.xkb.is_some() == after.xkb.is_some() && ks.xkb_group == after.xkb_group, numlock == after.numlock && ks.scroll == after.scroll, raw_min == after.min && raw_kpk == after.kpk),
-                    );
-                }
-                Err(e) => crate::log::config_trace("xkb_init_end", format_args!("phase=fetch_after_compositor diagnostic_only=true status=failed applied=false error={e}")),
-            }
-        }
-
-        // Apply the configured native wallpaper (if any) to the freshly-built
-        // compositor. A path of `None` leaves the legacy root pixmap in place.
-        if let Some(comp) = compositor.as_mut() {
-            if engine.state.wallpaper.source != crate::core::wallpaper::WallpaperSource::None {
-                comp.set_wallpaper(&engine.state.wallpaper);
-            }
-        }
-
         let mut wm = WindowManager {
             conn,
             dpy,
@@ -1288,13 +879,9 @@ impl WindowManager {
             docks: std::collections::HashMap::new(),
             pointer_guard_until: None,
             last_event_time: 0,
-            last_frame: std::time::Instant::now(),
             animating: false,
-            frame_period,
-            animation_due: None,
             last_stack_order: std::collections::HashMap::new(),
             fs_covering: std::collections::HashMap::new(),
-            compositor,
         };
 
         let _ = (depth, visual);
@@ -1443,7 +1030,6 @@ fn detect_monitors(
     screen: &Screen,
     cfg: &Cfg,
 ) -> Result<Vec<Monitor>, Box<dyn std::error::Error>> {
-    use x11rb::protocol::randr::ConnectionExt as _;
     let nt = cfg.n_tags;
 
     if let Ok(reply) = conn.randr_get_monitors(screen.root, true)?.reply() {
@@ -2200,45 +1786,6 @@ fn read_wm_hints_value(
     Ok(None)
 }
 
-fn frame_period_from_mode(mode: &x11rb::protocol::randr::ModeInfo) -> Option<std::time::Duration> {
-    let pixels = u128::from(mode.htotal) * u128::from(mode.vtotal);
-    let dot_clock = u128::from(mode.dot_clock) * 1_000;
-    if dot_clock == 0 || pixels == 0 {
-        return None;
-    }
-    let period_ns = 1_000_000_000u128
-        .checked_mul(pixels)?
-        .checked_div(dot_clock)?;
-    let period = std::time::Duration::from_nanos(u64::try_from(period_ns).ok()?);
-    // Reject impossible RandR values; retain slow displays but avoid a
-    // zero/overflow deadline in the scheduler.
-    (std::time::Duration::from_millis(3)..=std::time::Duration::from_millis(100))
-        .contains(&period)
-        .then_some(period)
-}
-
-fn detect_frame_period(conn: &XConn, root: Window) -> std::time::Duration {
-    let Ok(resources) = conn.randr_get_screen_resources_current(root) else {
-        return std::time::Duration::from_secs_f64(1.0 / 60.0);
-    };
-    let Ok(resources) = resources.reply() else {
-        return std::time::Duration::from_secs_f64(1.0 / 60.0);
-    };
-    resources
-        .crtcs
-        .iter()
-        .filter_map(|crtc| {
-            conn.randr_get_crtc_info(*crtc, x11rb::CURRENT_TIME)
-                .ok()?
-                .reply()
-                .ok()
-        })
-        .filter_map(|info| resources.modes.iter().find(|m| m.id == info.mode))
-        .filter_map(frame_period_from_mode)
-        .max_by_key(|p| *p) // lowest reported refresh across outputs
-        .unwrap_or_else(|| std::time::Duration::from_secs_f64(1.0 / 60.0))
-}
-
 #[inline]
 fn mod_variants(numlock: u16, scroll: u16) -> [u16; 8] {
     let lock = u16::from(ModMask::LOCK);
@@ -2277,35 +1824,4 @@ fn clean_mask(state: u16, numlock: u16, scroll: u16) -> u16 {
             | u16::from(ModMask::M3)
             | u16::from(ModMask::M4)
             | u16::from(ModMask::M5))
-}
-
-#[cfg(test)]
-mod reason_phrase_tests {
-    use super::describe_reasons;
-    use super::framesched::{FrameReason, FrameScheduler};
-
-    /// The phrase a user is asked to paste into a bug report, so the order and
-    /// the separator are part of the contract.
-    #[test]
-    fn reasons_read_in_scheduler_order() {
-        let mut s = FrameScheduler::new();
-        s.mark(FrameReason::Animation);
-        s.mark(FrameReason::Damage);
-        s.mark(FrameReason::Geometry);
-        assert_eq!(describe_reasons(&s), "animation, damage, geometry");
-    }
-
-    #[test]
-    fn a_single_reason_has_no_separator() {
-        let mut s = FrameScheduler::new();
-        s.mark(FrameReason::Focus);
-        assert_eq!(describe_reasons(&s), "focus");
-    }
-
-    /// An idle scheduler must produce an empty phrase rather than a stray
-    /// separator, since the caller formats it unconditionally at debug level.
-    #[test]
-    fn no_reasons_read_as_nothing() {
-        assert_eq!(describe_reasons(&FrameScheduler::new()), "");
-    }
 }

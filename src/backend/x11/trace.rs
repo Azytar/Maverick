@@ -32,7 +32,6 @@ const PAYLOAD: usize = 384;
 struct Record {
     ns: u128,
     turn: u64,
-    frame: u64,
     event: &'static str,
     bytes: [u8; PAYLOAD],
     len: usize,
@@ -63,10 +62,8 @@ struct Buffer {
     path: PathBuf,
     records: Vec<Record>,
     turn: u64,
-    frame: u64,
     dropped: u64,
     truncated: u64,
-    last_frame: Option<Instant>,
     capacity: usize,
 }
 
@@ -77,12 +74,12 @@ thread_local! {
 /// Serialises the tests in this file against each other.
 ///
 /// `BUFFER` is thread-local, so each test gets its own ring — but `ENABLED` is a
-/// process-global, and `begin_turn`/`begin_frame` read it to decide whether to
+/// process-global, and `begin_turn` reads it to decide whether to
 /// bump the counter. Two tests running concurrently can therefore interleave
 /// one test's `take()` (which clears the global) into another's
 /// `init`/`begin` window, and the second test silently loses a boundary. The
 /// buffer helpers in `tests` predate the property tests below and did not need
-/// this; adding property tests that drive `begin_turn`/`begin_frame` made the
+/// this; adding property tests that drive `begin_turn` made the
 /// window reachable, so both halves now take the same guard.
 #[cfg(test)]
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -111,10 +108,8 @@ pub(super) fn init() {
             path,
             records: Vec::with_capacity(4096),
             turn: 0,
-            frame: 0,
             dropped: 0,
             truncated: 0,
-            last_frame: None,
             capacity: CAPACITY,
         });
     });
@@ -173,7 +168,6 @@ pub(super) fn record(event: &'static str, args: fmt::Arguments<'_>) {
         let mut record = Record {
             ns: buffer.start.elapsed().as_nanos(),
             turn: buffer.turn,
-            frame: buffer.frame,
             event,
             bytes: [0; PAYLOAD],
             len: 0,
@@ -193,30 +187,6 @@ pub(super) fn begin_turn() {
             }
         });
         record("turn_begin", format_args!(""));
-    }
-}
-
-pub(super) fn begin_frame() {
-    if enabled() {
-        // The interval is measured between *begins*, not ends: it shows the GL
-        // attempt rate the scheduler actually asked for, which is the signal
-        // that distinguishes "no frame requested" from "frame requested too
-        // slowly". `None` on the first frame.
-        let interval = BUFFER.with(|slot| {
-            let mut slot = slot.borrow_mut();
-            let buffer = slot.as_mut()?;
-            let now = Instant::now();
-            buffer.frame += 1;
-            let interval = buffer
-                .last_frame
-                .map(|last| now.duration_since(last).as_nanos());
-            buffer.last_frame = Some(now);
-            interval
-        });
-        record(
-            "frame_begin",
-            format_args!("previous_begin_interval_ns={interval:?}"),
-        );
     }
 }
 
@@ -330,16 +300,9 @@ pub(super) fn dump(end: TraceEnd) -> DumpReport {
             buffer.truncated,
             end.x_teardown(),
         )?;
-        writeln!(
-            out,
-            "# ns\tturn\tframe\tevent\tfields (frame is latest begun GL attempt; startup=0)"
-        )?;
+        writeln!(out, "# ns\tturn\tevent\tfields")?;
         for record in buffer.records {
-            write!(
-                out,
-                "{}\t{}\t{}\t{}\t",
-                record.ns, record.turn, record.frame, record.event
-            )?;
+            write!(out, "{}\t{}\t{}\t", record.ns, record.turn, record.event)?;
             out.write_all(&record.bytes[..record.len])?;
             writeln!(out)?;
         }
@@ -452,10 +415,8 @@ mod tests {
                 path: std::env::temp_dir().join("maverick-trace-test"),
                 records: Vec::with_capacity(capacity),
                 turn: 0,
-                frame: 0,
                 dropped: 0,
                 truncated: 0,
-                last_frame: None,
                 capacity,
             });
         });
@@ -482,32 +443,6 @@ mod tests {
         assert_eq!(buffer.records.len(), 4);
         assert_eq!(buffer.dropped, 3);
         assert_eq!(buffer.records[0].event, "probe");
-    }
-
-    #[test]
-    fn frames_and_turns_are_monotonic_with_intervals() {
-        let _guard = test_lock();
-        init_buffer_with_capacity(16);
-        begin_turn();
-        begin_frame();
-        begin_frame();
-        begin_turn();
-        begin_frame();
-        let buffer = take();
-        assert_eq!(buffer.turn, 2);
-        assert_eq!(buffer.frame, 3);
-        let frame_count = buffer
-            .records
-            .iter()
-            .filter(|r| r.event == "frame_begin")
-            .count();
-        assert_eq!(frame_count, 3);
-        for window in buffer.records.windows(2) {
-            assert!(
-                window[0].ns <= window[1].ns,
-                "records must stay in arrival order"
-            );
-        }
     }
 
     #[test]
@@ -542,10 +477,8 @@ mod tests {
                 path: path.clone(),
                 records: Vec::with_capacity(16),
                 turn: 0,
-                frame: 0,
                 dropped: 0,
                 truncated: 0,
-                last_frame: None,
                 capacity: 16,
             });
         });
@@ -643,10 +576,8 @@ mod property_tests {
                 path: std::env::temp_dir().join("maverick-trace-property"),
                 records: Vec::with_capacity(capacity),
                 turn: 0,
-                frame: 0,
                 dropped: 0,
                 truncated: 0,
-                last_frame: None,
                 capacity,
             });
         });
@@ -669,15 +600,14 @@ mod property_tests {
             .to_string()
     }
 
-    /// One traced turn or frame boundary.
+    /// One traced turn boundary.
     #[derive(Debug, Clone, Copy)]
     enum Op {
         Turn,
-        Frame,
     }
 
     fn arb_ops() -> impl Strategy<Value = Vec<Op>> {
-        prop::collection::vec(prop_oneof![Just(Op::Turn), Just(Op::Frame)], 0..24)
+        prop::collection::vec(prop_oneof![Just(Op::Turn)], 0..24)
     }
 
     /// Payload text drawn two ways.
@@ -707,169 +637,125 @@ mod property_tests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(256))]
+            #![proptest_config(ProptestConfig::with_cases(256))]
 
-        /// Past the cap the *earliest* records survive and every later one is
-        /// counted as dropped, so the counts printed in the dump header always
-        /// account for every record the trace was handed.
-        #[test]
-        fn overflow_keeps_the_head_and_counts_everything_else(
-            n in 0usize..48,
-            capacity in 0usize..12,
-        ) {
-            let _guard = lock();
-            init_buffer_with_capacity(capacity);
-            for i in 0..n {
-                record("probe", format_args!("i={i}"));
-            }
-            let buffer = take();
-            let kept = n.min(capacity);
-            prop_assert_eq!(buffer.records.len(), kept);
-            prop_assert_eq!(buffer.dropped, (n - kept) as u64);
-            // The survivors are the head of the stream, in arrival order: a trace
-            // whose head was overwritten cannot explain why the burst started.
-            for (k, r) in buffer.records.iter().enumerate() {
-                prop_assert_eq!(r.event, "probe");
-                prop_assert_eq!(payload(r), format!("i={k}"));
-            }
-        }
-
-        /// An over-long payload is truncated rather than dropped, never exceeds
-        /// the fixed buffer, and never ends mid-code-point: a dump whose last
-        /// line held half a character would be unreadable to every tool pointed
-        /// at it, and `truncated` must count exactly the records that lost data.
-        #[test]
-        fn an_over_long_payload_is_cut_at_a_character_boundary(text in arb_payload()) {
-            let _guard = lock();
-            init_buffer_with_capacity(1);
-            record("probe", format_args!("{text}"));
-            let buffer = take();
-            prop_assert_eq!(buffer.records.len(), 1);
-            let r = &buffer.records[0];
-            prop_assert!(r.len <= PAYLOAD, "payload overflowed the fixed buffer");
-            let stored = payload(r);
-            prop_assert!(
-                text.starts_with(&stored),
-                "stored payload is not a prefix of the text that was recorded"
-            );
-            prop_assert_eq!(buffer.truncated, u64::from(stored.len() < text.len()));
-        }
-
-        /// A dropped record is dropped before its payload is ever written, so the
-        /// two counters partition the stream: every record is either stored whole
-        /// or stored truncated, never both counted and never neither.
-        #[test]
-        fn the_drop_and_truncation_counters_never_double_count(
-            n in 0usize..32,
-            capacity in 1usize..8,
-            text in arb_payload(),
-        ) {
-            let _guard = lock();
-            init_buffer_with_capacity(capacity);
-            for _ in 0..n {
-                record("probe", format_args!("{text}"));
-            }
-            let buffer = take();
-            let stored = buffer.records.len() as u64;
-            let truncated = buffer
-                .records
-                .iter()
-                .filter(|r| r.len < text.len())
-                .count() as u64;
-            prop_assert_eq!(buffer.truncated, truncated);
-            prop_assert_eq!(stored + buffer.dropped, n as u64);
-        }
-
-        /// The counter a record is stamped with and the marker record emitted for
-        /// it are bumped together inside one guard, so the two can never
-        /// disagree. The counters are lifetime totals while `records` is a
-        /// bounded ring, so they only have to line up while nothing was dropped —
-        /// past the cap the counter is allowed to run ahead of what survived, but
-        /// it must never fall *behind* the records, which would mean a marker was
-        /// emitted without its increment. Both only ever increase, so the stamps
-        /// also stay non-decreasing down the buffer, including after an overflow
-        /// has started overwriting its head.
-        #[test]
-        fn counters_and_their_marker_records_cannot_desynchronise(
-            ops in arb_ops(),
-            capacity in 1usize..=8,
-        ) {
-            let _guard = lock();
-            init_buffer_with_capacity(capacity);
-            for op in &ops {
-                // `ENABLED` is process-global while the buffer is thread-local.
-                // Re-asserting it immediately before each call keeps another
-                // test's `take()` from silently skipping a boundary mid-sequence.
-                ENABLED.store(true, Ordering::Relaxed);
-                match op {
-                    Op::Turn => begin_turn(),
-                    Op::Frame => begin_frame(),
+            /// Past the cap the *earliest* records survive and every later one is
+            /// counted as dropped, so the counts printed in the dump header always
+            /// account for every record the trace was handed.
+            #[test]
+            fn overflow_keeps_the_head_and_counts_everything_else(
+                n in 0usize..48,
+                capacity in 0usize..12,
+            ) {
+                let _guard = lock();
+                init_buffer_with_capacity(capacity);
+                for i in 0..n {
+                    record("probe", format_args!("i={i}"));
                 }
-                record("probe", format_args!("probe"));
+                let buffer = take();
+                let kept = n.min(capacity);
+                prop_assert_eq!(buffer.records.len(), kept);
+                prop_assert_eq!(buffer.dropped, (n - kept) as u64);
+                // The survivors are the head of the stream, in arrival order: a trace
+                // whose head was overwritten cannot explain why the burst started.
+                for (k, r) in buffer.records.iter().enumerate() {
+                    prop_assert_eq!(r.event, "probe");
+                    prop_assert_eq!(payload(r), format!("i={k}"));
+                }
             }
-            let buffer = take();
-            let wanted_turns = ops.iter().filter(|o| matches!(o, Op::Turn)).count() as u64;
-            let wanted_frames = ops.iter().filter(|o| matches!(o, Op::Frame)).count() as u64;
-            let turns = buffer
-                .records
-                .iter()
-                .filter(|r| r.event == "turn_begin")
-                .count() as u64;
-            let frames = buffer
-                .records
-                .iter()
-                .filter(|r| r.event == "frame_begin")
-                .count() as u64;
-            if buffer.dropped == 0 {
-                prop_assert_eq!(buffer.turn, wanted_turns);
-                prop_assert_eq!(buffer.frame, wanted_frames);
-                prop_assert_eq!(buffer.turn, turns);
-                prop_assert_eq!(buffer.frame, frames);
-            }
-            prop_assert!(
-                buffer.turn >= turns,
-                "a turn was recorded without its counter being bumped"
-            );
-            prop_assert!(
-                buffer.frame >= frames,
-                "a frame was recorded without its counter being bumped"
-            );
-            prop_assert!(buffer.turn <= wanted_turns, "turn counter over-incremented");
-            prop_assert!(buffer.frame <= wanted_frames, "frame counter over-incremented");
-            for w in buffer.records.windows(2) {
-                prop_assert!(w[0].turn <= w[1].turn, "turn stamps went backwards");
-                prop_assert!(w[0].frame <= w[1].frame, "frame stamps went backwards");
-                prop_assert!(w[0].ns <= w[1].ns, "records must stay in arrival order");
-            }
-        }
 
-        /// The frame interval is measured between *begins* and there is no
-        /// previous begin on the first one, so the first `frame_begin` records
-        /// `None` and every later one `Some`. The measured value itself is
-        /// wall-clock and is deliberately not asserted — only the shape, which is
-        /// what anything parsing the dump actually depends on.
-        #[test]
-        fn only_the_first_frame_reports_a_missing_interval(frames in 1u32..8) {
-            let _guard = lock();
-            init_buffer_with_capacity(64);
-            for _ in 0..frames {
-                ENABLED.store(true, Ordering::Relaxed);
-                begin_frame();
-            }
-            let buffer = take();
-            let begins: Vec<&Record> = buffer
-                .records
-                .iter()
-                .filter(|r| r.event == "frame_begin")
-                .collect();
-            prop_assert_eq!(begins.len() as u32, frames);
-            prop_assert!(payload(begins[0]).contains("previous_begin_interval_ns=None"));
-            for r in &begins[1..] {
+            /// An over-long payload is truncated rather than dropped, never exceeds
+            /// the fixed buffer, and never ends mid-code-point: a dump whose last
+            /// line held half a character would be unreadable to every tool pointed
+            /// at it, and `truncated` must count exactly the records that lost data.
+            #[test]
+            fn an_over_long_payload_is_cut_at_a_character_boundary(text in arb_payload()) {
+                let _guard = lock();
+                init_buffer_with_capacity(1);
+                record("probe", format_args!("{text}"));
+                let buffer = take();
+                prop_assert_eq!(buffer.records.len(), 1);
+                let r = &buffer.records[0];
+                prop_assert!(r.len <= PAYLOAD, "payload overflowed the fixed buffer");
+                let stored = payload(r);
                 prop_assert!(
-                    payload(r).contains("previous_begin_interval_ns=Some("),
-                    "a later frame reported no interval"
+                    text.starts_with(&stored),
+                    "stored payload is not a prefix of the text that was recorded"
                 );
+                prop_assert_eq!(buffer.truncated, u64::from(stored.len() < text.len()));
             }
-        }
+
+            /// A dropped record is dropped before its payload is ever written, so the
+            /// two counters partition the stream: every record is either stored whole
+            /// or stored truncated, never both counted and never neither.
+            #[test]
+            fn the_drop_and_truncation_counters_never_double_count(
+                n in 0usize..32,
+                capacity in 1usize..8,
+                text in arb_payload(),
+            ) {
+                let _guard = lock();
+                init_buffer_with_capacity(capacity);
+                for _ in 0..n {
+                    record("probe", format_args!("{text}"));
+                }
+                let buffer = take();
+                let stored = buffer.records.len() as u64;
+                let truncated = buffer
+                    .records
+                    .iter()
+                    .filter(|r| r.len < text.len())
+                    .count() as u64;
+                prop_assert_eq!(buffer.truncated, truncated);
+                prop_assert_eq!(stored + buffer.dropped, n as u64);
+            }
+
+            /// The counter a record is stamped with and the marker record emitted for
+            /// it are bumped together inside one guard, so the two can never
+            /// disagree. The counters are lifetime totals while `records` is a
+            /// bounded ring, so they only have to line up while nothing was dropped —
+            /// past the cap the counter is allowed to run ahead of what survived, but
+            /// it must never fall *behind* the records, which would mean a marker was
+            /// emitted without its increment. Both only ever increase, so the stamps
+            /// also stay non-decreasing down the buffer, including after an overflow
+            /// has started overwriting its head.
+            #[test]
+            fn counters_and_their_marker_records_cannot_desynchronise(
+                ops in arb_ops(),
+                capacity in 1usize..=8,
+            ) {
+                let _guard = lock();
+                init_buffer_with_capacity(capacity);
+                for op in &ops {
+                    // `ENABLED` is process-global while the buffer is thread-local.
+                    // Re-asserting it immediately before each call keeps another
+                    // test's `take()` from silently skipping a boundary mid-sequence.
+                    ENABLED.store(true, Ordering::Relaxed);
+                    match op {
+                        Op::Turn => begin_turn(),
+                    }
+                    record("probe", format_args!("probe"));
+                }
+                let buffer = take();
+                let wanted_turns = ops.iter().filter(|o| matches!(o, Op::Turn)).count() as u64;
+                let turns = buffer
+                    .records
+                    .iter()
+                    .filter(|r| r.event == "turn_begin")
+                    .count() as u64;
+                if buffer.dropped == 0 {
+                    prop_assert_eq!(buffer.turn, wanted_turns);
+                    prop_assert_eq!(buffer.turn, turns);
+                }
+                prop_assert!(
+                    buffer.turn >= turns,
+                    "a turn was recorded without its counter being bumped"
+                );
+                prop_assert!(buffer.turn <= wanted_turns, "turn counter over-incremented");
+                for w in buffer.records.windows(2) {
+                    prop_assert!(w[0].turn <= w[1].turn, "turn stamps went backwards");
+                    prop_assert!(w[0].ns <= w[1].ns, "records must stay in arrival order");
+                }
+            }
     }
 }

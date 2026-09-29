@@ -1,24 +1,22 @@
 //! Compiled configuration baseline and policy gates.
 //!
 //! Authority for two questions: *what the defaults are* (`compiled_config`) and
-//! *which compositor backend this build may run* (`validate_compositor_backend`,
-//! `compositor_enabled`). `load_config` is a thin delegate to `userconfig`,
+//! configuration normalisation and diagnostics. `load_config` is a thin
+//! delegate to `userconfig`,
 //! which owns file I/O, TOML tokenization and diagnostics.
 //!
 //! Boundary: owns no I/O, no X connection, and no atom interning. The
-//! `Cfg` type family (`Cfg`, `CompositorCfg`, `AnimationsCfg`, `WallpaperCfg`,
-//! `Rule`, `CompositorBackend`, `VsyncMode`) is a plain owned value that the
+//! `Cfg` type family (`Cfg`, `AnimationsCfg`, `WallpaperCfg`, `Rule`) is a
+//! plain owned value that the
 //! caller clones; the WM owns it for the session.
 //!
 //! # Invariants
 //!
 //! `compositor_enabled` is gated on both `Cfg::compositor.enabled` and the
 //! absence of `MAVERICK_NO_COMPOSITOR`, so the env var can veto a config that
-//! asks for the compositor. `validate_compositor_backend` is a no-op when
-//! `compositor-opengl` is not compiled and when the compositor is disabled, and
-//! otherwise rejects a requested backend that this build cannot provide. There is
-//! no Vulkan backend: the feature that once named one selected no crate and has
-//! been removed.
+//! asks for the compositor. Maverick has no compositor: `[compositor]` is
+//! parsed and kept inert so existing configurations still load, and
+//! `compositor_enabled` reports only what the configuration asked for.
 
 use std::path::Path;
 
@@ -62,19 +60,12 @@ pub struct Cfg {
     /// Minimum zoom factor for the Overview film-strip.
     pub overview_zoom_min: f32,
 
-    /// Compositor configuration (OpenGL/GLX). The WM tries to bring up GL on
-    /// `CompositeGetOverlayWindow`; if GL is missing, the 3.3 context can't be
-    /// created, or another compositor already owns the screen, it logs and
-    /// silently falls back to the classic `ConfigureWindow` path.
-    pub compositor: CompositorCfg,
-
-    /// Animation configuration. Independent from the compositor: the compositor
-    /// can run with `animations.enabled = false` for vsync without springs.
+    /// Animation configuration.
     pub animations: AnimationsCfg,
 
     /// Native wallpaper configuration (source + mode). `None` path ⇒ no native
-    /// wallpaper (legacy root pixmap / transparent). Applied to `State.wallpaper`
-    /// at startup; the compositor decodes/uploads it when GL is available.
+    /// wallpaper (transparent root). Applied to `State.wallpaper` at startup
+    /// and painted onto the root pixmap by `backend::x11::rootwall`.
     pub wallpaper: WallpaperCfg,
 
     // Catppuccin Mocha; also the `Default` baseline below and the values
@@ -120,7 +111,6 @@ impl Default for Cfg {
             warp_cursor: false,
             accordion_boost: 0.0,
             overview_zoom_min: 0.25,
-            compositor: CompositorCfg::default(),
             animations: AnimationsCfg::default(),
             wallpaper: WallpaperCfg::default(),
             col_normal: 0x45475a,
@@ -131,87 +121,6 @@ impl Default for Cfg {
             rules: vec![],
             autostart: vec![],
             honor_initial_state: false,
-        }
-    }
-}
-
-/// Swap-interval policy for the GL compositor. This is Maverick's own frame
-/// pacing only: `fullscreen_bypass` hands a window back to the client, and
-/// whatever vsync the application sets for itself is never touched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VsyncMode {
-    /// `glXSwapInterval 1` – tear-free, blocks to vblank (default).
-    On,
-    /// No swap interval – immediate present (tearing allowed, lowest latency).
-    Off,
-    /// `GLX_EXT_swap_control_tear` with `-1` when available, else `1`. Best for VRR.
-    Adaptive,
-}
-
-/// Backend selected for the compositor. The WM never assumes which GPU API is
-/// available — the config is validated against compiled features.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CompositorBackend {
-    #[default]
-    OpenGl,
-    Vulkan,
-}
-
-impl std::str::FromStr for CompositorBackend {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "opengl" | "gl" | "glx" => Ok(Self::OpenGl),
-            "vulkan" | "vk" => Ok(Self::Vulkan),
-            other => Err(format!(
-                "unknown compositor backend '{other}' (opengl|vulkan)"
-            )),
-        }
-    }
-}
-
-impl std::fmt::Display for CompositorBackend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::OpenGl => f.write_str("opengl"),
-            Self::Vulkan => f.write_str("vulkan"),
-        }
-    }
-}
-
-/// Compositor (OpenGL/GLX) configuration, exposed as the `[compositor]` table in
-/// the TOML (a deprecated `[general].compositor_enabled` alias also maps to
-/// `enabled`). An absent table means "on with these defaults". `enabled = false`
-/// — or the `MAVERICK_NO_COMPOSITOR` env var — means the compositor is never
-/// attempted and the WM stays on the plain `ConfigureWindow` path, which also
-/// keeps the X11 `Shape` corner-radius rounding available.
-#[derive(Debug, Clone)]
-pub struct CompositorCfg {
-    /// Master switch. Default `true`: on by default, with automatic fallback.
-    pub enabled: bool,
-    /// Backend to use when the compositor is enabled.
-    pub backend: CompositorBackend,
-    /// When `true` (default), Maverick may step aside ("bypass") and let a single
-    /// eligible fullscreen window on an output present itself directly, instead
-    /// of compositing it, to cut latency/overhead for games and video players.
-    /// The decision is made per-output by `crate::compositor_policy` and only
-    /// fires when the scene is unambiguously safe (exactly one fullscreen window,
-    /// nothing composited above it). Bypass NEVER changes an application's own
-    /// `VSync` — it only removes Maverick's redirection of that one window. When
-    /// `false`, Maverick always composites, even under fullscreen.
-    pub fullscreen_bypass: bool,
-    /// `VSync` mode for the GL compositor. `On` (default) = interval 1, `Off` = no
-    /// vsync, `Adaptive` = `-1` (tear) when `GLX_EXT_swap_control_tear` is present.
-    pub vsync: VsyncMode,
-}
-
-impl Default for CompositorCfg {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            backend: CompositorBackend::OpenGl,
-            fullscreen_bypass: true,
-            vsync: VsyncMode::On,
         }
     }
 }
@@ -520,58 +429,10 @@ pub fn compiled_config() -> Cfg {
     }
 }
 
-/// Whether the compositor should be attempted at startup. `true` only when the
-/// `[compositor]` config opts in *and* the `MAVERICK_NO_COMPOSITOR` env var is
-/// not set. The actual GL probe/fallback happens later; this is the policy gate.
-pub fn compositor_enabled(cfg: &Cfg) -> bool {
-    cfg.compositor.enabled && std::env::var_os("MAVERICK_NO_COMPOSITOR").is_none()
-}
-
 /// Whether spring animations should run. When false, the WM snaps directly to
 /// the target (no interpolation) and never requests animation frames.
 pub fn animations_enabled(cfg: &Cfg) -> bool {
     cfg.animations.enabled
-}
-
-/// Validate that the requested compositor backend was compiled in. Returns an
-/// actionable error when `backend = "vulkan"` is configured but the binary was
-/// built without `compositor-vulkan`.
-pub fn validate_compositor_backend(cfg: &Cfg) -> Result<(), String> {
-    // A binary with no compositor backend compiled in *is* the no-compositor
-    // build (dwm-style). There the `[compositor]` table is inert — the WM
-    // always runs on the classic X11 path — so the section is simply ignored:
-    // nothing to validate, no error, no warning.
-    if !cfg!(feature = "compositor-opengl") {
-        return Ok(());
-    }
-    // The backend is never consulted when the compositor is off (`enabled =
-    // false` or `MAVERICK_NO_COMPOSITOR`): validating it then only produces a
-    // spurious error for a setting that has no effect.
-    if !compositor_enabled(cfg) {
-        return Ok(());
-    }
-    match cfg.compositor.backend {
-        CompositorBackend::OpenGl => {
-            if cfg!(feature = "compositor-opengl") {
-                Ok(())
-            } else {
-                Err(
-                    "compositor.backend = \"opengl\" requested but this binary was built without \
-                     the `compositor-opengl` feature; rebuild with `--features compositor-opengl` \
-                     or set `backend = \"vulkan\"` if that feature is available, or disable the \
-                     compositor with `[compositor] enabled = false`"
-                        .to_string(),
-                )
-            }
-        }
-        CompositorBackend::Vulkan => Err(
-            "compositor.backend = \"vulkan\" requested but this Maverick has no Vulkan \
-             backend: the feature was a placeholder that never selected a crate, and \
-             it has been removed. Set `backend = \"opengl\"`, or disable the compositor \
-             with `[compositor] enabled = false`"
-                .to_string(),
-        ),
-    }
 }
 
 /// Build the runtime config: the compiled baseline, with an optional user

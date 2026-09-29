@@ -1,9 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 2b787caa77a1d43d2a7ff9f9926a1249222fb92a59e7479ad5041071afaec492 # shrinks to i = 5806964744461297460
-cc aed371e931336a15408a0f0e1cbb7c5c33cad20adac2cf2ad74f60ae65ce3162 # shrinks to (want, a, b) = (VisualFormat { id: 7478, depth: 0, red_bits: 0, green_bits: 0, blue_bits: 0, alpha_bits: 0, direct: true }, FbAttrs { visual: 7478, visual_depth: Some(0), pixmap_renderable: true, rgba_render: true, rgba: [0, 0, 0, 0], buffer_size: 32, bind_rgb: true, bind_rgba: false, target_2d: false, caveat_free: false, y_inverted: Some(1) }, FbAttrs { visual: 3426198089, visual_depth: Some(0), pixmap_renderable: true, rgba_render: true, rgba: [1, 4, 4, 2], buffer_size: 32, bind_rgb: true, bind_rgba: false, target_2d: true, caveat_free: false, y_inverted: Some(1) })
-cc cc032e49d51fb4958d06fe787b9182de83040ff38cfa26d425d4f2acef1d35b9 # shrinks to (want, a, b) = (VisualFormat { id: 27465, depth: 0, red_bits: 0, green_bits: 0, blue_bits: 0, alpha_bits: 0, direct: true }, FbAttrs { visual: 27465, visual_depth: Some(0), pixmap_renderable: true, rgba_render: true, rgba: [0, 0, 1, 0], buffer_size: 32, bind_rgb: true, bind_rgba: false, target_2d: true, caveat_free: false, y_inverted: Some(1) }, FbAttrs { visual: 27465, visual_depth: Some(0), pixmap_renderable: true, rgba_render: true, rgba: [0, 1, 7, 0], buffer_size: 32, bind_rgb: true, bind_rgba: false, target_2d: true, caveat_free: true, y_inverted: Some(1) })
