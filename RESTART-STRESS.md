@@ -1,221 +1,91 @@
-# Repeated-Restart Stress Test — Results
+# Repeated-restart stress
 
-Deterministic stress test for `maverickctl restart`: start Maverick on a nested
-Xephyr, open real managed clients, then restart the WM **N times in the same
-shell** (no terminal close/reopen) and verify full health after every restart.
+`maverickctl restart` has to be executable repeatedly, from one shell, without
+closing and reopening that shell.
 
-**Headline result: repeated restart does NOT fail.** 15/15 restarts pass in both
-idle and input-stress modes, and 30/30 pass in an extended idle run. The
-per-restart session-id churn is real but benign.
+    restart; restart; restart; ...   # must stay valid
 
----
+## Why the first version of this test could not see the failure
 
-## 1. Test procedure (exact commands)
+An earlier version of this test reported that repeated restart never fails. It
+was wrong, for a specific and checkable reason: it ran every `maverickctl`
+invocation from a shell that had `MAVERICK_INSTANCE` unset and whose controlling
+TTY satisfied `resolve_target`'s DISPLAY + `tty_nr` context filter. Under those
+conditions the context fallback always resolves, so the test never entered the
+state a real user is in.
 
-```bash
-cd /path/to/Maverick-reconstructed
+The real topology is different, and it is the one the harness now builds:
 
-# idle WM between restarts (RESTARTS defaults to 15)
-./tests/xephyr-restart-stress.sh
+* the window manager runs on its **own pty** — the `.xinitrc` / login-shell case;
+* the user's terminal runs on a **different pty** and **inherits
+  `MAVERICK_INSTANCE`**, because the WM exports it to every child at startup
+  (`src/main.rs`, `std::env::set_var("MAVERICK_INSTANCE", &sid)`);
+* so from the second restart onward that terminal's copy of the variable points
+  at paths that no longer exist, and the DISPLAY+TTY fallback finds nothing,
+  because the WM is on a different tty.
 
-# XTEST input storm during each restart + verification
-./tests/xephyr-restart-stress.sh stress
+Run: `RESTARTS=N tests/xephyr-restart-stress.sh <BIN_DIR>`
 
-# extended run (more iterations)
-RESTARTS=30 ./tests/xephyr-restart-stress.sh
-```
+## Checks after every restart
 
-What the script does, deterministically, every run:
+| | |
+|---|---|
+| V1 | the instance answers `maverickctl query tree` |
+| V2 | every pre-restart client is still managed, in `_NET_CLIENT_LIST` and in the tree |
+| V3 | `_NET_SUPPORTING_WM_CHECK` names a live window |
+| V4 | exactly one ALIVE instance in the runtime directory, and its socket answers |
+| V5 | the process recorded in the ficha is alive |
 
-1. **Preflight** — kill any stray `target/debug/maverick`, `Xephyr`, `mgdwin`,
-   `xtest_input` (pattern `target/debug/maveri[c]k` cannot match the live
-   `:0` session, whose cmdline is bare `maverick`).
-2. **Build helpers** — `tests/mgdwin` and `tests/xtest_input` (cc + `-lX11
-   [-lXtst]`).
-3. **Pick a free display** — first `:n` in `90..199` with no `/tmp/.X$n-lock`.
-4. **Hermetic runtime dir** — `XDG_RUNTIME_DIR=$(mktemp -d /tmp/mrt.XXXX)`;
-   `MAVERICK_INSTANCE` is **unset** (this shell is the "user's terminal", not
-   a WM child, so resolution must go through the DISPLAY/tty context path).
-5. **Start Xephyr** on the nested display, nesting into the host `DISPLAY`
-   (`:0`). Wait for `xprop -root` to answer.
-6. **Launch maverick** with **no `--session-id`** (the default user flow, so
-   every restart re-execs into a NEW random session id → NEW socket path).
-7. **Open 3 managed clients** (`mgdwin`, titles `RS_A/RS_B/RS_C`) and record
-   their XIDs.
-8. **Baseline verification** (V1–V5).
-9. **Restart loop** — for each of N iterations: record sid+socket, (stress mode:
-   launch `xtest_input 12`), `maverickctl restart`, wait for readiness, record
-   new sid+socket, run V1–V5.
-10. **Fresh-terminal phase** — F1 clean shell, F2 `MAVERICK_INSTANCE=<current
-    sid>`, F3 `MAVERICK_INSTANCE=<stale sid>`, F4 restart under the stale env.
-11. **Summary** — per-iteration pass/fail, runtime-dir entry count, totals.
+Plus the session id before and after, and the command's exit status — an
+instance that silently stopped being reachable is a failure even if the window
+count is unchanged.
 
-The script exits non-zero if any check fails. It cleans up its Xephyr and
-runtime dir via an EXIT trap.
+## Results
 
-### Readiness gate (important, non-obvious)
+### Baseline (`0d83275`, before the fix) — reproduces
 
-`wait_ready` polls **`maverickctl query tree`**, not `state`. The WM event loop
-blocks in `wait_readable_fds` when idle and only publishes its state snapshot
-after a *wake* (an X11 event, or a control command that pushes to the queue —
-`query`/`dispatch`/`restart`/`reload`/`quit`). `state`/`ping`/`identify` are
-answered server-side and do **not** wake the loop, so an idle WM answers
-`maverickctl state` with `{}` forever (verified: 15 s of `{}` on an idle WM).
-`query tree` is processed by the WM thread, so it both wakes the loop
-(publishing state) and returns valid JSON — a deterministic readiness+wake
-signal. After the first `query tree`, `state` returns full JSON.
+    pty C restart #1 -> rc=0  health=FAIL  V1=FAIL  ...
+    pty C restart #2 -> rc=1  health=FAIL  V1=FAIL
+      stderr: maverickctl: no running Maverick instance found for this context
 
----
+Two distinct failures, and they are the two the fixes target:
 
-## 2. Verification checklist after each restart (V1–V5)
+* **restart #1 returns `rc=0` but V1 fails.** `restart` is acknowledged by the
+  socket thread when the command is *enqueued*; the tool reports success for a
+  restart that has not happened yet.
+* **restart #2 returns `rc=1` outright.** By then the terminal's inherited
+  session id is stale, and the DISPLAY+TTY fallback cannot resolve it.
 
-From the script header:
+A reopened terminal buys exactly one successful restart before its own
+inherited id goes stale — which is the reported "close and reopen the terminal"
+workaround.
 
-| # | Check | How |
-|---|-------|-----|
-| **V1** | maverickctl responsive | `state` answers JSON with `"monitors"` **and** `query tree` answers JSON with `"instance"` |
-| **V2** | windows still managed | every pre-restart client XID is in `_NET_CLIENT_LIST` (xprop) **and** in `maverickctl query tree` |
-| **V3** | X11 ownership valid | `_NET_SUPPORTING_WM_CHECK` names a window whose `_NET_WM_NAME` is `maverick` |
-| **V4** | runtime state valid | exactly one ALIVE instance in the runtime dir, its socket answers, its pid is alive, `state` JSON well-formed |
-| **V5** | WM process alive | the pid recorded in the ficha is running (`kill -0`) |
+### Fixed — 20/20
 
-Stress mode additionally requires the XTEST storm to complete cleanly
-(`XTEST_INPUT_DONE` in the log) during the restart window.
+    first restart that FAILED : 0
+    pty C restart #1  .. #20 -> rc=0  V1=PASS V2=PASS V3=PASS V4=PASS V5=PASS
+    session id identical across all 20
+    20/20 restarts took effect; 0 reported as failures
 
----
+No terminal was closed at any point. A control matrix in the same run confirms
+the confound above is still visible: a shell on the WM's tty with
+`MAVERICK_INSTANCE` unset keeps working for reasons that have nothing to do with
+restart, which is exactly why the original test passed.
 
-## 3. Results
+## An intermediate failure worth recording
 
-### Idle WM — 15 restarts
+With the settle wait in place but before the outgoing instance announced its
+own departure, a 20-restart run **failed at restart #13**:
 
-```
-restart stress (idle): 100 passed, 0 failed
-iteration results:  1 PASS … 15 PASS   (15/15)
-runtime dir entries after run: 17 (alive: 1)
-```
+    pty C restart #13 -> rc=1  health=PASS  V1=PASS ...
 
-Every iteration passed V1–V5. No failure mode observed.
+The window manager was healthy; the *command* reported failure. The wait
+required the socket to be observed unbound before it would believe the
+replacement had arrived, and that window lasts only as long as the replacement
+takes to start — milliseconds. Poll for a transient that short and you will
+eventually miss it, and then report a completed handoff as a failure.
 
-### Idle WM — extended 30 restarts
-
-```
-restart stress (idle): 190 passed, 0 failed
-iteration results:  1 PASS … 30 PASS  (30/30)
-runtime dir entries after run: 32 (alive: 1)
-```
-
-### Under input stress — 15 restarts (XTEST storm)
-
-`xtest_input 12 :90` fires ~15 000 synthetic events (keys/motion/clicks) over
-12 s during each restart + verification window. Observed volume:
-`XTEST_INPUT_DONE keys=5798 motion=7759 click=1429`.
-
-```
-restart stress (stress): 115 passed, 0 failed
-iteration results:  1 PASS … 15 PASS   (15/15)
-runtime dir entries after run: 17 (alive: 1)
-```
-
-Every iteration passed V1–V5 **and** the input storm completed cleanly. No
-failure mode observed.
-
-### At which iteration does repeated restart break?
-
-**It does not break** — not at iteration 15 (both modes), not at iteration 30
-(idle). There is no failure mode to report. The restart path is robust:
-the WM keeps the same PID (in-place `exec`), re-adopts the surviving clients,
-re-establishes X11 ownership and the control socket every time.
-
----
-
-## 4. Fresh-terminal resolution (F1–F4)
-
-The script ends by re-running the resolution paths a new shell would take:
-
-| Case | Env | Result |
-|------|-----|--------|
-| **F1** clean shell | no `MAVERICK_INSTANCE` | **resolves** (DISPLAY/tty context match) |
-| **F2** fresh terminal | `MAVERICK_INSTANCE=<current sid>` | **resolves** (env hit) |
-| **F3** stale env | `MAVERICK_INSTANCE=<pre-restart sid>` | **resolves** — `read_meta(stale)` returns `None`, so `resolve_target` falls through to context |
-| **F4** restart under stale env | `MAVERICK_INSTANCE=<stale sid>` | **succeeds** — same context fallback, then restart |
-
-**A fresh terminal does not need to "avoid" a failure, because there is no
-failure.** The session-id instability does not break targeting: when
-`MAVERICK_INSTANCE` points at a dead sid, `resolve_target`
-(`maverick-sys/src/ctl/mod.rs:604`) simply falls through to the
-DISPLAY+TTY context path and finds the new instance. F3/F4 confirm this
-empirically.
-
----
-
-## 5. Observed per-restart socket-path churn
-
-The sid is random per process and the restart re-execs with only the original
-`launch_args` (no `--session-id`), so **every restart yields a brand-new sid and
-a brand-new control-socket path**. Representative excerpt (idle run, display
-`:90`, runtime dir `/tmp/mrt.ixFB/maverick/`):
-
-```
-baseline  3f7e-18d9e546cdebb6c0-d3cde244380ef9e7
-iter 1    3f7e-18d9e546cdebb6c0-d3cde244380ef9e7 -> 3f7e-18d9e5474e8021af-66f032a8a9d5fa35
-iter 2    3f7e-18d9e5474e8021af-66f032a8a9d5fa35 -> 3f7e-18d9e5477283f9e0-2103fdc8c67b8f53
-iter 3    3f7e-18d9e5477283f9e0-2103fdc8c67b8f53 -> 3f7e-18d9e5479686927a-b783a172459096ca
-iter 4    3f7e-18d9e5479686927a-b783a172459096ca -> 3f7e-18d9e547bd8dbca1-97de49200eeca0cf
-iter 5    3f7e-18d9e547bd8dbca1-97de49200eeca0cf -> 3f7e-18d9e547f08bf625-c222d00391689508
-…
-iter 15   3f7e-18d9e54946bbef2f-62eae5ae373ea55d -> 3f7e-18d9e5496dc2998e-40459a94cef1b760
-```
-
-The socket path is `$XDG_RUNTIME_DIR/maverick/<sid>/control.sock`, so it
-churns every iteration. The **WM process PID stays constant** across all
-restarts (e.g. `pid 16254` for all 15 idle iterations, `pid 20651` for all 15
-stress iterations) — confirming the restart is an in-place `exec`
-(`actions.rs:129`), not a fork+spawn.
-
----
-
-## 6. Hypotheses — confirmed / refuted
-
-| Hypothesis | Verdict | Evidence |
-|------------|---------|----------|
-| Restart re-execs maverick in place (`actions.rs:129`) | **CONFIRMED** | WM PID identical across all restarts |
-| Session id is random per process (unless `--session-id`) | **CONFIRMED** | new sid every restart |
-| Restart re-execs with only original `launch_args` (no `--session-id`) → new sid → new socket path | **CONFIRMED** | socket path churns every iteration |
-| Old sid's ficha/socket are deleted on restart | **CONFIRMED (files)** | `cleanup_meta` removes ficha+socket; only 1 instance alive after the run |
-| `MAVERICK_INSTANCE` in a terminal goes stale after restart | **CONFIRMED** | F3 uses a pre-restart sid |
-| Stale `MAVERICK_INSTANCE` breaks targeting (`read_meta(old_sid)` → `None`) | **REFUTED** | `resolve_target` falls through to context; F3/F4 resolve and restart fine |
-| Fresh terminal (no env) discovers via DISPLAY+TTY context | **CONFIRMED** | F1 passes |
-| `teardown_x` releases grabs/redirect; new instance re-adopts clients via `scan_windows` | **CONFIRMED** | V2 passes every iteration — all 3 clients stay managed |
-
----
-
-## 7. Additional findings
-
-1. **Idle WM answers `maverickctl state` with `{}`.** The event loop blocks in
-   `wait_readable_fds` and publishes state only after a wake. `state`/`ping`/
-   `identify` don't wake it; `query tree` (WM-thread command) does. This is why
-   the readiness gate uses `query tree`. (The live `:0` session returns full
-   state because real client activity keeps waking it.)
-
-2. **Restart leaves empty per-session directories behind.** `cleanup_meta`
-   (`identity.rs:435`) removes the ficha and socket *files* but not the
-   `<sid>/` *directory*. The runtime dir accumulates one empty dir per restart:
-   17 entries after 15 restarts, 32 after 30 (only 1 alive). Cosmetic, but it
-   grows without bound over many restarts.
-
-3. **Window IDs in `query tree` are decimal** (`"id":4194305`), while
-   `_NET_CLIENT_LIST`/mgdwin XIDs are hex (`0x400001`). The test converts
-   before comparing.
-
----
-
-## 8. Test tooling
-
-| File | Role |
-|------|------|
-| `tests/xephyr-restart-stress.sh` | the deterministic repeated-restart harness (idle + stress modes, V1–V5, F1–F4) |
-| `tests/xtest_input.c` → `tests/xtest_input` | XTEST synthetic input sender (stress mode); prints `XTEST_INPUT_DONE` on stdout |
-| `tests/mgdwin.c` → `tests/mgdwin` | managed (tiled) client; logs `WINID=0x…` on stderr |
-| `target/debug/maverick`, `target/debug/maverickctl` | the WM and its control client (pre-built) |
-
-Requires: `Xephyr`, `x11-utils` (xprop/xwininfo), `gcc`, `python3`.
+The fix is the announcement, not a shorter poll: the WM thread marks the hub as
+restarting before unbinding, and the socket thread answers `error restarting`
+to the read-side commands from that moment. The outgoing instance now ends the
+window itself, so a client never has to catch it mid-unbind.
