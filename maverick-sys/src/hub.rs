@@ -48,7 +48,7 @@
 
 use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
@@ -119,6 +119,29 @@ struct Inner {
     /// observability only: incremented on drop (rare), read by tests/tools.
     /// `Relaxed` is enough — an approximate count is fine.
     dropped: AtomicUsize,
+    /// Set by the WM thread before it tears the control socket down to restart.
+    /// The socket thread stops answering as though it were the instance from
+    /// this moment, so a client waiting on the handoff learns that the outgoing
+    /// process is finished rather than having to catch the window where its
+    /// socket happens to be absent — a window short enough that polling can
+    /// miss it, which would leave the client unable to tell "restarted" from
+    /// "the old instance never left".
+    restarting: AtomicBool,
+}
+
+impl ControlHub {
+    /// Declare that this process is about to stop being the instance behind its
+    /// control socket. Must be called before the socket is torn down; after it
+    /// returns true, every read-side command answers `error restarting` until
+    /// this process exits.
+    pub fn begin_restart(&self) {
+        self.inner.restarting.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether [`Self::begin_restart`] has been called.
+    pub fn is_restarting(&self) -> bool {
+        self.inner.restarting.load(Ordering::SeqCst)
+    }
 }
 
 impl ControlHub {
@@ -142,6 +165,7 @@ impl ControlHub {
                 state: Mutex::new(String::from("{}")),
                 subscribers: Mutex::new(Vec::new()),
                 dropped: AtomicUsize::new(0),
+                restarting: AtomicBool::new(false),
             }),
         }
     }

@@ -129,6 +129,16 @@ impl WindowManager {
     pub(super) fn restart(&mut self) {
         use std::os::unix::process::CommandExt;
 
+        // Stop answering as the instance *before* the socket is unbound. The
+        // window in which the socket simply does not exist lasts only as long as
+        // the replacement takes to start, which can be shorter than a client
+        // polling for it — so a client could otherwise see this process still
+        // serving before the exec and after it never return at all, and have no
+        // way to tell a completed restart from an instance that never left.
+        if let Some(hub) = &self.hub {
+            hub.begin_restart();
+        }
+
         // Release X11 resources + IPC + ficha so the new instance starts clean
         // and can reclaim the screen.
         let _ = self.cleanup();

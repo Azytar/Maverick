@@ -41,14 +41,31 @@ fn isolate_runtime_dir() {
 /// listener the replacement has bound but not yet attached to. The second
 /// answers `ping` and `{}` — precisely the state a restart returns in when it is
 /// acknowledged at enqueue time.
+/// What a stand-in instance is doing behind its socket.
+#[derive(Clone, Copy, PartialEq)]
+enum Behaviour {
+    /// A window manager whose event loop is publishing snapshots.
+    Serving,
+    /// Bound, but the WM thread has not attached to it yet — answers `ping`
+    /// and `{}`, which is the state a restart returns in when it is
+    /// acknowledged at enqueue time.
+    BoundButSilent,
+    /// Has declared its own departure and answers `error restarting`, without
+    /// ever unbinding. The real instance does this for the few requests that
+    /// can still reach it between `ControlHub::begin_restart` and the socket
+    /// going away.
+    Departing,
+}
+
 struct Instance {
     path: PathBuf,
     stop: Arc<AtomicBool>,
+    mode: Arc<std::sync::Mutex<Behaviour>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Instance {
-    fn start(sid: &str, serves_state: bool) -> Self {
+    fn start(sid: &str, behaviour: Behaviour) -> Self {
         let path = maverick_sys::identity::sock_path(sid);
         std::fs::create_dir_all(path.parent().expect("session dir")).expect("create dir");
         let _ = std::fs::remove_file(&path);
@@ -73,17 +90,23 @@ impl Instance {
         listener.set_nonblocking(true).expect("nonblocking accept");
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
+        let mode = Arc::new(std::sync::Mutex::new(behaviour));
+        let seen = Arc::clone(&mode);
         let name = sid.to_string();
         let handle = std::thread::spawn(move || {
             while !flag.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let mut line = String::new();
+                        let mode = *seen.lock().expect("behaviour lock");
                         let reply = match BufReader::new(&stream).read_line(&mut line) {
                             Err(_) => continue,
+                            Ok(_) if mode == Behaviour::Departing => {
+                                "error restarting\n".to_string()
+                            }
                             Ok(_) if line.starts_with("ping") => format!("pong {name}\n"),
                             Ok(_) if line.starts_with("query ") => {
-                                if serves_state {
+                                if mode == Behaviour::Serving {
                                     "{\"monitors\":[{\"index\":0}]}\n".to_string()
                                 } else {
                                     "{}\n".to_string()
@@ -104,8 +127,16 @@ impl Instance {
         Self {
             path,
             stop,
+            mode,
             handle: Some(handle),
         }
+    }
+
+    /// Change what this same, still-bound socket answers. The point of the
+    /// departure announcement is that the socket never has to go away, so the
+    /// tests need a handoff that provably does not unlink.
+    fn switch_to(&self, behaviour: Behaviour) {
+        *self.mode.lock().expect("behaviour lock") = behaviour;
     }
 
     /// Model the teardown half of the handoff: the socket stops answering and
@@ -140,7 +171,7 @@ fn restart(sid: &str) -> ExitCode {
 #[test]
 fn an_instance_that_never_hands_off_is_not_a_finished_restart() {
     isolate_runtime_dir();
-    let _instance = Instance::start("neverswapped", true);
+    let _instance = Instance::start("neverswapped", Behaviour::Serving);
     assert_eq!(restart("neverswapped"), ExitCode::FAILURE);
 }
 
@@ -150,9 +181,9 @@ fn an_instance_that_never_hands_off_is_not_a_finished_restart() {
 #[test]
 fn a_rebound_socket_that_publishes_no_snapshot_is_not_a_finished_restart() {
     isolate_runtime_dir();
-    let mut first = Instance::start("halfup", true);
+    let mut first = Instance::start("halfup", Behaviour::Serving);
     first.handoff_out();
-    let _second = Instance::start("halfup", false);
+    let _second = Instance::start("halfup", Behaviour::BoundButSilent);
     assert_eq!(restart("halfup"), ExitCode::FAILURE);
 }
 
@@ -162,7 +193,7 @@ fn a_rebound_socket_that_publishes_no_snapshot_is_not_a_finished_restart() {
 #[test]
 fn an_instance_that_never_returns_is_not_a_finished_restart() {
     isolate_runtime_dir();
-    let mut first = Instance::start("gone", true);
+    let mut first = Instance::start("gone", Behaviour::Serving);
     first.handoff_out();
     assert_eq!(restart("gone"), ExitCode::FAILURE);
 }
@@ -179,14 +210,60 @@ fn an_instance_that_never_returns_is_not_a_finished_restart() {
 fn a_replacement_that_serves_a_snapshot_finishes_the_restart() {
     isolate_runtime_dir();
     let sid = "swapped";
-    let first = Instance::start(sid, true);
+    let first = Instance::start(sid, Behaviour::Serving);
     let name = sid.to_string();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(80));
         drop(first);
         std::thread::sleep(std::time::Duration::from_millis(80));
-        let _second = Instance::start(&name, true);
+        let _second = Instance::start(&name, Behaviour::Serving);
         std::thread::sleep(std::time::Duration::from_secs(3));
     });
     assert_eq!(restart(sid), ExitCode::SUCCESS);
+}
+
+/// The handoff can be shorter than a client can poll for.
+///
+/// The socket is unbound for only as long as the replacement takes to start,
+/// which on a warm X server is milliseconds. Waiting for the socket to *vanish*
+/// therefore made a fast restart indistinguishable from one that never
+/// happened, and the client reported a completed handoff as a failure.
+///
+/// The outgoing instance announces its departure instead of relying on a window
+/// being observable: between `ControlHub::begin_restart` and the socket going
+/// away it answers `error restarting`, and that is as good as being gone. This
+/// fixture never unbinds at all — one socket, three behaviours — so the
+/// announcement is the only evidence the handoff occurred, and a client that
+/// polls for the socket to disappear can never see one.
+#[test]
+fn an_announced_departure_finishes_the_restart_without_ever_unbinding() {
+    isolate_runtime_dir();
+    let sid = "announced";
+    let first = Instance::start(sid, Behaviour::Serving);
+    let name = sid.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        first.switch_to(Behaviour::Departing);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        // The replacement takes over the same, never-unbound socket.
+        first.switch_to(Behaviour::Serving);
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    });
+    assert_eq!(restart(sid), ExitCode::SUCCESS);
+}
+
+/// An instance that announces its departure and never comes back has restarted
+/// nothing, and must not be reported as though it had.
+#[test]
+fn an_announced_departure_that_never_returns_is_not_a_finished_restart() {
+    isolate_runtime_dir();
+    let sid = "announced-gone";
+    let first = Instance::start(sid, Behaviour::Serving);
+    let name = sid.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        first.switch_to(Behaviour::Departing);
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    });
+    assert_eq!(restart(sid), ExitCode::FAILURE);
 }

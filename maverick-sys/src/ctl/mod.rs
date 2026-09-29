@@ -921,19 +921,19 @@ const RESTART_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
 /// whether it did.
 ///
 /// `restart` is acknowledged by the socket thread the moment the command is
-/// **enqueued**, long before the WM thread runs it. The WM then unlinks its
-/// socket and ficha and re-execs, so between the `ok` and the rebind the
-/// instance is not addressable at all. Reporting success at enqueue time hands
-/// the caller a window in which `maverickctl` cannot resolve any instance — the
-/// next `maverickctl`, including a second `restart`, is issued into that gap.
-/// Waiting for the replacement is what makes `restart` repeatable from one
-/// shell without reopening it.
+/// **enqueued**, long before the WM thread runs it. The WM then declares it is
+/// no longer the instance, unbinds its socket and ficha, and re-execs — so
+/// between the `ok` and the replacement binding there is no instance to address
+/// at all. Reporting success at enqueue time hands the caller a window in which
+/// `maverickctl` cannot resolve anything: the next `maverickctl`, including a
+/// second `restart`, is issued into that gap. Waiting for the replacement is what
+/// makes `restart` repeatable from one shell without reopening it.
 ///
-/// Readiness needs both halves: `ping` is answered by the socket thread and so
-/// only proves the socket is bound, while `query state` is served by the WM
-/// thread and so also proves the event loop is turning. The socket is required
-/// to be observed *down* first, because the outgoing instance still answers
-/// both right up until it `exec`s.
+/// Readiness needs both halves. `ping` is answered by the socket thread and so
+/// only proves a socket is bound; `query state` is served by the WM thread and
+/// so also proves its event loop is turning. An instance answering `error
+/// restarting` has declared its own departure and counts as gone — which is what
+/// keeps the handoff observable when the unbound window is shorter than a poll.
 fn await_restarted(name: &str) -> bool {
     await_restarted_within(name, RESTART_SETTLE)
 }
@@ -944,17 +944,20 @@ fn await_restarted_within(name: &str, budget: std::time::Duration) -> bool {
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + budget;
-    let mut went_down = false;
+    let mut went_away = false;
     while Instant::now() < deadline {
-        let bound = control::ping(name).is_ok();
-        if !bound {
-            went_down = true;
-        } else if went_down
+        let ready = control::ping(name)
+            .map(|reply| reply.starts_with("pong"))
+            .unwrap_or(false)
             && control::query(name, "state")
                 .map(|json| json.contains("\"monitors\":[{"))
-                .unwrap_or(false)
-        {
-            return true;
+                .unwrap_or(false);
+        if ready {
+            if went_away {
+                return true;
+            }
+        } else {
+            went_away = true;
         }
         std::thread::sleep(Duration::from_millis(20));
     }

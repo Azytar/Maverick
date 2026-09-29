@@ -429,7 +429,16 @@ fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -
     // `name` comes from `--name` (external input): sanitize for the
     // line protocol so `pong evil\ninject` cannot break framing.
     let safe_name: String = name.chars().filter(|c| !c.is_control()).take(128).collect();
+    // Once the window manager has committed to a restart it is no longer the
+    // instance behind this socket, and the read-side commands below would
+    // otherwise answer on its behalf — to a client that is waiting to be told
+    // the restart happened, among others. Saying so is also what lets that
+    // client recognise the handoff: the socket is unbound for only as long as
+    // the replacement takes to start, which can be shorter than one poll.
+    let restarting = hub.is_restarting();
     match cmd {
+        PING_CMD if restarting => "error restarting\n".to_string(),
+        STATE_CMD if restarting => "error restarting\n".to_string(),
         PING_CMD => format!("pong {safe_name}\n"),
         IDENTIFY_CMD => format!("{}\n", single_line(identity_json)),
         STATE_CMD => format!("{}\n", single_line(&hub.snapshot())),
@@ -472,6 +481,9 @@ fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -
             // `query <topic>` — same delimiter requirement.
             if let Some(rest) = tmp.strip_prefix(QUERY_CMD) {
                 if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) {
+                    if restarting {
+                        return "error restarting\n".to_string();
+                    }
                     let topic = rest.trim();
                     if topic.is_empty() {
                         return "error query: missing topic\n".to_string();
