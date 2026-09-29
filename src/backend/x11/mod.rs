@@ -328,6 +328,62 @@ pub struct WindowManager {
     /// the covering→not-covering transition. Re-raising it every frame would
     /// push floats below the bar.
     fs_covering: std::collections::HashMap<usize, Option<WindowId>>,
+    /// Reconcile work the events drained this turn owe, collapsed into at most
+    /// one pass per monitor.
+    pending: PendingReconcile,
+}
+
+/// The layout, stacking and pointer work owed by input, drained once per turn.
+///
+/// A focus change has to arrange a monitor, restack its overlays and put the
+/// pointer on the window that ended up focused. Doing that inline makes the
+/// cost of handling one event proportional to the window count — and it is the
+/// requests themselves, not the CPU, that make it worse: each arrange moves
+/// every window, which makes the server answer with a `ConfigureNotify` per
+/// window, each of which this loop then has to dispatch. A burst of N focus
+/// changes over one monitor therefore costs N full passes and N×windows worth
+/// of new events to consume, and the loop falls further behind for as long as
+/// input keeps arriving.
+///
+/// Nothing here loses state. The passes are pure functions of logical state and
+/// diff against `AppliedState`, so collapsing N of them into the last one
+/// produces the same geometry and the same stack with a fraction of the
+/// requests — and correspondingly fewer events to come back. What has to stay
+/// bounded is the *bookkeeping*, and one entry per monitor is bounded by the
+/// monitor count no matter how many events arrived.
+///
+/// Focus is recorded per monitor rather than per event because only the last
+/// one survives into the flushed pass: it is the one whose post-arrange geometry
+/// the pointer warp should target, and the one whose stacking the restack reads.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PendingReconcile {
+    /// monitor -> the window whose focus this turn's pass should finish.
+    monitors: std::collections::BTreeMap<usize, Option<Window>>,
+}
+
+impl PendingReconcile {
+    /// Record that `mon` owes a reconcile pass, to finish `focus` if one is
+    /// named. A later focus for the same monitor replaces an earlier one; a
+    /// later `None` does not erase a focus that is still owed.
+    fn mark(&mut self, mon: usize, focus: Option<Window>) {
+        self.monitors
+            .entry(mon)
+            .and_modify(|slot| {
+                if focus.is_some() {
+                    *slot = focus;
+                }
+            })
+            .or_insert(focus);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.monitors.is_empty()
+    }
+
+    /// Hand over everything owed, leaving the set empty for the next turn.
+    fn take(&mut self) -> std::collections::BTreeMap<usize, Option<Window>> {
+        std::mem::take(&mut self.monitors)
+    }
 }
 
 impl WindowManager {
@@ -631,6 +687,13 @@ impl WindowManager {
             self.dispatch(ev)?;
         }
 
+        // Settle before blocking, for the same reason the events above were
+        // dispatched with geometry from the previous turn already current: a
+        // hit-test on an event that arrives while we are asleep reads
+        // `client.geom`, and the focus that moved the camera does not rewrite
+        // it until a pass runs.
+        self.flush_pending()?;
+
         // Snap every spring straight to its target: dwm-style, zero animation.
         // Every state change has already landed on its final geometry through
         // the single `Effect::ArrangeMonitor` -> `arrange` (Phase::Settled)
@@ -678,7 +741,48 @@ impl WindowManager {
         self.publish_state();
         drop(control_trace);
 
+        // Whatever the post-wait drain owed. The earlier call already settled
+        // everything that came before the wait; this one exists so that work is
+        // never carried into the next turn, where it would queue up alongside
+        // that turn's own events.
+        let reconcile_trace = trace::Span::new("reconcile");
+        self.flush_pending()?;
+        drop(reconcile_trace);
+
         // Loop back → flush_client_list() rewrites _NET_CLIENT_LIST at most once per batch.
+        Ok(())
+    }
+
+    /// Run the layout, stacking and pointer work [`PendingReconcile`] is holding.
+    ///
+    /// `arrange` restacks the monitor it laid out on its way out, so a monitor
+    /// owes no separate stacking pass here. The pointer warp does have to wait:
+    /// it targets the geometry `arrange` just produced, not where the window was
+    /// before it moved.
+    fn flush_pending(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        for (mon, focus) in self.pending.take() {
+            self.arrange(mon)?;
+            let Some(w) = focus else { continue };
+            if !self.engine.cfg.warp_cursor {
+                continue;
+            }
+            // `arrange` above rewrote `client.geom` to the settled position, so
+            // this warps onto the window we actually focused rather than
+            // wherever it slid from. Clamped to i16: a >32k half-size would
+            // wrap negative.
+            let g = self
+                .engine
+                .state
+                .clients
+                .get(&w)
+                .map_or(Rect::new(0, 0, 1, 1), |c| c.geom);
+            let dx = (g.w / 2).min(i16::MAX as u32) as i16;
+            let dy = (g.h / 2).min(i16::MAX as u32) as i16;
+            let _ = self.conn.warp_pointer(x11rb::NONE, w, 0, 0, 0, 0, dx, dy);
+        }
         Ok(())
     }
     /// Drive the WM until `state.running` is false or the X connection is lost.
@@ -882,6 +986,7 @@ impl WindowManager {
             animating: false,
             last_stack_order: std::collections::HashMap::new(),
             fs_covering: std::collections::HashMap::new(),
+            pending: PendingReconcile::default(),
         };
 
         let _ = (depth, visual);

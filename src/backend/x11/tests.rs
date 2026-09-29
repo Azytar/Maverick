@@ -930,3 +930,78 @@ mod wait_bounds {
         );
     }
 }
+
+/// The bookkeeping bound.
+///
+/// A focus change used to arrange, restack and warp inline, so the work a burst
+/// owed grew with the number of events in it — and the requests that work
+/// issues are what made the burst worse, because every window moved is a
+/// `ConfigureNotify` the loop then has to dispatch. These pin the other side of
+/// that trade: whatever arrives, what the turn holds before running it is
+/// bounded by the monitor count.
+mod pending_reconcile {
+    use super::super::PendingReconcile;
+
+    #[test]
+    fn a_burst_owes_one_entry_per_monitor_however_long_it_is() {
+        let mut pending = PendingReconcile::default();
+        for step in 0..10_000u32 {
+            pending.mark(0, Some(step));
+        }
+        let owed = pending.take();
+        assert_eq!(owed.len(), 1);
+        assert_eq!(owed[&0], Some(9_999));
+    }
+
+    #[test]
+    fn a_burst_spanning_monitors_owes_one_entry_each() {
+        let mut pending = PendingReconcile::default();
+        for step in 0..10_000u32 {
+            pending.mark((step % 3) as usize, Some(step));
+        }
+        assert_eq!(pending.take().len(), 3);
+    }
+
+    #[test]
+    fn the_last_focus_named_for_a_monitor_is_the_one_that_survives() {
+        let mut pending = PendingReconcile::default();
+        pending.mark(1, Some(100));
+        pending.mark(1, Some(200));
+        pending.mark(1, Some(300));
+        assert_eq!(pending.take()[&1], Some(300));
+    }
+
+    /// A plain `ArrangeMonitor` carries no focus and must not cancel a focus
+    /// the same turn already owed — otherwise a command that re-arranges between
+    /// two focus changes would silently drop the pointer warp.
+    #[test]
+    fn an_arrange_does_not_erase_a_focus_the_turn_already_owed() {
+        let mut pending = PendingReconcile::default();
+        pending.mark(0, Some(7));
+        pending.mark(0, None);
+        assert_eq!(pending.take()[&0], Some(7));
+    }
+
+    #[test]
+    fn a_monitor_named_first_by_an_arrange_can_still_owe_a_focus() {
+        let mut pending = PendingReconcile::default();
+        pending.mark(2, None);
+        assert_eq!(pending.take()[&2], None);
+        let mut pending = PendingReconcile::default();
+        pending.mark(2, None);
+        pending.mark(2, Some(9));
+        assert_eq!(pending.take()[&2], Some(9));
+    }
+
+    /// Handing the work over has to leave the set empty, or the bound is only
+    /// ever enforced against one turn and the queue still grows across them.
+    #[test]
+    fn taking_the_work_leaves_nothing_owed_for_the_next_turn() {
+        let mut pending = PendingReconcile::default();
+        pending.mark(0, Some(1));
+        assert!(!pending.is_empty());
+        let _ = pending.take();
+        assert!(pending.is_empty());
+        assert!(pending.take().is_empty());
+    }
+}

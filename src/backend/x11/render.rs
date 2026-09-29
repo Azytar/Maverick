@@ -1150,9 +1150,9 @@ impl WindowManager {
 
         // The presentation overlay (`core::present`) is independent of focus, so a
         // focus change never recomputes or re-sizes geometry. Focus only
-        // influences stacking, via `stack_overlay` below: a focused presented
-        // window rises above the other presented ones and a focused plain tile
-        // "peeks" above the overlay.
+        // influences stacking, which `arrange` reaches on its way out: a focused
+        // presented window rises above the other presented ones and a focused
+        // plain tile "peeks" above the overlay.
         let prev_focused = self
             .engine
             .state
@@ -1303,16 +1303,15 @@ impl WindowManager {
             // off-screen.
             //
             // The recenter moves the just-focused window under the pointer; the
-            // `warp_cursor` block at the end of this function puts the pointer
-            // back on it, so the *next* click at the same spot cannot land on
+            // `warp_cursor` pass the mark below schedules puts the pointer back
+            // on it, so the *next* click at the same spot cannot land on
             // whatever scrolled under the cursor.
             //
             // `retarget_focus_to_window` is the pure core helper the keyboard
             // path's `ideal_scroll` retarget also funnels through, and it is
             // `#[must_use]`: the monitor index it hands back is exactly the one
-            // whose settled projection is still owed (`self.arrange` below), so
-            // deleting that call turns the binding into an unused-variable
-            // warning instead of a silent input-geometry regression.
+            // whose settled projection is still owed, so dropping it would leave
+            // the retargeted monitor unarranged rather than failing to compile.
             let retargeted = retarget_focus_to_window(&mut self.engine.state, &self.engine.cfg, w);
 
             // Keep X11 geometry (`client.geom`) in sync with the just-retargeted
@@ -1322,19 +1321,19 @@ impl WindowManager {
             // `_NET_ACTIVE_WINDOW`) calls `focus()` directly with no
             // `ArrangeMonitor`, so `client.geom` would still point at the
             // previous settled position and the next X hit-test (`find_client`)
-            // would land on the wrong window. Projecting here closes that
-            // asymmetry: every `camera.target` mutation now derives
-            // `client.geom`.
+            // would land on the wrong window. This marks the monitor for that
+            // projection instead of running it here.
             //
-            // `arrange` only *reads* `camera.{target,position}` to compute
-            // geometry; it never mutates the spring, so the compositor keeps
-            // interpolating `position → target`. `hide_offscreen` is skipped while
-            // a drag is in progress (guarded in `arrange_full_phase`), so a focus
-            // change mid-drag can't un-hide/offscreen windows incorrectly.
-            self.arrange(retargeted.unwrap_or(mon_i))?;
-
-            // Overlay stacking (presented / popups-of-presented / peek).
-            self.stack_overlay(mon_i);
+            // `focus()` therefore owes a pass rather than performing one: the
+            // turn's drain settles it before the loop can block, so no event is
+            // ever dispatched against geometry that has not caught up. What the
+            // deferral is for is the requests — `arrange` only *reads*
+            // `camera.{target,position}`, never mutating the spring, so the
+            // compositor keeps interpolating `position → target`, and
+            // `hide_offscreen` is skipped during a drag (guarded in
+            // `arrange_full_phase`) so a focus change mid-drag cannot un-hide or
+            // mis-place windows.
+            self.pending.mark(retargeted.unwrap_or(mon_i), Some(w));
 
             let _ = self.conn.change_property32(
                 PropMode::REPLACE,

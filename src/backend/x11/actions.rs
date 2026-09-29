@@ -71,7 +71,7 @@ impl WindowManager {
     /// effects without the core changing.
     pub(super) fn execute(&mut self, eff: Effect) -> Result<(), Box<dyn std::error::Error>> {
         match eff {
-            Effect::ArrangeMonitor(mi) => self.arrange(mi)?,
+            Effect::ArrangeMonitor(mi) => self.pending.mark(mi, None),
             Effect::MarkRestack(_mi) => {
                 self.stack_dirty = true;
                 // Focus-driven raises reorder the stack: refresh the
