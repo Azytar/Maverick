@@ -885,6 +885,18 @@ fn cmd_simple(tool: &str, args: &[String], verb: &str) -> ExitCode {
             eprintln!("{tool}: {verb} failed: {}", reply.trim_end());
             ExitCode::FAILURE
         }
+        Ok(_) if verb == "restart" => {
+            if await_restarted(&name) {
+                println!("{tool}: '{name}' {verb}");
+                ExitCode::SUCCESS
+            } else {
+                eprintln!(
+                    "{tool}: {verb} was accepted but '{name}' did not come back; \
+                     it may have exited during the handoff"
+                );
+                ExitCode::FAILURE
+            }
+        }
         Ok(_) => {
             println!("{tool}: '{name}' {verb}");
             ExitCode::SUCCESS
@@ -894,6 +906,59 @@ fn cmd_simple(tool: &str, args: &[String], verb: &str) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// How long `restart` waits for the replacement instance to serve again.
+///
+/// The handoff unlinks the socket and the identity ficha before the WM
+/// `exec`s, so the wait has to span that gap, not just the final state. What it
+/// is actually buying is the replacement's startup — config load, X reconnect,
+/// monitor enumeration and the window scan. Exceeding this means the handoff
+/// did not complete, which is worth reporting rather than waiting out.
+const RESTART_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Block until the instance `restart` replaced is answering again, and report
+/// whether it did.
+///
+/// `restart` is acknowledged by the socket thread the moment the command is
+/// **enqueued**, long before the WM thread runs it. The WM then unlinks its
+/// socket and ficha and re-execs, so between the `ok` and the rebind the
+/// instance is not addressable at all. Reporting success at enqueue time hands
+/// the caller a window in which `maverickctl` cannot resolve any instance — the
+/// next `maverickctl`, including a second `restart`, is issued into that gap.
+/// Waiting for the replacement is what makes `restart` repeatable from one
+/// shell without reopening it.
+///
+/// Readiness needs both halves: `ping` is answered by the socket thread and so
+/// only proves the socket is bound, while `query state` is served by the WM
+/// thread and so also proves the event loop is turning. The socket is required
+/// to be observed *down* first, because the outgoing instance still answers
+/// both right up until it `exec`s.
+fn await_restarted(name: &str) -> bool {
+    await_restarted_within(name, RESTART_SETTLE)
+}
+
+/// [`await_restarted`] with the handoff budget supplied, so the timeout path is
+/// testable without a test that sleeps for the real budget.
+fn await_restarted_within(name: &str, budget: std::time::Duration) -> bool {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + budget;
+    let mut went_down = false;
+    while Instant::now() < deadline {
+        let bound = control::ping(name).is_ok();
+        if !bound {
+            went_down = true;
+        } else if went_down
+            && control::query(name, "state")
+                .map(|json| json.contains("\"monitors\":[{"))
+                .unwrap_or(false)
+        {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
 }
 
 /// Remove stale fichas whose socket no longer answers (`prune`).

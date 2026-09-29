@@ -152,9 +152,8 @@ impl WindowManager {
             // `launch_args` excludes argv[0] (the program name), which
             // `Command::new(exe)` already supplies, so the new argv matches the
             // original launch exactly.
-            let err = std::process::Command::new(exe)
-                .args(&self.launch_args)
-                .exec();
+            let args = restart_args(&self.launch_args, &self.session_id);
+            let err = std::process::Command::new(exe).args(&args).exec();
             log::error!("restart exec failed: {err}");
         }
         self.engine.state.running = false;
@@ -420,5 +419,66 @@ impl WindowManager {
             hub.publish_state(json.clone());
             self.last_state_json = json;
         }
+    }
+}
+
+/// Build the argv for a restart re-exec, preserving the session id.
+///
+/// The session id is the filesystem key for the runtime directory, the control
+/// socket and the identity ficha, and a hand-started WM's argv carries no
+/// `--session-id` — so a re-exec from `launch_args` alone mints a fresh random
+/// id and relocates all three. Anything that resolved the instance before the
+/// restart (`MAVERICK_INSTANCE`, exported to every child at startup) then names
+/// paths that no longer exist. Re-passing the current id keeps the socket path
+/// stable across restarts.
+fn restart_args(launch_args: &[String], session_id: &str) -> Vec<String> {
+    let mut args = launch_args.to_vec();
+    if !args.iter().any(|a| a == "--session-id") {
+        args.push("--session-id".to_string());
+        args.push(session_id.to_string());
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restart_args;
+
+    #[test]
+    fn restart_preserves_a_random_session_id() {
+        let launch = vec!["--debug".to_string()];
+        let args = restart_args(&launch, "abc123-def456");
+        assert_eq!(
+            args,
+            vec![
+                "--debug".to_string(),
+                "--session-id".to_string(),
+                "abc123-def456".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn restart_leaves_an_explicit_session_id_untouched() {
+        let launch = vec![
+            "--session-id".to_string(),
+            "debug".to_string(),
+            "--debug".to_string(),
+        ];
+        let args = restart_args(&launch, "should-not-be-used");
+        assert_eq!(
+            args,
+            vec![
+                "--session-id".to_string(),
+                "debug".to_string(),
+                "--debug".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn restart_appends_to_empty_launch_args() {
+        let args = restart_args(&[], "sid");
+        assert_eq!(args, vec!["--session-id".to_string(), "sid".to_string()]);
     }
 }
