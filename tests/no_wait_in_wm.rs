@@ -53,8 +53,7 @@ const FORBIDDEN: &[(&str, &str)] = &[
 /// `maverick/src` — a path that does not exist. The walk found nothing, found
 /// nothing to complain about, and reported success on a tree that violated the
 /// rule in `src/main.rs`, silently skipping the window manager's own 42 source
-/// files. Enumerating real paths makes that class of mistake a non-zero
-/// assertion instead of a silent pass.
+/// files.
 /// Enumerating real paths makes that class of mistake a non-zero
 /// assertion instead of a silent pass — which is how this list earned its
 /// current contents. It used to name `maverick-gl/src` and `maverick-vk/src`,
