@@ -388,9 +388,10 @@ impl WindowManager {
         self.detect_portal(&mut client);
 
         // Apply per-rule opacity, if any. _NET_WM_WINDOW_OPACITY is a 32-bit
-        // cardinal in the range 0 (transparent) – 0xFFFFFFFF (opaque). A
-        // compositor (picom, etc.) reads this property; without one it's a
-        // no-op, which is why we never reject a rule that sets it.
+        // cardinal in the range 0 (transparent) – 0xFFFFFFFF (opaque). It is
+        // read by whatever composites the display, so it is published whether
+        // or not one is running — which is why a rule that sets it is never
+        // rejected.
         if let Some(op) = client.opacity {
             let alpha = (op.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
             let _ = self.conn.change_property32(
@@ -515,11 +516,8 @@ impl WindowManager {
                 } else {
                     // Through `retarget`, for the same reason as the teardown
                     // path below: a new window lengthens the ribbon, so the
-                    // destination moves, and `retarget` is the only writer that
-                    // drops the momentum the spring is still carrying from an
-                    // earlier scroll. Writing the field keeps it, and the ribbon
-                    // then slides the way it was already going while its
-                    // destination has been placed behind it.
+                    // destination moves and the camera has to land on it rather
+                    // than keep the offset it had.
                     cam.retarget(scroll)
                 }
             }
@@ -547,11 +545,10 @@ impl WindowManager {
 
         let _ = self.conn.map_window(win);
 
-        // The camera is already positioned just above (the `was_empty ? snap :
+        // The camera is already positioned just above: the `was_empty ? snap :
         // target` branch keeps the focused column visible without teleporting
-        // when other windows already exist, so the open-window scroll animates
-        // via the spring). A second unconditional `snap` here would kill that
-        // animation, so arrange directly.
+        // when other windows already exist. A second unconditional `snap` here
+        // would discard that choice, so arrange directly.
         self.arrange(mon_i)?;
 
         // Presentation-aware focus policy (EWMH focus stealing): a new window
@@ -703,16 +700,11 @@ impl WindowManager {
                 if now_empty {
                     cam.snap(0.0)
                 } else {
-                    // Through `retarget`, not the `target` field. `retarget` is
-                    // the single place that drops stale momentum when the
-                    // destination actually moves, and this teardown *does* move
-                    // it: closing a window under a held `Mod4+]` leaves the
-                    // spring travelling at tens of thousands of px/s toward the
-                    // old offset, and writing `target` underneath it kept that
-                    // velocity, so the ribbon first shot several thousand pixels
-                    // past the new destination and eased back over seconds. The
-                    // same arithmetic through `retarget` zeroes the velocity and
-                    // the excursion never happens.
+                    // Through `retarget`, not a bare field write. A held
+                    // `Mod4+]` recomputes the destination for every close, and
+                    // `retarget` ignores a destination that is not finite so a
+                    // poisoned scroll keeps the last offset the server was told
+                    // about instead of writing a NaN into a `ConfigureWindow`.
                     cam.retarget(scroll)
                 }
             }

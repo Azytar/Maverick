@@ -9,7 +9,7 @@
 //! # Pipeline
 //!
 //! ```text
-//! State + Cfg + Phase → layout::arrange → Placements
+//! State + Cfg → layout::arrange → Placements
 //!     → present::present_into → DesiredState
 //!     → Reconciler::reconcile → Vec<GeometryEffect>
 //!     → emit_geometry → X11
@@ -37,7 +37,7 @@
 //! Reconciliation is safe to repeat: the diff only emits when the
 //! desired rect/border actually changed from what was last applied.
 //! A no-op reconcile (desired == applied) emits nothing, so repeated
-//! calls from `arrange_full_phase` (once per animating monitor per
+//! calls from `arrange_full` (once per monitor per
 //! frame) do not spam the X server.
 //!
 //! # Invariants
@@ -1468,7 +1468,7 @@ mod tests {
     }
     proptest! {
         /// Idempotence: a repeat of a reconcile that already ran emits nothing.
-        /// The render loop calls this once per animating monitor per frame, so
+        /// The reconcile calls this once per monitor per arrange, so
         /// any churn here is a `configure_window` storm on the X server.
         #[test]
         fn a_repeated_reconcile_emits_nothing(

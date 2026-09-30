@@ -334,9 +334,8 @@ fn wheel_notches_are_queued_not_applied_inline() {
 // `apply_geom` for the out-of-band sinks — and `emit_geometry` stays the
 // single writer pairing one ConfigureWindow with its one ConfigureNotify.
 //
-// The entry point is `arrange_full`; the projection it emits must pass the
-// diff, whether `arrange_full` diffs itself or delegates to
-// `arrange_full_phase`. The constraint fails closed if neither diffs.
+// The entry point is `arrange_full`, and it owns the whole cycle: project,
+// diff, emit. The constraint fails closed if it ever stops diffing.
 #[test]
 fn arrange_emits_geometry_only_through_the_reconciler() {
     let render = production_source("backend/x11/render.rs");
@@ -351,31 +350,14 @@ fn arrange_emits_geometry_only_through_the_reconciler() {
              every geometry write goes through the reconciler's effects"
         );
     }
-    // The entry point diffs Desired vs Applied itself, or delegates to the
-    // function that does. Without that call the projection would re-emit
-    // every window on every pass.
+    // Without the diff the projection would re-emit every window on every
+    // pass, which is the amplification this rule exists to prevent.
     assert!(
-        !code_lines_containing(&arrange, "reconcile(").is_empty()
-            || !code_lines_containing(&arrange, "arrange_full_phase(").is_empty(),
-        "arrange_full must diff Desired vs Applied through `reconcile`, \
-         directly or via `arrange_full_phase`; emitting the projection without \
-         the diff is one ConfigureWindow per window per pass"
+        !code_lines_containing(&arrange, "reconcile(").is_empty(),
+        "arrange_full must diff Desired vs Applied through `reconcile`; \
+         emitting the projection without the diff is one ConfigureWindow per \
+         window per pass"
     );
-    if render.contains("fn arrange_full_phase(") {
-        let phase = fn_body(render, "arrange_full_phase");
-        assert!(
-            !code_lines_containing(&phase, "reconcile(").is_empty(),
-            "arrange_full_phase must diff Desired vs Applied through `reconcile`; \
-             emitting the projection directly is one ConfigureWindow per window per pass"
-        );
-        for needle in ["configure_window", "send_event"] {
-            assert!(
-                code_lines_containing(&phase, needle).is_empty(),
-                "arrange_full_phase must not issue `{needle}` directly; \
-                 every geometry write goes through the reconciler's effects"
-            );
-        }
-    }
     // The out-of-band sinks (hide/re-show, float settle, client requests)
     // share the same gate: diff first, emit only on change.
     let apply = fn_body(render, "apply_geom");

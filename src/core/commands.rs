@@ -1837,7 +1837,7 @@ impl Command for Restart {
 }
 
 /// Toggle the Overview mode on the active workspace: zooms the whole ribbon out
-/// (animated) so every column is visible, and back in.
+/// so every column is visible, and back in.
 #[derive(Debug, Clone, Copy)]
 pub struct ToggleOverview;
 
@@ -1862,7 +1862,7 @@ impl Command for ToggleOverview {
         // Mutually exclusive with Viewport Zoom: toggling Overview must reset
         // the page-zoom state, or a lingering `Zoomed` mode would keep `alpha` on
         // `page_zoom` (and leave `overview` ignored) — making Overview a silent
-        // no-op or corrupting the live `zoom` spring.
+        // no-op or leaving a zoom factor no reader expects.
         ws.viewport_mode = ViewportMode::Normal;
         ws.page_zoom = 1.0;
         let scroll = if layout == LayoutKind::Column {

@@ -207,13 +207,13 @@ impl WindowManager {
 
     /// Recompute each of `mon_idx`'s workspaces' camera target against the
     /// current workarea, using `target` (not `snap`) so the correction eases in
-    /// through the normal spring.
+    /// through the normal camera path.
     ///
     /// Called after a strut change resizes the workarea. Without it the camera
     /// keeps its old pixel target while the ribbon re-lays-out at the new width,
     /// so the focused column drifts out of alignment and stays there until some
     /// later focus/grow command happens to call `ideal_scroll` itself — at
-    /// which point the camera covers the whole accumulated gap in one animated
+    /// which point the camera covers the whole accumulated gap in a single
     /// jump, which reads as a sudden bounce rather than a stale target.
     pub(super) fn retarget_cameras(&mut self, mon_idx: usize) {
         if mon_idx >= self.engine.state.monitors.len() {

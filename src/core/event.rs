@@ -6,14 +6,16 @@
 //!   execute, and *declares* (optionally) the domain event that represents what
 //!   it did. The command knows its own event, never its consumers.
 //! - The `Engine` publishes that event on the `EventBus`.
-//! - Anyone may subscribe — renderer, IPC, future bars, hooks, logs, tests. A
-//!   consumer reacts to the fact without knowing which command caused it.
+//! - Anyone may subscribe. Today the only subscriber is the control-socket
+//!   bridge, which forwards focus and workspace changes to
+//!   `maverickctl subscribe`; a consumer reacts to the fact without knowing
+//!   which command caused it.
 //!
 //! Events are semantic facts, not X11 calls, and handlers never mutate state
-//! back into the command path. The bus exists to make extension cheap: a new
-//! consumer subscribes instead of polling `State`. It is the only reason the
-//! indirection is worth it, so a component that cannot be phrased as a
-//! "something happened" fact does not get an event.
+//! back into the command path. The bus exists so a consumer subscribes instead
+//! of polling `State`, which is what the control socket does. It is the only
+//! reason the indirection is worth it, so a component that cannot be phrased
+//! as a "something happened" fact does not get an event.
 
 use crate::core::effect::Effect;
 use crate::types::WindowId;

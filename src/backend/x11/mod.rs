@@ -153,7 +153,7 @@ fn wait_timeout(
 ///
 /// Created by `WindowManager::new` (opens X, claims `SUBSTRUCTURE_REDIRECT`,
 /// scans windows, arranges), driven by `run` → `run_once` (flush → drain →
-/// animate → present → wait → keyboard → control), torn down by `cleanup`.
+/// arrange → present → wait → keyboard → control), torn down by `cleanup`.
 ///
 /// # Protocol why
 ///
@@ -215,7 +215,7 @@ pub struct WindowManager {
     /// actually set for, per window. The mask is a pure function of size,
     /// never of position, so this cache is what suppresses the re-upload
     /// during the pure-move configures `emit_geometry` issues for every
-    /// visible window on every animation frame. `bw` is part of the key
+    /// visible window on every reconcile. `bw` is part of the key
     /// because the mask origin (`-bw, -bw`) re-anchors with the border.
     shape_mask_cache: std::collections::HashMap<Window, (u32, u32, i32, u32)>,
     /// Last `_NET_FRAME_EXTENTS` border width published per window.
@@ -664,7 +664,7 @@ impl WindowManager {
         self.flush_pending()?;
 
         // Block on X11 plus the control self-pipe. There is no frame deadline:
-        // no heartbeat, no timer, nothing to interpolate. Every other bound the
+        // no heartbeat, no timer, no frame loop. Every other bound the
         // loop owns lives in `wait_timeout` — never sleep past a pending
         // keyboard refresh or the shutdown deadline.
         let fd = self.conn.as_raw_fd();
@@ -831,10 +831,6 @@ impl WindowManager {
         let monitors = detect_monitors(&conn, screen, &cfg)?;
         let mut engine = Engine::new(cfg);
         engine.state.monitors = monitors;
-        // Apply the configured scroll-camera spring constants (the
-        // `stiffness`/`damping` values) to every workspace camera, since
-        // Monitor::new / reconcile_workspaces build cameras with hard-coded
-        // defaults.
         crate::log::config_snapshot("engine_config", &engine.cfg);
         if crate::log::config_trace_enabled() {
             for (monitor, mon) in engine.state.monitors.iter().enumerate() {

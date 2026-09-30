@@ -323,8 +323,8 @@ mod unit_tests {
 
     // Viewport zoom and overview are mutually exclusive: both scale the whole
     // workspace through `alpha`, so whichever was entered last owns that scalar
-    // and the other axis' spring must be reset to 1.0 — otherwise one mode is a
-    // silent no-op or the live `zoom` spring is pulled to a phantom value.
+    // and the other axis must be reset to 1.0 — otherwise one mode is a silent
+    // no-op or a later scale is pulled from a phantom value.
     // Exact float compares are sound here: the commands assign exactly 1.0.
     #[allow(clippy::float_cmp)]
     #[test]
@@ -8605,8 +8605,8 @@ mod unit_tests {
         }
 
         /// Any `f32` bit pattern, so NaN, ±inf and subnormals are all
-        /// reachable. `ViewportZoom` and the camera spring config both document
-        /// sanitising exactly these values.
+        /// reachable. `ViewportZoom` and `Camera::retarget` both document
+        /// refusing exactly these values.
         fn arb_f32_bits() -> impl Strategy<Value = f32> {
             any::<u32>().prop_map(f32::from_bits)
         }

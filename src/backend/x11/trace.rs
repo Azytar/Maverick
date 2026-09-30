@@ -23,7 +23,7 @@ use std::time::Instant;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 // ~112 MiB resident at the cap: 448 bytes per record (384-byte payload + a
-// 64-byte header), so a continuous software-GL animation burst still keeps its
+// 64-byte header), so a continuous burst of window events still keeps its
 // trailing input/action records. The `Vec` starts at 4096 entries and doubles,
 // so a short session never pays for the full cap.
 const CAPACITY: usize = 262_144;

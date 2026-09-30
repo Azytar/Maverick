@@ -7,7 +7,7 @@
 //! # Pipeline (per monitor, per frame)
 //!
 //! ```text
-//! arrange_full → arrange_full_phase
+//! arrange_full
 //!     → layout::arrange (Placements)
 //!     → present::present_into (fullscreen/max rewrite)
 //!     → DesiredState::from_placements
@@ -765,7 +765,7 @@ impl WindowManager {
     /// Fire-and-forget `StackMode::ABOVE` (or `BELOW` for the covering→off
     /// transition): arrange/focus paths must not block.
     ///
-    /// To avoid a `raise()` storm during the camera animation (arrange runs on
+    /// To avoid a `raise()` storm while the camera moves (arrange runs on
     /// every monitor every frame), the desired top-to-bottom order is computed
     /// into `order` and compared with the cached `last_stack_order[mon_idx]`;
     /// `raise` is only re-issued when the order actually changed.
@@ -885,7 +885,7 @@ impl WindowManager {
         // workspace occupies `mon.screen` (not the workarea) and must stay above
         // the dock for as long as it is focused — without waiting for the camera
         // to settle, or the bar stays visible through the whole entry/exit
-        // animation and "fullscreen covers the screen and is on top" is a lie.
+        // geometry and "fullscreen covers the screen and is on top" is a lie.
         // `covering_fullscreen_window` already filters `layout != Column` and
         // Overview, and the `prev_cover != new_cover` test below keeps this out
         // of the per-frame raise path.
@@ -1047,7 +1047,7 @@ impl WindowManager {
             // The Shape `BOUNDING` mask depends only on (outer_w, outer_h, r,
             // bw), never on position. `emit_geometry` fires on every Configure
             // effect, including pure moves (camera scroll re-Configures every
-            // visible window's x each animation frame), so without this guard
+            // visible window's x on every reconcile), so without this guard
             // an unchanged mask was re-uploaded to the X server every such
             // frame. Skip the SHAPE request when nothing the mask depends on
             // has changed since the last one we actually issued. `bw` is part
@@ -2890,7 +2890,7 @@ mod tests {
     }
 
     /// One arrange cycle's render list, built exactly the way
-    /// `arrange_full_phase` builds it: the layout projection, then the
+    /// `arrange_full` builds it: the layout projection, then the
     /// presentation overlay. `None` for a monitor index the state does not
     /// have, which the caller must treat as "nothing to place".
     fn projected(state: &State, cfg: &Cfg, mon_idx: usize) -> Option<Placements> {
@@ -3613,7 +3613,7 @@ mod tests {
         }
 
         /// Render-list determinism. The projection is documented as a pure
-        /// function of `State` + `Cfg` + `Phase`, and the same monitor is
+        /// function of `State` + `Cfg`, and the same monitor is
         /// projected again on every arrange. A render list whose order or
         /// contents varied between two identical runs would make the geometry
         /// X11 ends up holding depend on hash iteration order.

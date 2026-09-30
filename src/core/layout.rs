@@ -1634,7 +1634,7 @@ mod proptests {
     }
 
     /// A finite camera offset, including the fractional and negative values a
-    /// mid-flight spring produces. `Camera`'s finiteness is a `State` invariant
+    /// a poisoned scroll would produce. `Camera`'s finiteness is a `State` invariant
     /// (core invariant C), so non-finite inputs are not generated here.
     fn camera_offset() -> impl Strategy<Value = f32> {
         prop_oneof![0.0f32..=1.0, -20000.0f32..=20000.0, 0.05f32..=4.0]

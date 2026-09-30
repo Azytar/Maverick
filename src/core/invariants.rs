@@ -131,7 +131,7 @@ fn settle_on_column(
 
 /// Run a typed command and apply every `ArrangeMonitor` effect with the
 /// Settled projection (what the backend does). The backend retargets the
-/// camera (`scroll_to_focused` → `ideal_scroll`) in its render/animation loop
+/// camera (`scroll_to_focused` → `ideal_scroll`) before projecting
 /// BEFORE it projects, so we do the same here to mirror the real focus pipeline.
 /// It also applies the focus the command announced via the `FocusChanged` event
 /// (the backend's event handler does this; the pure `Engine` does not), so the
@@ -869,7 +869,7 @@ fn engine_with_columns(n_cols: usize, rows: usize) -> Engine {
 }
 
 /// Retarget the camera onto the focused column (what the backend does in its
-/// render loop before projecting), snap all animated factors to rest, then run
+/// `retarget` before projecting), park all view factors, then run
 /// the settled projection + `present` and write `client.geom`.
 fn retarget_and_settle(
     engine: &mut Engine,
