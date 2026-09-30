@@ -128,10 +128,9 @@ echo "── building hostile client (if missing)"
 [ -x "$HOSTILE" ] || gcc -O2 -o "$HOSTILE" tests/hostile.c -lX11 || { echo "cannot build hostile"; exit 1; }
 
 echo "── starting Xephyr + maverick on $DISP"
-# Headless Xephyr is not a compositor target (GLX texture-from-pixmap fails
+# Headless Xephyr is not a texture-from-pixmap target (GLX texture-from-pixmap fails
 # with a fatal XIO that kills the WM mid-suite) — same policy as
 # xephyr-suite.sh: validate focus/float logic on the plain X11 path.
-export MAVERICK_NO_COMPOSITOR=1
 mav_preflight
 start_xephyr "$DISP" 1280 720 >/dev/null
 mav_launch "$DISP" >/dev/null

@@ -1,7 +1,7 @@
 // Move (and optionally resize) a window by id, for the partial-redraw harness.
 // Uses XMoveWindow / XResizeWindow directly so it also works on override-redirect
 // windows (which the tiling WM does not manage). The geometry change generates a
-// ConfigureNotify the compositor turns into a full repaint.
+// ConfigureNotify that makes the server repaint.
 //
 // Usage: winmove WINID X Y [W H]
 

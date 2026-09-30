@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Xephyr integration suite for Maverick (Plan Fase 12).
+# Xephyr integration suite for Maverick.
 #
 # Spins up a throwaway X server (Xephyr), launches maverick on it, and drives
 # real clients (xterm, firefox, mpv, a GL game) to verify the fullscreen /
@@ -23,12 +23,8 @@
 
 set -u
 
-# The compositor's GLX pixmap path fails under nested Xephyr/llvmpipe
+# GLX texture-from-pixmap fails under nested Xephyr/llvmpipe
 # ("failed to create drawable" -> fatal XIO), which kills the WM mid-suite and
-# makes every later assertion report a "lost" client. Headless Xephyr is not a
-# compositor target; disable it for this integration harness so we can validate
-# focus / pending_focus / transient / management logic against a real X server.
-export MAVERICK_NO_COMPOSITOR=1
 
 
 SCREEN_W=1920
@@ -184,7 +180,7 @@ if command -v xterm >/dev/null 2>&1; then
 fi
 
 # ── Transient relink: a dialog mapped before its parent lands on the parent ──
-# FASE 3: deterministic, evidence-driven. We launch a parent xterm with a unique
+# Deterministic, evidence-driven. We launch a parent xterm with a unique
 # title, then a modal dialog (zenity/xmessage) that sets WM_TRANSIENT_FOR ->
 # parent. We POLL (with a timeout) for a child whose WM_TRANSIENT_FOR names the
 # real parent Window ID, then assert it is managed (_NET_CLIENT_LIST). If no
@@ -240,13 +236,11 @@ if command -v xterm >/dev/null 2>&1; then
     fi
 fi
 
-# ── Viewport zoom + page-snap (Fases 8-11) ──────────────────────────────────
-# FASE 4: with the compositor, viewport zoom is a CAMERA/RENDER transform
-# (visual scale), NOT an X11 resize — the client's real geometry must stay
-# put. WITHOUT a compositor there is no GPU to do the transform, so zoom is
-# implemented as animated X11 geometry scaling instead (layout `alpha`
-# multiplies tile widths); there the invariant is a clean round-trip
-# (in, then out, restores the exact original rect).
+# ── Viewport zoom + page-snap ───────────────────────────────────────────────
+# Zoom is X11 geometry scaling: the layout's `alpha` multiplies tile widths
+# and the server is told the new rects. The invariant is a clean round-trip —
+# zoom in, then out, restores the exact original rect — because zoom rewrites
+# geometry rather than moving a camera over an unresized client.
 if command -v xterm >/dev/null 2>&1; then
     xterm -title ZOOMT -e sleep 120 &>/dev/null &
     sleep 1
@@ -261,13 +255,11 @@ if command -v xterm >/dev/null 2>&1; then
     ACT="$(xprop -root -notype _NET_ACTIVE_WINDOW 2>/dev/null | grep -oE '0x[0-9a-f]+' | head -1)"
     if [ "$ACT" != "$THEX" ]; then
         bad "viewport zoom: focus never landed on T (active=$ACT, want $THEX) — key would hit the wrong window"
-    elif [ "${MAVERICK_NO_COMPOSITOR:-0}" = "1" ]; then
-        # No compositor => no GPU transform available, so zoom is implemented
-        # as (animated) X11 geometry scaling by design. Drive it via IPC, NOT
-        # via xdotool keys: XTEST through a nested Xephyr on a live host
-        # produces phantom autorepeats (40ms cadence long after release),
-        # which the WM dutifully dispatches — making key-driven zoom counts
-        # nondeterministic. IPC gives exactly one step per command.
+    else
+        # Drive the zoom via IPC, NOT via xdotool keys: XTEST through a nested
+        # Xephyr on a live host produces phantom autorepeats (40ms cadence long
+        # after release), which the WM dutifully dispatches — making key-driven
+        # zoom counts nondeterministic. IPC gives exactly one step per command.
         # Round-trip: zoom in, then back out, must restore the exact geometry.
         "$MAVERICK_MSG" msg "viewport_zoom 0.2" >/dev/null 2>&1
         sleep 0.8
@@ -276,18 +268,9 @@ if command -v xterm >/dev/null 2>&1; then
         sleep 0.8
         read -r W2 _ < <(xwininfo -id "$T" 2>/dev/null | awk '/Width:/{print $2}')
         if [ "${W1:-0}" -ne "${W0:-0}" ] && [ "${W2:-0}" -eq "${W0:-0}" ]; then
-            ok "viewport zoom (no-compositor geometry path) scaled ${W0} -> ${W1} and restored ${W2}"
+            ok "viewport zoom scaled ${W0} -> ${W1} and restored ${W2}"
         else
             bad "viewport zoom round-trip broken (W0=${W0} in=${W1} out=${W2})"
-        fi
-    else
-        xdotool key super+equal
-        sleep 0.6
-        read -r W1 _ < <(xwininfo -id "$T" 2>/dev/null | awk '/Width:/{print $2}')
-        if [ "${W1:-0}" -eq "${W0:-0}" ]; then
-            ok "viewport zoom left X11 geometry unchanged (${W0} == ${W1}); zoom is camera-scale, not resize"
-        else
-            bad "viewport zoom unexpectedly resized the X11 client (${W0} -> ${W1})"
         fi
     fi
     # Page-snap right should shift the camera without erroring.
@@ -297,7 +280,7 @@ if command -v xterm >/dev/null 2>&1; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# AUDIT PHASE 7 — hostile-client resistance scenarios (real X11, managed clients)
+# Hostile-client resistance scenarios (real X11, managed clients)
 # These drive the 7 required hostile-client flows that are NOT already covered by
 # the fullscreen-pointer suite (scenarios 3 fullscreen+create and 7 workspaces
 # are covered there). We reuse winmove.c to inject an external ConfigureNotify

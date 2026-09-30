@@ -227,8 +227,8 @@ fn no_code_linked_into_the_window_manager_waits_on_a_child() {
 }
 
 /// The detector itself has to be capable of failing, or the test above is a
-/// tautology. This re-runs the same needles against the one file the campaign
-/// measured as legitimately waiting, and requires the scan to find it. If a
+/// tautology. This re-runs the same needles against the one file that is
+/// allowed to wait, and requires the scan to find it. If a
 /// future edit to `FORBIDDEN`, `scrubbed_source`, or the walk quietly stops
 /// matching, this fails while the rule test still passes.
 #[test]

@@ -29,11 +29,9 @@ cat > "$RUN_A_CFG" <<'EOF'
 [general]
 n_tags = 4
 auto_workspace_binds = false
-compositor_enabled = true
 focus_mouse = false
 
 [compositor]
-enabled = true
 fullscreen_bypass = false
 
 [keybindings]
@@ -45,11 +43,9 @@ cat > "$RUN_B_CFG" <<'EOF'
 [general]
 n_tags = 4
 auto_workspace_binds = false
-compositor_enabled = true
 focus_mouse = false
 
 [compositor]
-enabled = true
 fullscreen_bypass = true
 
 [keybindings]

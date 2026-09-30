@@ -86,16 +86,12 @@ def main():
         path = out / name
         path.mkdir(mode=0o700)
         env[name] = str(path)
-    env.update(MAVERICK_NO_COMPOSITOR="1", MAVERICK_LOG="debug", DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(out / "no-bus"))
+    env.update(MAVERICK_LOG="debug", DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(out / "no-bus"))
     config = out / "config.toml"
     text = '''[general]
 focus_mouse = false
 warp_cursor = false
 auto_workspace_binds = false
-[compositor]
-enabled = false
-[animations]
-enabled = false
 [autostart]
 commands = [["/usr/bin/true"]]
 '''

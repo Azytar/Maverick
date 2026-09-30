@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# EWMH frame-extents sync (Fase 4B, commit 2).
+# EWMH frame-extents sync.
 #
 #   C) normal tiled window: border=1  -> `_NET_FRAME_EXTENTS = 1,1,1,1`
 #   D) fullscreen:           border=0  -> `_NET_FRAME_EXTENTS = 0,0,0,0`, window = screen
@@ -15,7 +15,6 @@ mav_preflight
 build_helpers
 trap mav_cleanup EXIT ERR
 
-export MAVERICK_NO_COMPOSITOR=1
 
 PASS=0; FAIL=0
 ok()  { echo "PASS: $*"; PASS=$((PASS+1)); }

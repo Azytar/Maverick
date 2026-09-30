@@ -25,7 +25,6 @@ NO_BUILD=false
 # asking, "no" = never touch a shell startup file.
 PATH_CHOICE=""
 NO_ANIM="${MAVERICK_NO_ANIM:-0}"
-WITH_COMPOSITOR=""
 KEEP_LOG=false
 
 while [[ $# -gt 0 ]]; do
@@ -48,9 +47,10 @@ while [[ $# -gt 0 ]]; do
         --no-path)   PATH_CHOICE="no"; shift ;;
         --no-anim)   NO_ANIM=1; shift ;;
         --keep-log)  KEEP_LOG=true; shift ;;
-        --with-compositor)   WITH_COMPOSITOR="yes"; shift ;;
-        --without-compositor|--no-compositor) WITH_COMPOSITOR="no"; shift ;;
-        --no-default-features) WITH_COMPOSITOR="no"; shift ;;
+        --with-compositor|--without-compositor|--no-compositor)
+            die "Maverick has no compositor. Drop the flag: there is nothing to select." ;;
+        --no-default-features)
+            die "There is no default feature to disable: the build has none." ;;
         -h|--help)
             cat <<'HELP'
 Usage: ./install.sh [options]
@@ -76,17 +76,16 @@ Options:
                    without asking. Offered by default when it is missing.
   --no-path        Never modify shell startup files; print the export line
                    to run instead.
-  --no-anim        Disable all animations (or export MAVERICK_NO_ANIM=1)
+  --no-anim        Disable this installer's progress spinner (or export
+                   MAVERICK_NO_ANIM=1)
   --keep-log       Keep build log even on success (saved to share/maverick/)
-  --with-compositor         Build WITH compositor (experimental)
-  --without-compositor      Build WITHOUT compositor — pure X11 [ideal, default]
   -h, --help       Show this help
 
 Environment:
   PREFIX=DIR          same as --prefix
   CARGO_TARGET_DIR    cargo build directory; honoured as given
   LANG / LC_ALL       auto language detection
-  MAVERICK_NO_ANIM=1  same as --no-anim
+  MAVERICK_NO_ANIM=1  same as --no-anim (spinner only)
   NO_COLOR=1          disable colors
 
 Notes:
@@ -307,12 +306,6 @@ t() {
             config_keep)     echo "se conservará la existente" ;;
             config_will_overwrite) echo "se sobrescribirá al instalar" ;;
             config_skip)     echo "configuración omitida" ;;
-            compositor_q)    echo "¿Compilar con compositor? (experimental)" ;;
-            compositor_hint) echo "[s/N] — ideal: sin compositor" ;;
-            compositor_yes)  echo "con compositor (experimental)" ;;
-            compositor_no)   echo "sin compositor — puro X11 [ideal]" ;;
-            comp_no_short)   echo "X11 puro · sin compositor" ;;
-            comp_yes_short)  echo "con compositor (experimental)" ;;
             done_title)      echo "¡Listo! Maverick instalado" ;;
             done_hint)       echo "Selecciona «maverick» en tu gestor de sesión, o ejecuta:" ;;
             tip)             echo "consejo" ;;
@@ -381,12 +374,6 @@ t() {
             config_keep)     echo "will keep existing" ;;
             config_will_overwrite) echo "will overwrite on install" ;;
             config_skip)     echo "config skipped" ;;
-            compositor_q)    echo "Build with compositor? (experimental)" ;;
-            compositor_hint) echo "[y/N] — ideal: without" ;;
-            compositor_yes)  echo "with compositor (experimental)" ;;
-            compositor_no)   echo "without compositor — pure X11 [ideal]" ;;
-            comp_no_short)   echo "pure X11 · no compositor" ;;
-            comp_yes_short)  echo "with compositor (experimental)" ;;
             done_title)      echo "Done — Maverick installed" ;;
             done_hint)       echo "Select 'maverick' in your display manager, or run:" ;;
             tip)             echo "tip" ;;
@@ -994,8 +981,6 @@ _panel_draw() {
     _nap 0.05
     _panel_row "$(t s_config)"   "${CONFIG_VALUE:-$(t skipped_word)}"
     _nap 0.05
-    _panel_row "$(t s_mode)"     "${MODE_VALUE:-}"
-    _nap 0.05
     _panel_row "$(t s_time)"     "$(_fmt_ms "$TOTAL_MS")"
     printf '  %s╰%s╯%s\n' "$GREY" "$h" "$RESET"
     return 0
@@ -1382,30 +1367,6 @@ elif [[ -f "$CFG_FILE" ]]; then
     fi
 fi
 
-# ── compositor (una sola línea) ──────────────────────────────────────────────
-if [[ -z "$WITH_COMPOSITOR" ]]; then
-    if [[ "$YES" == true || "$NO_BUILD" == true ]]; then
-        WITH_COMPOSITOR="no"
-    else
-        ask "$(t compositor_q)" "$(t compositor_hint)"
-        if is_yes no; then
-            WITH_COMPOSITOR="yes"
-            printf '  %s⠤ %s%s\n' "$DIM" "$(t compositor_yes)" "$RESET"
-        else
-            WITH_COMPOSITOR="no"
-            printf '  %s⠤ %s%s\n' "$DIM" "$(t compositor_no)" "$RESET"
-        fi
-        echo
-    fi
-fi
-if [[ "$WITH_COMPOSITOR" == "no" ]]; then
-    CARGO_FEATURES="--no-default-features"
-    MODE_VALUE="$(t comp_no_short)"
-else
-    CARGO_FEATURES=""
-    MODE_VALUE="$(t comp_yes_short)"
-fi
-
 # ── pre-flight: rust antes de abrir el bloque vivo ───────────────────────────
 if [[ "$NO_BUILD" != true ]] && ! ensure_rust; then
     die "$(t need_cargo)"
@@ -1432,7 +1393,7 @@ fi
 _render ""
 _nap 0.25
 
-# ── fase 0 · dependencias ────────────────────────────────────────────────────
+# ── dependencias ────────────────────────────────────────────────────
 _phase_begin 0 "$DEPS_DETAIL"
 if [[ "$NO_BUILD" != true ]]; then
     command -v cargo >/dev/null 2>&1 || die "$(t need_cargo)"
@@ -1461,7 +1422,7 @@ _animate 8 "$DEPS_DETAIL"
 _nap 0.2
 _phase_end 0 "$DEPS_DETAIL"
 
-# ── fase 1 · build ───────────────────────────────────────────────────────────
+# ── build ───────────────────────────────────────────────────────────
 FINAL_LOG_PATH=""
 if [[ "$NO_BUILD" == true ]]; then
     _animate 64 ""
@@ -1475,25 +1436,21 @@ else
     # the last resort when `cargo tree` cannot answer, because an estimate that
     # can only grow leaves the bar pinned below 100% for the whole build.
     # shellcheck disable=SC2086
-    estimated_crates="$(cargo tree --edges normal,build --prefix none $CARGO_FEATURES \
+    estimated_crates="$(cargo tree --edges normal,build --prefix none \
         -p maverick -p maverickctl 2>/dev/null | sort -u | grep -c . || true)"
     if [[ -z "$estimated_crates" || "$estimated_crates" -lt 1 ]]; then
-        if [[ "$WITH_COMPOSITOR" == "no" ]]; then
-            estimated_crates=12
-        else
-            estimated_crates=75
-        fi
+        estimated_crates=12
     fi
     total_crates=$estimated_crates
     
     # shellcheck disable=SC2086
     (
-        if RUSTFLAGS="-C target-cpu=native" cargo build --release $CARGO_FEATURES \
+        if RUSTFLAGS="-C target-cpu=native" cargo build --release \
                -p maverick -p maverickctl >"$BUILD_LOG" 2>&1; then
             exit 0
         fi
         # shellcheck disable=SC2086
-        cargo build --release $CARGO_FEATURES \
+        cargo build --release \
             -p maverick -p maverickctl >>"$BUILD_LOG" 2>&1
     ) &
     BUILD_PID=$!
@@ -1601,7 +1558,7 @@ else
     _phase_end 1 "$(t build_ok)"
 fi
 
-# ── fase 2 · binarios ────────────────────────────────────────────────────────
+# ── binarios ────────────────────────────────────────────────────────
 _phase_begin 2 ""
 # Check the complete artifact set before replacing any installed binary.
 for bin in "${RUNTIME_BINS[@]}"; do
@@ -1650,7 +1607,7 @@ STAGE_DIR=""
 _animate 80 "$n_ok/$RUNTIME_BIN_COUNT"
 _phase_end 2 "$n_ok/$RUNTIME_BIN_COUNT · $(t installed)"
 
-# ── fase 3 · sesión X11 ──────────────────────────────────────────────────────
+# ── sesión X11 ──────────────────────────────────────────────────────
 _phase_begin 3 ""
 SESSION_VALUE=""
 INSTALL_TMP="$(mktemp -d /tmp/maverick-install.XXXXXX)"
@@ -1662,11 +1619,7 @@ exec_path="${exec_path//\"/\\\\\"}"
 exec_path="${exec_path//\$/\\\\\$}"
 exec_path="${exec_path//\`/\\\\\`}"
 exec_path="${exec_path//%/%%}"
-if [[ "$WITH_COMPOSITOR" == "no" ]]; then
-    session_comment='Columnar tiling WM — keyboard-driven'
-else
-    session_comment='Columnar tiling WM — scrollable, composited, keyboard-driven'
-fi
+session_comment='Columnar tiling WM — keyboard-driven'
 printf '%s\n' \
     '[Desktop Entry]' \
     'Name=maverick' \
@@ -1696,7 +1649,7 @@ fi
 _animate 84 "$SESSION_VALUE"
 _phase_end 3 "$SESSION_VALUE"
 
-# ── fase 4 · configuración ───────────────────────────────────────────────────
+# ── configuración ───────────────────────────────────────────────────
 _phase_begin 4 ""
 CONFIG_VALUE=""
 case "$CONFIG_ACTION" in
@@ -1758,7 +1711,7 @@ TOML
         ;;
 esac
 
-# ── fase 5 · verificación final ──────────────────────────────────────────────
+# ── verificación final ──────────────────────────────────────────────
 _phase_begin 5 ""
 
 # Execute what was installed, by absolute path, and require each to succeed.

@@ -1,11 +1,10 @@
 //! Constraints on the production sources that no other test can observe.
 //!
-//! Two of this campaign's fixes live in functions that need a live X connection,
-//! so the behaviour they protect is only reachable from an integration test. The
-//! sabotage audit showed the obvious result: reverting either fix left the suite
-//! green, because the unit test next to it exercises the *obligation* — what a
-//! re-derivation achieves, what going through `retarget` costs — and not that
-//! this call site performs one.
+//! Two fixes live in functions that need a live X connection, so the behaviour
+//! they protect is only reachable from an integration test. Reverting either
+//! one left the suite green, because the unit test next to it exercises the
+//! *obligation* — what a re-derivation achieves, what going through `retarget`
+//! costs — and not that this call site performs one.
 //!
 //! These tests close that gap the only way it can be closed without a display:
 //! by constraining the source itself. That is weaker than exercising the code,
@@ -70,8 +69,9 @@ fn code_lines_containing(src: &str, needle: &str) -> Vec<(usize, String)> {
     src.lines()
         .enumerate()
         .filter_map(|(i, raw)| {
-            // Comments discuss `camera.target` constantly and say nothing about
-            // writing it, so they are not findings. Cut at the first `//`; a
+            // Comments discuss `camera.position` constantly and say nothing
+            // about writing it, so they are not findings. Cut at the first
+            // `//`; a
             // `//` inside a string literal would be a false cut, and there is
             // none in the code these tests look at.
             let code = raw.split("//").next().unwrap_or("").trim();
@@ -80,20 +80,21 @@ fn code_lines_containing(src: &str, needle: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
-/// Lines that assign through a `.target` field, as opposed to reading one or
-/// comparing against it.
+/// Lines that assign through a `camera.position` field, as opposed to reading one
+/// or comparing against it.
 ///
 /// The comparison exclusion is what keeps this from flagging
-/// `prev.rect != desired_rect`-style predicates: whitespace removed, `x.target==y`
-/// and `x.target >= y` both contain `.target=`, so the char after the `=` decides.
-fn target_assignments(src: &str) -> Vec<(usize, String)> {
+/// `prev.rect != desired_rect`-style predicates: whitespace removed,
+/// `x.position==y` and `x.position >= y` both contain `.position=`, so the char
+/// after the `=` decides.
+fn position_assignments(src: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
-    for (n, line) in code_lines_containing(src, ".target") {
+    for (n, line) in code_lines_containing(src, ".position") {
         let packed = line.replace(' ', "");
-        let Some(eq) = packed.find(".target=") else {
+        let Some(eq) = packed.find(".position=") else {
             continue;
         };
-        let after = packed[eq + ".target=".len()..].chars().next();
+        let after = packed[eq + ".position=".len()..].chars().next();
         if matches!(after, Some('=') | Some('>') | Some('<')) {
             continue;
         }
@@ -102,52 +103,45 @@ fn target_assignments(src: &str) -> Vec<(usize, String)> {
     out
 }
 
-/// A window's scroll target must move through `Camera::retarget`, never through
-/// the public `target` field.
+/// A workspace's scroll offset must move through `Camera::retarget` or
+/// `Camera::snap`, never through the public `position` field.
 ///
-/// `retarget` is the only sanctioned writer of the destination, and its contract
-/// includes dropping stale momentum when the destination actually moves. Writing
-/// the field instead keeps that momentum, and the effect is a camera that travels
-/// further in the direction it was already going *after* its destination has been
-/// placed behind it.
-///
-/// The concrete case this exists for: `unmanage` re-derives the destination for
-/// the shorter ribbon when a window closes, and that routinely happens while the
-/// spring is in flight — a user holding a scroll key who closes a window. It was
-/// `cam.target = scroll`, and the unit test next to the fix exercises `retarget`
-/// against a raw field write on the primitive, so it passed either way.
+/// Both are the only sanctioned writers, and their contract is to refuse a
+/// non-finite value: a raw field write bypasses that, and the offset then
+/// reaches a `ConfigureWindow` as a NaN rect, which X11 silently drops while
+/// the WM's bookkeeping moves on — a window whose `client.geom` no longer
+/// matches anything on screen, so every click on it lands elsewhere.
 #[test]
-fn no_production_code_writes_the_camera_target_field() {
-    // The pattern is any `.target` assignment, not the literal
-    // `camera.target =`: the binding a caller happens to use (`cam.target`,
-    // `ws.camera.target`, `monitors[i].workspaces[0].camera.target`) is exactly
-    // what a bypass would look like, and a check that only matches one spelling
-    // of it is not a check. There are no production `.target` writes to allowlist
-    // — the only writers are `Camera::retarget` and `Camera::snap`, which
-    // assign through `self`, and both are below the `#[cfg(test)]` cut in
-    // `maverick-core`, not here.
+fn no_production_code_writes_the_camera_position_field() {
+    // The pattern is any `.position` assignment on a camera, not the literal
+    // `camera.position =`: the binding a caller happens to use (`cam.position`,
+    // `ws.camera.position`, `monitors[i].workspaces[0].camera.position`) is
+    // exactly what a bypass would look like, and a check that only matches one
+    // spelling of it is not a check. There are no production `.position` writes
+    // to allowlist - the only writers are `Camera::retarget` and `Camera::snap`,
+    // which assign through `self`, and both live in `maverick-core`, not here.
     let offenders: Vec<String> = [
         "backend/x11/manage.rs",
         "backend/x11/events.rs",
         "backend/x11/render.rs",
         "backend/x11/struts.rs",
         "backend/x11/pointer.rs",
-        "backend/x11/manage.rs",
         "core/commands.rs",
         "core/layout.rs",
     ]
     .iter()
     .map(|f| (*f, production_source(f)))
     .flat_map(|(f, src)| {
-        target_assignments(src)
+        position_assignments(src)
             .into_iter()
+            .filter(|(_, line)| line.contains("camera"))
             .map(move |(n, t)| format!("{f}:{n}: {t}"))
     })
     .collect();
     assert!(
         offenders.is_empty(),
-        "camera.target must only be written by Camera::retarget. Direct writes: \\
-         {offenders:?}"
+        "camera.position must only be written by Camera::retarget/snap. Direct \
+         writes: {offenders:?}"
     );
 }
 
@@ -155,7 +149,7 @@ fn no_production_code_writes_the_camera_target_field() {
 /// handler that adopts the new screen has to re-derive it before projecting.
 ///
 /// This is the ordering rule `apply_dock_strut` already documents ("every
-/// `camera.target` mutation must precede the settled projection") applied to the
+/// camera mutation must precede the projection") applied to the
 /// path that was missing it. The unit test for the fix builds the scene and
 /// re-derives the target *itself*, so it passes whether or not the handler does —
 /// which is exactly what the sabotage audit found.

@@ -119,11 +119,6 @@ if ! xprop -root >/dev/null 2>&1 || ! kill -0 "$MAV_PID" 2>/dev/null; then
     exit 1
 fi
 ok "maverick started on $DISPLAY (log: $LOG)"
-if grep -q "compositor: GL ready" "$LOG"; then
-    info "compositor: GL ready (multi-monitor compositor path exercised)"
-elif grep -qi "compositor" "$LOG"; then
-    info "compositor note: $(grep -i compositor "$LOG" | head -1)"
-fi
 
 # ── IPC helpers ────────────────────────────────────────────────────────────────
 state() { "$MSG_BIN" query state 2>/dev/null; }
@@ -239,7 +234,7 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# S2 — Fullscreen ribbon clipping (per monitor) + no compositor on wrong monitor
+# S2 — Fullscreen ribbon clipping (per monitor)
 # ══════════════════════════════════════════════════════════════════════════════
 echo; echo "########## S2 Fullscreen ribbon clipping (clip to own monitor) ##########"
 for m in 0 1; do

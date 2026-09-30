@@ -4,20 +4,11 @@
 #
 # SIGKILL the X server under a running window manager and assert that the
 # process still leaves behind a *truthful* record: no identity ficha, no control
-# socket, and a compositor trace whose header says the X half of the shutdown
-# was skipped. Two sub-cases, both required:
+# socket, and a trace whose header says the X half of the shutdown was skipped.
 #
-#   A) MAVERICK_NO_COMPOSITOR=1   every X call is a void request that fails
-#                                 silently, so a shutdown that runs the X half
-#                                 and ignores its error looks perfect here.
-#   B) compositor on              the compositor's Drop runs GLX teardown, and
-#                                 GLX on a dead Display reaches libX11's I/O
-#                                 error handler, which exits the process
-#                                 without unwinding. This is the sub-case that
-#                                 tells A apart from a real fix.
-#
-# A fix that only reaches the local half is caught by both; a fix that lets the
-# compositor issue one more request is caught only by B.
+# The trap this guards: every X call in the X half of the teardown is a void
+# request that fails silently, so a shutdown that runs it anyway and ignores the
+# error looks perfect from the outside. The only evidence is the header.
 #
 # Run: bash tests/xephyr-disconnect.sh
 
@@ -97,33 +88,32 @@ saw_disconnect() {
     return 1
 }
 
-# The sub-case: $1 label, $2 "nocompositor" (empty for the compositor on)
+# One sub-case: $1 label.
 run_case() {
-    local label="$1" nocompositor="$2"
+    local label="$1"
     local dir="$SCRATCH/$label"
     local log="$dir/wm.log" log2="$dir/wm-restart.log" trace="$dir/trace.tsv"
     local sid="xdis-$label"
     rm -rf "$dir"; mkdir -p "$dir"
-    # A runtime dir of its own per sub-case, so a leaked record from the first
-    # cannot be mistaken for a clean one in the second.
+    # A runtime dir of its own, so a leaked record cannot be mistaken for a
+    # clean one.
     export XDG_RUNTIME_DIR="$dir/runtime"
     mkdir -p "$XDG_RUNTIME_DIR"
     local ficha="$XDG_RUNTIME_DIR/maverick/$sid/$sid.json"
     local sock="$XDG_RUNTIME_DIR/maverick/$sid/control.sock"
 
     start_server || return 0
-    echo "=== $label (compositor $([ -n "$nocompositor" ] && echo off || echo on), $DISPLAY) ==="
+    echo "=== $label ($DISPLAY) ==="
 
-    # A mapped client so the compositor owns real GLX state: without a window
-    # there is nothing for the compositor's teardown to reach, and sub-case B
-    # would quietly stop testing the thing it exists for.
+    # A mapped client so the window manager owns real X resources: without a
+    # window the teardown has nothing to reach and the case would quietly stop
+    # testing the thing it exists for.
     "$BIN_DIR/mgdwin" >/dev/null 2>&1 &
     local client=$!
     HELPER_PIDS+=("$client")
     sleep 0.3
 
-    env ${nocompositor:+MAVERICK_NO_COMPOSITOR="$nocompositor"} \
-        MAVERICK_COMPOSITOR_TRACE=1 MAVERICK_COMPOSITOR_TRACE_PATH="$trace" \
+    env MAVERICK_TRACE=1 MAVERICK_TRACE_PATH="$trace" \
         "$MAVERICK_BIN" --session-id "$sid" --config /dev/null >"$log" 2>&1 &
     local mav=$!
     MAV_PIDS+=("$mav")
@@ -160,7 +150,7 @@ run_case() {
 
     # ── 4. the trace must be written, and must say what happened ─────────────
     if [ -s "$trace" ]; then
-        ok "[$label] the compositor trace was written ($(wc -c <"$trace" | tr -d ' ') bytes)"
+        ok "[$label] the trace was written ($(wc -c <"$trace" | tr -d ' ') bytes)"
         local header
         header="$(head -1 "$trace")"
         case "$header" in
@@ -169,17 +159,16 @@ run_case() {
             *)
                 bad "[$label] trace header does not report the skipped X teardown: $header" ;;
         esac
-        if [ -z "$nocompositor" ]; then
-            # Proof the compositor sub-case is not vacuous: the frames really
-            # were being presented through GLX when the server died.
-            if grep -q 'swap_begin' "$trace"; then
-                ok "[$label] the compositor was presenting through GLX before the loss"
-            else
-                bad "[$label] no GLX swap in the trace — the compositor sub-case proved nothing"
-            fi
+        # Proof the case is not vacuous: the ring buffer really was recording
+        # before the server died, so its header is evidence and not an artifact
+        # of an empty file.
+        if grep -q 'turn_begin' "$trace"; then
+            ok "[$label] the trace recorded turns before the loss"
+        else
+            bad "[$label] the trace has no records — the case proved nothing"
         fi
     else
-        bad "[$label] the compositor trace was NOT written — the whole ring buffer is lost"
+        bad "[$label] the trace was NOT written — the whole ring buffer is lost"
     fi
 
     # ── 5. the cause: no X/GLX request may be issued after the loss ──────────
@@ -208,8 +197,7 @@ run_case() {
     # A second log file: waiting for "maverick ready" in the first one would
     # match the line the *dead* instance already wrote.
     start_server || return 0
-    env ${nocompositor:+MAVERICK_NO_COMPOSITOR="$nocompositor"} \
-        MAVERICK_COMPOSITOR_TRACE=1 MAVERICK_COMPOSITOR_TRACE_PATH="$trace" \
+    env MAVERICK_TRACE=1 MAVERICK_TRACE_PATH="$trace" \
         "$MAVERICK_BIN" --session-id "$sid" --config /dev/null >"$log2" 2>&1 &
     local mav2=$!
     MAV_PIDS+=("$mav2")
@@ -253,8 +241,7 @@ run_case() {
 }
 
 mkdir -p "$SCRATCH"
-run_case "nocompositor" 1
-run_case "compositor" ""
+run_case "xdisconnect"
 
 echo "────────────────────────────────────"
 echo "X disconnect: PASS=$PASS FAIL=$FAIL"

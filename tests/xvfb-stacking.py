@@ -33,15 +33,10 @@ def main():
             path = tmp / key
             path.mkdir(mode=0o700)
             env[key] = str(path)
-        env["MAVERICK_NO_COMPOSITOR"] = "1"
         config = tmp / "config.toml"
         config.write_text('''[general]
 focus_mouse = false
 warp_cursor = false
-[compositor]
-enabled = false
-[animations]
-enabled = false
 [autostart]
 commands = []
 [[keybindings]]

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# EWMH workarea publication (Fase 4B, commit 1).
+# EWMH workarea publication.
 #
 #   A) startup without docks: `_NET_WORKAREA` and `_NET_DESKTOP_GEOMETRY` must
 #      exist immediately (they used to appear only after a strut/RandR event).
@@ -18,7 +18,6 @@ build_helpers
     || { echo "FAIL: could not build tests/dockstrut"; exit 1; }
 trap mav_cleanup EXIT ERR
 
-export MAVERICK_NO_COMPOSITOR=1
 
 PASS=0; FAIL=0
 ok()  { echo "PASS: $*"; PASS=$((PASS+1)); }

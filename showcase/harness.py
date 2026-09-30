@@ -139,7 +139,6 @@ class Session:
         self.logs: list[Any] = []
         self.log_paths: list[Path] = []
         self.windows: list[str] = []
-        self.compositor_selection_owner: str | None = None
         self.wm: subprocess.Popen[Any] | None = None
         self.xephyr: subprocess.Popen[Any] | None = None
         self.env = self._private_environment()
@@ -250,14 +249,6 @@ accordion_boost = 0.0
 [colors]
 normal = 0x3b4650
 focused = 0x78b6c4
-[animations]
-enabled = true
-stiffness = 220.0
-damping = 30.0
-[compositor]
-enabled = true
-backend = "opengl"
-fullscreen_bypass = false
 """,
             encoding="utf-8",
         )
@@ -295,13 +286,7 @@ fullscreen_bypass = false
                 "tcp",
                 "-ac",
                 "+extension",
-                "Composite",
-                "+extension",
-                "DAMAGE",
-                "+extension",
                 "XFIXES",
-                "+extension",
-                "GLX",
                 "+extension",
                 "RANDR",
             ],
@@ -321,21 +306,22 @@ fullscreen_bypass = false
             "wm",
         )
         wait_for("Maverick IPC startup", lambda: self.state().get("monitors"), timeout=20)
-        self.compositor_selection_owner = wait_for(
-            "Maverick compositor selection ownership",
-            self.compositor_owner,
-            timeout=20,
-        )
+        # The root background belongs to an external program, exactly as it
+        # would on a real session: nothing in Maverick paints it.
         run(["xsetroot", "-solid", "#15191f"], env=self.env)
         print(
             f"showcase: Xephyr {self.env['DISPLAY']} at {self.size[0]}x{self.size[1]}; "
-            f"_NET_WM_CM_S0 owner {self.compositor_selection_owner}",
+            f"no external compositor (Maverick composes nothing)",
             flush=True,
         )
 
-    def compositor_owner(self) -> str | None:
-        if self.wm is None or self.wm.poll() is not None:
-            return None
+    def external_compositor_owner(self) -> str | None:
+        """Owner of `_NET_WM_CM_S0`, or `None` when nothing composites.
+
+        Maverick never claims this selection, so an unowned display is the
+        expected and correct result; it is recorded per scene as evidence that
+        the capture shows the window manager alone.
+        """
         # `_NET_WM_CM_S<n>` is a core X selection, not a root property;
         # `xprop -root` therefore reports "not found" even for a healthy
         # compositor. Query the selection owner through Xlib directly.
@@ -505,9 +491,9 @@ fullscreen_bypass = false
             "description": description,
             "display": self.env["DISPLAY"],
             "size": dimensions,
-            "compositor": {
+            "external_compositor": {
                 "selection": "_NET_WM_CM_S0",
-                "selection_owner": self.compositor_selection_owner,
+                "selection_owner": self.external_compositor_owner(),
             },
             "geometry": {window: list(self.geometry(window)) for window in self.windows},
             "state": self.state(),

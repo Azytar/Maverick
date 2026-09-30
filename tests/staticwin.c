@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
     unsigned long col = alloc_pixel(d, argc > 5 ? strtoul(argv[5], 0, 16) : 0x223355);
 
     // Override-redirect: the tiling WM must not relocate it (the harness samples
-    // absolute coordinates). The compositor still composites it.
+    // absolute coordinates).
     XSetWindowAttributes wa;
     wa.override_redirect = True;
     Window win = XCreateWindow(d, RootWindow(d, scr), x, y, w, h, 0,

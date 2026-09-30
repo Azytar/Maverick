@@ -28,7 +28,7 @@ The showcase is a six-step story:
 
 The captures are root-window screenshots of Maverick's actual output. The only
 post-processing is a deterministic check of the capture dimensions; no windows,
-labels or compositor effects are drawn into the image.
+labels or synthetic effects are drawn into the image.
 
 ## Run it
 
@@ -80,11 +80,10 @@ applications. The bundled page itself has no network dependency.
 
 - Maverick is currently an X11 column WM; the showcase uses its implemented
   `Column` layout and does not claim a Grid layout.
-- The reference captures use plain X11 presentation with the compositor disabled
-  for deterministic startup. The OpenGL compositor remains a separate,
-  driver-sensitive capability and is not substituted with a fake effect here.
+- The captures are plain X11 presentation, which is everything Maverick draws:
+  there is no compositor and no effect to substitute for one.
 - The floating proof is strongest when the selected monitor is at least
-  `640x480`; the default `1920x1080` composition is the documented reference.
+  `640x480`; the default `1920x1080` display is the documented reference.
 - A missing optional application changes the exact client mix, but the scene
   still launches a real application and records the actual WM tree instead of
   pretending that an unavailable application ran.

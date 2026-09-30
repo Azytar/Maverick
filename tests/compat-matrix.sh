@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# compat-matrix.sh — Maverick 3.0 real-client compatibility matrix (Fase 2/3/4/5/6/7).
+# compat-matrix.sh — Maverick real-client compatibility matrix.
 #
 # Drives a live, tiled Maverick session (nested Xephyr) with:
-#   Fase 2 — Firefox (real browser): fullscreen/maximize/popup/workspace.
-#   Fase 3 — Wine (emulated): Wine-like resize/fullscreen/transient/aux sequences
+#   Firefox (real browser): fullscreen/maximize/popup/workspace.
+#   Wine (emulated): Wine-like resize/fullscreen/transient/aux sequences
 #            via the stdin-driven `hostile` client.
-#   Fase 4 — Games (emulated + glxgears): _NET_WM_STATE_FULLSCREEN, OR windows.
-#   Fase 5 — _NET_ACTIVE_WINDOW: client focus grabs vs WM authority.
-#   Fase 6 — Transient chains A→B→…→E at depths 1..8 (MAX_TRANSIENT_DEPTH=4 boundary).
-#   Fase 7 — delegates to tests/xephyr-2mon.sh (2-output RANDR multi-monitor).
+#   Games (emulated + glxgears): _NET_WM_STATE_FULLSCREEN, OR windows.
+#   _NET_ACTIVE_WINDOW: client focus grabs vs WM authority.
+#   Transient chains A→B→…→E at depths 1..8 (MAX_TRANSIENT_DEPTH=4 boundary).
+#   Multi-monitor (2-output RANDR): delegates to tests/xephyr-2mon.sh.
 #
 # It aggregates PASS/FAIL per phase and prints the compatibility matrix.
 #
@@ -19,7 +19,7 @@
 #
 # Notes:
 #   * Nested Xephyr is flaky in this environment — launched with
-#     MAVERICK_NO_COMPOSITOR=1 under the real :0, every xdotool is wrapped in
+#     the real :0, every xdotool is wrapped in
 #     `timeout 8` so a display death can't hang the suite.
 #   * The control-socket path exceeds SUN_LEN with the default XDG_RUNTIME_DIR,
 #     so we use a short one (same workaround as xephyr-2mon.sh); it does not
@@ -35,7 +35,6 @@ MAVERICK_BIN="${MAVERICK_BIN:-./target/release/maverick}"
 MSG_BIN="${MSG_BIN:-./target/release/maverickctl}"
 HOSTILE="${HOSTILE:-/tmp/hostile}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/mvcm}"   # short -> avoids SUN_LEN
-export MAVERICK_NO_COMPOSITOR=1
 rm -rf "$XDG_RUNTIME_DIR"; mkdir -p "$XDG_RUNTIME_DIR"
 
 PASS=0; FAIL=0; SKIP=0
@@ -145,9 +144,9 @@ hostile_stop() { # $1=tag
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Fase 2 — Firefox (real)
+# Firefox (real)
 # ══════════════════════════════════════════════════════════════════════════════
-echo; echo "########## Fase 2 — Firefox (real) ##########"
+echo; echo "########## Firefox (real) ##########"
 if command -v firefox >/dev/null 2>&1; then
     firefox -new-instance -no-remote about:blank >/dev/null 2>&1 &
     FF=$!; SPIDS+=("$FF")
@@ -157,81 +156,81 @@ if command -v firefox >/dev/null 2>&1; then
         [ -n "$FFID" ] && break; sleep 0.3
     done
     if [ -n "$FFID" ]; then
-        ok "Fase2 Firefox mapped (id=$FFID)"
+        ok "Firefox mapped (id=$FFID)"
         timeout 8 xdotool windowactivate --sync "$FFID" 2>/dev/null; sleep 0.5
         # F11 fullscreen (EWMH/Core fullscreen path)
         timeout 8 xdotool key --window "$FFID" F11 2>/dev/null; sleep 0.8
         FFS="$(win_field "$FFID" 3)"
-        if [ "$FFS" = "1" ]; then ok "Fase2 Firefox enters fullscreen (EWMH fullscreen honored)"; else bad "Fase2 Firefox F11 did not reach fullscreen"; fi
+        if [ "$FFS" = "1" ]; then ok "Firefox enters fullscreen (EWMH fullscreen honored)"; else bad "Firefox F11 did not reach fullscreen"; fi
         timeout 8 xdotool key --window "$FFID" F11 2>/dev/null; sleep 0.5
         FFS2="$(win_field "$FFID" 3)"
-        [ "$FFS2" = "0" ] && ok "Fase2 Firefox leaves fullscreen cleanly" || bad "Fase2 Firefox stuck in fullscreen"
+        [ "$FFS2" = "0" ] && ok "Firefox leaves fullscreen cleanly" || bad "Firefox stuck in fullscreen"
         # maximize via _NET_WM_STATE through hostile-style message is out of scope;
         # record geometry only (observability, no behavior change).
-        info "Fase2 Firefox geom: $(tree | tree_lines | awk -v i="$FFID" '$1==i{print $5,$6,$7,$8}')"
+        info "Firefox geom: $(tree | tree_lines | awk -v i="$FFID" '$1==i{print $5,$6,$7,$8}')"
         kill "$FF" 2>/dev/null
     else
-        bad "Fase2 Firefox did not map"
+        bad "Firefox did not map"
     fi
 else
-    skip "Fase2 Firefox: /usr/bin/firefox not present (env-limited)"
+    skip "Firefox: /usr/bin/firefox not present (env-limited)"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Fase 3 — Wine (emulated via hostile): Cases A–F hostile sequences
+# Wine (emulated via hostile): Cases A–F hostile sequences
 # ══════════════════════════════════════════════════════════════════════════════
-echo; echo "########## Fase 3 — Wine (emulated) ##########"
+echo; echo "########## Wine (emulated) ##########"
 W="$(hostile_start wine)"
 hostile_cmd "$W" create
 WID="$(hostile_winid "$W")"
 if [ -n "$WID" ]; then
-    ok "Fase3 Wine-emul window created (id=$WID)"
+    ok "Wine-emul window created (id=$WID)"
     # Case A: aggressive resize-on-start + spam-resize
     hostile_cmd "$W" spam-resize 20
     sleep 0.4
     ROW="$(tree | tree_lines | awk -v i="$WID" '$1==i')"
-    [ -n "$ROW" ] && ok "Fase3 Case A resize storm survived (window still tracked)" || bad "Fase3 Case A window lost during resize storm"
+    [ -n "$ROW" ] && ok "Case A resize storm survived (window still tracked)" || bad "Case A window lost during resize storm"
     # Case B: client fullscreen toggle
     hostile_cmd "$W" fullscreen; sleep 0.5
     FSB="$(win_field "$WID" 3)"
-    [ "$FSB" = "1" ] && ok "Fase3 Case B client _NET_WM_STATE_FULLSCREEN honored" || bad "Fase3 Case B fullscreen not honored"
+    [ "$FSB" = "1" ] && ok "Case B client _NET_WM_STATE_FULLSCREEN honored" || bad "Case B fullscreen not honored"
     hostile_cmd "$W" fullscreen; sleep 0.4
     # Case C: popup/transient + aux window
     WC="$(hostile_start winechild)"; hostile_cmd "$WC" "transient $WID"; hostile_cmd "$WC" create
     WCID="$(hostile_winid "$WC")"
-    [ -n "$WCID" ] && ok "Fase3 Case C transient child created (child=$WCID of $WID)" || bad "Fase3 Case C transient child failed"
+    [ -n "$WCID" ] && ok "Case C transient child created (child=$WCID of $WID)" || bad "Case C transient child failed"
     hostile_stop "$WC"
     # Case D: focus capture via _NET_ACTIVE_WINDOW
     hostile_cmd "$W" active; sleep 0.4
     AX="$(active_win)"
-    [ "$AX" = "$(hexid "$WID")" ] && ok "Fase3 Case D _NET_ACTIVE_WINDOW -> focus follows (WM authority)" || info "Fase3 Case D active-window focus=$AX (may be deferred behind overlay)"
+    [ "$AX" = "$(hexid "$WID")" ] && ok "Case D _NET_ACTIVE_WINDOW -> focus follows (WM authority)" || info "Case D active-window focus=$AX (may be deferred behind overlay)"
     # Case E: destroy/recreate
     hostile_cmd "$W" destroy; sleep 0.3
-    [ -z "$(win_field "$WID" 0)" ] && ok "Fase3 Case E destroy clean" || bad "Fase3 Case E window survived destroy"
+    [ -z "$(win_field "$WID" 0)" ] && ok "Case E destroy clean" || bad "Case E window survived destroy"
     hostile_cmd "$W" create; sleep 0.3
     WID2="$(hostile_winid "$W")"
-    [ -n "$WID2" ] && ok "Fase3 Case E recreate works (new id=$WID2)" || bad "Fase3 Case E recreate failed"
+    [ -n "$WID2" ] && ok "Case E recreate works (new id=$WID2)" || bad "Case E recreate failed"
 else
-    bad "Fase3 Wine-emul window did not create"
+    bad "Wine-emul window did not create"
 fi
 hostile_stop "$W"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Fase 4 — Games (emulated + glxgears): _NET_WM_STATE_FULLSCREEN + OR windows
+# Games (emulated + glxgears): _NET_WM_STATE_FULLSCREEN + OR windows
 # ══════════════════════════════════════════════════════════════════════════════
-echo; echo "########## Fase 4 — Games (emulated) ##########"
+echo; echo "########## Games (emulated) ##########"
 G="$(hostile_start game)"
 hostile_cmd "$G" create; GID="$(hostile_winid "$G")"
 if [ -n "$GID" ]; then
-    ok "Fase4 game-emul window created (id=$GID)"
+    ok "game-emul window created (id=$GID)"
     hostile_cmd "$G" fullscreen; sleep 0.5
     GFS="$(win_field "$GID" 3)"
-    [ "$GFS" = "1" ] && ok "Fase4 client fullscreen honored (WM-managed fullscreen)" || bad "Fase4 game fullscreen not honored"
+    [ "$GFS" = "1" ] && ok "client fullscreen honored (WM-managed fullscreen)" || bad "game fullscreen not honored"
     hostile_cmd "$G" fullscreen; sleep 0.3
     hostile_cmd "$G" spam-resize 10; sleep 0.4
-    [ -n "$(win_field "$GID" 0)" ] && ok "Fase4 resize-on-start survived" || bad "Fase4 game lost during resize"
+    [ -n "$(win_field "$GID" 0)" ] && ok "resize-on-start survived" || bad "game lost during resize"
 else
-    bad "Fase4 game-emul window did not create"
+    bad "game-emul window did not create"
 fi
 hostile_stop "$G"
 # glxgears as a real GLX client (best-effort; needs GLX in Xephyr)
@@ -240,20 +239,20 @@ if command -v glxgears >/dev/null 2>&1; then
     GGID=""
     for _ in $(seq 1 40); do GGID="$(xdotool search --name glxgears 2>/dev/null|head -1)"; [ -n "$GGID" ]&&break; sleep 0.2; done
     if [ -n "$GGID" ]; then
-        ok "Fase4 glxgears (real GLX) mapped (id=$GGID)"
-        info "Fase4 glxgears geom: $(tree | tree_lines | awk -v i="$GGID" '$1==i{print $5,$6,$7,$8}')"
+        ok "glxgears (real GLX) mapped (id=$GGID)"
+        info "glxgears geom: $(tree | tree_lines | awk -v i="$GGID" '$1==i{print $5,$6,$7,$8}')"
         kill "$GG" 2>/dev/null
     else
-        info "Fase4 glxgears mapped but not found by xdotool (env quirk)"
+        info "glxgears mapped but not found by xdotool (env quirk)"
     fi
 else
-    skip "Fase4 glxgears not present (env-limited)"
+    skip "glxgears not present (env-limited)"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Fase 5 — _NET_ACTIVE_WINDOW: client grab vs WM authority
+# _NET_ACTIVE_WINDOW: client grab vs WM authority
 # ══════════════════════════════════════════════════════════════════════════════
-echo; echo "########## Fase 5 — _NET_ACTIVE_WINDOW ##########"
+echo; echo "########## _NET_ACTIVE_WINDOW ##########"
 A5="$(hostile_start a5)"; hostile_cmd "$A5" create; AID="$(hostile_winid "$A5")"
 B5="$(hostile_start b5)"; hostile_cmd "$B5" create; BID="$(hostile_winid "$B5")"
 if [ -n "$AID" ] && [ -n "$BID" ]; then
@@ -264,21 +263,21 @@ if [ -n "$AID" ] && [ -n "$BID" ]; then
     BHEX="$(hexid "$BID")"; GOT="$(active_win)"
     BF="$(win_field "$BID" 10)"; BXF="$(win_field "$BID" 11)"
     if [ "$GOT" = "$BHEX" ] && [ "$BF" = "1" ]; then
-        ok "Fase5 _NET_ACTIVE_WINDOW: B gained focus (focus=1, x11_focus=1)"
+        ok "_NET_ACTIVE_WINDOW: B gained focus (focus=1, x11_focus=1)"
     else
-        info "Fase5 _NET_ACTIVE_WINDOW: focus=$BF x11_focus=$BXF active=$GOT expected $BHEX (may be deferred/pending per overlay policy)"
+        info "_NET_ACTIVE_WINDOW: focus=$BF x11_focus=$BXF active=$GOT expected $BHEX (may be deferred/pending per overlay policy)"
     fi
     BP="$(win_field "$BID" 13)"
-    info "Fase5 B pending=$BP overlay(a)=$(win_field "$AID" 12) — observability captured"
+    info "B pending=$BP overlay(a)=$(win_field "$AID" 12) — observability captured"
 else
-    bad "Fase5 windows did not create"
+    bad "windows did not create"
 fi
 hostile_stop "$A5"; hostile_stop "$B5"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Fase 6 — Transient chains A→B→…→E at depths 1,2,4,5,8 (MAX_TRANSIENT_DEPTH=4)
+# Transient chains A→B→…→E at depths 1,2,4,5,8 (MAX_TRANSIENT_DEPTH=4)
 # ══════════════════════════════════════════════════════════════════════════════
-echo; echo "########## Fase 6 — Transient chains ##########"
+echo; echo "########## Transient chains ##########"
 for depth in 1 2 4 5 8; do
     # build chain root..depth
     prev=""
@@ -301,31 +300,31 @@ for depth in 1 2 4 5 8; do
         [ -n "$(win_field "$id" 0)" ] && present=$((present+1))
     done
     if [ "$present" -eq "$depth" ]; then
-        ok "Fase6 depth=$depth: all $depth transient links tracked (MAX_TRANSIENT_DEPTH=4 boundary documented; stacking/ownership allowed to change beyond it)"
+        ok "depth=$depth: all $depth transient links tracked (MAX_TRANSIENT_DEPTH=4 boundary documented; stacking/ownership allowed to change beyond it)"
     else
-        bad "Fase6 depth=$depth: only $present/$depth links tracked"
+        bad "depth=$depth: only $present/$depth links tracked"
     fi
     # teardown chain from leaf up
     for i in $(seq "$depth" -1 1); do hostile_stop "${tagprefix}_$i"; done
     sleep 0.3
 done
 
-# ── shut down our instance before Fase 7 (it manages its own display/runtime) ──
-echo; echo "########## Fase 7 — multi-monitor (delegates to tests/xephyr-2mon.sh) ##########"
+# ── shut down our instance before the multi-monitor run (it manages its own display/runtime) ──
+echo; echo "########## multi-monitor (delegates to tests/xephyr-2mon.sh) ##########"
 cleanup 2>/dev/null
 sleep 1
 if [ -x tests/xephyr-2mon.sh ]; then
     if bash tests/xephyr-2mon.sh; then
-        ok "Fase7 xephyr-2mon suite PASSED"
+        ok "xephyr-2mon suite PASSED"
     else
-        bad "Fase7 xephyr-2mon suite FAILED"
+        bad "xephyr-2mon suite FAILED"
     fi
 else
-    skip "Fase7 tests/xephyr-2mon.sh not found"
+    skip "tests/xephyr-2mon.sh not found"
 fi
 
 # ── summary ───────────────────────────────────────────────────────────────────
 echo; echo "────────────────────────────────────────"
-echo "compat-matrix (Fase 2/3/4/5/6): $PASS passed, $FAIL failed, $SKIP skipped"
+echo "compat-matrix: $PASS passed, $FAIL failed, $SKIP skipped"
 echo "────────────────────────────────────────"
 [ "$FAIL" -eq 0 ]

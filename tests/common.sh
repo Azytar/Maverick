@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Shared harness for Maverick Xephyr end-to-end tests (Fase 6).
+# Shared harness for Maverick Xephyr end-to-end tests.
 #
 # Provides:
 #   build_helpers        compile tests/mgdwin (+ pxsample/staticwin/winmove if absent)

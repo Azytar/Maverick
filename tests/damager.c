@@ -141,7 +141,7 @@ int main(int argc, char **argv) {
 
     // Override-redirect so the tiling WM leaves the window exactly where we put
     // it — the harness samples absolute screen coordinates, and a tiled window
-    // would be relocated. The compositor still redirects + textures it.
+    // would be relocated.
     XSetWindowAttributes wa;
     wa.override_redirect = True;
     Window w = XCreateWindow(d, RootWindow(d, scr), 200, 200, 420, 320, 0,
@@ -198,7 +198,7 @@ int main(int argc, char **argv) {
         // Erase the previous dot (small damage) then draw the new one (small
         // damage at a new location) — two small repaints per tick. After frame
         // 30 the dot settles at a fixed spot, so every earlier dot position has
-        // been erased by the client and the compositor must redraw it back to the
+        // been erased by the client and the server must redraw it back to the
         // base colour (the residue test samples one such spot).
         if (ppx >= 0) {
             XSetForeground(d, gc, base);

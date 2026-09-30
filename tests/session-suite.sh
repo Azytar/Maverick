@@ -263,33 +263,16 @@ echo "7. inspect"
 "$MAVERICKCTL_BIN" inspect suite --json | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
-for k in ("name","state","display","resolution","windows","layout","compositor","process_count"):
+for k in ("name","state","display","resolution","windows","layout","process_count"):
     assert k in d, f"missing {k}"
-assert d["compositor"]["backend"] in ("opengl","vulkan"), d["compositor"]
 assert d["layout"]["type"] == "column", d["layout"]
 assert d["windows"]["total"] >= 2, d["windows"]
-' 2>/dev/null && ok "inspect --json carries session, windows, layout, compositor and processes" \
+' 2>/dev/null && ok "inspect --json carries session, windows, layout and processes" \
                || bad "inspect --json is missing or wrong"
-"$MAVERICKCTL_BIN" inspect suite 2>/dev/null | grep -q COMPOSITOR \
-    && ok "inspect reports the compositor" || bad "inspect has no COMPOSITOR section"
 echo
 
-# ── 8. compositor on/off, compared without touching the primary session ────────
-echo "8. compositor"
-"$MAVERICKCTL_BIN" session remove suite --force >/dev/null 2>&1
-"$MAVERICKCTL_BIN" session create suite --binary "$MAVERICK_BIN" --resolution 1280x720 \
-    --no-compositor >/dev/null 2>&1
-if [ $? -eq 0 ]; then
-    "$MAVERICKCTL_BIN" inspect suite --json | python3 -c '
-import json,sys
-d=json.load(sys.stdin)
-assert d["compositor_requested"] is False, d["compositor_requested"]
-assert d["compositor"]["active"] is False, d["compositor"]
-' 2>/dev/null && ok "--no-compositor runs the real window manager without the compositor" \
-                || bad "--no-compositor did not disable the compositor"
-else
-    bad "could not create a no-compositor session"
-fi
+# ── 8. a fresh session, replacing the one section 7 inspected ───────────────
+echo "8. session restart"
 "$MAVERICKCTL_BIN" session remove suite --force >/dev/null 2>&1
 "$MAVERICKCTL_BIN" session create suite --binary "$MAVERICK_BIN" --resolution 1280x720 >/dev/null 2>&1
 note "sessions now: $("$MAVERICKCTL_BIN" session list 2>/dev/null | awk 'NR>3 {printf "%s ", $1}')"
@@ -708,7 +691,7 @@ SIG_DISPLAY=""
 sig_disp_run() { # signal, -> prints "exited|leaked|alive <artifact-count>"
     local sig="$1"
     local log=/tmp/maverick-sigdisp.$$.log
-    DISPLAY="$SIG_DISPLAY" MAVERICK_NO_COMPOSITOR=1 \
+    DISPLAY="$SIG_DISPLAY" \
         setsid bash -c "trap '' INT QUIT; exec '$MAVERICK_BIN' --name sigdisp --config /dev/null" \
         >"$log" 2>&1 &
     local pid=$!
@@ -917,93 +900,82 @@ echo "16. X server loss"
 #
 # A window manager that loses its X server still has to make its own record
 # truthful: no identity file, no control socket, and a log that says which half
-# of the teardown ran. Run twice, because the two configurations fail in
-# different ways: with the compositor compiled out, every X call in the teardown
-# is a void request that fails silently, so a shutdown that runs the X half
-# anyway looks perfect; with the compositor on, dropping it releases GLX
-# resources on a display whose server is gone, and libX11 answers that with an
-# I/O error rather than with a return value.
-for XD_NOCOMP in "" "--no-compositor"; do
-    XDNAME="xdis${XD_NOCOMP:+-nc}"
-    "$MAVERICKCTL_BIN" session remove "$XDNAME" --force >/dev/null 2>&1
-    XD_EXTRA=""
-    [ -n "$XD_NOCOMP" ] && XD_EXTRA="compositor off" || XD_EXTRA="compositor on"
-    # shellcheck disable=SC2086
-    if "$MAVERICKCTL_BIN" session create "$XDNAME" --binary "$MAVERICK_BIN" \
-            --resolution 640x480 $XD_NOCOMP >/dev/null 2>&1; then
-        ok "[$XD_EXTRA] the session was created"
-    else
-        bad "[$XD_EXTRA] could not create the session"
-        continue
-    fi
-    # A real window in it, so the compositor owns real state at the moment the
-    # server dies. Without one there is nothing for the compositor's teardown to
-    # reach, and the compositor case would quietly stop testing anything.
-    XAUTHORITY="$XDG_RUNTIME_DIR/maverick/$XDNAME/Xauthority" \
-        "$CLIENT" >/dev/null 2>&1 &
-    XDC=$!
-    sleep 1
-    read -r XD_XPID XD_WMPID <<EOF
+# of the teardown ran. A shutdown that runs the X half anyway looks perfect,
+# because every X call in it is a void request that fails silently.
+XDNAME="xdis"
+"$MAVERICKCTL_BIN" session remove "$XDNAME" --force >/dev/null 2>&1
+if "$MAVERICKCTL_BIN" session create "$XDNAME" --binary "$MAVERICK_BIN" \
+    --resolution 640x480 >/dev/null 2>&1; then
+ok "the session was created"
+else
+bad "could not create the session"
+fi
+# A real window in it, so the window manager owns real X resources at the
+# moment the server dies. Without one the teardown has nothing to reach and
+# this case would quietly stop testing anything.
+XAUTHORITY="$XDG_RUNTIME_DIR/maverick/$XDNAME/Xauthority" \
+"$CLIENT" >/dev/null 2>&1 &
+XDC=$!
+sleep 1
+read -r XD_XPID XD_WMPID <<EOF
 $("$MAVERICKCTL_BIN" session list --json | python3 -c "
 import json,sys
 try:
-    s = next(x for x in json.load(sys.stdin)['sessions'] if x['name']=='$XDNAME')
-    print(s['x_pid'] or 0, s['pid'] or 0)
+s = next(x for x in json.load(sys.stdin)['sessions'] if x['name']=='$XDNAME')
+print(s['x_pid'] or 0, s['pid'] or 0)
 except Exception:
-    print(0, 0)")
+print(0, 0)")
 EOF
-    if [ "${XD_XPID:-0}" = "0" ]; then
-        bad "[$XD_EXTRA] the session reports no X server pid"
-        kill -9 "$XDC" 2>/dev/null
-        "$MAVERICKCTL_BIN" session remove "$XDNAME" --force >/dev/null 2>&1
-        continue
-    fi
-    kill -9 "$XDC" 2>/dev/null
-    kill -9 "$XD_XPID" 2>/dev/null
-    XD_GONE=0
-    for i in $(seq 1 60); do
-        kill -0 "$XD_WMPID" 2>/dev/null || { XD_GONE=1; break; }
-        sleep 0.1
-    done
-    if [ "$XD_GONE" = 1 ]; then
-        ok "[$XD_EXTRA] the window manager exited after its X server was killed"
-    else
-        bad "[$XD_EXTRA] the window manager survived the death of its X server"
-        kill -9 "$XD_WMPID" 2>/dev/null
-    fi
-    XD_DIR="$XDG_RUNTIME_DIR/maverick/$XDNAME"
-    if [ -e "$XD_DIR/$XDNAME.json" ]; then
-        bad "[$XD_EXTRA] the identity record outlived the process ($XD_DIR/$XDNAME.json)"
-    else
-        ok "[$XD_EXTRA] the identity record is gone"
-    fi
-    if [ -e "$XD_DIR/control.sock" ]; then
-        bad "[$XD_EXTRA] the control socket outlived the process"
-    else
-        ok "[$XD_EXTRA] the control socket is gone"
-    fi
-    XD_LOG="$XD_DIR/maverick.log"
-    if grep -q 'X11 connection lost' "$XD_LOG" 2>/dev/null; then
-        ok "[$XD_EXTRA] the log says the connection was lost"
-    else
-        bad "[$XD_EXTRA] the log never mentions the lost connection"
-    fi
-    if grep -q 'X teardown skipped' "$XD_LOG" 2>/dev/null; then
-        ok "[$XD_EXTRA] the log says the X half of the teardown was skipped"
-    else
-        bad "[$XD_EXTRA] the log does not say the X teardown was skipped"
-    fi
-    # libX11's I/O error handler prints this and exits; one after the disconnect
-    # means the shutdown reached back into a server that was already gone.
-    XD_AFTER=$(awk '/X11 connection lost/{seen=1} seen' "$XD_LOG" 2>/dev/null \
-        | grep -c 'broken (explicit kill or server shutdown)' || true)
-    if [ "${XD_AFTER:-0}" -eq 0 ]; then
-        ok "[$XD_EXTRA] no request reached the dead server"
-    else
-        bad "[$XD_EXTRA] $XD_AFTER 'X connection broken' line(s) after the disconnect"
-    fi
-    "$MAVERICKCTL_BIN" session remove "$XDNAME" --force >/dev/null 2>&1
+if [ "${XD_XPID:-0}" = "0" ]; then
+bad "the session reports no X server pid"
+kill -9 "$XDC" 2>/dev/null
+"$MAVERICKCTL_BIN" session remove "$XDNAME" --force >/dev/null 2>&1
+fi
+kill -9 "$XDC" 2>/dev/null
+kill -9 "$XD_XPID" 2>/dev/null
+XD_GONE=0
+for i in $(seq 1 60); do
+kill -0 "$XD_WMPID" 2>/dev/null || { XD_GONE=1; break; }
+sleep 0.1
 done
+if [ "$XD_GONE" = 1 ]; then
+ok "the window manager exited after its X server was killed"
+else
+bad "the window manager survived the death of its X server"
+kill -9 "$XD_WMPID" 2>/dev/null
+fi
+XD_DIR="$XDG_RUNTIME_DIR/maverick/$XDNAME"
+if [ -e "$XD_DIR/$XDNAME.json" ]; then
+bad "the identity record outlived the process ($XD_DIR/$XDNAME.json)"
+else
+ok "the identity record is gone"
+fi
+if [ -e "$XD_DIR/control.sock" ]; then
+bad "the control socket outlived the process"
+else
+ok "the control socket is gone"
+fi
+XD_LOG="$XD_DIR/maverick.log"
+if grep -q 'X11 connection lost' "$XD_LOG" 2>/dev/null; then
+ok "the log says the connection was lost"
+else
+bad "the log never mentions the lost connection"
+fi
+if grep -q 'X teardown skipped' "$XD_LOG" 2>/dev/null; then
+ok "the log says the X half of the teardown was skipped"
+else
+bad "the log does not say the X teardown was skipped"
+fi
+# libX11's I/O error handler prints this and exits; one after the disconnect
+# means the shutdown reached back into a server that was already gone.
+XD_AFTER=$(awk '/X11 connection lost/{seen=1} seen' "$XD_LOG" 2>/dev/null \
+| grep -c 'broken (explicit kill or server shutdown)' || true)
+if [ "${XD_AFTER:-0}" -eq 0 ]; then
+ok "no request reached the dead server"
+else
+bad "$XD_AFTER 'X connection broken' line(s) after the disconnect"
+fi
+"$MAVERICKCTL_BIN" session remove "$XDNAME" --force >/dev/null 2>&1
 echo
 
 echo "-------------------------------------------"

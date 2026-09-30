@@ -6,6 +6,20 @@
 /tests/mgdwin
 /tests/pxsample
 /tests/staticwin
+/tests/dockstrut
+/tests/fsclient
+/tests/hostile
+/tests/keyboard-probe
+/tests/realwin
+/tests/setmon
+/tests/stacking-probe
+/tests/stress
+/tests/xtest-stress
+/tests/xtest_input
+
+# run artifacts from the Xephyr and Xvfb harnesses
+/tests/*.log
+__pycache__/
 
 # `cargo mutants` working directory: generated output, never source. The
 # trailing wildcard covers the `.old` suffix the tool appends when it rotates an
