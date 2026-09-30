@@ -15,10 +15,6 @@
 //!    clients and keybind-spawned programs), which are never waited on and are
 //!    therefore better auto-reaped than left as zombies.
 //!
-//! There is deliberately no third clause. The one thing in this process that
-//! wanted a child's exit status was the wallpaper decoder's fallback to an
-//! external converter, and Maverick no longer decodes anything: the root
-//! window's background belongs to an external program with its own process.
 //! `no_wait_in_wm.rs` covers the other half of the rule — that no code linked
 //! into `maverick` calls a wait at all.
 //!

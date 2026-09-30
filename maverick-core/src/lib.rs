@@ -2,7 +2,6 @@
 //! workspace membership, layout geometry, floats, cameras, and dock
 //! reservations.
 //!
-
 //! `std`-only, no `unsafe`, and free of X11/GL/rendering types: the core speaks
 //! `WindowId` (a plain `u32`) and `Rect`, so every transition can be reasoned
 //! about and tested without an X server or a GPU.

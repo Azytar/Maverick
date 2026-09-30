@@ -27,26 +27,23 @@ here has a `file:line` behind it.
                    X11
 ```
 
-Two supporting crates sit alongside, not inside, the correctness path:
+Three supporting crates sit alongside, not inside, the correctness path:
 
 - **`maverick-toml`** — a zero-dependency TOML-subset parser. Configuration is
   read at startup and on `reload`; it never influences a frame.
 - **`maverick-sys`** — the OS boundary: signals, `poll`, uid/gid, process-tree
   signalling, instance identity, the Unix-socket control protocol, and the
   `maverickctl` CLI engine (a second shipped binary).
-- **`maverick-img`** — dependency-free image decoding for the root-pixmap
-  wallpaper.
-
 Configuration is data. It is validated, normalised, and reported on at load
 time (`src/userconfig.rs`), and it is never consulted to decide what a window's
 geometry is.
 
 ### The runtime dependency set
 
-Seven crates, of which four are workspace-local:
+Six crates, of which four are workspace-local:
 
 ```
-maverick → maverick-core, maverick-x11, maverick-toml, maverick-img,
+maverick → maverick-core, maverick-x11, maverick-toml,
            maverick-sys, libc, x11rb
 ```
 

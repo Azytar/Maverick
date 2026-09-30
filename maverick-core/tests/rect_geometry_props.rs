@@ -1,5 +1,5 @@
-//! Properties of `Rect`: the one geometry type every placement, reservation and
-//! wallpaper decision is expressed in.
+//! Properties of `Rect`: the one geometry type every placement and reservation
+//! decision is expressed in.
 //!
 //! The contract under test is the one the type documents: `x`/`y` are signed
 //! absolute screen coordinates, `w`/`h` are unsigned so a degenerate size is

@@ -68,7 +68,6 @@ bloqueo ni lanzador de aplicaciones.
   asientan de inmediato, sin animación de spring.
 - Renderizado OpenGL/GLX opcional: animación de scroll/zoom, opacidad de
   ventanas, esquinas redondeadas, fondo de pantalla con imagen y fondo GLSL.
-- Fondo de imagen estático vía pixmap raíz incluso sin compositor.
 - Reinicio en sitio, adopción de ventanas existentes con `--replace` y sockets
   de control aislados para múltiples instancias de Maverick.
 - Tests unitarios/de regresión en Rust y harnesses de integración separados
@@ -221,7 +220,7 @@ creación del contexto u otro compositor posee la selección de pantalla.
 
 Los efectos implementados son opacidad de ventana
 (`_NET_WM_WINDOW_OPACITY`, también configurable por regla), esquinas
-redondeadas y fondo de pantalla — no blur ni sombras. El redibujado parcial
+redondeadas — no blur ni sombras. El redibujado parcial
 necesita `GLX_EXT_buffer_age` y un back buffer utilizable; si no, los frames
 se redibujan completos. El bypass de fullscreen depende de la presentación y
 el apilado reales, no está garantizado para cada cliente fullscreen.
@@ -508,29 +507,16 @@ rechaza peticiones EWMH fullscreen del cliente, no el toggle del usuario.
 `true_fullscreen` selecciona una política de overlay exclusiva y tiene
 precedencia sobre esa denegación.
 
-### Fondo de pantalla y autostart
-
-```toml
-[wallpaper]
-path = "~/Pictures/wallpaper.png"
-mode = "fill"
-```
-
-Los modos de imagen son `fill`, `fit`, `stretch` y `center`. La decodificación
-de PNG, PPM/PNM, QOI, BMP básico y farbfeld está en el árbol; otros formatos
-(o fallos de decodificación nativa) usan conversión externa. Con GL activo,
-los fondos `.glsl`/`.frag` pueden usar `u_time`, `u_resolution` y
-`u_delta_time`. El fondo de vídeo no tiene implementación. El viejo comentario
-del ejemplo sobre "requiere compositor" para imágenes no aplica a la ruta
-actual de pixmap raíz estático.
+### Autostart
 
 `[autostart] commands` es una lista de listas de argumentos, por ejemplo
 `commands = [["polybar", "main"]]`. Proveer una lista no vacía reemplaza la
 compilada; no hay override documentado con lista vacía, y una entrada vacía
-se descarta con aviso. Usa aplicaciones compatibles con X11; un panel solo
-Wayland no se vuelve compatible por listarlo aquí. Los docks que publican
-struts reservan workarea. El arranque de sesión y el restart no son un
-supervisor de servicios de propósito general.
+se descarta con aviso. Aquí es también donde va un compositor o un programa de
+fondo de pantalla: Maverick los arranca y nunca vuelve a hablar con ellos. Usa
+aplicaciones compatibles con X11; un panel solo Wayland no se vuelve compatible
+por listarlo aquí. Los docks que publican struts reservan workarea. El arranque
+de sesión y el restart no son un supervisor de servicios de propósito general.
 
 ## Control y ciclo de sesión
 
@@ -546,7 +532,7 @@ maverickctl quit --name desktop --confirm
 ```
 
 `maverickctl` también reenvía líneas de acción, por ejemplo
-`maverickctl view 3` o `maverickctl wallpaper clear`. Cada instancia tiene
+`maverickctl view 3`. Cada instancia tiene
 un directorio de runtime privado y un socket Unix bajo
 `$XDG_RUNTIME_DIR/maverick/<session-id>/`. El descubrimiento comprueba
 identidad de proceso y actividad del socket. La selección prefiere
@@ -601,7 +587,7 @@ temporales aislados y comandos privilegiados simulados; no es una instalación
 del sistema.
 
 `tests/xephyr-*.sh` cubre interacciones fullscreen/puntero, muerte de
-clientes, restart, shutdown, casos borde de IPC, fondo de pantalla, daño del
+clientes, restart, shutdown, casos borde de IPC, daño del
 compositor y escenarios de monitores. `tests/xephyr-suite.sh` es un harness
 de integración manual separado con aplicaciones reales opcionales; fuerza el
 compositor integrado a off por fallos conocidos de GLX anidado. Estos scripts
@@ -641,14 +627,14 @@ servidor anidado que soporte la ruta GLX requerida.
 | `src/main.rs` | CLI, selección de configuración, señales, vida útil de instancia/control, arranque del backend |
 | `maverick-core/` | Tipos de dominio sin dependencias y modelo de fuente de fondo |
 | `src/core/` | Motor, acciones/comandos/efectos/eventos, layout, presentación, estado deseado, recuperación de sesión |
-| `src/backend/x11/` | Manejo de eventos, gestión de clientes, entrada, EWMH, struts, reconciliación, planificación de frames, fondo raíz |
+| `src/backend/x11/` | Manejo de eventos, gestión de clientes, entrada, EWMH, struts, reconciliación, planificación de frames |
 | `src/config.rs`, `src/userconfig.rs` | Defaults compilados, fusión de config, validación |
 | `maverick-x11/` | Arranque de conexión Xlib/XCB compartida |
 | `maverick-sys/` | Identidad/descubrimiento de instancias, socket/hub de control, el modelo Maverick Session, `maverickctl` |
 | `maverick-render/` | Tipos y trait orientados al renderer; ningún backend del árbol implementa `Renderer` todavía |
 | `maverick-gl/` | Renderer OpenGL/GLX y FFI/carga en el árbol |
 | `maverick-vk/` | Código experimental de device/surface/swapchain Vulkan, no integrado al WM |
-| `maverick-toml/`, `maverick-img/` | Parser TOML-subset y decodificador PNG/conversión externa de imágenes |
+| `maverick-toml/` | Parser TOML-subset |
 | `tests/` | Sondas X11 reales y scripts de integración, smoke tests del instalador |
 | `showcase/` | Harness aislado y reproducible de presentación técnica |
 
@@ -668,7 +654,6 @@ dependiendo de librerías X11 nativas.
 ├── maverick-gl/         # Compositor OpenGL
 ├── maverick-vk/         # Backend Vulkan
 ├── maverick-render/     # Tipos/trait de renderer (sin implementador en el árbol)
-├── maverick-img/        # Soporte de imágenes
 ├── maverick-toml/       # Soporte TOML/config
 ├── maverick-sys/        # Interfaces IPC/control
 ├── config/              # Configuración de ejemplo
@@ -697,7 +682,7 @@ interacciones.
   opcional y sensible a drivers. Vulkan no está conectado a la composición de
   ventanas.
 - **Alcance:** solo Linux/X11; sin backend Wayland, shell de escritorio
-  integrado, blur, sombras ni fondo de vídeo.
+  integrado, blur ni sombras.
 - **Layout:** Column es el único layout implementado. Los índices de
   workspace están limitados a 1–9; los nombres son cosméticos.
 - **Compatibilidad:** el soporte ICCCM/EWMH está implementado para las
@@ -725,8 +710,8 @@ fechas de release prometidas:
   la cobertura de drivers.
 - Evaluar integrar el bootstrap Vulkan con texturas de ventanas reales y el
   contrato del renderer antes de llamarlo backend soportado.
-- Mantener fiable el fondo de imagen/shader; el vídeo queda reservado hasta
-  que exista un diseño de decodificador y ciclo de recursos.
+- Mantener honesta la workarea y los struts frente a docks que reservan espacio
+  de pantalla que el gestor de ventanas no posee.
 
 ## Capturas
 

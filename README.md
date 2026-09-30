@@ -59,7 +59,6 @@ notification service, lock screen, or application launcher.
   immediately, without spring animation.
 - Optional OpenGL/GLX rendering: scroll/zoom animation, window opacity, rounded
   corners, image wallpaper, and GLSL wallpaper.
-- Static image wallpaper through a root pixmap even without the compositor.
 - In-place restart, adoption of existing windows with `--replace`, and isolated
   control sockets for multiple Maverick instances.
 - Unit/regression tests in Rust and separate real-X11 integration harnesses.
@@ -181,8 +180,7 @@ MAVERICK_NO_COMPOSITOR=1 maverick
 ```
 
 Alternatively, set `[compositor] enabled = false`, or build the WM with
-`--no-default-features`. Geometry changes are immediate. Static wallpaper is
-painted through the X11 root pixmap; GLSL wallpaper requires the GL path. Rounded
+`--no-default-features`. Geometry changes are immediate. Rounded
 corners can use the X Shape path. An external compositor owns its own effects;
 Maverick's GPU animations are not delegated to it.
 
@@ -194,7 +192,7 @@ is loaded at runtime. Initialization can fall back to plain X11 if GL is unavail
 context creation fails, or another compositor owns the screen selection.
 
 Implemented effects are window opacity (`_NET_WM_WINDOW_OPACITY`, also settable
-by rule), rounded corners, and wallpaper—not blur or shadows. Partial redraw needs
+by rule) and rounded corners—not blur or shadows. Partial redraw needs
 `GLX_EXT_buffer_age` and a usable back buffer; otherwise frames are fully redrawn.
 Fullscreen bypass is conditional on the actual presentation and stacking state,
 not guaranteed for every fullscreen client.
@@ -228,8 +226,7 @@ sudo pacman -S --needed mesa libxcomposite
 The compiled launch bindings use `alacritty` and `rofi`; install those or override
 the bindings. Compiled autostart launches `xdg-desktop-portal` and
 `xdg-desktop-portal-gtk`; use an explicit autostart list to change or disable it.
-These applications are not required by the layout engine. Non-PNG image wallpaper
-may need `ffmpeg` or ImageMagick as a converter.
+These applications are not required by the layout engine.
 
 ### Build
 
@@ -463,27 +460,16 @@ forces normalization. `deny_fullscreen` refuses client EWMH fullscreen requests,
 not the user's WM toggle. `true_fullscreen` selects an exclusive overlay policy
 and takes precedence over that denial.
 
-### Wallpaper and autostart
-
-```toml
-[wallpaper]
-path = "~/Pictures/wallpaper.png"
-mode = "fill"
-```
-
-Image modes are `fill`, `fit`, `stretch`, and `center`. PNG, PPM/PNM, QOI, basic BMP,
-and farbfeld decoding are in-tree; other formats (or native decoding failures) use
-external conversion. With GL active, `.glsl`/`.frag`
-wallpapers can use `u_time`, `u_resolution`, and `u_delta_time`. Video wallpaper
-has no implementation. The sample's older “requires compositor” image comment
-does not apply to the current static root-pixmap path.
+### Autostart
 
 `[autostart] commands` is a list of argument lists, for example
 `commands = [["polybar", "main"]]`. Supplying a non-empty command list replaces the
 compiled one; there is no documented empty-list override, and an empty entry is
-discarded with a warning. Use X11-compatible applications; a Wayland-only
-panel is not made compatible by listing it here. Docks that publish struts reserve
-workarea. Session startup and restart are not a general-purpose service supervisor.
+discarded with a warning. This is also where a compositor or a wallpaper program
+belongs — Maverick starts them and never talks to them again. Use X11-compatible
+applications; a Wayland-only panel is not made compatible by listing it here.
+Docks that publish struts reserve workarea. Session startup and restart are not a
+general-purpose service supervisor.
 
 ## Control and session lifecycle
 
@@ -499,7 +485,7 @@ maverickctl quit --name desktop --confirm
 ```
 
 `maverickctl` also forwards action lines verbatim, for example
-`maverickctl view 3` or `maverickctl wallpaper clear`; a word it does not
+`maverickctl view 3`; a word it does not
 recognise as a command is passed to the window manager, which is the only thing
 that can tell an action from a query topic from a typo. Each instance has a
 private runtime directory and
@@ -595,7 +581,7 @@ The installer smoke test uses isolated temporary directories and stubbed privile
 commands; it is not a system installation.
 
 `tests/xephyr-*.sh` covers fullscreen/pointer interactions, client death, restart,
-shutdown, IPC edge cases, wallpaper, compositor damage, and monitor scenarios.
+shutdown, IPC edge cases, compositor damage, and monitor scenarios.
 `tests/xephyr-suite.sh` is a separate manual integration harness with optional real
 applications; it forces the built-in compositor off because of known nested-GLX
 failures. These scripts are **not all isolated to the same standard**: some older
@@ -630,16 +616,16 @@ server that supports the required GLX path.
 | Location | Responsibility |
 | --- | --- |
 | `src/main.rs` | CLI, configuration selection, signals, instance/control lifetime, backend startup |
-| `maverick-core/` | Dependency-free domain types and wallpaper source model |
+| `maverick-core/` | Dependency-free domain types |
 | `src/core/` | Engine, actions/commands/effects/events, layout, presentation, desired state, session recovery |
-| `src/backend/x11/` | Event handling, client management, input, EWMH, struts, reconciliation, frame scheduling, root wallpaper |
+| `src/backend/x11/` | Event handling, client management, input, EWMH, struts, reconciliation, frame scheduling |
 | `src/config.rs`, `src/userconfig.rs` | Compiled defaults, config merging, validation |
 | `maverick-x11/` | Shared Xlib/XCB connection bootstrap |
 | `maverick-sys/` | Instance identity/discovery, control socket/hub, the Maverick Session model, `maverickctl` |
 | `maverick-render/` | Renderer-facing types and trait; no in-tree backend implements `Renderer` yet |
 | `maverick-gl/` | OpenGL/GLX renderer and in-tree FFI/loading |
 | `maverick-vk/` | Experimental Vulkan device/surface/swapchain code, not integrated into the WM |
-| `maverick-toml/`, `maverick-img/` | TOML-subset parser and PNG decoder/external image conversion |
+| `maverick-toml/` | TOML-subset parser |
 | `tests/` | Real-X11 probes and integration scripts, installer smoke tests |
 | `showcase/` | Isolated, reproducible technical presentation harness |
 
@@ -658,7 +644,6 @@ or async-runtime requirement, but still depends on native X11 libraries.
 ├── maverick-gl/         # OpenGL compositor
 ├── maverick-vk/         # Vulkan backend
 ├── maverick-render/     # Renderer types/trait (no in-tree implementor)
-├── maverick-img/        # Image support
 ├── maverick-toml/       # TOML/config support
 ├── maverick-sys/        # IPC/control interfaces, Maverick Sessions
 ├── config/              # Example configuration
@@ -689,7 +674,7 @@ certification of broad application compatibility or long-running reliability.
 - **Experimental rendering:** OpenGL is implemented but remains optional and
   driver-sensitive. Vulkan is not connected to window compositing.
 - **Scope:** Linux/X11 only; no Wayland backend, built-in desktop shell, blur,
-  shadows, or video wallpaper.
+  or shadows.
 - **Layout:** Column is the only implemented layout. Workspace indices are limited
   to 1–9; names are cosmetic.
 - **Compatibility:** ICCCM/EWMH support is implemented for the WM's needs, not a
@@ -723,8 +708,8 @@ release dates:
 - Harden OpenGL startup, damage handling, fullscreen bypass, and driver coverage.
 - Evaluate integrating the Vulkan bootstrap with real window textures and the
   renderer contract before calling it a supported backend.
-- Keep image/shader wallpaper reliable; video remains reserved until a decoder
-  and resource-lifecycle design exist.
+- Keep the workarea and struts honest against docks that reserve screen space
+  the window manager does not own.
 
 ## Screenshots
 
