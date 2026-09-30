@@ -194,3 +194,137 @@ fn the_monitor_change_handler_re_derives_the_camera_before_projecting() {
          found {calls} call site(s)"
     );
 }
+
+// ── The input path never waits on the X server ──────────────────────────────
+//
+// A wheel notch used to cost ~80 X requests, a dozen of them round trips, all
+// on the one thread that also drains the socket; at wheel rates the backlog grew
+// without bound. The fixes are only durable if the *shape* is protected, and the
+// shape is: no handler on the input path blocks for a reply, and nothing per
+// event re-installs state that does not depend on the event.
+
+/// The body of `fn name`, from its signature to the first line indented back to
+/// the signature's own level (a closing brace). Panics if the function is gone,
+/// for the same reason `production_source` does.
+fn fn_body(src: &str, name: &str) -> String {
+    let sig = format!("fn {name}(");
+    let start = src
+        .find(&sig)
+        .unwrap_or_else(|| panic!("`{sig}` not found: renamed or moved, update this constraint"));
+    let line_start = src[..start].rfind('\n').map_or(0, |i| i + 1);
+    let indent = src[line_start..].chars().take_while(|c| *c == ' ').count();
+    let closer = format!("\n{}}}\n", " ".repeat(indent));
+    let end = src[start..].find(&closer).map_or(src.len(), |i| start + i);
+    src[start..end].to_string()
+}
+
+fn assert_no_blocking_reply(src: &str, func: &str, why: &str) {
+    // `src` is either a whole module (then `func` names the function to slice
+    // out) or an already-sliced body (then `func` is only the label).
+    let body = if src.contains(&format!("fn {func}(")) {
+        fn_body(src, func)
+    } else {
+        src.to_string()
+    };
+    for needle in [".reply()", ".check()", ".sync()", "get_input_focus", "get_property"] {
+        let hits = code_lines_containing(&body, needle);
+        assert!(
+            hits.is_empty(),
+            "`{func}` is on the input path and must not block on the X server, but it \
+             contains `{needle}`: {hits:?}\n{why}"
+        );
+    }
+}
+
+#[test]
+fn the_input_path_handlers_never_block_on_a_reply() {
+    let why = "Each round trip stalls the only thread that drains the socket; one per \
+               event is what let a spinning wheel outrun the loop. Defer the work to \
+               `flush_pending`, or serve it from state read at manage time.";
+    let pointer = production_source("backend/x11/pointer.rs");
+    // Only the part of `on_button_press` that runs for the wheel and for click-to-
+    // focus. What follows it starts a drag, and a drag start legitimately waits
+    // once for `GrabPointer`'s status (once per drag, not per notch).
+    let press = fn_body(pointer, "on_button_press");
+    let press = press
+        .split("let client_win = self.find_client(e.event);")
+        .next()
+        .unwrap();
+    assert_no_blocking_reply(press, "on_button_press (wheel path)", why);
+    assert_no_blocking_reply(pointer, "scroll_camera_with_wheel", why);
+    assert_no_blocking_reply(pointer, "apply_wheel_steps", why);
+    let events = production_source("backend/x11/events.rs");
+    assert_no_blocking_reply(events, "on_focus_out", why);
+    assert_no_blocking_reply(events, "on_key", why);
+}
+
+#[test]
+fn focus_changes_do_not_reinstall_button_grabs() {
+    // The grab set is a function of the window and the modifier map, not of
+    // focus. Re-issuing it per focus change cost ~70 requests per wheel notch.
+    let render = production_source("backend/x11/render.rs");
+    let hits = code_lines_containing(render, "grab_buttons(");
+    assert!(
+        hits.is_empty(),
+        "render.rs must not (re)install button grabs on focus changes; they are \
+         installed once in `manage` (and again by `refresh_keyboard` when the \
+         lock-modifier map moves): {hits:?}"
+    );
+}
+
+#[test]
+fn a_plain_wheel_notch_is_not_grabbed() {
+    // Buttons 4-7 are grabbed only together with Mod4. A catch-all SYNC grab
+    // freezes the pointer and round-trips through the WM for every notch of
+    // ordinary scrolling, which never needed the WM.
+    let body = fn_body(production_source("backend/x11/input.rs"), "grab_buttons");
+    assert!(
+        !body.contains("ButtonIndex::ANY,\n                ModMask::ANY")
+            && !body.contains("ButtonIndex::ANY, win, ModMask::ANY,"),
+        "grab_buttons must not install an AnyButton/AnyModifier grab"
+    );
+    let wheel_grab = body
+        .find("for wheel in 4u8..=7")
+        .expect("the Mod4+wheel grab loop is gone");
+    let anymod_click = body.find("ModMask::ANY,").expect("the click grab is gone");
+    assert!(
+        anymod_click < wheel_grab,
+        "the wheel buttons must only be grabbed inside the Mod4 loop"
+    );
+}
+
+#[test]
+fn wm_protocols_are_served_from_a_cache() {
+    let body = fn_body(production_source("backend/x11/ewmh.rs"), "has_protocol");
+    assert!(
+        body.contains("self.protocols"),
+        "has_protocol must consult the per-window cache before asking the server"
+    );
+    let events = production_source("backend/x11/events.rs");
+    assert!(
+        !code_lines_containing(events, "self.atoms.wm_protocols").is_empty(),
+        "on_property must invalidate the cache when WM_PROTOCOLS changes"
+    );
+}
+
+#[test]
+fn wheel_notches_are_queued_not_applied_inline() {
+    let pointer = production_source("backend/x11/pointer.rs");
+    let body = fn_body(pointer, "scroll_camera_with_wheel");
+    assert!(
+        body.contains("wheel_steps") && !body.contains("run_effects") && !body.contains("dispatch"),
+        "scroll_camera_with_wheel must only record the notch; applying it inline is \
+         one focus change and one arrange per notch"
+    );
+    // `mod.rs` carries an early `#[cfg(test)] mod tests;`, which would make
+    // `production_source` drop everything after it, so read the file whole.
+    let mod_rs = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/backend/x11/mod.rs"),
+    )
+    .unwrap();
+    let flush = fn_body(&mod_rs, "flush_pending");
+    assert!(
+        flush.contains("apply_wheel_steps"),
+        "flush_pending must apply the queued notches, once per turn"
+    );
+}

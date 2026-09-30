@@ -564,6 +564,13 @@ impl WindowManager {
             self.update_status()?;
             return Ok(());
         }
+        // `WM_PROTOCOLS` changed (or was cleared): drop the cached list so the
+        // next `has_protocol` re-reads it. Before the DELETE guard, since a
+        // removed property is a change too.
+        if e.atom == self.atoms.wm_protocols {
+            self.protocols.borrow_mut().remove(&e.window);
+            return Ok(());
+        }
         // A dock changing (or clearing) its strut updates its reservation. This
         // fires for unmanaged windows too, so handle it before the DELETE guard
         // and before the client lookup. No `!contains_key` gate: a dock that
@@ -771,6 +778,9 @@ impl WindowManager {
 
     pub(super) fn on_key(&mut self, e: KeyPressEvent) -> Result<(), Box<dyn std::error::Error>> {
         self.last_event_time = e.time;
+        // Notches queued earlier in this turn happened before this key; apply
+        // them first so the key acts on the state the user had already reached.
+        self.apply_wheel_steps()?;
         // A key following a map/group notification must not use the snapshot
         // from before that notification, even inside the same event drain.
         if self.kbd_refresh_due.take().is_some() {
@@ -912,6 +922,11 @@ impl WindowManager {
         // would obtain less accurately, since a probe issued now reports where
         // focus has moved to since this event was generated.
         self.settle_focus(Some(e.event))?;
+        // This event *is* the answer a deferred probe would fetch (and a more
+        // accurate one, see above), so a `FocusOut` queued earlier in the turn
+        // no longer needs its `GetInputFocus`. Order matters and is preserved:
+        // a `FocusOut` arriving after this re-arms the flag.
+        self.focus_probe_due = false;
         Ok(())
     }
 
@@ -939,7 +954,12 @@ impl WindowManager {
         if self.engine.state.x11_input_focus == Some(e.event) {
             self.engine.state.x11_input_focus = None;
         }
-        self.reconcile_focus()?;
+        // No inline `GetInputFocus`: a `FocusOut` names where focus *left*, not
+        // where it went, so the probe is the only way to learn the destination.
+        // Taking it here paid a round trip per event — and our own focus moves
+        // generate these in bulk — while one probe at the end of the turn sees
+        // the settled answer. `flush_pending` takes it.
+        self.focus_probe_due = true;
         Ok(())
     }
 

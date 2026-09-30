@@ -362,41 +362,64 @@ impl WindowManager {
         Ok(())
     }
 
-    pub(super) fn grab_buttons(
-        &self,
-        win: Window,
-        _focused: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    /// Install every passive button grab a managed window needs, once.
+    ///
+    /// The set depends on the window's existence and on the lock-modifier map
+    /// (`refresh_keyboard` re-runs this when NumLock/ScrollLock move), and on
+    /// nothing else — in particular not on which window has focus. It used to
+    /// be re-issued from `focus()` and `unfocus()`: an ungrab plus ~18 grabs
+    /// per call, several calls per wheel notch, for a result identical to what
+    /// the window already had. Like dwm, the grabs are placed at manage time
+    /// and left alone.
+    ///
+    /// What is grabbed, and why nothing more:
+    ///
+    /// * Buttons 1-3, any modifier, `SYNC`: click-to-focus. `on_button_press`
+    ///   decides, then releases the frozen pointer (replay to the client, or
+    ///   discard for a consumed gesture).
+    /// * `Mod4` + buttons 1/3, `ASYNC`, with pointer motion: move/resize drag.
+    /// * `Mod4` + buttons 4-7, `SYNC`: the wheel gesture that scrolls the
+    ///   camera.
+    ///
+    /// A plain wheel notch (or a side button) is deliberately *not* grabbed.
+    /// The handler only ever replayed it to the client, so grabbing it cost a
+    /// freeze, a round trip through this single-threaded loop and a replay per
+    /// notch for scrolling that never needed the WM — the dominant cost of
+    /// ordinary scrolling under the old catch-all `AnyButton` grab.
+    ///
+    /// Grab order is preserved from the catch-all era: the server tries a
+    /// window's grabs newest-first, so the `Mod4` grabs added last still win
+    /// over the click grab for the same press.
+    pub(super) fn grab_buttons(&self, win: Window) -> Result<(), Box<dyn std::error::Error>> {
         let _ = self.conn.ungrab_button(ButtonIndex::ANY, win, ModMask::ANY);
         let motion =
             EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION;
 
-        // SYNC grab on ALL windows (not just unfocused): `on_button_press`
-        // replays the pointer through `allow_events(REPLAY_POINTER)`, and the
-        // server rejects that with BadValue unless the pointer is actually
-        // frozen.
+        // SYNC on every window, focused or not: `on_button_press` releases the
+        // pointer through `allow_events(REPLAY_POINTER)`, which the server
+        // rejects with BadValue unless the pointer is actually frozen.
         //
-        // keyboard_mode MUST be ASYNC here. With SYNC/SYNC, every matching
-        // ButtonPress freezes *both* devices, but `on_button_press` only ever
-        // calls `allow_events(REPLAY_POINTER)` — never a keyboard AllowEvents
-        // mode — so the keyboard stays frozen for the rest of the session,
-        // breaking every shortcut (and the app's own key input) for clients
-        // that take focus on click.
-        let _ = self.conn.grab_button(
-            false,
-            win,
-            EventMask::BUTTON_PRESS,
-            GrabMode::SYNC,
-            GrabMode::ASYNC,
-            x11rb::NONE,
-            x11rb::NONE,
-            ButtonIndex::ANY,
-            ModMask::ANY,
-        );
+        // keyboard_mode MUST be ASYNC. With SYNC/SYNC every matching press
+        // freezes *both* devices, but `on_button_press` only ever issues a
+        // pointer `AllowEvents` mode, so the keyboard would stay frozen for the
+        // rest of the session — every shortcut dead.
+        for btn in [ButtonIndex::M1, ButtonIndex::M2, ButtonIndex::M3] {
+            let _ = self.conn.grab_button(
+                false,
+                win,
+                EventMask::BUTTON_PRESS,
+                GrabMode::SYNC,
+                GrabMode::ASYNC,
+                x11rb::NONE,
+                x11rb::NONE,
+                btn,
+                ModMask::ANY,
+            );
+        }
 
         #[cfg(feature = "input-trace")]
         itrace!(
-            "grab_buttons win={:#x}: installed SYNC BUTTON_PRESS grab (pointer FREEZES on every ButtonPress until allow_events runs)",
+            "grab_buttons win={:#x}: installed SYNC BUTTON_PRESS grab on buttons 1-3 (pointer FREEZES on each press until allow_events runs)",
             win
         );
         #[cfg(feature = "window-trace")]
@@ -405,12 +428,8 @@ impl WindowManager {
             win
         );
 
-        // keyboard_mode MUST be ASYNC here too, for the same reason as the
-        // catch-all grab above: `on_button_press` never calls allow_events with
-        // a keyboard mode, so a SYNC keyboard grab here freezes the keyboard
-        // (all shortcuts, including focus-move and spawn keybinds) the moment
-        // the user does a Mod+drag (move/resize) on any window, and it never
-        // gets released.
+        // Mod4 + drag: ASYNC/ASYNC (a SYNC keyboard mode here would freeze the
+        // keyboard the moment a Mod+drag starts, and nothing would release it).
         let sup: u16 = ModMask::M4.into();
         for extra in mod_variants(self.numlock, self.scroll) {
             let m = (sup | extra).into();
@@ -424,6 +443,22 @@ impl WindowManager {
                     x11rb::NONE,
                     x11rb::NONE,
                     btn,
+                    m,
+                );
+            }
+            // Mod4 + wheel (4 up, 5 down, 6 left, 7 right), SYNC pointer so the
+            // press can be consumed (`ASYNC_POINTER`) instead of also scrolling
+            // the client. Keyboard stays ASYNC for the reason above.
+            for wheel in 4u8..=7 {
+                let _ = self.conn.grab_button(
+                    false,
+                    win,
+                    EventMask::BUTTON_PRESS,
+                    GrabMode::SYNC,
+                    GrabMode::ASYNC,
+                    x11rb::NONE,
+                    x11rb::NONE,
+                    ButtonIndex::from(wheel),
                     m,
                 );
             }

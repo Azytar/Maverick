@@ -331,6 +331,22 @@ pub struct WindowManager {
     /// Reconcile work the events drained this turn owe, collapsed into at most
     /// one pass per monitor.
     pending: PendingReconcile,
+    /// `WM_PROTOCOLS` of each managed client, read once and kept fresh by
+    /// `PropertyNotify`. `focus()` and `kill()` ask "does it speak
+    /// `WM_TAKE_FOCUS` / `WM_DELETE_WINDOW`?" on the input path, and answering
+    /// with a `GetProperty` round trip there stalled the single event-loop
+    /// thread once per focus change. A `RefCell` because `has_protocol` is `&self`.
+    protocols: std::cell::RefCell<std::collections::HashMap<Window, Vec<u32>>>,
+    /// A `FocusOut` arrived this turn and the real X focus has not been
+    /// compared with the logical one yet. The comparison is a blocking
+    /// `GetInputFocus`; deferring it to the end of the turn makes a burst of
+    /// focus events cost one probe, taken against the final state.
+    focus_probe_due: bool,
+    /// `Mod4+wheel` notches received this turn and not applied yet, in order.
+    /// Applied together by `flush_pending`: N notches in one turn move the
+    /// focus N columns but pay for one focus change and one arrange, not N.
+    /// The direction list (not a net count) keeps edge clamping exact.
+    wheel_steps: Vec<Dir>,
 }
 
 /// The layout, stacking and pointer work owed by input, drained once per turn.
@@ -518,7 +534,7 @@ impl WindowManager {
         // Mod4+click.
         let wins: Vec<Window> = self.engine.state.clients.keys().copied().collect();
         for win in wins {
-            if let Err(e) = self.grab_buttons(win, false) {
+            if let Err(e) = self.grab_buttons(win) {
                 log::debug!("keyboard refresh: regrabbing buttons on {win} failed ({e})");
             }
         }
@@ -760,6 +776,17 @@ impl WindowManager {
     /// it targets the geometry `arrange` just produced, not where the window was
     /// before it moved.
     fn flush_pending(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.apply_wheel_steps()?;
+        self.flush_layout()?;
+        // After the layout work, so the probe compares the real X focus with
+        // the logical focus this turn ended on, not one it passed through.
+        if std::mem::take(&mut self.focus_probe_due) {
+            self.reconcile_focus()?;
+        }
+        Ok(())
+    }
+
+    fn flush_layout(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.pending.is_empty() {
             return Ok(());
         }
@@ -987,6 +1014,9 @@ impl WindowManager {
             last_stack_order: std::collections::HashMap::new(),
             fs_covering: std::collections::HashMap::new(),
             pending: PendingReconcile::default(),
+            protocols: std::cell::RefCell::new(std::collections::HashMap::new()),
+            focus_probe_due: false,
+            wheel_steps: Vec::new(),
         };
 
         let _ = (depth, visual);

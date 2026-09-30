@@ -487,7 +487,10 @@ impl WindowManager {
         );
         let _ = self.conn.shape_select_input(win, true);
 
-        self.grab_buttons(win, false)?;
+        self.grab_buttons(win)?;
+        // Read `WM_PROTOCOLS` now, while mapping, so the first `focus()` of this
+        // window is not the one that pays the round trip.
+        let _ = self.has_protocol(win, self.atoms.wm_take_focus);
 
         // `_NET_FRAME_EXTENTS` is published by `emit_geometry` (the single X
         // geometry sink) when the `arrange` below applies the first configure, so
@@ -667,6 +670,7 @@ impl WindowManager {
         self.applied.forget(win);
         self.shape_mask_cache.remove(&win);
         self.frame_extents.remove(&win);
+        self.protocols.borrow_mut().remove(&win);
 
         // Announce the departure on the typed EventBus.
         self.engine

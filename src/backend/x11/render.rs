@@ -1261,7 +1261,6 @@ impl WindowManager {
             let _ = self
                 .conn
                 .change_window_attributes(w, &ChangeWindowAttributesAux::new().border_pixel(col));
-            self.grab_buttons(w, true)?;
 
             let serial = self.engine.state.next_serial();
             let was_urgent = if let Some(c) = self.engine.state.clients.get_mut(&w) {
@@ -1406,7 +1405,6 @@ impl WindowManager {
         let _ = self
             .conn
             .change_window_attributes(win, &ChangeWindowAttributesAux::new().border_pixel(col));
-        let _ = self.grab_buttons(win, false);
         Ok(())
     }
 

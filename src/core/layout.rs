@@ -710,9 +710,10 @@ fn arrange_columns(
 // Camera/hit-test helpers, all reading the same `ribbon_geom` table.
 
 /// Horizontal extents (in SCREEN space) of each column, using the exact same
-/// projection as `arrange_columns`. Used by the Mod4+wheel camera step to know
-/// where each column actually sits on screen — it must match what is drawn,
-/// not a stale world-space estimate.
+/// projection as `arrange_columns`, so a hit-test agrees with what is drawn
+/// rather than with a stale world-space estimate. Test-only for now: the
+/// Mod4+wheel step no longer hit-tests the column under the pointer.
+#[cfg(test)]
 pub(crate) fn column_screen_extents(
     ws: &Workspace,
     cfg: &Cfg,
@@ -725,7 +726,9 @@ pub(crate) fn column_screen_extents(
     out
 }
 
-/// Allocation-free variant used by the compositor's visual path.
+/// Allocation-free variant. Test-only since the wheel stopped hit-testing the
+/// column under the pointer; it pins the extents to `arrange`'s placement.
+#[cfg(test)]
 pub(crate) fn column_screen_extents_into(
     ws: &Workspace,
     cfg: &Cfg,

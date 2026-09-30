@@ -290,19 +290,31 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Whether `win` lists `proto` in `WM_PROTOCOLS`.
+    ///
+    /// Served from `self.protocols`; only a window not seen yet (or whose
+    /// property changed) costs a `GetProperty` round trip, and `manage` warms
+    /// the cache so that read happens at map time, never on the input path. A
+    /// failed read (the window is gone) is not cached.
     pub(super) fn has_protocol(
         &self,
         win: Window,
         proto: u32,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        let prop = self
+        if let Some(list) = self.protocols.borrow().get(&win) {
+            return Ok(list.contains(&proto));
+        }
+        let reply = self
             .conn
             .get_property(false, win, self.atoms.wm_protocols, AtomEnum::ATOM, 0, 32)?
             .reply();
-        Ok(prop
-            .ok()
-            .and_then(|p| p.value32().map(|mut v| v.any(|x| x == proto)))
-            .unwrap_or(false))
+        let Ok(prop) = reply else {
+            return Ok(false);
+        };
+        let list: Vec<u32> = prop.value32().map(Iterator::collect).unwrap_or_default();
+        let hit = list.contains(&proto);
+        self.protocols.borrow_mut().insert(win, list);
+        Ok(hit)
     }
 
     pub(super) fn send_proto(

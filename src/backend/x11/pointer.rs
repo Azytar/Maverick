@@ -10,9 +10,10 @@
 //!
 //! # Grab lifecycle
 //!
-//! A focused managed window carries a per-window `SYNC` button grab (see
-//! `input::grab_buttons`), so the server freezes the pointer on every
-//! `ButtonPress` until `on_button_press` calls `allow_events`. A drag adds an
+//! Every managed window carries a `SYNC` grab on buttons 1-3 and on
+//! `Mod4`+wheel, installed once at manage time (see `input::grab_buttons`), so
+//! the server freezes the pointer on those `ButtonPress`es until
+//! `on_button_press` calls `allow_events`. A drag adds an
 //! active `ASYNC` pointer grab on the root, released by `on_button_release`.
 //! `SyncGrabGuard` releases *either* grab on every exit path (see below), so a
 //! handler that returns early can never leave the server with a frozen device.
@@ -26,9 +27,9 @@
 //!
 //! # Scroll wheel
 //!
-//! `Mod4+wheel` scrolls the camera (reuses `FocusDir`
-//! action + `focus_column_at` via `column_screen_extents`).
-//! Plain wheel 4/7 replays to the focused window.
+//! `Mod4+wheel` scrolls the camera by stepping the focused column (reuses the
+//! `FocusDir` action). Only `Mod4+wheel` is grabbed (see `grab_buttons`), so a
+//! plain wheel notch goes straight to the client and never reaches the WM.
 //!
 //! # Quadrant resize
 //!
@@ -149,6 +150,12 @@ impl WindowManager {
             tag: "on_button_press",
         };
 
+        // A click (or drag start) after queued notches acts on the state those
+        // notches produced, so they are applied first.
+        if e.detail < 4 {
+            self.apply_wheel_steps()?;
+        }
+
         // Scroll buttons (4=up,5=down,6=left,7=right). With no modifier they are
         // just delivered to the application (REPLAY_POINTER). With Mod4 held they
         // scroll the ribbon camera left/right (and, in Overview, also
@@ -157,15 +164,16 @@ impl WindowManager {
             let sup: u16 = ModMask::M4.into();
             let clean = clean_mask(u16::from(e.state), self.numlock, self.scroll);
             if clean == sup {
-                self.scroll_camera_with_wheel(e.detail, e.root_x as i32, e.root_y as i32)?;
+                self.scroll_camera_with_wheel(e.detail)?;
                 // Consumed as a WM gesture: release the SYNC grab WITHOUT
                 // replay (ASYNC discards the press so the app doesn't also
                 // scroll) and mark the guard emitted — falling through to
                 // `Drop` would REPLAY plus log a bogus FREEZE-RISK.
                 _guard.emitted = true;
-                self.conn
-                    .allow_events(Allow::ASYNC_POINTER, e.time)?
-                    .check()?;
+                // Fire and forget: `.check()` was a round trip per notch, and a
+                // failure here (a stale timestamp) is not worth taking the WM
+                // down through `?` — the X error arrives as `Event::Error`.
+                let _ = self.conn.allow_events(Allow::ASYNC_POINTER, e.time);
                 return Ok(());
             }
             _guard.emitted = true;
@@ -665,65 +673,58 @@ impl WindowManager {
     /// accordion target); instead we step the *focused column* one slot per
     /// notch, which recenters the camera via `ideal_scroll` — exactly like
     /// `OverviewNav`, just continuous.
-    fn scroll_camera_with_wheel(
-        &mut self,
-        detail: u8,
-        px: i32,
-        py: i32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ///
+    /// This only *records* the notch. A wheel delivers notches faster than a
+    /// focus change can be applied (each is X requests plus a re-arrange), and
+    /// the pointer is frozen until every one is handled, so applying them inline
+    /// made the backlog grow for as long as the wheel spun. `flush_pending`
+    /// applies whatever accumulated, once per turn, in `apply_wheel_steps`.
+    fn scroll_camera_with_wheel(&mut self, detail: u8) -> Result<(), Box<dyn std::error::Error>> {
+        // Bound the queue: past this, extra notches in a single turn add nothing
+        // a user could perceive and only lengthen the replay.
+        const MAX_STEPS_PER_TURN: usize = 256;
         let dir = match detail {
             7 | 5 => Dir::Right, // wheel right / down → next column
             _ => Dir::Left,      // wheel left / up → previous column (and any other)
         };
-        // Reuse the existing focus-movement command so behaviour (row carry,
-        // camera recenter, events) stays identical to the keybinding path.
-        let effects = self.engine.dispatch(crate::types::Action::FocusDir(dir));
-        self.run_effects(effects)?;
-        // Keep the column under the pointer focused so the gesture and the
-        // keyboard agree on what is selected.
-        self.focus_column_at(px, py);
+        if self.wheel_steps.len() < MAX_STEPS_PER_TURN {
+            self.wheel_steps.push(dir);
+        }
         Ok(())
     }
 
-    /// Focus the tiled column whose screen rect contains `(px, py)` on `mon`,
-    /// used by wheel-scroll so focus tracks the gesture. No-op if the point is
-    /// not over any tiled column (floats/empty space don't steal focus this way).
-    fn focus_column_at(&mut self, px: i32, py: i32) {
-        let mi = self.engine.state.mon_at(px, py);
-        if mi >= self.engine.state.monitors.len() {
-            return;
+    /// Apply the notches queued by [`Self::scroll_camera_with_wheel`].
+    ///
+    /// Each step runs through the same `FocusDir` command as the keybinding, so
+    /// the resulting state is exactly what N sequential notches produce. Only the
+    /// *effects* are squeezed: intermediate columns are never visibly focused, so
+    /// their `FocusWindow`/`Unfocus` are dropped — the first `Unfocus` (the
+    /// window that had focus) and the last `FocusWindow` (where it ended up) are
+    /// kept — and the arrange marks are idempotent, so they collapse into one
+    /// pass.
+    pub(super) fn apply_wheel_steps(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.wheel_steps.is_empty() {
+            return Ok(());
         }
-        let (ws_i, wa) = {
-            let m = &self.engine.state.monitors[mi];
-            (m.active_ws, m.workarea)
-        };
-        let fs = crate::core::layout::fs_ctx(
-            &self.engine.state.clients,
-            &self.engine.state.monitors[mi].workspaces[ws_i],
-            self.engine.state.monitors[mi].screen,
-        );
-        let extents = crate::core::layout::column_screen_extents(
-            &self.engine.state.monitors[mi].workspaces[ws_i],
-            &self.engine.cfg,
-            wa,
-            &fs,
-        );
-        let vis_l = wa.x as f32;
-        let vis_r = (wa.x + wa.w as i32) as f32;
-        let col = extents.iter().position(|&(l, r)| {
-            let l = l.max(vis_l);
-            let r = r.min(vis_r);
-            r > l && (px as f32) >= l && (px as f32) <= r
-        });
-        if let Some(ci) = col {
-            self.engine.state.monitors[mi].workspaces[ws_i]
-                .focus
-                .column_idx = ci;
-            if let Some(w) =
-                self.engine.state.monitors[mi].workspaces[ws_i].columns[ci].focused_win()
-            {
-                let _ = self.focus(Some(w));
+        let steps = std::mem::take(&mut self.wheel_steps);
+        let mut first_unfocus = None;
+        let mut last_focus = None;
+        let mut rest = Vec::new();
+        for dir in steps {
+            for eff in self.engine.dispatch(crate::types::Action::FocusDir(dir)) {
+                match eff {
+                    Effect::Unfocus(w) => {
+                        first_unfocus.get_or_insert(w);
+                    }
+                    Effect::FocusWindow(w) => last_focus = Some(w),
+                    other => rest.push(other),
+                }
             }
         }
+        let mut effects = Vec::with_capacity(rest.len() + 2);
+        effects.extend(first_unfocus.map(Effect::Unfocus));
+        effects.extend(rest);
+        effects.extend(last_focus.map(Effect::FocusWindow));
+        self.run_effects(effects)
     }
 }
