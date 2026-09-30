@@ -275,12 +275,11 @@ impl WindowManager {
                     // Answer structured queries from live state; the client is
                     // blocked on the channel until the reply lands. State is
                     // only touched here (the WM thread), which is exactly why
-                    // querying has to happen through this queue.
-                    let json = if topic == "inspect" {
-                        crate::core::ipc::inspect_json(&self.engine.state, &self.engine.cfg)
-                    } else {
-                        crate::core::ipc::query_json(&self.engine.state, &self.engine.cfg, &topic)
-                    };
+                    // querying has to happen through this queue. `query_json`
+                    // already routes `inspect` to `inspect_json`, so there is no
+                    // topic to special-case here.
+                    let json =
+                        crate::core::ipc::query_json(&self.engine.state, &self.engine.cfg, &topic);
                     let _ = reply.send(json);
                 }
             }
