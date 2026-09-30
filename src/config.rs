@@ -172,10 +172,10 @@ pub struct Rule {
 
 impl Rule {
     /// True when every criterion matches. An absent criterion is a wildcard;
-    /// `class`, `instance` and `title` match as a case-insensitive substring
-    /// (in both directions, so `fire` matches `Firefox`), while `window_type`
-    /// must equal one of the window's reported `_NET_WM_WINDOW_TYPE` values,
-    /// case-insensitively.
+    /// `class`, `instance` and `title` match as a case-insensitive substring of
+    /// the window's own string (so a `fire` criterion matches `Firefox`, but not
+    /// the reverse), while `window_type` must equal one of the window's reported
+    /// `_NET_WM_WINDOW_TYPE` values, case-insensitively.
     pub fn matches(&self, class: &str, instance: &str, types: &[String], title: &str) -> bool {
         let class_lower = class.to_lowercase();
         let instance_lower = instance.to_lowercase();
@@ -310,6 +310,25 @@ pub fn compiled_config() -> Cfg {
                 ws: None,
                 ..Default::default()
             },
+            // A screenshot utility draws its own chrome over the whole screen and
+            // is destroyed on use, so a tile-sized frame is never what the user
+            // wants to see. Its border is dropped as well: the tool paints its
+            // own outline around the capture.
+            Rule {
+                class: Some("flameshot".into()),
+                title: None,
+                float: true,
+                ws: None,
+                border_w: Some(0),
+                ..Default::default()
+            },
+            Rule {
+                class: Some("screenkey".into()),
+                title: None,
+                float: true,
+                ws: None,
+                ..Default::default()
+            },
             // No per-`WM_CLASS` rule is needed for GTK's "remember I was
             // maximized" tantrum: map-time `_NET_WM_STATE` is normalized for
             // *every* client by default (see `Cfg::honor_initial_state`), so
@@ -345,6 +364,27 @@ pub fn compiled_config() -> Cfg {
             Rule {
                 class: None,
                 title: Some("qt file dialog".into()),
+                float: true,
+                ws: None,
+                ..Default::default()
+            },
+            Rule {
+                class: None,
+                title: Some("file chooser".into()),
+                float: true,
+                ws: None,
+                ..Default::default()
+            },
+            Rule {
+                class: None,
+                title: Some("choose file".into()),
+                float: true,
+                ws: None,
+                ..Default::default()
+            },
+            Rule {
+                class: None,
+                title: Some("select file".into()),
                 float: true,
                 ws: None,
                 ..Default::default()
@@ -430,6 +470,64 @@ mod rule_tests {
 
     fn base() -> Rule {
         Rule::default()
+    }
+
+    /// Maverick ships a per-application float policy so that a file chooser or
+    /// a PIN prompt does not land in a column. It has to live in the shipped
+    /// `rules` list, because `[[rules]]` in a user config replaces that list
+    /// wholesale: policy held anywhere else could never be seen or overridden
+    /// by the person whose window it floats.
+    ///
+    /// This is the whole policy, one representative window per entry, so that
+    /// dropping an entry — or moving the list back into the backend — fails
+    /// here rather than as a tiled PIN prompt in someone's session.
+    #[test]
+    fn the_shipped_float_policy_lives_in_the_shipped_rules() {
+        const FLOATS: &[(&str, &str)] = &[
+            ("xdg-desktop-portal", ""),
+            ("gpick", ""),
+            ("pinentry", ""),
+            ("flameshot", ""),
+            ("screenkey", ""),
+            ("", "file upload"),
+            ("", "open file"),
+            ("", "save file"),
+            ("", "file chooser"),
+            ("", "qt file dialog"),
+            ("", "choose file"),
+            ("", "select file"),
+        ];
+        let rules = compiled_config().rules;
+        for (class, title) in FLOATS {
+            let window_class = if class.is_empty() { "anyapp" } else { class };
+            let window_title = if title.is_empty() { "untitled" } else { title };
+            assert!(
+                rules
+                    .iter()
+                    .any(|r| r.float && r.matches(window_class, "", &[], window_title)),
+                "no shipped rule floats a window with class {class:?} title {title:?}: \
+                 the policy must be in `compiled_config().rules`, where a user's \
+                 `[[rules]]` can replace it"
+            );
+        }
+    }
+
+    /// `flameshot` paints its own chrome over the whole screen, so its frame has
+    /// to go with it. A rule can only set a border width on a window it also
+    /// floats, so the two travel together in one entry.
+    #[test]
+    fn the_borderless_float_rule_also_floats() {
+        let rules = compiled_config().rules;
+        let rule = rules
+            .iter()
+            .find(|r| r.matches("flameshot", "", &[], "untitled"))
+            .expect("a shipped rule matches a flameshot window");
+        assert!(rule.float, "the matching rule must float the window");
+        assert_eq!(
+            rule.border_w,
+            Some(0),
+            "flameshot draws its own outline, so its frame must be dropped"
+        );
     }
 
     #[test]

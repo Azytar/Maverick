@@ -386,3 +386,46 @@ fn arrange_emits_geometry_only_through_the_reconciler() {
         "emit_geometry pairs one synthetic ConfigureNotify with each real configure"
     );
 }
+
+/// The X11 backend must not decide anything from a window's identity.
+///
+/// `WM_CLASS` and `_NET_WM_NAME` are free-form strings the application chooses,
+/// so reading them is reading an untrusted string; folding one into a
+/// case-insensitive matching key in the backend turns that string into a layout
+/// decision the user cannot see, cannot override, and cannot turn off. A window
+/// floats for a property it published (`_NET_WM_WINDOW_TYPE`, `_NET_WM_STATE`,
+/// `WM_NORMAL_HINTS`, `WM_TRANSIENT_FOR`), for a `[[rules]]` entry, or because
+/// a previous session left it that way — and for nothing else.
+///
+/// Per-application policy belongs in `compiled_config().rules`, where a user's
+/// `[[rules]]` replaces it wholesale. That substitution has to happen through
+/// `Rule::matches`; the backend may only *read* the strings and hand them over.
+#[test]
+fn the_backend_never_matches_on_a_windows_identity() {
+    static BACKEND: OnceLock<std::collections::HashMap<String, String>> = OnceLock::new();
+    for (rel, src) in BACKEND.get_or_init(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut out = std::collections::HashMap::new();
+        collect(&root, &mut out);
+        out
+    }) {
+        if !rel.starts_with("backend/") {
+            continue;
+        }
+        for needle in [
+            ".class.to_lowercase()",
+            ".instance.to_lowercase()",
+            ".name.to_lowercase()",
+            ".title.to_lowercase()",
+        ] {
+            let hits = code_lines_containing(src, needle);
+            assert!(
+                hits.is_empty(),
+                "{rel}:{} case-folds a window's identity into a matching key (`{needle}`). \
+                 Per-application policy belongs in `config::compiled_config().rules`; \
+                 the backend decides from the client's own X11 properties and from `Cfg::rules`.",
+                hits[0].0,
+            );
+        }
+    }
+}

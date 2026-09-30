@@ -266,6 +266,36 @@ float = true
 window_type = "dialog"
 float = true
 
+# Declaring any `[[rules]]` above REPLACES the compiled list wholesale, and the
+# compiled list carries Maverick's own per-application float policy. Copying
+# this file therefore drops it unless you repeat it, so here it is. The file
+# choosers the defaults also name are already covered by the `window_type =
+# "dialog"` rule above, so only the launcher-shaped tools are left to add — the
+# ones that publish no dialog type and no transient parent, so nothing else
+# would float them.
+[[rules]]
+class = "xdg-desktop-portal"
+float = true
+
+[[rules]]
+class = "gpick"
+float = true
+
+[[rules]]
+class = "pinentry"
+float = true
+
+# It paints its own chrome over the whole screen, so it should not be tiled and
+# should not be framed.
+[[rules]]
+class = "flameshot"
+float = true
+border_w = 0
+
+[[rules]]
+class = "screenkey"
+float = true
+
 # Pin an app to a specific workspace (1-based; 8 = workspace 8).
 [[rules]]
 class = "spotify"
