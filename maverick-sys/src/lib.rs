@@ -5,10 +5,10 @@
 //! The event loop polls the [`AtomicBool`] flags exported here, and no
 //! `static mut` is used anywhere in the workspace.
 //!
-//! `unsafe` is **not** confined to this crate. `maverick-gl`, `maverick-vk` and
-//! `maverick-x11` each contain their own FFI `unsafe`, as does the X11 backend
-//! in the root package; within those crates it stays confined to the FFI
-//! boundary and the public API is safe. `maverick-core` is `unsafe`-free: it
+//! `unsafe` is **not** confined to this crate. `maverick-x11` contains FFI
+//! `unsafe` of its own, as does the X11 backend in the root package; within
+//! those crates it stays confined to the FFI boundary and the public API is
+//! safe. `maverick-core` is `unsafe`-free: it
 //! speaks `WindowId(u32)` and `Rect` and holds no FFI.
 //!
 //! What is not owned: the X11 connection fd passed to [`wait_readable_fds`], the

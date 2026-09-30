@@ -430,10 +430,9 @@ impl WindowManager {
             }
             // Errors from the many fire-and-forget requests the WM issues
             // (`let _ = …`). Debug, not warn: `BadWindow` from a client that
-            // died between our request and the server processing it is routine
-            // — `maverick-gl` installs a silent Xlib error handler for the same
-            // reason. Without this arm a `BadAccess` from a rejected grab was
-            // simply invisible.
+            // died between our request and the server processing it is routine,
+            // so it is not worth a warning either. Without this arm a `BadAccess`
+            // from a rejected grab was simply invisible.
             Event::Error(e) => log::debug!("X error: {e:?}"),
             _ => {}
         }

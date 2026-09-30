@@ -10,16 +10,14 @@
 // `target/flycheck0/`):
 //
 //   * Workspace — `Cargo.toml` at the repository root *is* the Cargo workspace
-//     root (the root `maverick` package plus the 8 members it declares).
+//     root (the root `maverick` package plus the members it declares).
 //     rust-analyzer resolves packages through Cargo, so every member is
-//     analysed, including `maverick-vk`, which is not in the root package's
-//     dependency graph. No `linkedProjects` needed.
+//     analysed. No `linkedProjects` needed.
 //
-//   * Features — default features only (`compositor-opengl`). Do NOT enable
-//     everything (`cargo.allFeatures`, or `cargo.features: ["all"]`):
-//     `input-trace` and `window-trace` are diagnostic-only builds and
-//     `compositor-vulkan` is an unwired placeholder, so that would analyse a
-//     configuration nobody develops against. CI agrees —
+//   * Features — do NOT enable everything (`cargo.allFeatures`, or
+//     `cargo.features: ["all"]`): `input-trace` and `window-trace` are
+//     diagnostic-only builds, so that would analyse a configuration nobody
+//     develops against. CI agrees —
 //     `.github/workflows/ci.yml` runs plain `cargo clippy --workspace
 //     --all-targets` and `cargo test --workspace`, without `--all-features`.
 //

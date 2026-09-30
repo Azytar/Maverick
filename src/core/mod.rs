@@ -3,8 +3,7 @@
 //! This module owns the *logical* window-manager state machine:
 //! what windows exist, where they should be placed, what effects
 //! must be applied to X11, and what domain events to publish.
-//! It deliberately knows nothing about X11, GL, or rendering —
-//! those live in `crate::backend` and `maverick-gl`.
+//! It deliberately knows nothing about X11 — that lives in `crate::backend`.
 //!
 //! # State flow
 //!
