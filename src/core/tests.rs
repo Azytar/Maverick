@@ -4815,7 +4815,6 @@ mod unit_tests {
             rect: before,
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         let obs = classify_configure(requested, 2, &applied);
         assert_eq!(
@@ -4852,7 +4851,6 @@ mod unit_tests {
                 rect: r,
                 border_w: b,
                 seen: true,
-                sequence: None,
             },
         );
 
@@ -4921,7 +4919,6 @@ mod unit_tests {
             rect: g0,
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         let obs = classify_configure(g1, 2, &applied);
         assert_eq!(
@@ -5305,7 +5302,6 @@ mod unit_tests {
                 rect: r,
                 border_w: b,
                 seen: true,
-                sequence: None,
             },
         );
 
@@ -5369,7 +5365,6 @@ mod unit_tests {
                 rect: r,
                 border_w: b,
                 seen: true,
-                sequence: None,
             },
         );
 
@@ -5423,7 +5418,6 @@ mod unit_tests {
             rect: g0,
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         let g1 = Rect::new(200, 150, 400, 250);
         let obs = classify_configure(g1, 2, &applied);
@@ -5440,7 +5434,6 @@ mod unit_tests {
             rect: g1,
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         let obs2 = classify_configure(g1, 2, &applied);
         assert_eq!(
@@ -5472,7 +5465,6 @@ mod unit_tests {
             rect: g0,
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         let mut last = g0;
         for i in 0..5 {
@@ -5493,7 +5485,6 @@ mod unit_tests {
                 rect: r,
                 border_w: 2,
                 seen: true,
-                sequence: None,
             };
             last = r;
         }
@@ -5596,7 +5587,6 @@ mod unit_tests {
                 rect: desired_before,
                 border_w: engine.cfg.border_w,
                 seen: true,
-                sequence: None,
             };
             let obs = classify_configure(reported, engine.cfg.border_w, &applied);
             assert_eq!(
@@ -5709,7 +5699,6 @@ mod unit_tests {
             rect: a_screen,
             border_w: 0,
             seen: true,
-            sequence: None,
         };
         let b_desired = pipeline_desired(&engine, mi);
         let (b_r, b_b) = {
@@ -5720,7 +5709,6 @@ mod unit_tests {
             rect: b_r,
             border_w: b_b,
             seen: true,
-            sequence: None,
         };
 
         // Simulate an unexpected ConfigureNotify for A (fullscreen) and B (tiled).
@@ -6795,7 +6783,6 @@ mod unit_tests {
                 rect: Rect::new(0, 0, 50, 50),
                 border_w: b,
                 seen: true,
-                sequence: None,
             },
         );
         let effects = reconcile(&desired, &engine.state, &mut applied);
@@ -6836,7 +6823,6 @@ mod unit_tests {
                 rect: old,
                 border_w: b,
                 seen: true,
-                sequence: None,
             },
         );
         let effects = reconcile(&desired, &engine.state, &mut applied);
@@ -6865,7 +6851,6 @@ mod unit_tests {
                 rect: r,
                 border_w: b,
                 seen: true,
-                sequence: None,
             },
         );
         // Set a pending_focus referencing the window (the #8c context).
@@ -7011,7 +6996,6 @@ mod unit_tests {
             rect: g0,
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         let mut last = g0;
         let mut iterations = 0u32;
@@ -7033,7 +7017,6 @@ mod unit_tests {
                 rect: r,
                 border_w: 2,
                 seen: true,
-                sequence: None,
             };
             last = r;
             iterations += 1;
@@ -7385,7 +7368,6 @@ mod unit_tests {
                                         rect: reported,
                                         border_w: bw,
                                         seen: true,
-                                        sequence: None,
                                     },
                                 );
                             } else {
@@ -7402,7 +7384,6 @@ mod unit_tests {
                                             rect: dr,
                                             border_w: bw,
                                             seen: true,
-                                            sequence: None,
                                         },
                                     );
                                 }
@@ -7567,7 +7548,6 @@ mod unit_tests {
                                             rect: reported,
                                             border_w: bw,
                                             seen: true,
-                                            sequence: None,
                                         },
                                     );
                                 } else {
@@ -7583,7 +7563,6 @@ mod unit_tests {
                                                 rect: dr,
                                                 border_w: bw,
                                                 seen: true,
-                                                sequence: None,
                                             },
                                         );
                                     }
@@ -7958,7 +7937,6 @@ mod unit_tests {
             rect: desired_before,
             border_w: engine.cfg.border_w,
             seen: true,
-            sequence: None,
         };
         let obs = classify_configure(reported, engine.cfg.border_w, &applied);
         assert_eq!(

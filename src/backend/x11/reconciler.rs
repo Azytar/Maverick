@@ -80,11 +80,6 @@ pub struct AppliedWindow {
     /// False until the first configure has been applied. A freshly-mapped
     /// window has nothing applied yet, so the first diff always emits.
     pub seen: bool,
-    /// X11 sequence number of the request that produced `rect`, when the writer
-    /// knew it. No verdict in this module reads it; it exists so an applied
-    /// record can be traced back to a request, and is `None` for synthetic or
-    /// untracked configures.
-    pub sequence: Option<u32>,
 }
 
 /// The full set of windows the `Reconciler` believes X11 currently shows.
@@ -394,7 +389,6 @@ mod tests {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         assert_eq!(
             classify_configure(Rect::new(0, 0, 1000, 800), 2, &applied),
@@ -416,7 +410,6 @@ mod tests {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         assert_eq!(
             classify_configure(Rect::new(0, 0, 400, 300), 2, &applied),
@@ -489,13 +482,11 @@ mod tests {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         let applied_b = AppliedWindow {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         assert_eq!(
             classify_configure(Rect::new(0, 0, 1000, 800), 2, &applied_a),
@@ -515,7 +506,6 @@ mod tests {
             rect: Rect::new(0, 0, 1920, 1080),
             border_w: 0,
             seen: true,
-            sequence: None,
         };
         assert_eq!(
             classify_configure(Rect::new(0, 0, 1920, 1080), 0, &applied),
@@ -550,7 +540,6 @@ mod tests {
                 rect,
                 border_w: border,
                 seen: true,
-                sequence: None,
             },
         );
         let desired = DesiredState {
@@ -584,7 +573,6 @@ mod tests {
                 rect: applied_rect,
                 border_w: border,
                 seen: true,
-                sequence: None,
             },
         );
         let desired = DesiredState {
@@ -633,7 +621,6 @@ mod tests {
                 rect,
                 border_w: border,
                 seen: true,
-                sequence: None,
             },
         );
         let desired = DesiredState {
@@ -683,7 +670,6 @@ mod tests {
                     rect: r,
                     border_w: border,
                     seen: true,
-                    sequence: None,
                 },
             );
         }
@@ -725,7 +711,6 @@ mod tests {
                 rect: Rect::new(0, 0, 10, 10),
                 border_w: 1,
                 seen: true,
-                sequence: None,
             },
         );
         applied.forget(win);
@@ -755,7 +740,6 @@ mod tests {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         assert_eq!(
             classify_configure(reported, 2, &applied),
@@ -795,7 +779,6 @@ mod tests {
             rect: Rect::new(0, 0, 1000, 800),
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         assert_eq!(
             classify_configure(Rect::new(0, 0, 0, 0), 2, &applied),
@@ -837,7 +820,6 @@ mod tests {
                 rect: Rect::new(0, 0, 100, 100),
                 border_w: 2,
                 seen: true,
-                sequence: None,
             };
             let (obs, echo_obs) = (
                 classify_configure(Rect::new(10, 10, 200, 200), 2, &applied),
@@ -866,7 +848,6 @@ mod tests {
             rect: Rect::new(0, 0, 100, 100),
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         // The drag policy moved to the sink; classify still guarantees that the
         // dragged float's reported rect is never mistaken for our own echo.
@@ -889,7 +870,6 @@ mod tests {
             rect: Rect::new(0, 0, 100, 100),
             border_w: 2,
             seen: true,
-            sequence: None,
         };
         // During the drag and after it, classification is flag-blind: a
         // divergent report is Stale either way. What the drag end changes is
@@ -1059,7 +1039,6 @@ mod tests {
                         ),
                         border_w: row.border.wrapping_add(border_step),
                         seen,
-                        sequence: None,
                     },
                 );
             }
@@ -1071,7 +1050,6 @@ mod tests {
                     rect: Rect::new(0, 0, 10, 10),
                     border_w: 1,
                     seen: true,
-                    sequence: None,
                 },
             );
             map
@@ -1633,11 +1611,11 @@ mod tests {
 
         /// The `ConfigureNotify` verdict is decided by geometry equality and
         /// nothing else: not by whether the record was ever applied, not by the
-        /// sequence number, not by the reported size. A report that differs is
-        /// stale traffic the caller re-asserts over; a report that matches is
-        /// the WM's own echo. Any dependence on the bookkeeping fields would
-        /// make a real echo look stale (a configure storm) or a genuine
-        /// divergence look compliant (a window that drifts off the layout).
+        /// reported size. A report that differs is stale traffic the caller
+        /// re-asserts over; a report that matches is the WM's own echo. Any
+        /// dependence on the bookkeeping fields would make a real echo look
+        /// stale (a configure storm) or a genuine divergence look compliant (a
+        /// window that drifts off the layout).
         #[test]
         fn the_configure_verdict_depends_only_on_geometry_equality(
             applied_rect in arb_rect(),
@@ -1645,13 +1623,12 @@ mod tests {
             applied_bw in any::<u32>(),
             reported_bw in any::<u32>(),
             seen in any::<bool>(),
-            sequence in prop::option::of(any::<u32>()),
         ) {
-            let verdict = |seen: bool, sequence: Option<u32>| {
+            let verdict = |seen: bool| {
                 classify_configure(
                     reported,
                     reported_bw,
-                    &AppliedWindow { rect: applied_rect, border_w: applied_bw, seen, sequence },
+                    &AppliedWindow { rect: applied_rect, border_w: applied_bw, seen },
                 )
             };
             let expected = if applied_rect == reported && applied_bw == reported_bw {
@@ -1659,10 +1636,10 @@ mod tests {
             } else {
                 ConfigureObservation::Stale
             };
-            prop_assert_eq!(verdict(seen, sequence), expected);
+            prop_assert_eq!(verdict(seen), expected);
             // Same reported geometry, opposite bookkeeping: still the same
             // verdict, so an echo is never mistaken for stale traffic.
-            prop_assert_eq!(verdict(!seen, sequence.map(|s| s.wrapping_add(1))), expected);
+            prop_assert_eq!(verdict(!seen), expected);
         }
     }
 
