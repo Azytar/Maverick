@@ -77,9 +77,8 @@ xprop -root >/dev/null 2>&1 && ok "maverick started on $DISPLAY" \
     || { bad "maverick did not start on $DISPLAY"; exit 1; }
 
 # ── open a solid-colour window (override-redirect, survives the WM restart) ────
-# Centre is (400,350). Baseline drawing of ordinary windows is already covered by
-# tests/xephyr-compositor.sh; this test guards the restart regression where
-# pre-existing windows lost their GPU texture and the tiles vanished.
+# Centre is (400,350). This test guards the restart regression where
+# pre-existing windows did not survive the restart.
 "$BINDIR/staticwin" 200 200 400 300 0x22cc44 >/dev/null 2>&1 &
 sleep 1.5
 
