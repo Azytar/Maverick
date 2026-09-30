@@ -1,6 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-cc 9eab7b5b539b2ebfb8bf012daed396bd4f60aeb5b0d97d92e54f0e6df69674e9 # shrinks to position = 0.0, target = -39661.4, velocity = 0.0, stiffness = inf, damping = 0.80734557
-cc 8b2b768e01e38d0f8b73d3568f8a286587a5dd4df1664d6e0a1141a7ca7a81bf # shrinks to position = 0.0, target = 13811.8955, velocity = 0.0, (raw_stiffness, raw_damping) = (220.0, 0.0)
