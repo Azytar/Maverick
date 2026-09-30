@@ -6,11 +6,6 @@ members = [
     "maverick-toml",
     "maverickctl",
 ]
-# `maverick-vk` is an unwired Vulkan/X11 bootstrap. No crate depends on it, so
-# it is unreachable from any build and its 3489 lines are never linked into the
-# WM. It is excluded rather than deleted so the work is not thrown away, and so
-# it stops appearing in workspace-wide `--workspace` test and clippy runs.
-exclude = ["maverick-vk"]
 resolver = "2"
 
 # Centralised versions for shared dev-dependencies. Every entry here must be
@@ -55,10 +50,12 @@ maverick-x11 = { path = "maverick-x11" }
 # `xkb` is used only to *subscribe* to keyboard-map changes (XkbMapNotify /
 # XkbNewKeyboardNotify), which core `MappingNotify` does not always deliver —
 # the keymap itself is still read with core `GetKeyboardMapping`.
-# `allow-unsafe-code` is what makes `x11rb::xcb_ffi::XCBConnection` available so
-# the bootstrap can hand back the one connection the WM uses.
+# `allow-unsafe-code` is deliberately absent: it exists for
+# `x11rb::xcb_ffi::XCBConnection`, which only `maverick-x11` names, and cargo
+# unifies the feature across the graph, so the enabling stays where it is
+# justified.
 x11rb = { version = "0.13", default-features = false, features = [
-    "randr", "shape", "xkb", "allow-unsafe-code",
+    "randr", "shape", "xkb",
 ] }
 
 [dev-dependencies]
