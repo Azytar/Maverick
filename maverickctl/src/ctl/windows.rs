@@ -17,7 +17,8 @@
 //! *acted on*, and an ambiguous name is refused with the candidates listed
 //! rather than resolved to a guess.
 
-use crate::json::Json;
+use crate::client;
+use maverick_sys::json::Json;
 
 use super::session::{available_sessions, split_session_and_rest, truncate};
 use super::{print_usage, session_target, Ctl};
@@ -279,9 +280,9 @@ fn candidates(windows: &[&WindowInfo]) -> String {
 fn windows_of(c: &Ctl, args: &[String]) -> Result<(String, Vec<WindowInfo>), String> {
     let name = session_target(c, args)?;
     let view = crate::session::resolve(&name).map_err(|e| e.to_string())?;
-    let tree = crate::control::query(&view.sid, "tree")
+    let tree = client::query(&view.sid, "tree")
         .map_err(|e| format!("cannot read the window tree of '{name}': {e}"))?;
-    let tree = crate::json::parse(&tree)
+    let tree = maverick_sys::json::parse(&tree)
         .ok_or_else(|| format!("the window tree of '{name}' was not valid JSON"))?;
     Ok((view.sid, flatten_windows(&tree)))
 }
@@ -330,7 +331,7 @@ fn window_list(c: &Ctl, args: &[String]) -> Result<bool, String> {
         let items: Vec<String> = windows.iter().map(window_json).collect();
         println!(
             "{{\"session\":{},\"windows\":[{}]}}",
-            crate::json::json_quote(&sid),
+            maverick_sys::json::json_quote(&sid),
             items.join(",")
         );
         return Ok(true);
@@ -366,9 +367,9 @@ fn window_json(w: &WindowInfo) -> String {
         w.id,
         w.id,
         w.pid.map_or_else(|| "null".to_string(), num),
-        crate::json::json_quote(&w.class),
-        crate::json::json_quote(&w.instance),
-        crate::json::json_quote(&w.title),
+        maverick_sys::json::json_quote(&w.class),
+        maverick_sys::json::json_quote(&w.instance),
+        maverick_sys::json::json_quote(&w.title),
         w.monitor,
         w.workspace,
         w.column,
@@ -413,17 +414,17 @@ fn window_inspect(c: &Ctl, args: &[String]) -> Result<(), String> {
 
     // The window manager's own view of the same window, so the two are
     // reported together: what the tool sees and what the WM believes.
-    let live = crate::control::query(&sid, "inspect")
+    let live = client::query(&sid, "inspect")
         .ok()
-        .and_then(|j| crate::json::parse(&j));
+        .and_then(|j| maverick_sys::json::parse(&j));
     if c.json {
         let doc = window_json(w);
-        let mut fields = match crate::json::parse(&doc) {
+        let mut fields = match maverick_sys::json::parse(&doc) {
             Some(Json::Obj(f)) => f,
             _ => Vec::new(),
         };
         if let Some(v) = &live {
-            for key in ["layout", "compositor", "sel_mon"] {
+            for key in ["layout", "sel_mon"] {
                 if let Some(part) = v.get(key) {
                     fields.push((format!("maverick_{key}"), part.clone()));
                 }
@@ -513,9 +514,9 @@ pub(crate) fn window_selector(c: &Ctl, args: &[String]) -> Option<String> {
 fn act(c: &Ctl, args: &[String], verb: &str, op: WindowOp) -> Result<(), String> {
     let name = session_target(c, args)?;
     let view = crate::session::resolve(&name).map_err(|e| e.to_string())?;
-    let tree = crate::control::query(&view.sid, "tree")
+    let tree = client::query(&view.sid, "tree")
         .map_err(|e| format!("cannot read the window tree of '{name}': {e}"))?;
-    let tree = crate::json::parse(&tree)
+    let tree = maverick_sys::json::parse(&tree)
         .ok_or_else(|| format!("the window tree of '{name}' was not valid JSON"))?;
     let windows = flatten_windows(&tree);
 
@@ -534,14 +535,14 @@ fn act(c: &Ctl, args: &[String], verb: &str, op: WindowOp) -> Result<(), String>
         resolve_window(&windows, &selector)?
     };
 
-    crate::control::dispatch(&view.sid, &op.action(id))
+    client::dispatch(&view.sid, &op.action(id))
         .map_err(|e| format!("{verb} failed for {id:#x}: {e}"))?;
     if c.json {
         println!(
             "{{\"session\":{},\"window\":{},\"action\":{}}}",
-            crate::json::json_quote(&name),
+            maverick_sys::json::json_quote(&name),
             id,
-            crate::json::json_quote(&op.action(id))
+            maverick_sys::json::json_quote(&op.action(id))
         );
     } else {
         println!("{id:#x}: {verb}");
@@ -586,7 +587,7 @@ pub fn camera(c: &Ctl, args: &[String]) -> Result<(), String> {
         "camera needs a direction\n\n  try: maverickctl camera debug right".to_string()
     })?;
     let view = crate::session::resolve(&name).map_err(|e| e.to_string())?;
-    crate::control::dispatch(&view.sid, &format!("focus:{dir}"))
+    client::dispatch(&view.sid, &format!("focus:{dir}"))
         .map_err(|e| format!("camera {dir} failed: {e}"))?;
     report(c, &name, &format!("camera {dir}"));
     Ok(())
@@ -629,8 +630,7 @@ pub fn resize(c: &Ctl, args: &[String]) -> Result<(), String> {
             "'{amount}' is neither a pixel count nor a percentage\n\n  try: maverickctl resize {name} +10%"
         ));
     };
-    crate::control::dispatch(&view.sid, &action)
-        .map_err(|e| format!("resize {amount} failed: {e}"))?;
+    client::dispatch(&view.sid, &action).map_err(|e| format!("resize {amount} failed: {e}"))?;
     report(c, &name, &action);
     Ok(())
 }
@@ -646,7 +646,7 @@ pub fn layout(c: &Ctl, args: &[String]) -> Result<(), String> {
             "layout needs a kind\n\n  try: maverickctl layout debug column".to_string()
         })?;
     let view = crate::session::resolve(&name).map_err(|e| e.to_string())?;
-    crate::control::dispatch(&view.sid, &format!("layout:{kind}"))
+    client::dispatch(&view.sid, &format!("layout:{kind}"))
         .map_err(|e| format!("layout {kind} failed: {e}"))?;
     report(c, &name, &format!("layout {kind}"));
     Ok(())
@@ -656,8 +656,8 @@ fn report(c: &Ctl, session_name: &str, action: &str) {
     if c.json {
         println!(
             "{{\"session\":{},\"action\":{}}}",
-            crate::json::json_quote(session_name),
-            crate::json::json_quote(action)
+            maverick_sys::json::json_quote(session_name),
+            maverick_sys::json::json_quote(action)
         );
     } else {
         println!("{action}");
@@ -762,7 +762,7 @@ mod tests {
     /// change this fixture with it.
     #[test]
     fn flattening_reads_the_hierarchy_including_floats() {
-        let tree = crate::json::parse(
+        let tree = maverick_sys::json::parse(
             r#"{"sel_mon":0,"monitors":[{"index":0,"active_ws":0,"focused":2,
                  "workspaces":[{"index":0,"layout":"column","columns":[
                     {"width":640.0,"focused":0,"windows":[
@@ -806,7 +806,7 @@ mod tests {
     /// document that disagrees with itself reports the window's own answer.
     #[test]
     fn a_windows_own_placement_beats_the_walk_position() {
-        let tree = crate::json::parse(
+        let tree = maverick_sys::json::parse(
             r#"{"sel_mon":0,"monitors":[{"index":0,"active_ws":0,"focused":0,
                  "workspaces":[{"index":0,"columns":[{"width":1.0,"focused":0,"windows":[
                     {"id":1,"pid":7,"class":"a","instance":"a","title":"t","monitor":1,"workspace":3,"geom":[0,0,10,10]}]}],"floats":[]}]}]}"#,
@@ -822,7 +822,7 @@ mod tests {
     #[test]
     fn flattening_a_missing_tree_yields_nothing() {
         for doc in ["{}", r#"{"monitors":[]}"#, "not json"] {
-            let tree = crate::json::parse(doc).unwrap_or(crate::json::Json::Null);
+            let tree = maverick_sys::json::parse(doc).unwrap_or(maverick_sys::json::Json::Null);
             assert!(flatten_windows(&tree).is_empty(), "{doc}");
         }
     }

@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 rust-version = "1.82"
 authors = ["azytar"]
-description = "Maverick's OS/control boundary: libc FFI (signals, poll, uid/gid, process-tree signalling), instance identity and discovery, the Unix-socket control protocol, the Maverick Session model, and the maverickctl CLI engine"
+description = "Maverick's OS/control boundary: libc FFI (signals, poll, uid/gid), instance identity, the Unix-socket control protocol server, and minimal JSON helpers. Session orchestration and the maverickctl CLI live in the maverickctl crate."
 license = "GPL-3.0"
 repository = "https://github.com/azytar/Maverick"
 categories = ["os::unix-apis"]
@@ -30,20 +30,11 @@ libc = "0.2"
 rustix = { version = "1", default-features = false, features = [
     "std",
     "event",
-    "fs",
     "net",
     "process",
     "rand",
 ] }
 
-[[test]]
-name = "ctl_props"
-path = "tests/ctl_props.rs"
-
 [dev-dependencies]
 # Property-based coverage for this crate's pure deterministic logic.
 proptest.workspace = true
-# The session tests write real `.Xauthority` files and records into a
-# throwaway directory, so they need a private one that cleans itself up rather
-# than a hand-rolled name that collides under parallel execution.
-tempfile.workspace = true

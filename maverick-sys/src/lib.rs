@@ -1,10 +1,9 @@
-//! System boundary — process, signal and session FFI in one place.
+//! System boundary — process, signal and identity FFI in one place.
 //!
 //! Centralizes this crate's `libc` FFI: POSIX signal handlers (`sigaction`),
-//! `poll(2)` for the event-loop socket, `getuid`/`getgid` identity reads, and
-//! the process-tree signalling (`kill`/`killpg`) behind [`session`]. The event
-//! loop polls the [`AtomicBool`] flags exported here, and no `static mut` is
-//! used anywhere in the workspace.
+//! `poll(2)` for the event-loop socket, and `getuid`/`getgid` identity reads.
+//! The event loop polls the [`AtomicBool`] flags exported here, and no
+//! `static mut` is used anywhere in the workspace.
 //!
 //! `unsafe` is **not** confined to this crate. `maverick-gl`, `maverick-vk` and
 //! `maverick-x11` each contain their own FFI `unsafe`, as does the X11 backend
@@ -24,27 +23,17 @@
 //! - [`hub`] — `Arc`/`Mutex`/`mpsc` bridge between the server thread and the
 //!   single WM thread: command queue, cached state snapshot, and `subscribe`
 //!   event sinks. Cloning is cheap and shares the same queues.
-//! - [`discover`] — scans [`identity::runtime_dir`] fichas, enriches with live
-//!   `/proc` data (`DISPLAY`/`tty_nr`/`exe`), checks liveness via
-//!   `ping` + `start_time` against PID reuse, and offers `quit`/`prune`.
 //! - [`identity`] — [`InstanceInfo`], `session_id` generation, `runtime_dir`/
 //!   `session_dir`/`sock_path`/`meta_path` (0700, fixed `control.sock` under
 //!   `SUN_LEN`), `/proc/<pid>/stat`/`environ`/`exe` readers, and minimal JSON
 //!   ficha I/O without `serde`.
 //! - [`json`] — canonical `json_escape`/`json_quote`/`json_unescape` plus the
-//!   flat-object codec `scan_object` used by `identity` and `session`; single
-//!   copy, no `serde`.
-//! - [`session`] — the Maverick Session model: a named, reproducible graphical
-//!   unit (X server + Maverick + applications) with its own runtime directory,
-//!   cookie, logs and lifecycle. Owns display allocation, the nested X server
-//!   backend, the process tree and the session record. Still no control-plane
-//!   policy: that is `ctl`.
-//! - [`ctl`] — the `maverickctl` engine: instance
-//!   selection (`--session`/`--name`/`$MAVERICK_INSTANCE`/DISPLAY+TTY
-//!   context/singleton), `list`/`state`/`query`/`msg`/`subscribe`/`quit`/
-//!   `restart`/`reload`/`prune`, and confirmation via
-//!   `zenity`/`kdialog`/TTY.
+//!   flat-object codec `scan_object` used by `identity`; single copy, no
+//!   `serde`.
 //!
+//! The `maverickctl` tool (CLI parsing, IPC client, discovery, session
+//! orchestration) lives in the separate `maverickctl` crate and links this
+//! one only for the protocol surface above.
 //! # Ownership
 //!
 //! [`Signal`] owns the handler/ignore lists; [`Signal::install`] consumes it
@@ -505,17 +494,13 @@ pub fn wait_readable_fds(
 }
 
 pub mod control;
-pub mod ctl;
-pub mod discover;
 pub mod hub;
 pub mod identity;
 pub mod json;
-pub mod session;
 
 pub use control::ControlServer;
 pub use hub::{ControlCommand, ControlHub};
 pub use identity::{self_info, InstanceInfo, DEFAULT_NAME};
-pub use session::{Session, SessionName, SessionState};
 
 /// Shared pieces for the property tests that are compiled into the library
 /// because the functions they cover are private.

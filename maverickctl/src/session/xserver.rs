@@ -1,15 +1,15 @@
 //! The nested X server that backs a Maverick session.
 //!
 //! A session needs a real X server of its own: the window manager connects to
-//! `DISPLAY`, the compositor needs GLX/Composite/Damage, and every application
-//! the session runs expects a normal X client environment. Maverick does not
-//! nest a server into itself — the session *manager* does, here.
+//! `DISPLAY`, and every application the session runs expects a normal X client
+//! environment. Maverick does not nest a server into itself — the session
+//! *manager* does, here.
 //!
 //! # Why Xephyr, and what "backend" means here
 //!
 //! The alternatives on Linux were compared against the criteria that actually
-//! matter for this feature (a real server, a real GLX for the compositor, no
-//! privileges, scriptable, present on a stock Arch install):
+//! matter for this feature (a real server, a screen of its own, no privileges,
+//! scriptable, present on a stock Arch install):
 //!
 //! * **Nested Xorg** (`Xorg -configure` with a generated `xorg.conf`) is the
 //!   most "real" option and is what a distribution would ship, but it needs
@@ -20,15 +20,14 @@
 //!   and a distribution-specific driver package.
 //! * **Xvfb** is a real X server and needs no privileges, but it is *headless*:
 //!   nothing renders into the parent display, so a user cannot see the session
-//!   they just created, and its GLX is software-rasterised (llvmpipe) or
-//!   absent, which means the real Maverick compositor either fails to
-//!   initialise or runs a path it never runs on real hardware. It stays as a
-//!   backend for headless/CI use.
+//!   they just created, and it draws through software rasterisation (llvmpipe),
+//!   so a graphical application inside the session may render slowly or not at
+//!   all. It stays as a backend for headless/CI use.
 //! * **Xephyr** is a real X server whose framebuffer *is* a window on the
-//!   parent display, with real GLX, Composite, Damage and RANDR. It is the
-//!   only option that gives a developer what this feature is for: a second
-//!   Maverick they can watch, at an independent resolution, without touching
-//!   the primary session.
+//!   parent display, so the session's clients get the host's drivers and
+//!   extensions. It is the only option that gives a developer what this feature
+//!   is for: a second Maverick they can watch, at an independent resolution,
+//!   without touching the primary session.
 //!
 //! So the session manager owns a [`Backend`] abstraction and Xephyr is its
 //! default implementation. Nothing in [`crate::session`] is "an Xephyr
@@ -74,13 +73,13 @@ use super::ProcRef;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Backend {
     /// A real X server rendered into a window on the parent display. The
-    /// default, and the only backend that gives a *visible* session with a
-    /// hardware/GLX compositor path.
+    /// default, and the only backend whose session is *visible* and whose
+    /// clients reach the host's drivers and extensions.
     #[default]
     Xephyr,
-    /// Headless real X server. No window on the parent display and a software
-    /// (or absent) GLX, so the compositor may fall back to the X11 path. Meant
-    /// for CI and for `maverickctl exec`-style automation, not for watching.
+    /// Headless real X server: no window on the parent display, and rendering
+    /// through software rasterisation. Meant for CI and for `maverickctl
+    /// exec`-style automation, not for watching.
     Xvfb,
 }
 
@@ -602,9 +601,11 @@ pub fn spawn(spec: &XServerSpec) -> io::Result<XServer> {
         Backend::Xephyr => {
             cmd.arg("-screen").arg(&screen);
             cmd.arg("-title").arg(&spec.title);
-            // The extensions Maverick's compositor and borders rely on. Naming
-            // them explicitly makes a session's capability set reproducible
-            // instead of dependent on a server build's defaults.
+            // A session's clients are entitled to a normal X server, so the
+            // capability set is named here rather than left to whatever a
+            // particular Xephyr build happens to leave enabled. The window
+            // manager itself needs RANDR for monitor geometry; the rest are
+            // what an application inside the session expects to find.
             for ext in ["RANDR", "GLX", "Composite", "DAMAGE", "RENDER", "XFIXES"] {
                 cmd.arg("+extension").arg(ext);
             }

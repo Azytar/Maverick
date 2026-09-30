@@ -7,7 +7,7 @@
 
 mod common;
 
-use maverick_sys::ctl::main_with_args;
+use maverickctl::ctl::main_with_args;
 use proptest::prelude::*;
 use std::process::ExitCode;
 

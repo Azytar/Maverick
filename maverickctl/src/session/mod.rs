@@ -50,7 +50,7 @@
 //! A session belongs to the uid that created it, and the record says so. The
 //! directory is `0700`, the cookie is `0600`, the logs are `0600`, and the
 //! control socket is additionally peer-credential checked by the WM (see
-//! [`crate::control`]). Nothing here reads an environment variable as an
+//! [`maverick_sys::control`]). Nothing here reads an environment variable as an
 //! authorization decision: `owner_uid` is recorded so a *foreign* record is
 //! refused, never so a caller can claim one.
 
@@ -58,13 +58,14 @@ pub mod lifecycle;
 pub mod proc;
 pub mod xserver;
 
+use crate::client;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::identity;
-use crate::json::{json_quote, quote_array, scan_object};
+use maverick_sys::identity;
+use maverick_sys::json::{json_quote, quote_array, scan_object};
 
 pub use xserver::{Backend, Display, XServer};
 
@@ -297,10 +298,6 @@ pub struct Spec {
     pub args: Vec<String>,
     /// Debug mode: verbose logging and a per-session log worth reading.
     pub debug: bool,
-    /// Whether the compositor was requested. `false` means the session runs
-    /// with `MAVERICK_NO_COMPOSITOR=1`, which is how one session is compared
-    /// against another without touching the user's own.
-    pub compositor: bool,
 }
 
 impl Default for Spec {
@@ -313,7 +310,6 @@ impl Default for Spec {
             cwd: None,
             args: Vec::new(),
             debug: false,
-            compositor: true,
         }
     }
 }
@@ -356,7 +352,7 @@ impl Session {
     /// pid is checked too, so a recycled pid cannot be mistaken for the WM.
     pub fn wm_is_up(&self) -> bool {
         self.wm.is_alive()
-            && crate::control::ping(self.name.as_str()).is_ok()
+            && client::ping(self.name.as_str()).is_ok()
             && identity::read_meta(self.name.as_str())
                 .is_some_and(|i| i.start_time == 0 || i.start_time == self.wm.start_time)
     }
@@ -476,21 +472,7 @@ impl Session {
                 "MAVERICK_LOG".to_string(),
                 if self.spec.debug { "debug" } else { "info" }.to_string(),
             ),
-            (
-                "MAVERICK_NO_COMPOSITOR".to_string(),
-                if self.spec.compositor {
-                    String::new()
-                } else {
-                    "1".to_string()
-                },
-            ),
         ]
-        .into_iter()
-        // An empty value is how the kernel spells "unset" for an env var, and
-        // `compositor_enabled` checks `var_os(..).is_none()` — so the variable
-        // has to be *absent*, not empty, for the compositor to run.
-        .filter(|(_, v)| !v.is_empty() || v == "info")
-        .collect()
     }
 
     /// Serialize the record to its on-disk form.
@@ -499,7 +481,7 @@ impl Session {
             concat!(
                 "{{\"name\":{name},\"backend\":\"{backend}\",\"resolution\":\"{res}\",",
                 "\"refresh_rate\":{hz},\"binary\":{bin},\"cwd\":{cwd},\"args\":{args},",
-                "\"debug\":{debug},\"compositor\":{comp},\"owner_uid\":{uid},",
+                "\"debug\":{debug},\"owner_uid\":{uid},",
                 "\"owner_gid\":{gid},\"created_at\":{created},\"display\":\"{display}\",",
                 "\"x_pid\":{xpid},\"x_start_time\":{xstart},\"wm_pid\":{wmpid},",
                 "\"wm_start_time\":{wmstart},\"state\":\"{state}\",\"exit_reason\":{reason},",
@@ -520,7 +502,6 @@ impl Session {
                 .map_or("null".to_string(), |p| json_quote(&p.display().to_string())),
             args = quote_array(&self.spec.args),
             debug = self.spec.debug,
-            comp = self.spec.compositor,
             uid = self.owner_uid,
             gid = self.owner_gid,
             created = self.created_at,
@@ -544,7 +525,7 @@ impl Session {
     /// not usable.
     ///
     /// A `null` field reads as *absent*, not as the four characters `null`
-    /// (see [`crate::json::Field::text`]), so an optional the writer left empty
+    /// (see [`maverick_sys::json::Field::text`]), so an optional the writer left empty
     /// stays empty on the way back in. That is what keeps `cwd: null` from
     /// becoming a session whose working directory is a file called "null".
     pub fn from_json(doc: &str) -> Option<Self> {
@@ -584,7 +565,6 @@ impl Session {
                 },
                 args: get_arr("args").unwrap_or_default(),
                 debug: get_bool("debug").unwrap_or(false),
-                compositor: get_bool("compositor").unwrap_or(true),
             },
             // A record that names no owner is this process's own: reading it is
             // reading a file only this uid can have written, in a `0700`
@@ -788,8 +768,6 @@ pub struct SessionView {
     pub binary: String,
     /// Whether the session runs in debug mode.
     pub debug: bool,
-    /// Whether the compositor was requested.
-    pub compositor_requested: bool,
     /// Which nested X server implementation is in use, when known.
     pub backend: Option<Backend>,
     /// Why the session is in its state, in one line.
@@ -862,7 +840,6 @@ pub fn list() -> Vec<SessionView> {
             pid: (inst.pid != 0).then_some(inst.pid),
             binary: inst.exe.clone(),
             debug: false,
-            compositor_requested: true,
             backend: None,
             exit_reason: if inst.alive {
                 String::new()
@@ -904,7 +881,6 @@ fn view_of(s: &Session) -> SessionView {
         pid: s.wm.pid.checked_sub(0).filter(|_| s.wm.is_some()),
         binary: s.spec.binary.clone(),
         debug: s.spec.debug,
-        compositor_requested: s.spec.compositor,
         backend: Some(s.spec.backend),
         exit_reason,
         created_at: s.created_at,
@@ -954,7 +930,6 @@ pub fn resolve(name: &str) -> Result<SessionView, SessionError> {
                 pid: (inst.pid != 0).then_some(inst.pid),
                 binary: inst.exe.clone(),
                 debug: false,
-                compositor_requested: true,
                 backend: None,
                 exit_reason: String::new(),
                 created_at: inst.started_at,
@@ -1010,7 +985,6 @@ pub fn main_session() -> Option<SessionView> {
         pid: (inst.pid != 0).then_some(inst.pid),
         binary: inst.exe.clone(),
         debug: false,
-        compositor_requested: true,
         backend: None,
         exit_reason: String::new(),
         created_at: inst.started_at,
@@ -1412,7 +1386,6 @@ mod tests {
                 cwd: Some(PathBuf::from("/home/u/Descargas/Maverick")),
                 args: vec!["--debug".into(), r#"--log "x,y""#.into(), String::new()],
                 debug: true,
-                compositor: false,
             },
             owner_uid: 1000,
             owner_gid: 1000,
@@ -1442,10 +1415,21 @@ mod tests {
         assert_eq!(s.name.as_str(), "debug");
         assert_eq!(s.display, Display(2));
         assert_eq!(s.spec.resolution, Resolution::DEFAULT);
-        assert!(s.spec.compositor, "the compositor is opt-out, not opt-in");
         assert!(!s.spec.debug);
         assert_eq!(s.state, SessionState::Stopped);
         assert!(s.wm.pid == 0 && s.wm.start_time == 0);
+    }
+
+    /// A record written by an older build carries keys this one retired. The
+    /// reader looks up the keys it knows rather than walking the document, so an
+    /// unknown key is ignored and the record still loads; a record that refused
+    /// to load would strand every session created before the retirement.
+    #[test]
+    fn a_record_with_a_key_this_build_does_not_know_still_parses() {
+        let s = Session::from_json(r#"{"name":"debug","display":":4"}"#)
+            .expect("a retired key must not refuse the record");
+        assert_eq!(s.name.as_str(), "debug");
+        assert_eq!(s.display, Display(4));
     }
 
     /// Without a valid name there is no record: the name is what every path is
@@ -1468,10 +1452,7 @@ mod tests {
     }
 
     /// The environment is the contract that makes a program *be* in the
-    /// session, so each variable is pinned. `MAVERICK_NO_COMPOSITOR` in
-    /// particular must be absent rather than empty: the WM tests
-    /// `var_os(..).is_none()`, so an empty value would silently disable the
-    /// compositor in every session that asked for one.
+    /// session, so each variable and its exact value are pinned.
     #[test]
     fn the_session_environment_is_exactly_what_a_client_needs() {
         let mut s = Session::new(
@@ -1498,19 +1479,14 @@ mod tests {
             Some("debug")
         );
         assert_eq!(env.get("MAVERICK_LOG").map(String::as_str), Some("debug"));
-        assert!(
-            !env.contains_key("MAVERICK_NO_COMPOSITOR"),
-            "an empty value would read as 'compositor disabled' to the WM"
-        );
 
         s.spec.debug = false;
-        s.spec.compositor = false;
         let env: std::collections::HashMap<String, String> = s.env().into_iter().collect();
         assert_eq!(env.get("MAVERICK_LOG").map(String::as_str), Some("info"));
-        assert_eq!(
-            env.get("MAVERICK_NO_COMPOSITOR").map(String::as_str),
-            Some("1")
-        );
+        // The list is a fixed contract, not a filtered subset: every entry is
+        // present whatever its value, so a program in the session cannot end up
+        // with a variable silently missing.
+        assert_eq!(env.len(), 5, "{env:?}");
     }
 
     #[test]

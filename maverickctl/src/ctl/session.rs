@@ -18,6 +18,7 @@
 //! in" — is `maverickctl window list` with no arguments at all. A session name
 //! is only spelled out when the caller means a specific one.
 
+use crate::client;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -25,12 +26,11 @@ use std::time::Duration;
 
 use super::windows::flatten_windows;
 use super::{print_usage, session_target, Ctl};
-use crate::control;
-use crate::json::Json;
 use crate::session::{
     self, lifecycle, proc, Backend, Resolution, Session, SessionName, SessionState, SessionView,
     Spec,
 };
+use maverick_sys::json::Json;
 
 /// How many log lines `maverickctl logs` shows by default.
 const DEFAULT_LOG_LINES: usize = 40;
@@ -151,15 +151,15 @@ fn view_json(v: &SessionView) -> String {
     };
     let refresh = v.refresh_rate.map_or("null".to_string(), |r| r.to_string());
     let xauth = match live_record(&v.name) {
-        Some(s) => crate::json::json_quote(&s.xauth_path().display().to_string()),
+        Some(s) => maverick_sys::json::json_quote(&s.xauth_path().display().to_string()),
         None => "null".to_string(),
     };
     let fields = [
-        field("name", crate::json::json_quote(&v.name)),
-        field("session_id", crate::json::json_quote(&v.sid)),
-        field("kind", crate::json::json_quote(v.kind)),
-        field("state", crate::json::json_quote(v.state.as_str())),
-        field("display", crate::json::json_quote(&v.display)),
+        field("name", maverick_sys::json::json_quote(&v.name)),
+        field("session_id", maverick_sys::json::json_quote(&v.sid)),
+        field("kind", maverick_sys::json::json_quote(v.kind)),
+        field("state", maverick_sys::json::json_quote(v.state.as_str())),
+        field("display", maverick_sys::json::json_quote(&v.display)),
         field("resolution", resolution),
         field("refresh_rate", refresh),
         field("pid", v.pid.map_or("null".to_string(), |p| p.to_string())),
@@ -167,16 +167,19 @@ fn view_json(v: &SessionView) -> String {
             "x_pid",
             v.x_pid.map_or("null".to_string(), |p| p.to_string()),
         ),
-        field("binary", crate::json::json_quote(&v.binary)),
+        field("binary", maverick_sys::json::json_quote(&v.binary)),
         field("debug", v.debug.to_string()),
-        field("compositor_requested", v.compositor_requested.to_string()),
         field(
             "backend",
-            v.backend
-                .map_or("null".to_string(), |b| crate::json::json_quote(b.label())),
+            v.backend.map_or("null".to_string(), |b| {
+                maverick_sys::json::json_quote(b.label())
+            }),
         ),
         field("xauth", xauth),
-        field("exit_reason", crate::json::json_quote(&v.exit_reason)),
+        field(
+            "exit_reason",
+            maverick_sys::json::json_quote(&v.exit_reason),
+        ),
         field("created_at", v.created_at.to_string()),
         field("owner_uid", v.owner_uid.to_string()),
     ];
@@ -218,7 +221,6 @@ fn create(c: &Ctl, args: &[String]) -> Result<(), String> {
         cwd,
         args: parsed.maverick_args,
         debug: parsed.debug,
-        compositor: !parsed.no_compositor,
     };
 
     if c.json {
@@ -249,7 +251,6 @@ struct CreateArgs {
     binary: String,
     cwd: Option<PathBuf>,
     debug: bool,
-    no_compositor: bool,
     maverick_args: Vec<String>,
 }
 
@@ -268,7 +269,6 @@ impl CreateArgs {
         let mut binary = String::new();
         let mut cwd = None;
         let mut debug = false;
-        let mut no_compositor = false;
         let mut maverick_args = Vec::new();
 
         let mut i = 0;
@@ -310,7 +310,6 @@ impl CreateArgs {
                 "--binary" => binary = value("--binary")?,
                 "--cwd" => cwd = Some(PathBuf::from(value("--cwd")?)),
                 "--debug" => debug = true,
-                "--no-compositor" => no_compositor = true,
                 other if other.starts_with('-') => {
                     return Err(format!(
                         "unknown option '{other}'\n\n  try: maverickctl session create --help"
@@ -337,7 +336,6 @@ impl CreateArgs {
             binary,
             cwd,
             debug,
-            no_compositor,
             maverick_args,
         })
     }
@@ -357,7 +355,6 @@ fn created_json(s: &Session) -> String {
         pid: (s.wm.pid != 0).then_some(s.wm.pid),
         binary: s.spec.binary.clone(),
         debug: s.spec.debug,
-        compositor_requested: s.spec.compositor,
         backend: Some(s.spec.backend),
         exit_reason: s.exit_reason.clone(),
         created_at: s.created_at,
@@ -400,9 +397,6 @@ fn status(c: &Ctl, args: &[String]) -> Result<(), String> {
     if view.debug {
         println!("  {:<14}yes", "debug:");
     }
-    if !view.compositor_requested {
-        println!("  {:<14}disabled", "compositor:");
-    }
     if let Some(b) = view.backend {
         println!("  {:<14}{}", "x backend:", b.label());
     }
@@ -439,7 +433,7 @@ fn change(c: &Ctl, args: &[String], verb: &str) -> Result<(), String> {
         if views.is_empty() {
             println!(
                 "{{\"name\":{},\"removed\":true}}",
-                crate::json::json_quote(&name)
+                maverick_sys::json::json_quote(&name)
             );
         } else {
             println!("{{\"session\":{}}}", views[0]);
@@ -507,7 +501,7 @@ pub fn exec(c: &Ctl, args: &[String]) -> Result<(), String> {
     if c.json {
         println!(
             "{{\"session\":{},\"pid\":{pid}}}",
-            crate::json::json_quote(&call.session)
+            maverick_sys::json::json_quote(&call.session)
         );
     } else {
         println!("{pid}");
@@ -903,7 +897,7 @@ fn process_list(c: &Ctl, args: &[String]) -> Result<bool, String> {
             .collect();
         println!(
             "{{\"session\":{},\"processes\":[{}]}}",
-            crate::json::json_quote(&name),
+            maverick_sys::json::json_quote(&name),
             items.join(",")
         );
         return Ok(true);
@@ -937,12 +931,12 @@ fn process_json(p: &proc::ProcInfo, role: &str) -> String {
         p.pid,
         p.ppid,
         p.pgid,
-        crate::json::json_quote(&p.display_name()),
-        crate::json::json_quote(role),
-        crate::json::json_quote(&p.cmdline),
+        maverick_sys::json::json_quote(&p.display_name()),
+        maverick_sys::json::json_quote(role),
+        maverick_sys::json::json_quote(&p.cmdline),
         p.cpu_percent(),
         p.rss_bytes,
-        crate::json::json_quote(&p.rss_human()),
+        maverick_sys::json::json_quote(&p.rss_human()),
         p.elapsed_ms,
     )
 }
@@ -1055,7 +1049,7 @@ pub fn logs(c: &Ctl, args: &[String]) -> Result<(), String> {
         )
     })?;
     // The X server's log is the other half of a failed start, and it is where a
-    // "display already in use" or a missing GLX driver actually shows up.
+    // "display already in use" or a driver that would not bind actually shows up.
     let xserver = args.iter().any(|a| a == "--xserver" || a == "-x");
     let path = if xserver {
         record.xserver_log_path()
@@ -1100,9 +1094,9 @@ pub fn logs(c: &Ctl, args: &[String]) -> Result<(), String> {
 /// Two real sources, because neither alone answers "what is this session
 /// doing": the `subscribe` stream is structured, ordered and cheap but only
 /// carries transitions, while the log at `MAVERICK_LOG=debug` carries the
-/// reconciliation, geometry, compositor and damage detail that a bug in any of
-/// those needs. Both are filtered by `--window`, so an investigation can be
-/// scoped to one window without reading everything.
+/// reconciliation and geometry detail that a bug in either of those needs. Both
+/// are filtered by `--window`, so an investigation can be scoped to one window
+/// without reading everything.
 pub fn debug(c: &Ctl, args: &[String]) -> Result<(), String> {
     let name = session_target(c, args)?;
     let record = live_record(&name).ok_or_else(|| {
@@ -1133,7 +1127,7 @@ pub fn debug(c: &Ctl, args: &[String]) -> Result<(), String> {
     // Callback-shaped because the subscription is a blocking read on a socket:
     // the closure returning `false` is how a filter ends the stream without a
     // second control path through the reader.
-    let result = control::subscribe_stream(&name, |line| match window_filter {
+    let result = client::subscribe_stream(&name, |line| match window_filter {
         Some(win) if !line_mentions(line, win) => true,
         _ => {
             println!("{line}");
@@ -1154,13 +1148,13 @@ pub fn inspect(c: &Ctl, args: &[String]) -> Result<(), String> {
     // The window manager's own answer, when it is up. Absent for a stopped
     // session, which is reported as such rather than as a session with no
     // windows.
-    let live = control::query(&view.sid, "inspect")
+    let live = client::query(&view.sid, "inspect")
         .ok()
-        .and_then(|j| crate::json::parse(&j));
+        .and_then(|j| maverick_sys::json::parse(&j));
     let tree = live
         .as_ref()
-        .and_then(|_| control::query(&view.sid, "tree").ok())
-        .and_then(|j| crate::json::parse(&j));
+        .and_then(|_| client::query(&view.sid, "tree").ok())
+        .and_then(|j| maverick_sys::json::parse(&j));
     let windows = tree.as_ref().map(flatten_windows).unwrap_or_default();
 
     if c.json {
@@ -1214,18 +1208,6 @@ pub fn inspect(c: &Ctl, args: &[String]) -> Result<(), String> {
             println!("  {:<14}{cam:.3}", "camera:");
         }
     }
-    if let Some(c) = live.get("compositor") {
-        println!("\nCOMPOSITOR");
-        println!("  {:<14}{}", "backend:", c.str_field("backend"));
-        println!(
-            "  {:<14}{}",
-            "enabled:",
-            if c.bool_field("active") { "yes" } else { "no" }
-        );
-        if !c.bool_field("active") && live.bool_field("compositor_requested") {
-            println!("  {:<14}requested but not running", "note:");
-        }
-    }
     println!("\nPROCESSES");
     println!("  {:<14}{}", "total:", procs.len());
     Ok(())
@@ -1239,13 +1221,13 @@ fn merge_inspect(
     windows: &[super::WindowInfo],
     process_count: usize,
 ) -> String {
-    let base = crate::json::parse(view).expect("a view this function just built");
+    let base = maverick_sys::json::parse(view).expect("a view this function just built");
     let mut fields = match base {
         Json::Obj(fields) => fields,
         _ => Vec::new(),
     };
     if let Some(live) = live {
-        for key in ["windows", "layout", "compositor", "monitor", "animations"] {
+        for key in ["windows", "layout", "monitor", "animations"] {
             if let Some(v) = live.get(key) {
                 fields.retain(|(k, _)| k != key);
                 fields.push((key.to_string(), v.clone()));
@@ -1317,10 +1299,10 @@ fn follow_file(path: &Path, _c: &Ctl) -> Result<(), String> {
 /// True if a log line concerns `win`, or names no window at all.
 ///
 /// A line that names *other* windows is dropped; a line that names none is
-/// kept. That second half matters: a failure with no window reference —
-/// "compositor: GL error", a rejected keybind, a lost client — is exactly the
-/// one a window filter would otherwise hide, and the whole reason to filter is
-/// to read less, not to miss things.
+/// kept. That second half matters: a failure with no window reference — a
+/// rejected keybind, a lost client, an X error — is exactly the one a window
+/// filter would otherwise hide, and the whole reason to filter is to read less,
+/// not to miss things.
 fn matches_filter(line: &str, window: Option<u32>) -> bool {
     let Some(win) = window else {
         return true;
@@ -1541,7 +1523,6 @@ mod tests {
             "./target/debug/maverick".into(),
             "--cwd".into(),
             "/tmp".into(),
-            "--no-compositor".into(),
         ])
         .expect("parses");
         assert_eq!(parsed.name.as_str(), "agent");
@@ -1550,7 +1531,6 @@ mod tests {
         assert_eq!(parsed.backend, Backend::Xvfb);
         assert_eq!(parsed.binary, "./target/debug/maverick");
         assert_eq!(parsed.cwd, Some(PathBuf::from("/tmp")));
-        assert!(parsed.no_compositor);
     }
 
     /// Every failure has to name the option and, where there is an obvious
@@ -1600,7 +1580,6 @@ mod tests {
             pid: Some(22),
             binary: "/usr/bin/maverick".into(),
             debug: true,
-            compositor_requested: true,
             backend: Some(Backend::Xephyr),
             exit_reason: String::new(),
             created_at: 17,
@@ -1612,7 +1591,7 @@ mod tests {
             "the key is always present: {doc}"
         );
         assert!(
-            crate::json::parse(&doc).is_some(),
+            maverick_sys::json::parse(&doc).is_some(),
             "and it must be valid JSON"
         );
 
@@ -1632,7 +1611,7 @@ mod tests {
         }
         // And no environment variable is reported at all, so nothing inherited
         // by this process can ride along into a log or a JSON document.
-        for forbidden in ["DISPLAY=", "XAUTHORITY=", "MAVERICK_NO_COMPOSITOR="] {
+        for forbidden in ["DISPLAY=", "XAUTHORITY="] {
             assert!(!doc.contains(forbidden), "{forbidden} leaked: {doc}");
         }
     }
@@ -1653,13 +1632,12 @@ mod tests {
             pid: Some(1821),
             binary: "/usr/bin/maverick".into(),
             debug: false,
-            compositor_requested: true,
             backend: None,
             exit_reason: String::new(),
             created_at: 0,
             owner_uid: 1000,
         });
-        let v = crate::json::parse(&doc).expect("valid JSON");
+        let v = maverick_sys::json::parse(&doc).expect("valid JSON");
         for key in [
             "name",
             "session_id",
@@ -1672,7 +1650,6 @@ mod tests {
             "x_pid",
             "binary",
             "debug",
-            "compositor_requested",
             "backend",
             "xauth",
             "exit_reason",
@@ -1701,7 +1678,7 @@ mod tests {
             elapsed_ms: 10_000,
         };
         let doc = process_json(&p, "application");
-        let v = crate::json::parse(&doc).expect("valid JSON");
+        let v = maverick_sys::json::parse(&doc).expect("valid JSON");
         assert_eq!(v.num_field("pid"), 18231);
         assert_eq!(v.str_field("name"), "alacritty");
         assert_eq!(v.str_field("role"), "application");
@@ -1717,7 +1694,10 @@ mod tests {
     fn a_window_filter_keeps_lines_that_name_no_window() {
         let win = 0x42003;
         assert!(matches_filter(&format!("focus win=0x{win:x}"), Some(win)));
-        assert!(matches_filter("compositor: GL error", Some(win)));
+        assert!(matches_filter(
+            "keybind rejected: no such action",
+            Some(win)
+        ));
         assert!(
             !matches_filter("focus win=0x99", Some(win)),
             "a line about another window must be filtered out"

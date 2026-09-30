@@ -9,32 +9,32 @@
 //! # Ownership and lifecycle
 //!
 //! No owned handles — all functions are stateless and re-scan
-//! [`crate::identity::runtime_dir`] on every call. File I/O is best-effort;
+//! [`maverick_sys::identity::runtime_dir`] on every call. File I/O is best-effort;
 //! a missing or unreadable ficha is silently skipped.
 //!
 //! # Stale-socket and PID-reuse guard
 //!
 //! [`list_instances`] marks an entry `alive` only when **both** conditions hold:
 //!
-//! 1. The control socket answers [`crate::control::ping`] (proves a live listener).
+//! 1. The control socket answers [`maverick_sys::control::ping`] (proves a live listener).
 //! 2. The recorded `pid`'s `/proc/<pid>/stat` start time matches the ficha's
 //!    `start_time` (field 22). If the WM crashed and the kernel recycled the
 //!    PID, the start time will differ and the entry is considered stale even if
 //!    some unrelated process now holds that PID or a dead socket file remains.
 //!
 //! The socket's own stale file was already handled at spawn by
-//! [`crate::control::ControlServer::spawn`] (TOCTOU-safe `is_socket` check
+//! [`maverick_sys::control::ControlServer::spawn`] (TOCTOU-safe `is_socket` check
 //! before unlink), but a `SIGKILL`'d instance may still leave a dead socket
 //! that rejects connections — the `ping` check catches it.
 
+use crate::client;
 use std::fs;
 
-use crate::control;
-use crate::identity::{self, InstanceInfo};
+use maverick_sys::identity::{self, InstanceInfo};
 
 /// List every Maverick instance with a ficha on disk.
 ///
-/// Each session lives in its own subdirectory of [`crate::identity::runtime_dir`]
+/// Each session lives in its own subdirectory of [`maverick_sys::identity::runtime_dir`]
 /// named after its `session_id`, and the ficha is `<sid>/<sid>.json`. Missing
 /// `display`/`tty_nr`/`exe` fields are filled in from `/proc/<pid>`, and
 /// `alive` comes from the ping + start-time check documented at module level.
@@ -98,7 +98,7 @@ pub fn list_instances() -> Vec<InstanceInfo> {
 /// whose pid the kernel has since recycled would look alive through its
 /// leftover socket file.
 fn is_instance_alive(info: &InstanceInfo) -> bool {
-    if control::ping(&info.session_id).is_err() {
+    if client::ping(&info.session_id).is_err() {
         return false;
     }
     if info.start_time != 0 {
@@ -131,7 +131,7 @@ pub fn find_by_name(name: &str) -> Option<InstanceInfo> {
 /// correctly; this remains the path for an instance nobody has a record of,
 /// where the window manager owns its own socket and removes it on exit.
 pub fn quit_by_name(sid: &str) -> std::io::Result<String> {
-    control::quit(sid)
+    client::quit(sid)
 }
 
 /// Quit every discovered instance that is still alive.

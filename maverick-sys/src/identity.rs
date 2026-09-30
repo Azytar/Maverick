@@ -290,7 +290,11 @@ fn read_urandom_u64() -> Option<u64> {
 /// chmod a path to `0700` so other UIDs cannot read/modify it.
 /// Refuses to follow symlinks: if `path` is a symlink (or not a dir),
 /// returns an error instead of chmodding an attacker-controlled target.
-pub(crate) fn set_private_dir(path: &Path) -> io::Result<()> {
+///
+/// Public because both sides of the control boundary enforce it: the server
+/// for the runtime directory it binds into, the tool for the session
+/// directories it creates.
+pub fn set_private_dir(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let meta = std::fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() || !meta.file_type().is_dir() {

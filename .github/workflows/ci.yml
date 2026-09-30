@@ -54,6 +54,6 @@ jobs:
         # There is no `default` feature and no compositor to leave out, so this
         # is the profile the WM ships. `--no-default-features` used to mean
         # "the pure X11 WM" here; that build is now the only build.
-        run: cargo build --release -p maverick -p maverick-sys
+        run: cargo build --release -p maverick -p maverickctl
       - name: Xvfb stacking regression
         run: python3 tests/xvfb-stacking.py

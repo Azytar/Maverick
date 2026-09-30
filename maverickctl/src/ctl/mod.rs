@@ -17,7 +17,7 @@
 //! [`resolve_target`] resolves the target `session_id` in this order (first
 //! match wins):
 //!
-//! 1. `--session <sid>` — explicit session id, validated via [`crate::identity::read_meta`].
+//! 1. `--session <sid>` — explicit session id, validated via [`maverick_sys::identity::read_meta`].
 //! 2. `--name <label>` — human label or sid, via [`crate::discover::find_by_name`].
 //! 3. `$MAVERICK_INSTANCE` — session id the WM exported to its children.
 //! 4. Caller context — `DISPLAY` + controlling TTY (`/proc/self/stat` field 7);
@@ -32,8 +32,8 @@
 
 use std::process::ExitCode;
 
-use crate::identity::{current_display, current_tty_nr, InstanceInfo};
-use crate::{control, discover};
+use crate::{client, discover};
+use maverick_sys::identity::{current_display, current_tty_nr, InstanceInfo};
 
 pub mod session;
 pub mod windows;
@@ -370,7 +370,6 @@ SESSIONS
         --binary <path>        Maverick binary to run (default: maverick on PATH)
         --cwd <path>           Working directory for Maverick
         --debug                Run at debug level (what `logs` is for)
-        --no-compositor        Run without the compositor, to compare
         -- <args…>             Everything after -- is passed to Maverick
 
 RUNNING THINGS IN A SESSION
@@ -386,7 +385,7 @@ RUNNING THINGS IN A SESSION
     process kill <session> <pid>        Signal a process in the session
 
 LOOKING INSIDE
-    inspect <session> [--json]          Session, windows, layout, compositor
+    inspect <session> [--json]          Session, windows, layout
     logs <session> [-n N] [-f] [--xserver]  Tail a session's own log
     debug <session> [--window <id>]     Live event stream + recent debug log
 
@@ -491,7 +490,7 @@ COMMANDS:
     attach <session> [cmd…]    As shell, announcing display and session
     logs   <session>           Tail a session's own log
     debug  <session>           Live event stream + recent debug log
-    inspect <session>          Session, windows, layout, compositor
+    inspect <session>          Session, windows, layout
     window  <session> <verb>   list | inspect | focus | close | float |
                                fullscreen | move
     process <session> <verb>   list | inspect | kill
@@ -589,7 +588,7 @@ fn parse_opts_default(args: &[String]) -> Opts {
 /// key (`session_id`), not the human label.
 fn resolve_target(tool: &str, name: &Option<String>, session: &Option<String>) -> Option<String> {
     if let Some(s) = session {
-        return if crate::identity::read_meta(s).is_some() {
+        return if maverick_sys::identity::read_meta(s).is_some() {
             Some(s.clone())
         } else {
             eprintln!("{tool}: no instance with session id '{s}'");
@@ -602,7 +601,7 @@ fn resolve_target(tool: &str, name: &Option<String>, session: &Option<String>) -
     // `$MAVERICK_INSTANCE` holds the session id the WM exported to its children
     // (the common case when a tool is launched from a Maverick keybind).
     if let Ok(env) = std::env::var("MAVERICK_INSTANCE") {
-        if !env.is_empty() && crate::identity::read_meta(&env).is_some() {
+        if !env.is_empty() && maverick_sys::identity::read_meta(&env).is_some() {
             return Some(env);
         }
     }
@@ -714,14 +713,14 @@ fn cmd_state(tool: &str, args: &[String], full_snapshot: bool) -> ExitCode {
         None => return ExitCode::FAILURE,
     };
     if full_snapshot {
-        return print_json(tool, control::state(&name));
+        return print_json(tool, client::state(&name));
     }
     let line = o.positional.join(" ");
     if line.is_empty() {
         eprintln!("{tool}: query requires a topic (state|workspaces|tree|focused) or action");
         return ExitCode::FAILURE;
     }
-    print_json(tool, control::query(&name, &line))
+    print_json(tool, client::query(&name, &line))
 }
 
 /// Dispatch an action string (`msg`/`dispatch`/`command`) to the resolved instance.
@@ -736,7 +735,7 @@ fn cmd_msg(tool: &str, args: &[String]) -> ExitCode {
         Some(n) => n,
         None => return ExitCode::FAILURE,
     };
-    match control::dispatch(&name, &action) {
+    match client::dispatch(&name, &action) {
         Ok(reply) => {
             if reply.starts_with("error") {
                 eprintln!("{tool}: {reply}");
@@ -759,7 +758,7 @@ fn cmd_subscribe(tool: &str, args: &[String]) -> ExitCode {
         Some(n) => n,
         None => return ExitCode::FAILURE,
     };
-    let r = control::subscribe_stream(&name, |line| {
+    let r = client::subscribe_stream(&name, |line| {
         println!("{line}");
         true
     });
@@ -869,8 +868,8 @@ fn cmd_simple(tool: &str, args: &[String], verb: &str) -> ExitCode {
         None => return ExitCode::FAILURE,
     };
     let res = match verb {
-        "restart" => control::restart(&name),
-        "reload" => control::reload(&name),
+        "restart" => client::restart(&name),
+        "reload" => client::reload(&name),
         other => {
             eprintln!("{tool}: unknown verb '{other}'");
             return ExitCode::FAILURE;
@@ -946,10 +945,10 @@ fn await_restarted_within(name: &str, budget: std::time::Duration) -> bool {
     let deadline = Instant::now() + budget;
     let mut went_away = false;
     while Instant::now() < deadline {
-        let ready = control::ping(name)
+        let ready = client::ping(name)
             .map(|reply| reply.starts_with("pong"))
             .unwrap_or(false)
-            && control::query(name, "state")
+            && client::query(name, "state")
                 .map(|json| json.contains("\"monitors\":[{"))
                 .unwrap_or(false);
         if ready {
@@ -1007,7 +1006,7 @@ fn cmd_forward(tool: &str, line: &str) -> ExitCode {
         .map(|(_, word)| word.as_str())
         .collect::<Vec<_>>()
         .join(" ");
-    use crate::identity::{DISPATCH_CMD, IDENTIFY_CMD, PING_CMD, QUERY_CMD};
+    use maverick_sys::identity::{DISPATCH_CMD, IDENTIFY_CMD, PING_CMD, QUERY_CMD};
     // Require a whitespace delimiter after `query`/`dispatch`, mirroring the
     // server (`control::dispatch_line`): `queryfoo` must fall through to
     // dispatch, not be parsed as topic `foo`.
@@ -1020,24 +1019,24 @@ fn cmd_forward(tool: &str, line: &str) -> ExitCode {
         }
     }
     let res: std::io::Result<String> = match payload.as_str() {
-        "ping" => control::send_command(&name, PING_CMD),
-        "identify" => control::send_command(&name, IDENTIFY_CMD),
-        "state" => control::state(&name),
-        "quit" => control::quit(&name),
-        "restart" => control::restart(&name),
-        "reload" => control::reload(&name),
-        "subscribe" => control::subscribe_stream(&name, |l| {
+        "ping" => client::send_command(&name, PING_CMD),
+        "identify" => client::send_command(&name, IDENTIFY_CMD),
+        "state" => client::state(&name),
+        "quit" => client::quit(&name),
+        "restart" => client::restart(&name),
+        "reload" => client::reload(&name),
+        "subscribe" => client::subscribe_stream(&name, |l| {
             println!("{l}");
             true
         })
         .map(|_| "ok".to_string()),
         l => {
             if let Some(topic) = strip_cmd(l, QUERY_CMD) {
-                control::query(&name, topic)
+                client::query(&name, topic)
             } else if let Some(action) = strip_cmd(l, DISPATCH_CMD) {
-                control::dispatch(&name, action)
+                client::dispatch(&name, action)
             } else {
-                control::dispatch(&name, l)
+                client::dispatch(&name, l)
             }
         }
     };
@@ -1133,7 +1132,7 @@ fn which(bin: &str) -> bool {
 #[cfg(test)]
 mod opts_props {
     use super::*;
-    use crate::prop_support::{config, text};
+    use crate::test_support::{config, text};
     use proptest::prelude::*;
 
     /// The compatibility flags `cmd_state` hands to [`parse_opts`].

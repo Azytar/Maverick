@@ -1,10 +1,14 @@
-//! Shared strategies for the `maverick-sys` property suite.
+//! Shared strategies for the `maverickctl` property suite.
+//!
+//! The `{nasty_char, regex_s, text}` generators twin the ones in
+//! `maverick-sys/tests/common.rs`: each crate's integration tests must be
+//! self-contained, so the copies exist in both places and must stay
+//! equivalent.
 //!
 //! The text strategies below are deliberately hostile: quotes, backslashes,
 //! separators, control bytes and non-ASCII are over-represented, because those
-//! are exactly the characters that decide whether a payload survives the JSON
-//! escaper, the line framing of the control protocol and the hand-rolled ficha
-//! reader.
+//! are exactly the characters that decide whether a payload survives the CLI
+//! parser and the line framing of the control protocol.
 
 #![allow(dead_code)]
 
@@ -50,26 +54,6 @@ pub fn text() -> impl Strategy<Value = String> {
         1 => regex_s("[^\x00-\x7f]{0,12}"),
         1 => regex_s("."),
     ]
-}
-
-/// Text built only from escape material — lone backslashes, `\u` runs of every
-/// length, quotes. No WM ever emits it; it arrives from a hand-edited, stale or
-/// hostile ficha, and it is what the decoder's branches are written for.
-pub fn escape_soup() -> impl Strategy<Value = String> {
-    prop_oneof![
-        3 => proptest::collection::vec(nasty_char(), 0..24).prop_map(|cs| cs.into_iter().collect()),
-        3 => regex_s("(\\\\u|\\\\|\\\\u[0-9a-fA-F]{0,4}|[0-9a-fA-F]|\"|[bfrnt/]){0,16}"),
-    ]
-}
-
-/// Free-form text long enough to cross the protocol's line bound, so the paths
-/// that truncate a payload are reached instead of merely approached.
-pub fn oversized_text(min_len: usize, max_len: usize) -> impl Strategy<Value = String> {
-    (min_len..=max_len, text()).prop_map(|(pad_len, tail)| {
-        let mut s = "x".repeat(pad_len);
-        s.push_str(&tail);
-        s
-    })
 }
 
 /// Point `XDG_RUNTIME_DIR` at an empty throwaway directory for this test binary.

@@ -44,9 +44,9 @@
 //! - `framebench` — test-only heap-allocation counter (allocation-free proof).
 //!
 //! Graphical sessions — the X server, the window manager and the applications
-//! launched into them — are not modelled here. They live in `maverick_sys::session`
-//! and are driven by `maverickctl session`; this module owns window-management
-//! state only.
+//! launched into them — are not modelled here. They live in
+//! `maverickctl::session` and are driven by `maverickctl session`; this module
+//! owns window-management state only.
 
 pub mod action;
 pub mod capability;

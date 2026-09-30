@@ -145,7 +145,6 @@ dependencies = [
  "libc",
  "proptest",
  "rustix",
- "tempfile",
 ]
 
 [[package]]
@@ -161,6 +160,17 @@ version = "1.0.0"
 dependencies = [
  "proptest",
  "x11rb",
+]
+
+[[package]]
+name = "maverickctl"
+version = "1.0.0"
+dependencies = [
+ "libc",
+ "maverick-sys",
+ "proptest",
+ "rustix",
+ "tempfile",
 ]
 
 [[package]]

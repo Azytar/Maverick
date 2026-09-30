@@ -10,8 +10,8 @@
 //! instance is present. Sharing a runtime directory between the two made that
 //! assertion depend on whether a fixture happened to be up.
 
-use maverick_sys::ctl::main_with_args;
 use maverick_sys::identity::InstanceInfo;
+use maverickctl::ctl::main_with_args;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::process::ExitCode;

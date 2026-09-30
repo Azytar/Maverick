@@ -33,6 +33,7 @@
 //! mid-write. [`kill`] reverses nothing — it is the path for a session that
 //! will not shut down, so it skips straight to signals.
 
+use crate::client;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -44,8 +45,7 @@ use super::{
     current_gid, current_uid, read_checked, session_dir, wait_until, Session, SessionError,
     SessionName, SessionState, Spec, START_TIMEOUT, STOP_GRACE,
 };
-use crate::control;
-use crate::identity;
+use maverick_sys::identity;
 
 /// A resolved, runnable Maverick binary.
 ///
@@ -577,11 +577,11 @@ fn start_maverick(session: &mut Session) -> Result<ProcRef, SessionError> {
         }
         // The socket answering is necessary; a snapshot with a monitor is what
         // makes the session usable.
-        control::ping(&name)
+        client::ping(&name)
             .ok()
             .filter(|pong| !pong.is_empty())
             .is_some()
-            && control::query(&name, "state")
+            && client::query(&name, "state")
                 .map(|json| json.contains("\"monitors\":[{"))
                 .unwrap_or(false)
     });
@@ -634,7 +634,7 @@ fn teardown(session: &mut Session, mode: StopMode) {
     // and applications killed mid-write.
     if session.wm.is_alive() {
         if mode == StopMode::Graceful {
-            let _ = control::quit(session.name.as_str());
+            let _ = client::quit(session.name.as_str());
         }
         wait_until(STOP_GRACE, || !session.wm.is_alive());
         if session.wm.is_alive() {

@@ -15,11 +15,13 @@
 //! `cargo test` in a fraction of a second rather than only when a delegated
 //! decode happens to hang.
 //!
-//! The rule spans a boundary that is not a crate boundary. `maverick-sys` is
-//! linked into both binaries: the `maverick` window manager, which must never
-//! wait, and `maverickctl`, which legitimately does (`session exec --wait` is
-//! specified to block and report the status, and `maverickctl` never installs
-//! `SA_NOCLDWAIT`). `ALLOWED` below records that split with its reason. Any
+//! The rule spans a boundary that is now a crate boundary. `maverick-sys` is
+//! linked into both binaries, but the waiting code lives in `maverickctl`,
+//! which is never linked into the `maverick` window manager and legitimately
+//! waits (`session exec --wait` is specified to block and report the status,
+//! and `maverickctl` never installs `SA_NOCLDWAIT`). The walked directories
+//! below therefore need no exemptions: `ALLOWED` is empty on purpose, and an
+//! entry may only ever be added with the reason waiting there is sound. Any
 //! other crate gaining a `wait` in a path that reaches the WM is a violation,
 //! and a crate that reaches the WM without depending on `maverick-sys` — as
 //! `maverick-img` deliberately does — cannot be protected by any convention in
@@ -74,11 +76,12 @@ const WM_SOURCE_DIRS: &[&str] = &[
 ];
 
 /// Paths permitted to wait, each with the reason it is sound.
-const ALLOWED: &[(&str, &str)] = &[(
-    "maverick-sys/src/ctl/",
-    "maverickctl is a separate process that never installs SA_NOCLDWAIT; \
-     `session exec --wait` is specified to block and report the child's status",
-)];
+///
+/// Deliberately empty: every directory the rule walks is linked into the
+/// window manager, and none of that code may wait. The legitimately waiting
+/// code lives in `maverickctl`, which is never linked into `maverick` and
+/// therefore never walked.
+const ALLOWED: &[(&str, &str)] = &[];
 
 /// Strip `#[cfg(test)]` regions and line comments, returning the remaining
 /// lines with their original 1-based numbers.
@@ -233,7 +236,7 @@ fn no_code_linked_into_the_window_manager_waits_on_a_child() {
 #[test]
 fn the_wait_detector_can_still_see_a_real_violation() {
     let root = repo_root();
-    let control = root.join("maverick-sys/src/ctl/session.rs");
+    let control = root.join("maverickctl/src/ctl/session.rs");
     assert!(
         control.is_file(),
         "the allow-listed control file moved; re-derive the ALLOWED entry and \

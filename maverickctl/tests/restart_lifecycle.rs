@@ -14,7 +14,7 @@
 //! real runtime-directory resolution that moving it out from under them would
 //! invalidate.
 
-use maverick_sys::ctl::main_with_args;
+use maverickctl::ctl::main_with_args;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
@@ -240,7 +240,7 @@ fn an_announced_departure_finishes_the_restart_without_ever_unbinding() {
     isolate_runtime_dir();
     let sid = "announced";
     let first = Instance::start(sid, Behaviour::Serving);
-    let name = sid.to_string();
+    let _name = sid.to_string();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(80));
         first.switch_to(Behaviour::Departing);
@@ -259,7 +259,7 @@ fn an_announced_departure_that_never_returns_is_not_a_finished_restart() {
     isolate_runtime_dir();
     let sid = "announced-gone";
     let first = Instance::start(sid, Behaviour::Serving);
-    let name = sid.to_string();
+    let _name = sid.to_string();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(80));
         first.switch_to(Behaviour::Departing);

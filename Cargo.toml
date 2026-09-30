@@ -5,6 +5,7 @@ members = [
     "maverick-x11",
     "maverick-toml",
     "maverick-img",
+    "maverickctl",
 ]
 # `maverick-vk` is an unwired Vulkan/X11 bootstrap. No crate depends on it, so
 # it is unreachable from any build and its 3489 lines are never linked into the

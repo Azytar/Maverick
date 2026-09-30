@@ -48,13 +48,13 @@
 //! - The parent directory is created `0700` via [`crate::identity::set_private_dir`].
 //! - A stale socket file is only unlinked if it is a socket (`FileTypeExt::is_socket`)
 //!   to avoid TOCTOU symlink attacks.
-//! - Commands containing `'\n'` are rejected in [`send_command`] to prevent
-//!   line-protocol injection.
+//! - Commands containing `'\n'` are rejected by the client
+//!   (`maverickctl::client::send_command`) to prevent line-protocol injection.
 //! - Every reply and event is cut back to at most [`MAX_LINE_LEN`] bytes on a
 //!   character boundary ([`single_line`]), so a hub payload can never make a
 //!   handler unwind mid-write.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -87,7 +87,9 @@ pub const MAX_SUBSCRIBERS: usize = 16;
 /// Maximum accepted protocol line (64 KiB). Prevents a single client from
 /// OOMing the per-connection thread with a 1 GiB `read_line`.
 pub const MAX_LINE_LEN: usize = 64 * 1024;
-/// Maximum accepted command length for `send_command` (same bound).
+/// Longest command the client will send (64 KiB). The client refuses longer
+/// commands before touching the socket; the server independently bounds every
+/// inbound line at [`MAX_LINE_LEN`].
 pub const MAX_CMD_LEN: usize = 64 * 1024;
 
 /// The uid of the process on the other end of a connected Unix socket.
@@ -405,7 +407,7 @@ fn handle_conn(
 /// Flatten a payload the hub published into one bounded protocol line.
 ///
 /// All hub-published payloads must be single-line; a WM bug emitting `\n` would
-/// otherwise desync `subscribe_stream`'s `lines()` framing. The bound is in
+/// otherwise desync the subscriber's `lines()` framing. The bound is in
 /// bytes but the payload is UTF-8, so the cut can land inside a multi-byte
 /// character, and [`String::truncate`] panics on any offset that is not a
 /// character boundary. Walk back to the last boundary at or before the limit: a
@@ -549,152 +551,6 @@ fn stream_events(
     }
 }
 
-/// Connect to a running instance's control socket and send one command,
-/// returning the first reply line. Used by discovery/ctl tools.
-pub fn send_command(name: &str, cmd: &str) -> std::io::Result<String> {
-    // Reject embedded CR/LF to prevent command injection in the line protocol,
-    // and bound length to avoid amplifying a huge caller string.
-    if cmd.contains(['\n', '\r']) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "command contains newline",
-        ));
-    }
-    if cmd.len() > MAX_CMD_LEN {
-        return Err(std::io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "command too long",
-        ));
-    }
-    // Validate session id before touching the filesystem (traversal-safe).
-    let path = identity::try_sock_path(name)?;
-    let mut stream = UnixStream::connect(&path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-    stream.write_all(format!("{cmd}\n").as_bytes())?;
-    let reader = BufReader::new(stream);
-    let mut reply = String::new();
-    // Bound the reply as well: a compromised server must not OOM the client.
-    let mut limited = reader.take((MAX_LINE_LEN + 16) as u64);
-    limited.read_line(&mut reply)?;
-    if reply.len() > MAX_LINE_LEN + 16 {
-        return Err(std::io::Error::new(
-            io::ErrorKind::InvalidData,
-            "reply too long",
-        ));
-    }
-    let reply = reply.trim_end_matches(['\n', '\r']).to_string();
-    // The protocol owes exactly one line per request: every arm of
-    // `dispatch_line` returns one, and the server writes it before closing. The
-    // shortest real reply is `ok`, so a zero-byte read means the peer went away
-    // mid-exchange — not an empty answer. Reporting that as `Ok("")` made a
-    // silent exit 0 with a bare newline on stdout and nothing on stderr, which
-    // is worse than a refused socket: that already fails.
-    if reply.is_empty() {
-        return Err(std::io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "no reply from the instance",
-        ));
-    }
-    Ok(reply)
-}
-
-/// Probe a running instance: connect, `ping`, and confirm it answers.
-/// Returns the `pong` reply (e.g. `pong default`) or an error if dead.
-pub fn ping(name: &str) -> std::io::Result<String> {
-    send_command(name, PING_CMD)
-}
-
-/// Ask a running instance for its identity ficha JSON.
-pub fn identify(name: &str) -> std::io::Result<String> {
-    send_command(name, IDENTIFY_CMD)
-}
-
-/// Ask a running instance to quit. Returns Ok if the socket answered.
-pub fn quit(name: &str) -> std::io::Result<String> {
-    send_command(name, QUIT_CMD)
-}
-
-/// Ask a running instance to restart (re-exec).
-pub fn restart(name: &str) -> std::io::Result<String> {
-    send_command(name, RESTART_CMD)
-}
-
-/// Ask a running instance to reload its config.
-pub fn reload(name: &str) -> std::io::Result<String> {
-    send_command(name, RELOAD_CMD)
-}
-
-/// Fetch the current WM state snapshot (JSON) from a running instance.
-pub fn state(name: &str) -> std::io::Result<String> {
-    send_command(name, STATE_CMD)
-}
-
-/// Send a `dispatch <action>` to a running instance (execute an action as if
-/// it were a keybind). Returns the server reply.
-pub fn dispatch(name: &str, action: &str) -> std::io::Result<String> {
-    if action.contains(['\n', '\r']) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "action contains newline",
-        ));
-    }
-    send_command(name, &format!("{DISPATCH_CMD} {action}"))
-}
-
-/// Run a structured `query <topic>` against a running instance ("workspaces",
-/// "tree", "focused", …). The WM answers from its live state; this blocks
-/// until the reply arrives. Used by `maverickctl query …`.
-pub fn query(name: &str, topic: &str) -> std::io::Result<String> {
-    if topic.contains(['\n', '\r']) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "topic contains newline",
-        ));
-    }
-    send_command(name, &format!("{QUERY_CMD} {topic}"))
-}
-
-/// Subscribe to the event stream of a running instance, invoking `on_line` for
-/// each event line as it arrives. Blocks until the socket closes or `on_line`
-/// returns `false`. Used by `maverickctl subscribe` and external bars.
-pub fn subscribe_stream<F>(name: &str, mut on_line: F) -> std::io::Result<()>
-where
-    F: FnMut(&str) -> bool,
-{
-    let path = identity::try_sock_path(name)?;
-    let mut stream = UnixStream::connect(&path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
-    stream.write_all(format!("{SUBSCRIBE_CMD}\n").as_bytes())?;
-    let reader = BufReader::new(stream);
-    let mut acked = false;
-    for line in reader.lines() {
-        let line = line?;
-        if line.len() > MAX_LINE_LEN {
-            continue;
-        }
-        let trimmed = line.trim_end_matches(['\n', '\r']);
-        // Skip the initial "ok subscribe" acknowledgement. A server-side
-        // rejection (e.g. subscriber cap) arrives here instead: surface it
-        // as an error rather than feeding it to `on_line` as an event.
-        if !acked {
-            acked = true;
-            if trimmed == "ok subscribe" {
-                continue;
-            }
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                format!("subscribe rejected: {trimmed}"),
-            ));
-        }
-        if !on_line(trimmed) {
-            break;
-        }
-    }
-    Ok(())
-}
-
 /// Convenience: build the identity JSON for `info` (mirrors `identity::write_meta`).
 pub fn identity_json(info: &InstanceInfo) -> String {
     use crate::json::json_quote;
@@ -715,6 +571,29 @@ pub fn identity_json(info: &InstanceInfo) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Whether the server still answers `ping` over a raw socket.
+    ///
+    /// The `ping()` client helper moved to `maverickctl`; these server tests
+    /// only need to know the accept loop is still serving, so they ask over a
+    /// bare `UnixStream` instead of linking the client.
+    fn server_answers(name: &str) -> bool {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+        let Ok(path) = crate::identity::try_sock_path(name) else {
+            return false;
+        };
+        let Ok(mut s) = UnixStream::connect(&path) else {
+            return false;
+        };
+        s.set_read_timeout(Some(Duration::from_secs(2))).ok();
+        if s.write_all(b"ping\n").is_err() {
+            return false;
+        }
+        let mut line = String::new();
+        BufReader::new(s).read_line(&mut line).is_ok() && line.starts_with("pong ")
+    }
 
     /// The peer check is the second line of the socket's security, and it has
     /// to be *verifiable*, not merely present: the test connects from this
@@ -772,54 +651,6 @@ mod tests {
     }
 
     use super::*;
-    use crate::hub::ControlCommand;
-    use crate::identity::InstanceInfo;
-
-    #[test]
-    fn server_full_protocol() {
-        let name = "testctl";
-        let info = InstanceInfo {
-            name: name.into(),
-            session_id: name.into(),
-            pid: std::process::id(),
-            display: ":9".into(),
-            tty_nr: 0x1234,
-            x_server_identity: "?".into(),
-            start_time: 0,
-            exe: "/usr/bin/maverick".into(),
-            started_at: 1,
-            alive: true,
-        };
-        let json = identity_json(&info);
-        let hub = ControlHub::new();
-        hub.publish_state("{\"focus\":7}");
-        let server = ControlServer::spawn(name, json, hub.clone()).expect("server binds");
-
-        let pong = ping(name).expect("ping");
-        assert!(pong.starts_with("pong testctl"), "got: {pong}");
-
-        let ident = identify(name).expect("identify");
-        assert!(ident.contains("\"display\":\":9\""), "got: {ident}");
-
-        let st = state(name).expect("state");
-        assert_eq!(st, "{\"focus\":7}");
-
-        assert_eq!(dispatch(name, "focus-left").expect("dispatch"), "ok");
-
-        assert_eq!(quit(name).expect("quit"), "ok");
-
-        // The WM thread would drain these; verify order/content here.
-        // Give the connection threads a moment to enqueue.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let cmds = hub.drain_commands();
-        assert!(cmds
-            .iter()
-            .any(|c| matches!(c, ControlCommand::Dispatch(a) if a == "focus-left")));
-        assert!(cmds.iter().any(|c| matches!(c, ControlCommand::Quit)));
-
-        server.shutdown();
-        assert!(!identity::sock_path(name).exists());
-    }
 
     // `active` is the count the accept loop checks against `MAX_CONCURRENT`, so
     // a slot lost on the way out of a handler is lost for the life of the
@@ -911,56 +742,9 @@ mod tests {
             );
         }
         assert!(
-            ping(name).is_ok(),
+            server_answers(name),
             "every handler slot must be back after every connection"
         );
-        server.shutdown();
-    }
-
-    #[test]
-    fn subscribe_receives_events() {
-        let name = "testsub";
-        let info = InstanceInfo {
-            name: name.into(),
-            session_id: name.into(),
-            pid: std::process::id(),
-            display: ":9".into(),
-            tty_nr: 0,
-            x_server_identity: "?".into(),
-            start_time: 0,
-            exe: String::new(),
-            started_at: 1,
-            alive: true,
-        };
-        let hub = ControlHub::new();
-        let server =
-            ControlServer::spawn(name, identity_json(&info), hub.clone()).expect("server binds");
-
-        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let got_c = got.clone();
-        let nm = name.to_string();
-        let handle = std::thread::spawn(move || {
-            let _ = subscribe_stream(&nm, |line| {
-                got_c.lock().unwrap().push(line.to_string());
-                false
-            });
-        });
-
-        // Poll for subscriber registration before emitting, otherwise the
-        // event is published to an empty sink list.
-        for _ in 0..50 {
-            if hub.subscriber_count() > 0 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        hub.emit("{\"event\":\"focus\",\"win\":5}");
-        handle.join().unwrap();
-
-        let events = got.lock().unwrap();
-        assert_eq!(events.len(), 1);
-        assert!(events[0].contains("\"event\":\"focus\""));
-
         server.shutdown();
     }
 
@@ -1074,56 +858,10 @@ mod tests {
 
         // The subscribers must not have eaten every handler slot: short
         // commands still answer.
-        assert!(ping(name).is_ok(), "commands must survive full subs");
+        assert!(server_answers(name), "commands must survive full subs");
 
         server.shutdown();
         drop(replies);
-    }
-
-    #[test]
-    fn subscribe_cap_rejects_beyond_max() {
-        let name = "testsubcap";
-        let info = InstanceInfo {
-            name: name.into(),
-            session_id: name.into(),
-            pid: std::process::id(),
-            display: ":9".into(),
-            tty_nr: 0,
-            x_server_identity: "?".into(),
-            start_time: 0,
-            exe: String::new(),
-            started_at: 1,
-            alive: true,
-        };
-        let hub = ControlHub::new();
-        let server =
-            ControlServer::spawn(name, identity_json(&info), hub.clone()).expect("server binds");
-
-        let mut handles = Vec::new();
-        for _ in 0..MAX_SUBSCRIBERS {
-            let nm = name.to_string();
-            handles.push(std::thread::spawn(move || {
-                let _ = subscribe_stream(&nm, |_| true);
-            }));
-        }
-        for _ in 0..250 {
-            if hub.subscriber_count() >= MAX_SUBSCRIBERS {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert_eq!(hub.subscriber_count(), MAX_SUBSCRIBERS);
-
-        // The next subscribe must be rejected (as an Err, not an event line),
-        // and short commands must still work on the remaining slots.
-        let err = subscribe_stream(name, |_| true).expect_err("cap must reject");
-        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
-        assert!(ping(name).is_ok(), "commands must survive full subs");
-
-        server.shutdown();
-        for h in handles {
-            h.join().unwrap();
-        }
     }
 }
 
@@ -1352,6 +1090,7 @@ mod event_props {
     use super::*;
     use crate::prop_support::{config, text};
     use proptest::prelude::*;
+    use std::io::Read;
 
     /// Run one payload through [`stream_events`] and return what the subscriber
     /// saw on the wire.

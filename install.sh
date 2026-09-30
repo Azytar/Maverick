@@ -1476,7 +1476,7 @@ else
     # can only grow leaves the bar pinned below 100% for the whole build.
     # shellcheck disable=SC2086
     estimated_crates="$(cargo tree --edges normal,build --prefix none $CARGO_FEATURES \
-        -p maverick -p maverick-sys 2>/dev/null | sort -u | grep -c . || true)"
+        -p maverick -p maverickctl 2>/dev/null | sort -u | grep -c . || true)"
     if [[ -z "$estimated_crates" || "$estimated_crates" -lt 1 ]]; then
         if [[ "$WITH_COMPOSITOR" == "no" ]]; then
             estimated_crates=12
@@ -1489,12 +1489,12 @@ else
     # shellcheck disable=SC2086
     (
         if RUSTFLAGS="-C target-cpu=native" cargo build --release $CARGO_FEATURES \
-               -p maverick -p maverick-sys >"$BUILD_LOG" 2>&1; then
+               -p maverick -p maverickctl >"$BUILD_LOG" 2>&1; then
             exit 0
         fi
         # shellcheck disable=SC2086
         cargo build --release $CARGO_FEATURES \
-            -p maverick -p maverick-sys >>"$BUILD_LOG" 2>&1
+            -p maverick -p maverickctl >>"$BUILD_LOG" 2>&1
     ) &
     BUILD_PID=$!
     
