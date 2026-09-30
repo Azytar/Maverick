@@ -265,7 +265,7 @@ impl WindowManager {
                         if a == self.atoms.net_wm_window_type_desktop
                             || a == self.atoms.net_wm_window_type_dock
                         {
-                            client.is_unmanaged = true;
+                            unmanaged = true;
                         }
                         if a == self.atoms.net_wm_window_type_dialog
                             || a == self.atoms.net_wm_window_type_utility
@@ -279,11 +279,10 @@ impl WindowManager {
                 }
             }
 
-            if client.is_unmanaged {
+            if unmanaged {
                 if let Err(e) = self.conn.map_window(win) {
                     log::warn!("failed to map window {}: {}", win, e);
                 }
-                unmanaged = true;
             }
 
             if let Ok(ref sp) = c_wstate.reply() {
@@ -992,7 +991,7 @@ impl WindowManager {
         let Some(c) = self.engine.state.clients.get(&win) else {
             return;
         };
-        if c.is_float() && !c.is_unmanaged {
+        if c.is_float() {
             let _ = self.conn.change_property32(
                 PropMode::REPLACE,
                 win,

@@ -760,8 +760,6 @@ pub struct Client {
     /// back via `ConfigureNotify` (X11 Real). Written by the events convergence
     /// path; NEVER read for layout, focus, or overlay decisions.
     pub last_reported: Option<Rect>,
-    /// True when the window is unmanaged (not tiled/floated by the WM).
-    pub is_unmanaged: bool,
     /// True when the client wants input focus (`WM_HINTS` input).
     pub wants_input: bool,
     /// True when the WM has hidden the window (offscreen/minimized).
@@ -836,7 +834,6 @@ impl Client {
             window_types: Vec::new(),
             last_desired: None,
             last_reported: None,
-            is_unmanaged: false,
             wants_input: true,
             wm_hidden: false,
             geometry_dirty: false,
