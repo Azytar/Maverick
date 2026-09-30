@@ -248,7 +248,6 @@ pub fn build(spec: &Spec) -> Built {
         // is why the checker does not constrain it.
         c.geom = Rect::new(-40 * k as i32, 900, 200 + 10 * k as u32, 150);
         c.flags.set(WinFlags::FLOAT);
-        c.flags.set(WinFlags::FLOAT_NATIVE);
         st.add_client(c);
         st.monitors[mi].workspaces[ws_i].floats.push(win);
         wins.push(win);

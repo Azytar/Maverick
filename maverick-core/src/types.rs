@@ -142,7 +142,7 @@ impl Rect {
 ///
 /// # Invariants
 ///
-/// - Bits 0-9 are in use; bits >= 10 are reserved.
+/// - Bits 0-8 are in use; bits >= 9 are reserved.
 /// - `MAXIMIZED` is the union `MAXIMIZED_V | MAXIMIZED_H`, and `has()` tests
 ///   bit *overlap*, so `has(MAXIMIZED)` is already true when a single axis is
 ///   set. Callers must test both axes (`is_maximized_v() && is_maximized_h()`).
@@ -178,18 +178,6 @@ impl WinFlags {
     /// leaving fullscreen can return it to its float (and `saved_geom`) instead
     /// of dropping it back as a tiled column. Set by `ToggleFullscreen`.
     pub const FS_WAS_FLOAT: u16 = 1 << 7;
-    /// Window *origin*: the WM decided at map time that this window must float
-    /// (`_NET_WM_WINDOW_TYPE` dialog/utility/menu/toolbar/splash,
-    /// `_NET_WM_STATE_MODAL`, `WM_TRANSIENT_FOR`, fixed size hints, portal or
-    /// file-chooser heuristics, a `float = true` window rule, or a float state
-    /// restored from a session). Contrast with a tiled window the *user* tears
-    /// off (`ToggleFloat` / Mod4-drag), which leaves this bit clear.
-    ///
-    /// The origin outlives layout-mode changes and is never cleared, so
-    /// `origin != current layout mode` always holds: a native float that was
-    /// tiled and floated again is still distinguishable from a torn-off tile.
-    pub const FLOAT_NATIVE: u16 = 1 << 9;
-
     /// Set bit(s) `f`.
     #[inline]
     pub fn set(&mut self, f: u16) {
@@ -862,13 +850,6 @@ impl Client {
     #[inline]
     pub fn is_float(&self) -> bool {
         self.flags.has(WinFlags::FLOAT)
-    }
-    /// True when this window's floating origin is "born floating" (see
-    /// [`WinFlags::FLOAT_NATIVE`]). Orthogonal to the *current* layout mode:
-    /// a native float toggled into the tiling keeps returning `true`.
-    #[inline]
-    pub fn is_native_float(&self) -> bool {
-        self.flags.has(WinFlags::FLOAT_NATIVE)
     }
     /// True when the window is fullscreen (`WinFlags::FULLSCREEN`).
     #[inline]

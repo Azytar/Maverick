@@ -1020,10 +1020,10 @@ impl Command for ToggleFloat {
             if let Some(c) = state.clients.get_mut(&win) {
                 c.flags.set(WinFlags::FLOAT);
             }
-            // The projected tile rect can fall outside grid/hints; a window born
-            // floating is re-settled (idempotently) against its workarea so the
-            // first arrange does not displace it. Single "new context" helper,
-            // see `layout::settle_float_in_workarea`.
+            // The projected tile rect can fall outside grid/hints, so a window
+            // re-settled (idempotently) against its workarea now does not get
+            // displaced by the first arrange. Single "new context" helper, see
+            // `layout::settle_float_in_workarea`.
             crate::core::layout::settle_float_in_workarea(state, mi, win);
         }
         scroll_to_focused(state, cfg, mi, ws_i);

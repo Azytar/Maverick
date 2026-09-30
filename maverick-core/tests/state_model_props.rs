@@ -596,7 +596,6 @@ proptest! {
         prop_assert_eq!(c.is_fullscreen(), has(WinFlags::FULLSCREEN), "is_fullscreen read the wrong bit");
         prop_assert_eq!(c.no_focus(), has(WinFlags::NO_FOCUS), "no_focus read the wrong bit");
         prop_assert_eq!(c.is_sticky(), has(WinFlags::STICKY), "is_sticky read the wrong bit");
-        prop_assert_eq!(c.is_native_float(), has(WinFlags::FLOAT_NATIVE), "is_native_float read the wrong bit");
         prop_assert_eq!(c.is_maximized_v(), has(WinFlags::MAXIMIZED_V), "is_maximized_v read the wrong bit");
         prop_assert_eq!(c.is_maximized_h(), has(WinFlags::MAXIMIZED_H), "is_maximized_h read the wrong bit");
         prop_assert_eq!(c.flags.has(WinFlags::FIXED), has(WinFlags::FIXED), "FIXED is not readable");
@@ -653,7 +652,6 @@ fn the_ewmh_and_icccm_bit_layout_is_the_one_the_protocol_defines() {
         1 << 8,
         "_NET_WM_STATE_MAXIMIZED_HORZ"
     );
-    assert_eq!(WinFlags::FLOAT_NATIVE, 1 << 9);
     assert_eq!(
         WinFlags::MAXIMIZED,
         WinFlags::MAXIMIZED_V | WinFlags::MAXIMIZED_H
@@ -681,7 +679,6 @@ fn the_ewmh_and_icccm_bit_layout_is_the_one_the_protocol_defines() {
         WinFlags::STICKY,
         WinFlags::FS_WAS_FLOAT,
         WinFlags::MAXIMIZED_H,
-        WinFlags::FLOAT_NATIVE,
     ];
     let mut all = 0u16;
     for (i, f) in used.iter().enumerate() {
@@ -697,10 +694,7 @@ fn the_ewmh_and_icccm_bit_layout_is_the_one_the_protocol_defines() {
         );
         all |= f;
     }
-    assert_eq!(
-        all, 0x03FF,
-        "bits 0..=9 are in use and 10..=15 are reserved"
-    );
+    assert_eq!(all, 0x01FF, "bits 0..=8 are in use and 9..=15 are reserved");
 }
 
 // A column added and then removed again must leave the workspace exactly as it

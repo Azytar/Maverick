@@ -4495,58 +4495,77 @@ mod unit_tests {
         );
     }
 
-    // Origin vs layout mode: `ToggleFloat` must never blur the window's floating
-    // ORIGIN (`WinFlags::FLOAT_NATIVE`), so a born-floating window (dialog,
-    // splash, transient, rule) stays distinguishable from a tile the user tore
-    // off — even after both have been through tiled→float→tiled.
+    // `FLOAT` is the whole of a window's floating state. The window manager sets
+    // it for a signal the client published, for a `[[rules]]` entry, or for
+    // float state restored from a previous session; the user sets it by tearing
+    // a tile off. Nothing records which of those happened and nothing branches on
+    // it, so the property that has to hold is narrower: toggling is total and
+    // reversible from either starting point, and each round leaves the window in
+    // the tree it started in.
     #[test]
-    fn toggle_float_preserves_window_origin() {
+    fn toggle_float_round_trips_through_the_ribbon() {
         use crate::core::commands::{Command, ToggleFloat};
         use crate::types::{Client, WinFlags};
+
+        let in_floats = |engine: &Engine, ws_i: usize, win: u32| {
+            let mi = engine.state.sel_mon;
+            engine.state.monitors[mi].workspaces[ws_i].floats.contains(&win)
+        };
+        let in_ribbon = |engine: &Engine, ws_i: usize, win: u32| {
+            let mi = engine.state.sel_mon;
+            engine.state.monitors[mi].workspaces[ws_i]
+                .columns
+                .iter()
+                .any(|c| c.windows.contains(&win))
+        };
+
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
         let ws_i = engine.state.monitors[mi].active_ws;
 
-        // Tiled origin: tear off (ToggleFloat) and put back. The origin bit
-        // must stay CLEAR through both transitions.
+        // Starting tiled: the user tears it off and puts it back.
         engine.state.add_client(Client::new(1, mi, ws_i));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, engine.cfg.column_width);
         engine.state.monitors[mi].focused = Some(1);
         ToggleFloat(None).execute(&mut engine.state, &mut engine.cfg);
         assert!(engine.state.clients.get(&1).unwrap().is_float());
         assert!(
-            !engine.state.clients.get(&1).unwrap().is_native_float(),
-            "a torn-off tile must NOT acquire the native-float origin"
+            in_floats(&engine, ws_i, 1) && !in_ribbon(&engine, ws_i, 1),
+            "a torn-off tile leaves the ribbon for the float list"
         );
         ToggleFloat(None).execute(&mut engine.state, &mut engine.cfg);
         assert!(!engine.state.clients.get(&1).unwrap().is_float());
-        assert!(!engine.state.clients.get(&1).unwrap().is_native_float());
+        assert!(
+            in_ribbon(&engine, ws_i, 1) && !in_floats(&engine, ws_i, 1),
+            "and toggling again returns it to the ribbon"
+        );
 
-        // Native origin: born floating (as manage() marks every policy-floated
-        // window). Toggle it tiled and back — the origin bit must SURVIVE both
-        // transitions so drag semantics can still tell it apart.
+        // Starting floating. A dialog, a rule and a restored session all leave
+        // exactly this state, so each is the same round trip.
         let mut f = Client::new(2, mi, ws_i);
         f.flags.set(WinFlags::FLOAT);
-        f.flags.set(WinFlags::FLOAT_NATIVE);
         engine.state.add_client(f);
         engine.state.monitors[mi].workspaces[ws_i].floats.push(2);
         engine.state.monitors[mi].focused = Some(2);
         ToggleFloat(None).execute(&mut engine.state, &mut engine.cfg);
         assert!(!engine.state.clients.get(&2).unwrap().is_float());
         assert!(
-            engine.state.clients.get(&2).unwrap().is_native_float(),
-            "tiled mode must not erase a native float's origin"
+            in_ribbon(&engine, ws_i, 2) && !in_floats(&engine, ws_i, 2),
+            "a float the user tiles joins the ribbon"
         );
         ToggleFloat(None).execute(&mut engine.state, &mut engine.cfg);
         assert!(engine.state.clients.get(&2).unwrap().is_float());
-        assert!(engine.state.clients.get(&2).unwrap().is_native_float());
+        assert!(
+            in_floats(&engine, ws_i, 2) && !in_ribbon(&engine, ws_i, 2),
+            "and it floats again on the next toggle"
+        );
     }
 
-    // Native-float geometry ownership: a native float smaller than a tile keeps
-    // its own rect (never stretched to the column width), and one larger than the
-    // workarea is clamped to the WORKAREA — never to a column/tile rectangle.
+    // Float geometry ownership: a float smaller than a tile keeps its own rect
+    // (never stretched to the column width), and one larger than the workarea is
+    // clamped to the WORKAREA — never to a column/tile rectangle.
     #[test]
-    fn native_float_geometry_is_independent_from_tile_rect() {
+    fn float_geometry_is_independent_from_tile_rect() {
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
@@ -4558,21 +4577,19 @@ mod unit_tests {
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, engine.cfg.column_width);
         engine.state.monitors[mi].focused = Some(1);
 
-        // Native float much smaller than any tile.
+        // A float much smaller than any tile.
         let small = Rect::new(120, 90, 320, 240);
         let mut f = Client::new(2, mi, ws_i);
         f.flags.set(WinFlags::FLOAT);
-        f.flags.set(WinFlags::FLOAT_NATIVE);
         f.geom = small;
         f.saved_geom = small;
         f.border_w = engine.cfg.border_w;
         engine.state.add_client(f);
         engine.state.monitors[mi].workspaces[ws_i].floats.push(2);
 
-        // Native float larger than the workarea (must clamp to wa, not tile).
+        // A float larger than the workarea (must clamp to wa, not tile).
         let mut big = Client::new(3, mi, ws_i);
         big.flags.set(WinFlags::FLOAT);
-        big.flags.set(WinFlags::FLOAT_NATIVE);
         big.geom = Rect::new(-100, -100, 9999, 9999);
         big.saved_geom = big.geom;
         big.border_w = engine.cfg.border_w;
@@ -4586,21 +4603,21 @@ mod unit_tests {
             .windows
             .iter()
             .find(|d| d.window == 2)
-            .expect("native float present in Desired");
+            .expect("float present in Desired");
         assert_eq!(
             small_entry.rect, small,
-            "native float keeps its own (smaller-than-tile) geometry"
+            "a float keeps its own (smaller-than-tile) geometry"
         );
         assert_ne!(
             small_entry.rect.w, tile_w,
-            "native float must not be stretched to the column width"
+            "a float must not be stretched to the column width"
         );
 
         let big_entry = desired
             .windows
             .iter()
             .find(|d| d.window == 3)
-            .expect("oversized native float present in Desired");
+            .expect("oversized float present in Desired");
         // The clamp includes the 2*border_w frame, same as
         // `clamp_float_to_workarea`.
         let bw = engine.cfg.border_w;
@@ -9017,7 +9034,7 @@ mod unit_tests {
                 let c = &s.clients[&win];
                 let _ = writeln!(
                     d,
-                    "client{win} mon={} ws={} geom={:?} saved={:?} bw={}/{} dirty={} policy={:?} snap={:?} parent={:?} name={:?} class={:?} inst={:?} flags[fs={} maxv={} maxh={} sticky={} native={} fswas={} urgent={} fixed={} nofocus={}] des={:?} rep={:?}",
+                    "client{win} mon={} ws={} geom={:?} saved={:?} bw={}/{} dirty={} policy={:?} snap={:?} parent={:?} name={:?} class={:?} inst={:?} flags[fs={} maxv={} maxh={} sticky={} fswas={} urgent={} fixed={} nofocus={}] des={:?} rep={:?}",
                     c.monitor,
                     c.workspace,
                     c.geom,
@@ -9035,7 +9052,6 @@ mod unit_tests {
                     c.is_maximized_v(),
                     c.is_maximized_h(),
                     c.is_sticky(),
-                    c.is_native_float(),
                     c.flags.has(WinFlags::FS_WAS_FLOAT),
                     c.flags.has(WinFlags::URGENT),
                     c.flags.has(WinFlags::FIXED),
