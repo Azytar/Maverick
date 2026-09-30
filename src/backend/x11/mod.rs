@@ -1,9 +1,8 @@
 //! Window manager core — niri-style columnar layout, clean coords.
 //!
 //! This is the main X11 backend. It owns the X connection, the event
-//! loop, the window lifecycle, the compositor, and the translation
-//! from `Effect` (the core's semantic vocabulary) into X11 protocol
-//! calls.
+//! loop, the window lifecycle, and the translation from `Effect` (the
+//! core's semantic vocabulary) into X11 protocol calls.
 //!
 //! # Architecture
 //!
@@ -12,9 +11,8 @@
 //!     → Backend::execute → DesiredState → Reconciler → AppliedState → X11
 //! ```
 //!
-//! - **`WindowManager`** owns the X connection (`Rc<XConn>` shared with
-//!   the compositor), the event loop, the keymap, the pointer grab
-//!   state, and the compositor handle.
+//! - **`WindowManager`** owns the X connection, the event loop, the
+//!   keymap, the pointer grab state, and the applied-geometry cache.
 //! - **`dispatch`** handles every X11 event and translates it into a
 //!   `Command` that the `Engine` executes.
 //! - **`manage`/`unmanage`** handle the client lifecycle (scan, map,
@@ -29,22 +27,17 @@
 //!   reservations.
 //! - **`actions`** bridges `Effect` into X11 calls (the future
 //!   Wayland backend replaces only this module).
-//! - **`framesched`** decides when to render based on animation,
-//!   damage, and geometry changes.
 //! - **`reconciler`** diffs Desired vs Applied geometry and emits only
 //!   the `ConfigureWindow` calls that actually changed.
-//! - **`compositor`/`compositor_gl`** handle the OpenGL compositor
-//!   lifecycle and the per-frame render pipeline.
 //! - **`events`** handles X11 event callbacks dispatched from `mod.rs`.
 //! - **`hubevents`** bridges domain events to the control-hub wire
 //!   protocol.
 //!
-//! # X11 connection sharing
+//! # X11 connection
 //!
-//! The `conn: Rc<XConn>` is shared with the compositor so both see the
-//! same sequence-number space and event queue. `XDisplay` is `Copy`
-//! not `Drop` because the `XCBConnection` borrows its
-//! `xcb_connection_t*` with `should_drop = false` — see
+//! The `conn: Rc<XConn>` is the one connection every part of the WM issues
+//! requests on. `XDisplay` is `Copy` not `Drop` because the `XCBConnection`
+//! borrows its `xcb_connection_t*` with `should_drop = false` — see
 //! `maverick_x11` for the safety invariants.
 //!
 //! # Safety
@@ -52,7 +45,7 @@
 //! The only `unsafe` in this area is the `FD_CLOEXEC` `fcntl` in
 //! `actions::restart`, documented there. The X11 FFI invariants — the
 //! `Display*`/`xcb_connection_t` pairing in particular — live in
-//! `maverick_x11` and `maverick_gl`.
+//! `maverick_x11`.
 //!
 //! # Invariants
 //!
@@ -76,7 +69,7 @@ use x11rb::protocol::{xproto::*, Event};
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::COPY_DEPTH_FROM_PARENT;
 
-use maverick_x11::{XConn, XDisplay};
+use maverick_x11::XConn;
 
 use crate::backend::atoms::Atoms;
 use crate::config::Cfg;
@@ -131,32 +124,30 @@ const KBD_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_millis(
 /// the wait unbounded, and the budget unreachable until some unrelated X event
 /// happens to arrive.
 ///
-/// `frame` is the frame scheduler's own answer — 0 ms when a frame is pending —
-/// and `keyboard` and `shutdown` are absolute deadlines. `None` throughout
-/// means "no work and no deadline", i.e. block until something happens.
+/// `keyboard` and `shutdown` are absolute deadlines. `None` throughout means
+/// "no deadline", i.e. block until something happens.
 fn wait_timeout(
-    frame: Option<std::time::Duration>,
     keyboard: Option<Instant>,
     shutdown: Option<Instant>,
 ) -> Option<std::time::Duration> {
-    let mut timeout = frame;
+    let mut timeout = None;
     for deadline in [keyboard, shutdown].into_iter().flatten() {
         let left = deadline.saturating_duration_since(Instant::now());
-        timeout = Some(timeout.map_or(left, |current| current.min(left)));
+        timeout = Some(timeout.map_or(left, |current: std::time::Duration| current.min(left)));
     }
     timeout
 }
 
-/// The X11 backend — owns the single `Rc<XConn>` + `XDisplay`, the `State`/
-/// `Engine`, EWMH, grabs, and the compositor handle.
+/// The X11 backend — owns the single `Rc<XConn>`, the `State`/`Engine`, EWMH,
+/// and grabs.
 ///
 /// # Ownership
 ///
-/// `Rc<XConn>` is shared with `Compositor` so both issue requests over the same
-/// `xcb_connection_t` (sequence-number coherent, one socket). `XDisplay` is
-/// `Copy` / non-`Drop` with `should_drop=false` (invariant proved by
-/// `maverick_x11::open_x`): the `Display*` stays live as long as either `Rc`
-/// holder lives.
+/// Every request goes over the one `Rc<XConn>` (`xcb_connection_t`,
+/// sequence-number coherent, one socket). The `XDisplay` `open_x` also returns
+/// is `Copy` / non-`Drop` with `should_drop=false` (invariant proved by
+/// `maverick_x11::open_x`): the `Display*` stays live as long as an `Rc` holder
+/// lives.
 ///
 /// # Lifecycle
 ///
@@ -170,23 +161,17 @@ fn wait_timeout(
 /// `_NET_SUPPORTED` advertise EWMH; `RandR` monitors drive `workarea`; XKB +
 /// core `MappingNotify` drive keymap refresh.
 pub struct WindowManager {
-    /// The one X connection. It is an `XCBConnection` (not `RustConnection`)
-    /// because it is the *same* `xcb_connection_t` the Xlib `Display` below
-    /// owns: GLX needs a `Display*`, the WM needs XCB, and sharing one socket
-    /// is the only way both can agree on sequence numbers and see the same
-    /// event queue. See `maverick_gl::open_x`.
+    /// The one X connection, shared by every part of the WM. It is an
+    /// `XCBConnection` (not `RustConnection`) because it is the *same*
+    /// `xcb_connection_t` the Xlib `Display` owns: `maverick_x11::open_x` opens
+    /// the display with `XOpenDisplay` and hands back the connection Xlib
+    /// created, so there is exactly one socket, one sequence-number space and
+    /// one event queue. See `maverick_x11::open_x`.
     conn: Rc<XConn>,
-    /// The Xlib display backing `conn`, kept only so GLX has something to talk
-    /// to. Never used for X *events* — XCB owns the queue. The compositor holds
-    /// its own `Copy` of it; this field just pins the `Display*` open for the
-    /// whole process (it is not `Drop`, so the connection survives either way).
-    #[allow(dead_code)]
-    dpy: XDisplay,
     screen_num: usize,
     root: Window,
     atoms: Atoms,
     pub engine: Engine,
-    layout_registry: crate::core::layout::LayoutRegistry,
     check_win: Window,
     numlock: u16,
     /// Modifier-map column that carries Scroll Lock (0 when unmapped). Treated
@@ -221,13 +206,11 @@ pub struct WindowManager {
     /// per event-loop turn so a burst of window changes costs one property
     /// write.
     client_list_dirty: bool,
-    /// Deferred restack: only re-stack when the float/fullscreen set changes.
-    stack_dirty: bool,
     /// The `Reconciler`'s record of what geometry has actually been written to
     /// X11. Every desired placement is diffed against this so
     /// `configure_window` fires only on real changes.
     applied: crate::backend::x11::reconciler::AppliedState,
-    /// No-compositor rounded-corner path (`round_corners`): the last
+    /// Rounded-corner path (`round_corners`): the last
     /// (`outer_w`, `outer_h`, radius, `bw`) a Shape `BOUNDING` mask was
     /// actually set for, per window. The mask is a pure function of size,
     /// never of position, so this cache is what suppresses the re-upload
@@ -249,18 +232,9 @@ pub struct WindowManager {
     /// The `Reconciler` diffs this `Desired` against `AppliedState` to decide what
     /// to write to X11. Reusable buffer — avoids allocation per `arrange()`.
     desired: Placements,
-    /// Per-monitor "is a spring still moving" flag, produced by
-    /// `tick_animations_multi`. Lets the frame loop recompute the live layout for
-    /// only the monitors that are actually animating. Parallel to `state.monitors`.
-    anim_per_mon: Vec<bool>,
-    /// Reusable raise-list scratch for `live_placements` → `present_into`.
-    /// The WM discards the raise list, so a fresh `Vec` here would allocate once
-    /// per animating monitor per frame.
-    present_scratch: Vec<WindowId>,
-    /// Reusable scratch for the per-frame column projection (`ribbon_geom`).
-    /// Without it every `arrange` (once per animating monitor per frame) would
-    /// allocate the per-column table. Owned by the WM and threaded through
-    /// `arrange` → `Layout::arrange`.
+    /// Reusable scratch for the per-arrange column projection (`ribbon_geom`).
+    /// Without it every `arrange` would allocate the per-column table. Owned by
+    /// the WM and threaded through `arrange` → `Layout::arrange`.
     ribbon_scratch: RibbonScratch,
     /// Rate-limit tracker for key repeat suppression (mods, keysym → last dispatch).
     last_key_times: std::collections::BTreeMap<(u16, u32), std::time::Instant>,
@@ -304,12 +278,9 @@ pub struct WindowManager {
     /// `CurrentTime`, which a few strict toolkits (some Java/Emacs builds)
     /// refuse to act on.
     last_event_time: u32,
-    /// Always false. The loop is idle, so nothing consumes it; kept so the
-    /// "is anything moving" question has one answer at every call site.
-    animating: bool,
     /// Per-monitor cached stacking order (top-to-bottom) so `stack_overlay`
     /// only re-issues `raise()` when the order actually changed, instead of
-    /// re-raising every float/popup on every animation frame.
+    /// re-raising every float/popup on every arrange.
     last_stack_order: std::collections::HashMap<usize, Vec<WindowId>>,
     /// Per-monitor record of which fullscreen window was "covering" (raised
     /// above the dock) on the previous frame, so the dock is only re-raised on
@@ -578,12 +549,12 @@ impl WindowManager {
         );
         if let Some(error) = &local.trace.error {
             log::warn!(
-                "compositor trace dump {}: {error}",
+                "trace dump {}: {error}",
                 local.trace.path.display()
             );
         } else if local.trace.written {
             log::info!(
-                "compositor trace: {} records written to {}",
+                "trace: {} records written to {}",
                 local.trace.records,
                 local.trace.path.display()
             );
@@ -596,7 +567,7 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Release the WM-owned X resources: the compositor, the grabs, the root
+    /// Release the WM-owned X resources: the grabs, the root
     /// event mask, the EWMH properties, the check window and the root pixmap.
     ///
     /// Takes the [`LiveX`] borrow, so this cannot be *called* with a connection
@@ -692,22 +663,12 @@ impl WindowManager {
         // it until a pass runs.
         self.flush_pending()?;
 
-        // Snap every spring straight to its target: dwm-style, zero animation.
-        // Every state change has already landed on its final geometry through
-        // the single `Effect::ArrangeMonitor` -> `arrange` (Phase::Settled)
-        // path, so there is nothing to interpolate and nothing to reconfigure
-        // per frame. Leaving the logical state settled is what makes the
-        // integer `ConfigureWindow` rect the final rect.
-        self.engine.state.snap_animations();
-        self.anim_per_mon.clear();
-        self.animating = false;
-
-        // Block on X11 plus the control self-pipe. With nothing animating the
-        // loop is idle, so the poll has no frame deadline: no heartbeat, no
-        // timer. Every other bound the loop owns lives in `wait_timeout` — never
-        // sleep past a pending keyboard refresh or the shutdown deadline.
+        // Block on X11 plus the control self-pipe. There is no frame deadline:
+        // no heartbeat, no timer, nothing to interpolate. Every other bound the
+        // loop owns lives in `wait_timeout` — never sleep past a pending
+        // keyboard refresh or the shutdown deadline.
         let fd = self.conn.as_raw_fd();
-        let timeout = wait_timeout(None, self.kbd_refresh_due, self.shutdown_deadline);
+        let timeout = wait_timeout(self.kbd_refresh_due, self.shutdown_deadline);
 
         if timeout != Some(std::time::Duration::ZERO) {
             let wait_trace = trace::Span::new("wait");
@@ -800,11 +761,7 @@ impl WindowManager {
     pub fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         crate::log::config_trace(
             "event_loop_start",
-            format_args!(
-                "presentation=x11_settled animations_enabled={} trace={}",
-                crate::config::animations_enabled(&self.engine.cfg),
-                trace::enabled(),
-            ),
+            format_args!("presentation=x11_settled trace={}", trace::enabled()),
         );
         while self.engine.state.running {
             if let Err(e) = self.run_once() {
@@ -831,7 +788,7 @@ impl WindowManager {
         Ok(())
     }
     /// Open X, claim the screen (or `--replace`), detect `RandR` monitors, build
-    /// `Engine`, optionally initialise the GL compositor, scan existing windows
+    /// `Engine`, scan existing windows
     /// and arrange. `config_path` is the exact file to re-read on `reload`;
     /// `launch_args` are replayed verbatim on `restart`.
     pub fn new(
@@ -841,11 +798,11 @@ impl WindowManager {
         launch_args: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         trace::init();
-        let (dpy, conn, screen_num) = maverick_x11::open_x()?;
-        // `conn` is shared (via `Rc`) with the compositor so both the WM and the
-        // GLX layer issue requests over the *same* `XCBConnection` — that is what
-        // keeps x11rb's sequence-number/reply tracking coherent. `XDisplay` is
-        // `Copy`, so `dpy` is simply handed to both.
+        // The `XDisplay` returned here is deliberately not stored: the WM talks
+        // to X through `conn`, and `XDisplay` has no `Drop`, so letting it fall
+        // out of scope cannot close the connection or free the socket the
+        // `XCBConnection` borrows.
+        let (_dpy, conn, screen_num) = maverick_x11::open_x()?;
         let conn = Rc::new(conn);
         let screen = &conn.setup().roots[screen_num];
         let root = screen.root;
@@ -874,10 +831,10 @@ impl WindowManager {
         let monitors = detect_monitors(&conn, screen, &cfg)?;
         let mut engine = Engine::new(cfg);
         engine.state.monitors = monitors;
-        // Apply the configured scroll-camera spring constants (compositor
-        // stiffness/damping) to every workspace camera, since Monitor::new /
-        // reconcile_workspaces build cameras with hard-coded defaults.
-        engine.apply_camera_cfg();
+        // Apply the configured scroll-camera spring constants (the
+        // `stiffness`/`damping` values) to every workspace camera, since
+        // Monitor::new / reconcile_workspaces build cameras with hard-coded
+        // defaults.
         crate::log::config_snapshot("engine_config", &engine.cfg);
         if crate::log::config_trace_enabled() {
             for (monitor, mon) in engine.state.monitors.iter().enumerate() {
@@ -909,22 +866,19 @@ impl WindowManager {
         )?
         .check()?;
 
-        crate::log::config_trace(
-            "xkb_init_start",
-            format_args!("phase=fetch_before_compositor"),
-        );
+        crate::log::config_trace("xkb_init_start", format_args!("phase=fetch_before_grabs"));
         let ks = fetch_keyboard_state(&conn).inspect_err(|e| {
             crate::log::config_trace(
                 "xkb_init_end",
-                format_args!("phase=fetch_before_compositor status=failed error={e}"),
+                format_args!("phase=fetch_before_grabs status=failed error={e}"),
             );
         })?;
         crate::log::config_trace(
             "xkb_init_end",
-            format_args!("phase=fetch_before_compositor status=ok"),
+            format_args!("phase=fetch_before_grabs status=ok"),
         );
         crate::log::config_trace(
-            "keyboard_snapshot_before_compositor",
+            "keyboard_snapshot",
             format_args!(
                 "min={} kpk={} raw={:?} xkb={} xkb_group={} numlock={:#x} scroll={:#x}",
                 ks.min,
@@ -941,12 +895,10 @@ impl WindowManager {
 
         let mut wm = WindowManager {
             conn,
-            dpy,
             screen_num,
             root,
             atoms,
             engine,
-            layout_registry: crate::core::layout::LayoutRegistry::new(),
             check_win,
             numlock,
             scroll: ks.scroll,
@@ -960,15 +912,12 @@ impl WindowManager {
             kbd_refresh_due: None,
             drag: None,
             client_list_dirty: false,
-            stack_dirty: false,
             applied: crate::backend::x11::reconciler::AppliedState::default(),
             shape_mask_cache: std::collections::HashMap::new(),
             frame_extents: std::collections::HashMap::new(),
             hide_ws_set: std::collections::HashSet::with_capacity(32),
             hide_mon_vec: Vec::with_capacity(64),
             desired: Placements::with_capacity(32),
-            anim_per_mon: Vec::new(),
-            present_scratch: Vec::with_capacity(32),
             ribbon_scratch: RibbonScratch::default(),
             last_key_times: std::collections::BTreeMap::new(),
             control: None,
@@ -981,7 +930,6 @@ impl WindowManager {
             docks: std::collections::HashMap::new(),
             pointer_guard_until: None,
             last_event_time: 0,
-            animating: false,
             last_stack_order: std::collections::HashMap::new(),
             fs_covering: std::collections::HashMap::new(),
             pending: PendingReconcile::default(),

@@ -2,7 +2,7 @@
 //!
 //! A shutdown does two unrelated things: it releases X resources, and it makes
 //! the record of this session truthful — the identity ficha, the control socket
-//! and the compositor trace. The second half has nothing to do with X and must
+//! and the trace dump. The second half has nothing to do with X and must
 //! happen on *every* exit path, including the one where the X server is already
 //! gone.
 //!
@@ -118,7 +118,7 @@ pub(crate) struct LocalTeardown {
     /// The control socket was released by dropping its handle. Non-joining, on
     /// purpose — see [`run_local`].
     pub(crate) control_dropped: bool,
-    /// The compositor trace dump. [`DumpReport::written`] is false both when
+    /// The trace dump. [`DumpReport::written`] is false both when
     /// tracing was never enabled and when the write failed; the two are told
     /// apart by `error`.
     pub(crate) trace: DumpReport,
@@ -139,7 +139,7 @@ pub(crate) struct LocalTeardown {
 ///    that is no longer running *before* anything that can still block is
 ///    dropped;
 /// 2. the control socket, by dropping its handle;
-/// 3. the compositor trace, which is the last thing the process knows that
+/// 3. the trace dump, which is the last thing the process knows that
 ///    cannot be reconstructed afterwards.
 ///
 /// The control handle is dropped and not joined. `ControlServer::drop` stops

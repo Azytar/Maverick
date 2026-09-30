@@ -14,12 +14,9 @@
 //!   focus deferral). Not owned here: X connections, GL contexts, pixmaps, or
 //!   rendered frames.
 //! - **Backend** owns X11 protocol interaction: it reads X11 events, translates
-//!   them into `Command`s, applies geometry via `ConfigureWindow`, and mirrors
-//!   X11 state back into the core. It must never mutate `State` directly — all
-//!   mutations flow through `Command::execute`.
-//! - **Compositor** owns visual presentation: it reads `State` and `Cfg`,
-//!   computes live (animated) geometry, and draws frames. It owns no logical
-//!   state.
+//!   them into `Command`s, applies geometry via `ConfigureWindow`, and draws
+//!   the decorations. It must never mutate `State` directly — all mutations
+//!   flow through `Command::execute`.
 //!
 //! [`WindowId`] is a backend-agnostic handle rather than an alias for
 //! `x11rb::Window`; see its documentation for the id-stability invariant that
@@ -35,12 +32,10 @@
 //!    (`Workspace::floats`) — and never from two monitors or workspaces.
 //! B. `Monitor::active_ws`, `Client::monitor`, and `Client::workspace` agree:
 //!    a client's `(monitor, workspace)` is the workspace it is placed in.
-//! C. The scroll camera is never the source of truth for geometry:
-//!    `arrange_columns` derives each column's x from `camera.target` for
-//!    settled geometry and from `camera.position` for live rendering, so
-//!    animation cannot mutate the layout. `target`/`position` are checked for
-//!    finiteness, and `Camera::step` snaps any non-finite field back to the
-//!    target.
+//! C. The scroll camera is an *input* to the projection, not a source of
+//!    truth: `arrange_columns` derives each column's x from `camera.position`,
+//!    so the layout is a pure function of the state. `position` is checked
+//!    for finiteness, and every `Camera` mutator refuses a non-finite value.
 //! D. `Workspace::focus` (`Focus::column_idx`) indexes `columns`, never
 //!    `floats`, and every `Column::focused` is in range.
 //! E. `Monitor::focus_stack` holds only known clients, without duplicates;

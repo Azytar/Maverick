@@ -1,10 +1,9 @@
 //! Per-thread heap-allocation counter — a measuring instrument, not a feature.
 //!
 //! `#[cfg(test)]` only: the shipped binary carries no counting cost. The
-//! measured subject is the per-frame projection (`layout::arrange` →
-//! `present::present_into` via `compositor::live_placements`), which is pure
-//! over `State` and so needs no X/GL; rendering and X application stay in the
-//! backend.
+//! measured subject is the per-arrange projection (`layout::arrange` →
+//! `present::present_into`), which is pure over `State` and so needs no X
+//! connection; applying the result to X11 stays in the backend.
 //!
 //! Invariants: counting is thread-local, so `cargo test` parallelism cannot
 //! make a measurement flaky; `realloc` counts. Warm-up allocations are excluded
@@ -117,12 +116,12 @@ mod self_tests {
 mod frame_alloc_tests {
     use super::CountAllocs;
     use crate::config::Cfg;
-    use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements, RibbonScratch};
+    use crate::core::layout::{arrange, Placements, RibbonScratch};
     use crate::core::present::present_into;
     use crate::types::{Client, Column, Focus, Monitor, Rect, State, WindowId};
 
     /// A workspace with `n` single-window columns on one 1920x1080 monitor —
-    /// the shape of a scrolling ribbon mid-animation.
+    /// the shape of a scrolling ribbon.
     fn ribbon(n: u32) -> State {
         let screen = Rect::new(0, 0, 1920, 1080);
         let mut state = State::new();
@@ -136,25 +135,22 @@ mod frame_alloc_tests {
                 windows: vec![win],
                 focused: 0,
                 weight: 0.25,
-                boost: 0.0,
             });
         }
         state.monitors[0].workspaces[0].focus = Focus { column_idx: 0 };
         state.monitors[0].focused = Some(1);
-        // Mid-flight camera: position != target is what an animation frame
-        // looks like, and it is the only state in which this path runs.
-        state.monitors[0].workspaces[0].camera.position = 137.0;
-        state.monitors[0].workspaces[0].camera.target = 900.0;
+        // A scrolled camera: a non-zero offset is what puts the projection on
+        // its non-trivial path, and it is the state a real session is in
+        // whenever more than one column exists.
+        state.monitors[0].workspaces[0].camera.position = 900.0;
         state
     }
 
-    /// Allocations performed by one animation frame's worth of projection.
+    /// Allocations performed by one arrange.
     fn allocs_per_frame(n_windows: u32) -> u64 {
         let state = ribbon(n_windows);
         let cfg = Cfg::default();
-        let registry = LayoutRegistry::new();
         let mut out: Placements = Placements::new();
-        let mut raise: Vec<WindowId> = Vec::new();
         let mut scratch = RibbonScratch::default();
 
         // Warm up: let every reusable buffer reach its steady-state capacity.
@@ -165,12 +161,10 @@ mod frame_alloc_tests {
                 &state,
                 0,
                 &cfg,
-                &registry,
-                Phase::Live,
                 &mut out,
                 &mut scratch,
             );
-            present_into(&state, &state.monitors[0], &mut out, &mut raise);
+            present_into(&state, &state.monitors[0], &mut out);
         }
 
         let counter = CountAllocs::start();
@@ -179,12 +173,10 @@ mod frame_alloc_tests {
                 &state,
                 0,
                 &cfg,
-                &registry,
-                Phase::Live,
                 &mut out,
                 &mut scratch,
             );
-            present_into(&state, &state.monitors[0], &mut out, &mut raise);
+            present_into(&state, &state.monitors[0], &mut out);
         }
         let total = counter.finish();
         // Report per frame, rounding up, so "1" really means "at least one
@@ -192,20 +184,20 @@ mod frame_alloc_tests {
         total.div_ceil(16)
     }
 
-    /// The headline compositor invariant: a normal animation frame must not
-    /// touch the heap.
+    /// The headline projection invariant: an arrange must not touch the heap.
     ///
     /// This is the whole justification for the projection buffers being
     /// caller-owned. If it ever fails, some buffer went back to being built
-    /// from scratch every frame — which at 144 Hz with several monitors is a
-    /// steady allocator drumbeat for values that never change shape.
+    /// from scratch on every turn — which, on a busy session that arranges on
+    /// every focus change, is a steady allocator drumbeat for values whose
+    /// shape never changes.
     #[test]
-    fn an_animation_frame_allocates_nothing() {
+    fn an_arrange_allocates_nothing() {
         for n in [1, 5, 10, 50] {
             let per_frame = allocs_per_frame(n);
             assert_eq!(
                 per_frame, 0,
-                "{n} windows: {per_frame} allocation(s) per animation frame; \
+                "{n} windows: {per_frame} allocation(s) per arrange; \
                  the live projection path must reuse its buffers"
             );
         }

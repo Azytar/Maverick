@@ -73,7 +73,6 @@ impl WindowManager {
         match eff {
             Effect::ArrangeMonitor(mi) => self.pending.mark(mi, None),
             Effect::MarkRestack(_mi) => {
-                self.stack_dirty = true;
                 // Focus-driven raises reorder the stack: refresh the
                 // `_NET_CLIENT_LIST_STACKING` property in the same flush.
                 self.client_list_dirty = true;
@@ -278,13 +277,7 @@ impl WindowManager {
                     // only touched here (the WM thread), which is exactly why
                     // querying has to happen through this queue.
                     let json = if topic == "inspect" {
-                        crate::core::ipc::inspect_json(
-                            &self.engine.state,
-                            &self.engine.cfg,
-                            &crate::core::ipc::BackendFacts {
-                                animations: crate::config::animations_enabled(&self.engine.cfg),
-                            },
-                        )
+                        crate::core::ipc::inspect_json(&self.engine.state, &self.engine.cfg)
                     } else {
                         crate::core::ipc::query_json(&self.engine.state, &self.engine.cfg, &topic)
                     };
@@ -359,9 +352,7 @@ impl WindowManager {
         }
 
         self.engine.cfg = cfg;
-        self.engine.apply_camera_cfg();
         self.keymap = build_keymap(&self.engine.cfg);
-
         self.grab_keys()?;
 
         // Republish EWMH desktop state for external bars/taskbars. Only the

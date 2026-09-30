@@ -15,11 +15,11 @@
 //!
 //! None of this needs a request to fail, which is deliberate: on this crate's
 //! connection a *synchronous* Xlib request that fails desynchronises libXlib from
-//! the shared socket and takes the process down (`io_error_scope.rs`, ignored by
-//! default, measures that), so provoking errors is not something a test should
-//! rely on. Whether a protocol error ever reaches the installed handler at all is
-//! `x_error_signal.rs`'s question, and for asynchronous requests the answer is
-//! "no".
+//! the shared socket and takes the process down (`io_error_scope.rs` measures that
+//! in a child process, so the fault cannot take the harness with it), so
+//! provoking errors is not something a test should rely on. Whether a protocol
+//! error ever reaches the installed handler at all is `x_error_signal.rs`'s
+//! question, and for asynchronous requests the answer is "no".
 //!
 //! # Running
 //!

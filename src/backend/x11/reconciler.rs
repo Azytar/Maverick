@@ -211,7 +211,7 @@ pub fn reconcile(
     // takes two `configure_window`s per arrange, indefinitely. The placement list
     // is ordered back-to-front, so the *last* entry for a window is the one
     // nearest the top of the stack, and last-write-wins is both the cheapest
-    // deterministic policy and the one that matches the raise order.
+    // deterministic policy and the one that matches the stacking order.
     let mut last_index: std::collections::HashMap<WindowId, usize> =
         std::collections::HashMap::with_capacity(desired.windows.len());
     for (i, dw) in desired.windows.iter().enumerate() {
@@ -558,9 +558,7 @@ mod tests {
                 window: win,
                 rect,
                 border,
-                mapped: true,
             }],
-            raise: vec![win],
         };
         let effects = reconcile(&desired, &state, &mut applied);
         assert!(
@@ -594,9 +592,7 @@ mod tests {
                 window: win,
                 rect,
                 border,
-                mapped: true,
             }],
-            raise: vec![win],
         };
         let effects = reconcile(&desired, &state, &mut applied);
         assert_eq!(
@@ -645,9 +641,7 @@ mod tests {
                 window: win,
                 rect,
                 border,
-                mapped: true,
             }],
-            raise: vec![win],
         };
         let e1 = reconcile(&desired, &state_dirty, &mut applied);
         assert_eq!(
@@ -699,22 +693,18 @@ mod tests {
                     window: a,
                     rect: rect_a,
                     border,
-                    mapped: true,
                 },
                 DesiredWindow {
                     window: b,
                     rect: rect_b,
                     border,
-                    mapped: true,
                 },
                 DesiredWindow {
                     window: c,
                     rect: rect_c_new,
                     border,
-                    mapped: true,
                 },
             ],
-            raise: vec![a, b, c],
         };
         let effects = reconcile(&desired, &state, &mut applied);
         assert_eq!(effects.len(), 1, "only the changed window (c) emits");
@@ -744,10 +734,7 @@ mod tests {
             "forget must drop the applied record"
         );
         let state = State::new();
-        let desired = DesiredState {
-            windows: vec![],
-            raise: vec![],
-        };
+        let desired = DesiredState { windows: vec![] };
         let effects = reconcile(&desired, &state, &mut applied);
         assert!(
             effects.is_empty(),
@@ -1123,10 +1110,8 @@ mod tests {
                     window: r.win,
                     rect: r.rect,
                     border: r.border,
-                    mapped: true,
                 })
                 .collect(),
-            raise: rows.iter().map(|r| r.win).collect(),
         }
     }
 
@@ -1388,22 +1373,18 @@ mod tests {
                     window: 1,
                     rect: Rect::new(0, 0, 100, 100),
                     border: 2,
-                    mapped: true,
                 },
                 DesiredWindow {
                     window: 2,
                     rect: Rect::new(200, 0, 100, 100),
                     border: 2,
-                    mapped: true,
                 },
                 DesiredWindow {
                     window: 1,
                     rect: Rect::new(500, 500, 80, 80),
                     border: 2,
-                    mapped: true,
                 },
             ],
-            raise: vec![1, 2],
         };
 
         let mut applied = AppliedState::default();

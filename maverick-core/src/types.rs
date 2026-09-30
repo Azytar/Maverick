@@ -11,9 +11,8 @@
 //!
 //! - Core owns `State` and all logical placement (`Client`, `Monitor`,
 //!   `Workspace`, `Column`, `Camera`, `ReservedRegion`). The backend mirrors
-//!   X11 state into the core and applies `Client::geom` via `ConfigureWindow`;
-//!   the compositor reads `State` for rendering. Neither mutates `State`
-//!   outside the command pipeline.
+//!   X11 state into the core and applies `Client::geom` via `ConfigureWindow`.
+//!   Neither mutates `State` outside the command pipeline.
 //! - `Client::geom` is WM-authoritative for floating windows and is the
 //!   projected result of arrangement for tiled ones; `Client::saved_geom` and
 //!   `FullscreenSnapshot` are transition stores, not the current geometry.
@@ -61,11 +60,10 @@ pub type WindowId = u32;
 ///
 /// # Invariants
 ///
-/// - `w >= 1` and `h >= 1` for every arranged window, so the compositor never
-///   presents a zero-area rect.
-/// - Hit-testing (pointer warp, input focus) and the composition layer read
-///   the same values; any divergence would leave pixels uncovered or drawn
-///   twice.
+/// - `w >= 1` and `h >= 1` for every arranged window, so X11 never receives a
+///   zero-area rect (which the server silently drops).
+/// - Hit-testing (pointer warp, input focus) and the projection read the same
+///   values; any divergence would make a click land on the wrong window.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Rect {
     /// X coordinate of the top-left corner.
@@ -134,31 +132,6 @@ impl Rect {
     pub fn bottom(&self) -> i32 {
         (i64::from(self.y) + i64::from(self.h)).clamp(i64::from(i32::MIN), i64::from(i32::MAX))
             as i32
-    }
-    /// Smallest rect containing both `self` and `other`. Used for animation
-    /// damage: a window sliding from one rect to another must repaint the union
-    /// so neither the pixels it left nor the ones it slid into linger.
-    ///
-    /// # Postcondition
-    ///
-    /// `union` is total: for any two `Rect` values the result satisfies
-    /// `contains_rect` on both, because every edge here is a
-    /// [`Self::right`] / [`Self::bottom`] of a rect that saturates the same way
-    /// as the envelope's own. The extent can only be narrower than the true one
-    /// where the span is not representable as an `i32` edge at all, which the
-    /// two containing rects report as the same saturated limit.
-    #[inline]
-    pub fn union(&self, other: Rect) -> Rect {
-        let x0 = self.x.min(other.x);
-        let y0 = self.y.min(other.y);
-        let x1 = self.right().max(other.right());
-        let y1 = self.bottom().max(other.bottom());
-        Rect::new(
-            x0,
-            y0,
-            (i64::from(x1) - i64::from(x0)).clamp(0, i64::from(u32::MAX)) as u32,
-            (i64::from(y1) - i64::from(y0)).clamp(0, i64::from(u32::MAX)) as u32,
-        )
     }
 }
 
@@ -331,7 +304,7 @@ impl SizeHints {
 /// - `weight` is finite and within `[0.05, 1.0]`; repaired by
 ///   `Workspace::rebalance_weights`, and kept inside the band by
 ///   [`band_weight`] on every path that derives a weight from another one.
-/// - `focused < windows.len()` when non-empty; `boost` within `[0.0, 1.0]`.
+/// - `focused < windows.len()` when non-empty.
 #[derive(Debug, Clone)]
 pub struct Column {
     /// Windows top-to-bottom in this column.
@@ -340,12 +313,6 @@ pub struct Column {
     pub weight: f32,
     /// Index into `windows` that has focus within this column.
     pub focused: usize,
-    /// Accordion boost for THIS column, animated 0→1. The focused column eases
-    /// to 1 while the others ease to 0, so a focus change makes the widths
-    /// *glide* instead of snapping. Per column rather than per workspace: a
-    /// single global scalar can only animate when the layout mode itself
-    /// changes, which would make every focus change a one-frame jump.
-    pub boost: f32,
 }
 
 /// The documented `Column::weight` band (crate invariant F), in one place: the
@@ -387,286 +354,52 @@ impl Column {
 
 impl Default for Column {
     fn default() -> Self {
-        // A column is created because it — or the window in it — is the focus
-        // target, so it starts fully boosted; `tick_animations` eases it back
-        // to 0 if it loses focus.
         Self {
             windows: Vec::new(),
             weight: 1.0,
             focused: 0,
-            boost: 1.0,
         }
     }
 }
 
 /// 1D scroll camera for the ribbon layout.
 ///
-/// `position` is the current visual scroll offset in px; `target` is the
-/// logical destination. A closed-form damped transition eases `position` toward
-/// `target`, and retargeting preserves the visual position while explicitly
-/// resetting old-direction momentum.
-///
-/// The camera is never the source of truth for logical geometry: arrangement
-/// derives each window's x from `target` for settled geometry and from
-/// `position` for live rendering, so animation can never mutate the layout.
+/// A single scroll offset in px. The ribbon scrolls by writing this number and
+/// re-projecting; there is no interpolation, no velocity and no frame loop, so
+/// `position` is the geometry rather than a value chasing it.
 ///
 /// # Invariants
 ///
-/// - `position`, `target`, and `velocity` are finite; `step` snaps a non-finite
-///   state back to `target`.
-/// - `stiffness`/`damping` are sanitized at integration time; damping is also
-///   bounded relative to `sqrt(stiffness)` so a slow overdamped pole cannot keep
-///   a pixel-settled camera active indefinitely.
-/// - Every frame is integrated from the f64 continuation of the state (see the
-///   private `x`/`v` fields), never from the rounded `position`. The published
-///   `position` is that continuation rounded to f32, which is what every caller
-///   reads; rounding is therefore a publication step and never an input to the
-///   next one, so the settle envelope is reachable at *any* offset instead of
-///   only where `ulp(position)` happens to be small enough for the per-frame
-///   rounding error to stay under `CAMERA_SETTLE_VELOCITY`.
+/// - `position` is finite. Every mutator refuses a non-finite value, so a
+///   poisoned camera cannot reach a `ConfigureWindow` or a hit-test.
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
-    /// Current scroll offset in px.
+    /// Scroll offset in px.
     pub position: f32,
-    /// Desired scroll offset — focus drives this, the spring follows.
-    pub target: f32,
-    /// Current velocity (px/s).
-    pub velocity: f32,
-    /// Spring stiffness (`220.0` default, clamped to `[MIN_STIFFNESS, MAX_SPRING]`).
-    pub stiffness: f32,
-    /// Damper (`30.0` default, bounded by `MIN_DAMPING` and the stability
-    /// ratio derived from stiffness).
-    pub damping: f32,
-    // `position` and `velocity` as the f64 the integrator actually carries.
-    //
-    // `step` solves the oscillator over `dt` in f64 and rounds the result into
-    // the two public fields. Were those rounded values fed back as the next
-    // step's initial condition — which is what integrating an f32 state does —
-    // the trajectory would be re-quantised once per frame, and the error that
-    // injects is not a constant offset: the spring feeds it back through both
-    // the restoring and the damping term, so it settles at a steady-state speed
-    // of roughly `k/c · ½ · ulp(position)`. That floor grows with the scroll
-    // offset, and once it passes `CAMERA_SETTLE_VELOCITY` the animation can
-    // never satisfy the settle predicate at all: the stored state stops moving
-    // (the residual is a couple of ULPs, so no representable step exists) while
-    // the velocity sits just above the threshold, forever. At 12 000 px — three
-    // full-width columns on a 4K workarea — that floor is ~0.013 px/s, an order
-    // of magnitude above the threshold, which is why the camera parked up to
-    // ~8 000 px and never beyond. Carrying the state in f64 removes the
-    // injection altogether: the analytic solution then converges geometrically
-    // for every sanitised spring, and the published f32 follows it to the target
-    // within a fraction of an ULP.
-    x: f64,
-    v: f64,
-}
-
-/// Upper bound for a user-supplied spring constant. `Camera::step` evaluates
-/// the damped oscillator analytically, so this is a configuration/sanitization
-/// bound rather than an Euler stability condition.
-pub(crate) const MAX_SPRING: f32 = 62_500.0;
-/// Smallest tolerated stiffness. `Camera::step` re-clamps on every step, so
-/// even a caller that bypasses `sanitize_spring` cannot disable restoration.
-pub(crate) const MIN_STIFFNESS: f32 = 1.0;
-/// Smallest tolerated damping. This is a numerical safety floor, not a
-/// guaranteed visual settle-time bound: the underdamped decay envelope is
-/// `exp(-c*t/2)`, so a very low positive damper can still settle slowly.
-pub(crate) const MIN_DAMPING: f32 = 0.1;
-/// Bound `c / sqrt(stiffness)` for the overdamped branch. Prevents a
-/// numerically finite but extremely slow pole; does not bound the underdamped
-/// decay envelope.
-const MAX_DAMPING_RATIO: f32 = 10.0;
-// Sub-pixel position / velocity thresholds at which the camera is declared
-// settled and the exact endpoint installed.
-const CAMERA_SETTLE_POSITION: f32 = 0.5;
-const CAMERA_SETTLE_VELOCITY: f32 = 0.01;
-
-#[inline]
-fn bounded_damping(stiffness: f32, damping: f32) -> f32 {
-    // The slow pole of an overdamped spring is `-c/2 + sqrt(c²/4 - k)`; bounding
-    // `c / sqrt(k)` bounds how slow that pole can get relative to the natural
-    // frequency, so an overdamped camera still converges in a bounded time.
-    let max = (MAX_DAMPING_RATIO * stiffness.max(MIN_STIFFNESS).sqrt()).min(MAX_SPRING);
-    let damping = if damping.is_finite() { damping } else { 30.0 };
-    damping.clamp(MIN_DAMPING, max)
 }
 
 impl Camera {
-    /// Create a camera at rest at `pos` (position = target, velocity = 0).
+    /// Create a camera parked at `pos`.
     pub fn new(pos: f32) -> Self {
         Self {
-            position: pos,
-            target: pos,
-            velocity: 0.0,
-            stiffness: 220.0,
-            damping: 30.0,
-            x: pos as f64,
-            v: 0.0,
+            position: if pos.is_finite() { pos } else { 0.0 },
         }
     }
 
-    /// Change only the logical destination. The animated position is retained
-    /// so a retarget never teleports; derivative momentum is reset explicitly,
-    /// matching the reference camera policy and preventing a reversal from
-    /// briefly accelerating farther in the old direction.
+    /// Move the ribbon to `target`. A non-finite value is refused and the
+    /// current offset is kept, so one poisoned calculation cannot scroll the
+    /// desktop into the void.
     pub fn retarget(&mut self, target: f32) {
         if target.is_finite() {
-            // Repeated focus/arrange notifications for the same endpoint must
-            // not continuously cancel an in-flight spring.
-            if (self.target - target).abs() > 1e-4 {
-                // The analytic velocity has to be zeroed alongside the published
-                // one, or the continuation check in `analytic_state` would see a
-                // published velocity that is not its rounding and drop back to
-                // the f32 position — losing the f64 carry on every retarget,
-                // which is exactly the case a scroll retargets on every step.
-                self.velocity = 0.0;
-                self.v = 0.0;
-            }
-            self.target = target;
+            self.position = target;
         }
     }
 
-    /// Whether the camera still has a meaningful visual transition.
-    ///
-    /// This is separate from `step`'s return value because a zero or invalid
-    /// frame delta must not make a pending retarget look settled to the
-    /// scheduler. Non-finite state is sanitized by the next valid `step`.
-    pub fn needs_update(&self) -> bool {
-        if !self.position.is_finite() || !self.target.is_finite() || !self.velocity.is_finite() {
-            return true;
-        }
-        (self.position - self.target).abs() > CAMERA_SETTLE_POSITION
-            || self.velocity.abs() > CAMERA_SETTLE_VELOCITY
-    }
-
-    /// Advance the camera by elapsed `dt` seconds and return whether it remains
-    /// animated.
-    ///
-    /// The state is sampled from the closed-form solution of the damped
-    /// harmonic oscillator for a constant target:
-    ///
-    /// `x'' + c·x' + k·(x - target) = 0`.
-    ///
-    /// This is deliberately not `position += velocity·dt`. The exact
-    /// transition makes a fixed elapsed interval independent of how that
-    /// interval is partitioned into render frames, while retaining the existing
-    /// stiffness/damping configuration and explicit target changes.
-    pub fn step(&mut self, dt: f32) -> bool {
-        if !dt.is_finite() {
-            return false;
-        }
-        if !self.position.is_finite() || !self.target.is_finite() || !self.velocity.is_finite() {
-            self.snap(self.target);
-            return false;
-        }
-        if dt <= 0.0 {
-            // A zero/negative elapsed interval makes no progress, but a
-            // pending transition must not be reported as settled.
-            return self.needs_update();
-        }
-
-        // If the state is already inside the visual settle envelope, install
-        // the exact endpoint. This prevents a last sampled subpixel from being
-        // left in the compositor forever when no further frame is scheduled.
-        if !self.needs_update() {
-            self.snap(self.target);
-            return false;
-        }
-
-        let stiffness = self.stiffness.clamp(MIN_STIFFNESS, MAX_SPRING) as f64;
-        let damping = bounded_damping(stiffness as f32, self.damping) as f64;
-        // Integrate the analytic state, not the pair of f32 fields the caller
-        // can see: those are this step's *output*. Rounding them and seeding the
-        // next step with the result is what gave the trajectory a per-frame
-        // quantisation floor proportional to `ulp(position)`, which is a speed
-        // floor the settle predicate cannot be below once the scroll offset is
-        // large — the camera then parks nowhere, however long it is stepped.
-        let (x0, v0) = self.analytic_state();
-        let target = self.target as f64;
-        let y0 = x0 - target;
-        let t = dt as f64;
-        let (y1, v1) = if damping * damping > 4.0 * stiffness {
-            // Over-damped: two real characteristic roots.
-            let root = (damping * damping - 4.0 * stiffness).sqrt();
-            let r1 = (-damping + root) * 0.5;
-            let r2 = (-damping - root) * 0.5;
-            let a = (v0 - r2 * y0) / (r1 - r2);
-            let b = y0 - a;
-            let e1 = (r1 * t).exp();
-            let e2 = (r2 * t).exp();
-            (a * e1 + b * e2, r1 * a * e1 + r2 * b * e2)
-        } else if damping * damping < 4.0 * stiffness {
-            // Under-damped: exponentially decaying sinusoid.
-            let alpha = damping * 0.5;
-            let omega = (4.0 * stiffness - damping * damping).sqrt() * 0.5;
-            let decay = (-alpha * t).exp();
-            let cos = (omega * t).cos();
-            let sin = (omega * t).sin();
-            let b = (v0 + alpha * y0) / omega;
-            let y = decay * (y0 * cos + b * sin);
-            let v = decay * (v0 * cos - (stiffness * y0 + alpha * v0) / omega * sin);
-            (y, v)
-        } else {
-            // Critically damped: the repeated-root limit.
-            let alpha = stiffness.sqrt();
-            let b = v0 + alpha * y0;
-            let decay = (-alpha * t).exp();
-            let y = decay * (y0 + b * t);
-            let v = decay * (v0 - alpha * b * t);
-            (y, v)
-        };
-
-        // Keep the f64 continuation and publish its rounding: the pair the
-        // caller reads is `self.x`/`self.v` narrowed to f32, so `analytic_state`
-        // keeps accepting the continuation on the next step.
-        self.x = target + y1;
-        self.v = v1;
-        self.position = self.x as f32;
-        self.velocity = self.v as f32;
-        if !self.position.is_finite() || !self.velocity.is_finite() {
-            self.snap(self.target);
-            return false;
-        }
-
-        if self.needs_update() {
-            true
-        } else {
-            self.snap(self.target);
-            false
-        }
-    }
-
-    /// Snap immediately (no animation) — used on first layout / unmanage.
+    /// Park the camera at `pos`, mapping a non-finite value to `0.0` rather
+    /// than keeping the old offset. Used where a settled value is required and
+    /// there is no previous offset worth preserving.
     pub fn snap(&mut self, pos: f32) {
-        let pos = if pos.is_finite() { pos } else { 0.0 };
-        self.position = pos;
-        self.target = pos;
-        self.velocity = 0.0;
-        self.x = pos as f64;
-        self.v = 0.0;
-    }
-
-    /// The state to integrate from: the f64 continuation while the published f32
-    /// pair still is its rounding, the published pair itself otherwise.
-    ///
-    /// The public fields stay authoritative. A caller that overwrites `position`
-    /// or `velocity` — a test fixture, a manual nudge, a `Camera` built before
-    /// this state existed — makes the pair disagree with the continuation, and
-    /// the step is then taken from exactly what the caller wrote. Accepting the
-    /// continuation when the pair matches is safe rather than merely convenient:
-    /// it is the same f32 state, and the f64 is the more precise copy of the
-    /// trajectory the camera has been following.
-    ///
-    /// The comparison is exact on purpose: "is the published pair still the
-    /// rounding of this state" has no tolerance to speak of, and a margin would
-    /// quietly keep a stale continuation alive after a caller nudged the camera.
-    #[inline]
-    #[allow(clippy::float_cmp)]
-    fn analytic_state(&self) -> (f64, f64) {
-        if self.position == self.x as f32 && self.velocity == self.v as f32 {
-            (self.x, self.v)
-        } else {
-            (self.position as f64, self.velocity as f64)
-        }
+        self.position = if pos.is_finite() { pos } else { 0.0 };
     }
 }
 
@@ -713,8 +446,6 @@ pub struct Workspace {
     pub zoom: f32,
     /// Overview (film-strip zoom-out) mode active for this workspace.
     pub overview: bool,
-    /// Semantic-zoom target animated toward by `tick_animations`.
-    pub zoom_target: f32,
     /// Viewport display mode (normal vs zoomed-in inspection). Orthogonal to
     /// `overview` and to window fullscreen.
     pub viewport_mode: ViewportMode,
@@ -723,8 +454,6 @@ pub struct Workspace {
     /// there is deliberately no upper clamp (unlike `zoom`'s lower one), so a
     /// value > 1 enlarges instead of shrinking.
     pub page_zoom: f32,
-    /// Animated target of `page_zoom`, eased by `tick_animations`.
-    pub page_zoom_target: f32,
     /// The window currently presented as the **maximize** overlay on this
     /// workspace (`None` when no maximized window owns it). Explicitly stored
     /// rather than re-derived from `Monitor::focused` at every read site; kept
@@ -746,10 +475,8 @@ impl Workspace {
             layout: LayoutKind::Column,
             zoom: 1.0,
             overview: false,
-            zoom_target: 1.0,
             viewport_mode: ViewportMode::Normal,
             page_zoom: 1.0,
-            page_zoom_target: 1.0,
             presented_maximize: None,
         }
     }
@@ -1079,10 +806,6 @@ pub struct Client {
     /// runtime — it is policy, not state, so it deliberately lives here rather
     /// than as another `WinFlags` bit.
     pub fullscreen_policy: FullscreenPolicy,
-    /// `_NET_WM_BYPASS_COMPOSITOR` hint from the client (EWMH): None=auto (0 or
-    /// absent), Some(1)=force compositor ON, Some(2)=force bypass. Updated on
-    /// `PropertyNotify` and read by `compositor_policy::bypass_candidate`.
-    pub bypass_hint: Option<u32>,
     /// Client process id from `_NET_WM_PID`, captured at manage time. `None`
     /// when the client never set it (not all toolkit setups do). Never used for
     /// any WM decision — it is the window → process link that lets external
@@ -1138,7 +861,6 @@ impl Client {
             geometry_dirty: false,
             fs_snapshot: None,
             fullscreen_policy: FullscreenPolicy::Normal,
-            bypass_hint: None,
             pid: None,
             float_client_authority: false,
         }
@@ -1311,11 +1033,6 @@ pub struct Monitor {
     pub focused: Option<WindowId>,
     /// MRU focus stack for this monitor (most-recent last).
     pub focus_stack: Vec<WindowId>,
-    /// Set when this monitor's window geometry changed and its cached live
-    /// placements (used by the GLX compositor) must be recomputed. Cleared by
-    /// the frame loop after it re-projects the monitor. Starts `true` so the
-    /// first frame projects every monitor.
-    pub layout_dirty: bool,
 }
 
 impl Monitor {
@@ -1341,7 +1058,6 @@ impl Monitor {
             active_ws: 0,
             focused: None,
             focus_stack: Vec::with_capacity(16),
-            layout_dirty: true,
         };
         m.recalc_geometry();
         m
@@ -1607,15 +1323,13 @@ pub enum Action {
     /// Drop into the currently selected column, leaving Overview (zoom back to 1.0).
     OverviewEnter,
     /// Enlarge/shrink the workspace viewport (zoom in/out). Positive `f32` zooms
-    /// in, negative zooms out; enters `ViewportMode::Zoomed` and animates the
-    /// `page_zoom` spring (see `Workspace::page_zoom_target`). This is display
-    /// state, not window fullscreen.
+    /// in, negative zooms out; enters `ViewportMode::Zoomed` and rescales
+    /// `page_zoom` immediately. This is display state, not window fullscreen.
     ViewportZoom(f32),
     /// Scroll the camera by one screen-width in the given direction (a "page"
     /// of the zoomed ribbon). Reuses `ideal_scroll`/`camera` — no focus change.
     PageSnap(Dir),
 }
-
 
 /// A deferred focus request created while an overlay (fullscreen/maximize owner)
 /// is presented. It carries the *context* it was created under: the exact
@@ -1637,8 +1351,7 @@ pub struct PendingFocus {
 }
 
 /// Global WM state — the single source of truth for placement, focus, and
-/// reservations. Owns all `Client`s and `Monitor`s; the backend and compositor
-/// only read it.
+/// reservations. Owns all `Client`s and `Monitor`s; the backend only reads it.
 ///
 /// # Ownership
 ///
@@ -2273,14 +1986,10 @@ impl State {
                     mon.workspaces.len()
                 ));
             }
-            // 2. Cameras carry no NaN / infinity: a poisoned camera would desync
-            //    the compositor from the logical scroll.
-            if !mon
-                .workspaces
-                .iter()
-                .all(|ws| ws.camera.target.is_finite() && ws.camera.position.is_finite())
-            {
-                v.push(format!("monitor {mi}: camera has NaN/inf target/position"));
+            // 2. Cameras carry no NaN / infinity: a poisoned camera would write
+            //    a NaN rect straight into a ConfigureWindow.
+            if !mon.workspaces.iter().all(|ws| ws.camera.position.is_finite()) {
+                v.push(format!("monitor {mi}: camera has NaN/inf position"));
             }
             for (ws_i, ws) in mon.workspaces.iter().enumerate() {
                 // 3. Focus column/row pointers in range.
@@ -2523,161 +2232,6 @@ impl State {
             );
         }
     }
-
-    /// Advance every workspace camera (and per-column boost / zoom springs) by
-    /// `dt` seconds. Returns true if any animation is still in flight, so the
-    /// backend can keep ticking at a high frame rate.
-    pub fn tick_animations(&mut self, dt: f32) -> bool {
-        let mut scratch = Vec::new();
-        self.tick_animations_multi(dt, &mut scratch)
-    }
-
-    /// Like [`State::tick_animations`] but also reports, per monitor, whether that
-    /// monitor still has a moving spring (camera, accordion `boost`, or zoom).
-    ///
-    /// The per-monitor flag lets the frame loop recompute the live layout for
-    /// *only* the monitors that are actually animating, instead of re-projecting
-    /// every monitor on every animation frame. An idle monitor whose layout is
-    /// unchanged keeps its cached projection (see `WindowManager::run_once`).
-    pub fn tick_animations_multi(&mut self, dt: f32, per_monitor: &mut [bool]) -> bool {
-        let mut any = false;
-        for (mi, mon) in self.monitors.iter_mut().enumerate() {
-            let mut anim = false;
-            for ws in &mut mon.workspaces {
-                if ws.layout == LayoutKind::Column {
-                    anim |= ws.camera.step(dt);
-                    // A zero-resolution Instant must not turn a pending camera
-                    // retarget into an apparently settled state. `step` still
-                    // owns numerical sanitisation; this keeps one more frame
-                    // scheduled until a positive monotonic interval arrives.
-                    anim |= ws.camera.needs_update();
-                    // Per-column accordion: every column eases its own `boost`
-                    // toward 1.0 if it is the focused one, else toward 0.0, so
-                    // column widths glide when focus changes instead of snapping.
-                    // In Overview every boost is forced to 0 so all columns share
-                    // the base width and the strip fits them all.
-                    let focus_i = ws.focus.column_idx;
-                    for (i, col) in ws.columns.iter_mut().enumerate() {
-                        let target = if ws.overview {
-                            0.0
-                        } else if i == focus_i {
-                            1.0
-                        } else {
-                            0.0
-                        };
-                        if spring_smooth(&mut col.boost, target, dt) {
-                            anim = true;
-                        }
-                    }
-                    if spring_smooth(&mut ws.zoom, ws.zoom_target, dt) {
-                        anim = true;
-                    }
-                    // Viewport page-zoom spring: only meaningful in Zoomed mode,
-                    // but easing it unconditionally is harmless — once the
-                    // workspace is back to Normal, `ribbon_geom` ignores the
-                    // factor anyway.
-                    if spring_smooth(&mut ws.page_zoom, ws.page_zoom_target, dt) {
-                        anim = true;
-                    }
-                }
-            }
-            if mi < per_monitor.len() {
-                per_monitor[mi] = anim;
-            }
-            any |= anim;
-        }
-        any
-    }
-
-    /// Snap all animated values to their targets immediately (no interpolation).
-    /// Used when `animations.enabled = false` so the WM never requests animation
-    /// frames.
-    pub fn snap_animations(&mut self) {
-        for mon in &mut self.monitors {
-            for ws in &mut mon.workspaces {
-                ws.camera.snap(ws.camera.target);
-                let focus_i = ws.focus.column_idx;
-                for (i, col) in ws.columns.iter_mut().enumerate() {
-                    let target = if ws.overview {
-                        0.0
-                    } else if i == focus_i {
-                        1.0
-                    } else {
-                        0.0
-                    };
-                    col.boost = target;
-                }
-                ws.zoom = ws.zoom_target;
-                ws.page_zoom = ws.page_zoom_target;
-            }
-        }
-    }
-}
-
-/// Frame-rate-independent exponential approach of `cur` toward `target`
-/// (critical damping, rate 12/s). Returns `true` while the value is still
-/// moving meaningfully, and — for a finite pending target — also when `dt` is
-/// zero, so the scheduler cannot park mid-transition on a zero-length tick.
-///
-/// A non-finite `target` or `dt` must never poison `cur`: an infinite target
-/// would push `cur` to infinity on the first step and the layout projection
-/// would follow. Poisoned inputs are ignored, `cur` is pulled back to a finite
-/// value, and the spring reports "settled" so the animator can drop the frame.
-pub fn spring_smooth(cur: &mut f32, target: f32, dt: f32) -> bool {
-    if !dt.is_finite() {
-        return false;
-    }
-    if !cur.is_finite() {
-        *cur = if target.is_finite() { target } else { 0.0 };
-    }
-    if dt <= 0.0 {
-        return target.is_finite() && (*cur - target).abs() > 0.001;
-    }
-    if !target.is_finite() {
-        // Never chase a non-finite target; if `cur` is already poisoned,
-        // pull it back to a finite value.
-        if !cur.is_finite() {
-            *cur = 0.0;
-        }
-        return false;
-    }
-    let rate = 12.0;
-    // Closed form rather than `cur += (target - cur) * rate * dt`: that Euler
-    // step overshoots for large `dt`. `k` saturates to 1 as `dt` grows, so a
-    // long frame lands exactly on the target instead of oscillating around it.
-    let k = 1.0 - (-rate * dt).exp();
-    *cur += (target - *cur) * k;
-    if !cur.is_finite() {
-        *cur = target;
-        return false;
-    }
-    if (*cur - target).abs() <= 0.001 {
-        *cur = target;
-        false
-    } else {
-        true
-    }
-}
-
-/// Sanitize user-supplied spring parameters before they enter the analytical
-/// camera transition. Stiffness is bounded for numerical range; damping is
-/// additionally bounded relative to `sqrt(stiffness)` so an overdamped camera
-/// cannot retain a practically invisible slow pole for minutes.
-pub fn sanitize_spring(stiffness: f32, damping: f32) -> (f32, f32) {
-    let stiffness = if !stiffness.is_finite() || stiffness <= 0.0 {
-        220.0
-    } else {
-        stiffness.clamp(MIN_STIFFNESS, MAX_SPRING)
-    };
-    let damping = if !damping.is_finite() || damping <= 0.0 {
-        30.0
-    } else {
-        damping
-    };
-    // Bound the fallbacks by the same relative rule as user values, so
-    // `sanitize_spring` maps every input into the effective (k, c) domain and is
-    // idempotent even for a tiny stiffness with an invalid damping.
-    (stiffness, bounded_damping(stiffness, damping))
 }
 
 impl Default for State {
@@ -2685,6 +2239,7 @@ impl Default for State {
         Self::new()
     }
 }
+
 
 #[cfg(test)]
 mod reservation_tests {
@@ -2875,26 +2430,6 @@ mod rect_tests {
     use super::Rect;
 
     #[test]
-    fn union_spanning_two_rects_is_the_bounding_box() {
-        let a = Rect::new(0, 0, 100, 100);
-        let b = Rect::new(300, 200, 50, 50);
-        assert_eq!(a.union(b), Rect::new(0, 0, 350, 250));
-    }
-
-    #[test]
-    fn union_with_overlapping_rect_is_their_bounds() {
-        let a = Rect::new(10, 10, 100, 100);
-        let b = Rect::new(50, 50, 100, 100);
-        assert_eq!(a.union(b), Rect::new(10, 10, 140, 140));
-    }
-
-    #[test]
-    fn union_with_itself_is_unchanged() {
-        let a = Rect::new(5, 5, 40, 40);
-        assert_eq!(a.union(a), a);
-    }
-
-    #[test]
     fn contains_rect_is_true_only_when_fully_inside() {
         let big = Rect::new(0, 0, 200, 200);
         let small = Rect::new(50, 50, 40, 40);
@@ -2904,511 +2439,5 @@ mod rect_tests {
         assert!(big.contains_rect(Rect::new(0, 0, 10, 10)));
         // Partial overlap is not containment.
         assert!(!big.contains_rect(Rect::new(150, 150, 100, 100)));
-    }
-}
-
-#[cfg(test)]
-mod column_weight_tests {
-    use super::*;
-
-    /// A state whose only column holds three windows and weighs `weight` — the
-    /// shape `MoveWindow` splits, since a split needs a column with more than one
-    /// window to take one out of.
-    fn stacked_column(weight: f32) -> State {
-        let mut st = State::new();
-        st.monitors
-            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 1));
-        for i in 0..3u32 {
-            let mut c = Client::new(0x300 + i, 0, 0);
-            c.flags.clear(WinFlags::MAXIMIZED);
-            st.add_client(c);
-            st.monitors[0].workspaces[0].add_tiled(0x300 + i, 0.5);
-        }
-        // Merge the two later windows into the first column, then point the focus
-        // and the monitor's focus at its leading window, as a focus command would.
-        let ws = &mut st.monitors[0].workspaces[0];
-        for win in 0x301..0x303u32 {
-            ws.remove_window(win);
-        }
-        for win in 0x301..0x303u32 {
-            let pos = ws.columns[0].windows.len();
-            ws.drop_into_column(0, win, pos);
-        }
-        ws.columns[0].weight = weight;
-        ws.focus.column_idx = 0;
-        ws.columns[0].focused = 0;
-        st.monitors[0].focused = Some(0x300);
-        st
-    }
-
-    fn weights(st: &State) -> Vec<f32> {
-        st.monitors[0].workspaces[0]
-            .columns
-            .iter()
-            .map(|c| c.weight)
-            .collect()
-    }
-
-    /// A split hands each half `src_w * 0.5`, so a column already at the 0.05
-    /// floor would yield 0.025 halves — outside the band the checker enforces
-    /// after the very next command. Splitting has to clamp, not just divide.
-    #[test]
-    fn splitting_a_column_at_the_band_floor_keeps_every_half_in_band() {
-        let mut st = stacked_column(MIN_COLUMN_WEIGHT);
-        // Two splits in a row: the first leaves the source column weighing the
-        // clamped halves, the second splits that column again.
-        assert!(
-            st.apply_move_dir(Dir::Right),
-            "the first split did not happen"
-        );
-        // The first split moved the focus to the extracted window's own column,
-        // which holds a single window; point it back at the source column, which
-        // still holds two, the way a focus command would.
-        let ws = &mut st.monitors[0].workspaces[0];
-        ws.focus.column_idx = 0;
-        ws.columns[0].focused = 0;
-        st.monitors[0].focused = Some(ws.columns[0].windows[0]);
-        assert!(
-            st.apply_move_dir(Dir::Right),
-            "the second split did not happen"
-        );
-        for w in weights(&st) {
-            assert!(
-                (MIN_COLUMN_WEIGHT..=MAX_COLUMN_WEIGHT).contains(&w),
-                "a split produced the out-of-band weight {w}"
-            );
-        }
-        let checked = st.check_invariants();
-        assert!(checked.is_ok(), "splitting broke the model: {checked:?}");
-    }
-
-    /// The clamp only exists to stop the split leaving the band; a column with
-    /// room to spare must still be divided, or every split would collapse to the
-    /// floor and the ribbon would stop responding to `MoveWindow`.
-    #[test]
-    fn splitting_a_column_with_room_still_divides_it_evenly() {
-        let mut st = stacked_column(1.0);
-        assert!(st.apply_move_dir(Dir::Left), "the split did not happen");
-        assert_eq!(weights(&st), vec![0.5, 0.5]);
-        let checked = st.check_invariants();
-        assert!(checked.is_ok(), "splitting broke the model: {checked:?}");
-    }
-}
-
-#[cfg(test)]
-mod spring_hardening_tests {
-    use super::{sanitize_spring, spring_smooth, Camera, MIN_DAMPING};
-
-    #[test]
-    fn stiffness_zero_negative_and_non_finite_fall_back_to_default() {
-        assert_eq!(sanitize_spring(0.0, 30.0), (220.0, 30.0));
-        assert_eq!(sanitize_spring(-5.0, 30.0), (220.0, 30.0));
-        assert_eq!(sanitize_spring(f32::NAN, 30.0), (220.0, 30.0));
-        assert_eq!(sanitize_spring(f32::INFINITY, 30.0), (220.0, 30.0));
-        assert_eq!(sanitize_spring(f32::NEG_INFINITY, 30.0), (220.0, 30.0));
-    }
-
-    #[test]
-    fn damping_negative_and_non_finite_fall_back_to_default() {
-        assert_eq!(sanitize_spring(220.0, -1.0), (220.0, 30.0));
-        assert_eq!(sanitize_spring(220.0, f32::NAN), (220.0, 30.0));
-        assert_eq!(sanitize_spring(220.0, f32::INFINITY), (220.0, 30.0));
-    }
-
-    #[test]
-    fn sanitize_spring_is_idempotent_for_invalid_damping() {
-        let (k, c) = sanitize_spring(1.0, f32::INFINITY);
-        assert!((k - 1.0).abs() < 1e-6);
-        assert!((c - 10.0).abs() < 1e-6);
-        let (k2, c2) = sanitize_spring(k, c);
-        assert!((k2 - k).abs() < 1e-6);
-        assert!((c2 - c).abs() < 1e-6);
-        let mut cam = Camera::new(0.0);
-        cam.stiffness = 62_500.0;
-        cam.damping = f32::NAN;
-        cam.target = 1_000.0;
-        assert!(cam.step(1.0 / 60.0));
-        assert!(cam.position.is_finite());
-        assert!(cam.velocity.is_finite());
-    }
-
-    #[test]
-    fn damping_extreme_is_bounded_relative_to_stiffness() {
-        // A finite overdamped value is accepted, but its slow pole is bounded
-        // relative to sqrt(stiffness). Low-damping underdamped springs remain
-        // mathematically stable but can still have a long visual settle.
-        let (k, c) = sanitize_spring(500.0, 10_000.0);
-        assert!((k - 500.0).abs() < 1e-6);
-        assert!(c > 0.0 && c < 10_000.0);
-        // Both parameters remain finite and stiffness keeps its global bound.
-        let (k, c) = sanitize_spring(1.0e9, 1.0e9);
-        assert!((k - 62_500.0).abs() < 1e-6);
-        assert!(c.is_finite() && c > 0.0 && c <= 2_500.0);
-    }
-
-    #[test]
-    fn camera_analytic_regimes_finite_and_convergent() {
-        for (label, k, c) in [
-            ("under", 1_000.0, 5.0),
-            ("critical", 1_000.0, 63.245_555),
-            ("over", 1_000.0, 100.0),
-            ("extreme", 62_500.0, 30.0),
-            ("max-damping", 1.0, 10.0),
-        ] {
-            let mut cam = Camera::new(0.0);
-            cam.stiffness = k;
-            cam.damping = c;
-            cam.target = 500.0;
-            let mut settled = false;
-            for _ in 0..20_000 {
-                settled = !cam.step(1.0 / 60.0);
-                assert!(cam.position.is_finite(), "{label} position");
-                assert!(cam.velocity.is_finite(), "{label} velocity");
-                if settled {
-                    break;
-                }
-            }
-            assert!(settled, "{label} did not settle");
-            assert!((cam.position - cam.target).abs() < 1e-6, "{label} position");
-            assert!(cam.velocity.abs() < 1e-6, "{label} velocity");
-        }
-    }
-
-    #[test]
-    fn camera_snap_is_exact_even_with_tiny_dt() {
-        let mut cam = Camera::new(0.0);
-        cam.target = 100.5;
-        cam.position = 100.1;
-        cam.velocity = 0.0;
-        assert!(!cam.step(1.0e-9));
-        assert!((cam.position - cam.target).abs() < 1e-6);
-        assert!(cam.velocity.abs() < 1e-6);
-    }
-
-    #[test]
-    fn camera_step_survives_non_finite_dt_and_poisoned_state() {
-        let mut cam = Camera::new(0.0);
-        cam.target = 100.0;
-        // NaN dt must not poison the state.
-        assert!(!cam.step(f32::NAN));
-        assert!(cam.position.is_finite());
-        // A poisoned position snaps back to target instead of staying NaN.
-        cam.position = f32::NAN;
-        assert!(!cam.step(1.0 / 60.0));
-        assert!(cam.position.is_finite());
-    }
-
-    fn advance(cam: &mut Camera, seconds: f32, fps: u32) {
-        let frame = 1.0 / fps as f32;
-        let mut elapsed = 0.0;
-        while elapsed < seconds {
-            let dt = frame.min(seconds - elapsed);
-            cam.step(dt);
-            elapsed += dt;
-        }
-    }
-
-    /// Frames until the camera parks, or the step cap if it never does.
-    fn frames_to_park(cam: &mut Camera, dt: f32, cap: u32) -> Option<u32> {
-        let mut frames = 0;
-        while cam.step(dt) {
-            frames += 1;
-            if frames >= cap {
-                return None;
-            }
-        }
-        Some(frames)
-    }
-
-    /// The settle contract has to hold at *any* offset, not just where the f32
-    /// resolution of the position happens to be fine enough. Past ~12 000 px the
-    /// residual used to freeze one or two ULPs short of the target with the
-    /// velocity sitting just above `CAMERA_SETTLE_VELOCITY`, and the frame loop
-    /// kept asking for frames for as long as it was left running.
-    // The exact-endpoint assertions are bit comparisons on purpose: parking
-    // installs `target` itself, which is the contract, not an approximation of it.
-    #[test]
-    #[allow(clippy::float_cmp)]
-    fn camera_parks_at_the_offsets_where_the_old_rounding_could_not() {
-        for target in [
-            8_192.0_f32,
-            12_000.0,
-            13_811.895_5,
-            16_384.0,
-            100_000.0,
-            -16_384.0,
-            1.0e6,
-        ] {
-            let mut cam = Camera::new(0.0);
-            cam.target = target;
-            let frames = frames_to_park(&mut cam, 1.0 / 60.0, 20_000)
-                .unwrap_or_else(|| panic!("{target} px never parked"));
-            // A park, not a stall: the exact endpoint is installed, so the camera
-            // is no longer scheduling frames.
-            assert_eq!(
-                cam.position, target,
-                "{target} px parked at {}",
-                cam.position
-            );
-            assert_eq!(cam.velocity, 0.0, "{target} px kept its momentum");
-            assert!(!cam.needs_update(), "{target} px still asks for frames");
-            assert!(frames > 0, "{target} px snapped without animating");
-        }
-    }
-
-    /// The offset alone is not the whole story: a *slow* spring reaches the
-    /// frozen state while still a pixel or two outside the envelope, so a fix
-    /// that only addressed the velocity clause would leave these running. Both
-    /// extreme damping sanitizers get pinned, since they are what `arb_raw_spring`
-    /// reaches for most hostile inputs.
-    #[test]
-    #[allow(clippy::float_cmp)]
-    fn camera_parks_through_the_slowest_sanitized_springs() {
-        for (stiffness, damping) in [(1.0, 10.0), (220.0, MIN_DAMPING), (220.0, 30.0)] {
-            let (stiffness, damping) = sanitize_spring(stiffness, damping);
-            let mut cam = Camera::new(0.0);
-            cam.target = 50_000.0;
-            cam.stiffness = stiffness;
-            cam.damping = damping;
-            let frames = frames_to_park(&mut cam, 1.0 / 60.0, 40_000)
-                .unwrap_or_else(|| panic!("k={stiffness} c={damping} never parked"));
-            assert_eq!(
-                cam.position, 50_000.0,
-                "k={stiffness} c={damping} parked short"
-            );
-            assert!(
-                !cam.needs_update(),
-                "k={stiffness} c={damping} still animates"
-            );
-            assert!(frames > 0);
-        }
-    }
-
-    /// Near equilibrium the camera must *not* be cut short: a state already
-    /// inside the envelope still animates while it is visibly moving, and a
-    /// caller that overwrites the published state is integrated from exactly
-    /// what it wrote rather than from a continuation the caller never saw.
-    #[test]
-    #[allow(clippy::float_cmp)]
-    fn camera_near_equilibrium_is_neither_cut_short_nor_ignored() {
-        let mut cam = Camera::new(0.0);
-        cam.target = 100.0;
-        // 0.4 px out — inside the settle envelope — but travelling at 40 px/s, so
-        // parking here would be a visible jump.
-        cam.position = 99.6;
-        cam.velocity = 40.0;
-        assert!(cam.step(1.0 / 60.0), "a moving camera was declared settled");
-        assert_ne!(
-            cam.position, 100.0,
-            "the camera snapped instead of animating"
-        );
-        assert!(
-            (cam.position - 99.6).abs() > 1e-3,
-            "a moving camera inside the envelope was frozen at {}",
-            cam.position
-        );
-
-        // The published fields are the whole of what a caller may set, so a
-        // hand-placed position with no matching continuation is the initial
-        // condition of the step.
-        let mut cam = Camera::new(0.0);
-        cam.target = 0.0;
-        cam.position = 1.0;
-        assert!(cam.step(1.0 / 60.0));
-        assert!(
-            cam.position > 0.9,
-            "a hand-set position was not honoured: {}",
-            cam.position
-        );
-    }
-
-    #[test]
-    fn camera_trajectory_is_frame_rate_independent() {
-        let mut positions = Vec::new();
-        for fps in [30_u32, 60, 120] {
-            let mut cam = Camera::new(0.0);
-            cam.target = 1_000.0;
-            advance(&mut cam, 0.25, fps);
-            positions.push(cam.position);
-        }
-        let spread = positions.iter().copied().fold(0.0_f32, f32::max)
-            - positions.iter().copied().fold(f32::INFINITY, f32::min);
-        assert!(spread < 0.05, "partition changed trajectory: {positions:?}");
-    }
-
-    #[test]
-    fn camera_retarget_keeps_visual_state_and_resets_velocity() {
-        let mut cam = Camera::new(0.0);
-        cam.target = 1_000.0;
-        advance(&mut cam, 0.10, 60);
-        let current = cam.position;
-        cam.retarget(-500.0);
-        assert!(
-            (cam.position - current).abs() < 1e-6,
-            "retarget must not teleport"
-        );
-        assert!(
-            cam.velocity.abs() < 1e-6,
-            "retarget must not keep old-direction momentum"
-        );
-        assert!((cam.target + 500.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn camera_snap_and_zero_delta_are_not_motion() {
-        let mut cam = Camera::new(0.0);
-        cam.target = 100.0;
-        assert!(cam.step(0.0));
-        assert!(cam.step(-1.0));
-        assert!(
-            cam.needs_update(),
-            "a pending retarget must keep scheduling"
-        );
-        cam.position = 99.8;
-        cam.velocity = 0.0;
-        assert!(!cam.step(1.0 / 60.0));
-        assert!((cam.position - cam.target).abs() < 1e-6);
-        assert!(cam.velocity.abs() < 1e-6);
-        assert!(!cam.needs_update());
-    }
-
-    #[test]
-    fn camera_repeated_direction_changes_do_not_teleport() {
-        let mut cam = Camera::new(0.0);
-        cam.target = 1_000.0;
-        advance(&mut cam, 0.08, 60);
-        for target in [-500.0, 1_000.0, -500.0, 1_000.0] {
-            let before = cam.position;
-            cam.retarget(target);
-            assert!((cam.position - before).abs() < 1e-6);
-            cam.step(1.0 / 60.0);
-            assert!(cam.position.is_finite());
-        }
-    }
-
-    #[test]
-    fn camera_step_with_extreme_spring_does_not_diverge() {
-        let mut cam = Camera::new(0.0);
-        cam.stiffness = 62_500.0; // at the clamp bound
-        cam.damping = 0.0; // clamped to 0.1 internally
-        cam.target = 1.0e6;
-        for _ in 0..600 {
-            cam.step(1.0 / 60.0);
-            assert!(
-                cam.position.is_finite(),
-                "position diverged: {}",
-                cam.position
-            );
-            assert!(cam.velocity.is_finite());
-        }
-    }
-
-    #[test]
-    fn camera_step_terminates_with_valid_configuration() {
-        let mut cam = Camera::new(0.0);
-        cam.target = 100.0;
-        let mut steps = 0;
-        while cam.step(0.008) {
-            steps += 1;
-            assert!(steps <= 1000, "camera failed to terminate after 1000 steps");
-        }
-        assert!((cam.position - 100.0).abs() <= 0.5);
-    }
-
-    #[test]
-    fn camera_step_terminates_even_with_zero_or_negative_damping() {
-        let mut cam = Camera::new(0.0);
-        cam.target = 100.0;
-        cam.damping = 0.0;
-        let mut steps = 0;
-        while cam.step(0.008) {
-            steps += 1;
-            assert!(
-                steps <= 20000,
-                "zero damping failed to terminate (infinite loop bug)"
-            );
-        }
-
-        cam.snap(0.0);
-        cam.target = 100.0;
-        cam.damping = -10.0;
-        steps = 0;
-        while cam.step(0.008) {
-            steps += 1;
-            assert!(steps <= 20000, "negative damping failed to terminate");
-        }
-    }
-
-    #[test]
-    fn spring_smooth_ignores_non_finite_inputs() {
-        let mut cur = 5.0;
-        assert!(!spring_smooth(&mut cur, f32::NAN, 0.016));
-        assert!(
-            (cur - 5.0).abs() < 1e-6,
-            "a NaN target must not poison the value"
-        );
-        assert!(!spring_smooth(&mut cur, 10.0, f32::INFINITY));
-        assert!((cur - 5.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn spring_smooth_zero_dt_keeps_pending_state_and_snaps_endpoint() {
-        let mut cur = f32::NAN;
-        assert!(!spring_smooth(&mut cur, 1.0, 0.0));
-        assert!((cur - 1.0).abs() < 1e-6);
-        let mut cur = 0.0;
-        assert!(spring_smooth(&mut cur, 1.0, 0.0));
-        assert!(cur.abs() < 1e-6);
-        cur = 0.9995;
-        assert!(!spring_smooth(&mut cur, 1.0, 0.016));
-        assert!((cur - 1.0).abs() < 1e-6);
-    }
-
-    /// Integrator-level invariant: the `Camera` fields are public, so a caller
-    /// can bypass `sanitize_spring` entirely. Every degenerate value must still
-    /// terminate *and* converge — the settle predicate has to be reachable (the
-    /// camera lands on the target), not merely "did not explode after N frames".
-    /// The step count is only a watchdog against a hung test; the real assertion
-    /// is convergence.
-    #[test]
-    fn camera_step_terminates_and_converges_for_every_degenerate_direct_mutation() {
-        let bad = [
-            (0.0, 0.0),             // no stiffness and no damping: never restores
-            (220.0, 0.0),           // damping == 0
-            (220.0, -25.0),         // damping < 0 (energy injection)
-            (220.0, f32::NAN),      // NaN damping
-            (220.0, f32::INFINITY), // +inf damping
-            (220.0, f32::NEG_INFINITY),
-            (0.0, 30.0),      // stiffness == 0 (spring never restores)
-            (-100.0, 30.0),   // stiffness < 0
-            (f32::NAN, 30.0), // NaN stiffness
-            (f32::INFINITY, 30.0),
-            (f32::NEG_INFINITY, 30.0),
-        ];
-        for (k, c) in bad {
-            let mut cam = Camera::new(0.0);
-            cam.stiffness = k;
-            cam.damping = c;
-            cam.target = 100.0;
-            let mut steps = 0;
-            while cam.step(0.008) {
-                steps += 1;
-                assert!(
-                    steps <= 40_000,
-                    "stiffness={k} damping={c}: camera never reached the settle predicate \
-                     (eternal moving state)"
-                );
-            }
-            assert!(
-                cam.position.is_finite(),
-                "stiffness={k} damping={c}: position poisoned"
-            );
-            assert!(
-                (cam.position - cam.target).abs() <= 0.5,
-                "stiffness={k} damping={c}: terminated at {} instead of the target {}",
-                cam.position,
-                cam.target
-            );
-        }
     }
 }

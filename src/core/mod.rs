@@ -64,8 +64,8 @@ mod tests;
 #[cfg(test)]
 mod invariants;
 
-/// Test-only heap-allocation counter used to prove the per-frame compositor
-/// path stays allocation-free. Compiled out of the shipped binary.
+/// Test-only heap-allocation counter used to prove the per-arrange projection
+/// stays allocation-free. Compiled out of the shipped binary.
 #[cfg(test)]
 pub mod framebench;
 

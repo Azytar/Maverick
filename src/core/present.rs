@@ -2,10 +2,9 @@
 //!
 //! `present_into` is the single place that rewrites `layout::arrange`'s
 //! `layout_rect` into the `rendered_rect` the reconciler applies to X11 — in
-//! place, plus the `raise` order the caller restacks in. Coordinate computation
-//! (`layout::arrange` + `ribbon_geom`), the reconciler diff against
-//! `AppliedState`, and the backend `ConfigureWindow`/restack calls all live
-//! elsewhere.
+//! place. Coordinate computation (`layout::arrange` + `ribbon_geom`), the
+//! reconciler diff against `AppliedState`, and the backend
+//! `ConfigureWindow`/restack calls all live elsewhere.
 //!
 //! Invariants: `fullscreen > maximized` — fullscreen (checked via
 //! `is_fullscreen_overlay`) covers `mon.screen` with border 0 and wins if both
@@ -16,37 +15,24 @@
 //! `FullscreenPolicy::True` is always an overlay. Tiles underneath are still
 //! computed unchanged, so exiting the overlay restores the workspace exactly.
 //!
-//! "Presented" means the rect the reconciler writes and the raise order it
-//! restacks in. It does not promise *when* the server has processed either, nor
-//! anything about stacking relative to the dock or other overlays.
+//! "Presented" means the rect the reconciler writes. It does not promise *when*
+//! the server has processed it, nor anything about stacking relative to the
+//! dock or other overlays.
 
 use crate::core::layout::Placements;
-use crate::types::{Monitor, Rect, State, WindowId};
+use crate::types::{Monitor, Rect, State};
 
 #[cfg(test)]
-use crate::core::layout::LayoutRegistry;
 #[cfg(test)]
 use crate::core::layout::RibbonScratch;
 
-/// Rewrite `placements` in place, applying the presentation overlay for `mon`,
-/// and collect every presented window into `raise` (cleared first) in
-/// `placements` order — focused last, so the caller can raise them in that
-/// order and the focused one lands on top. Precedence is `fullscreen >
-/// maximized`: `is_fullscreen_overlay()` rewrites to `mon.screen` (border 0)
-/// and wins if both flags are set; otherwise `presented_maximize` rewrites via
-/// `maximized_rect` (per-axis, workarea, border 0).
-///
-/// `raise` is caller-owned rather than returned because the per-frame paths
-/// reuse a buffer: the compositor's `live_placements` runs once per animating
-/// monitor *per frame*, so returning a fresh `Vec` there would be a heap
-/// allocation on every frame of every scroll.
-pub fn present_into(
-    state: &State,
-    mon: &Monitor,
-    placements: &mut Placements,
-    raise: &mut Vec<WindowId>,
-) {
-    raise.clear();
+/// Rewrite `placements` in place, applying the presentation overlay for `mon`.
+/// Precedence is `fullscreen > maximized`: `is_fullscreen_overlay()` rewrites
+/// to `mon.screen` (border 0) and wins if both flags are set; otherwise
+/// `presented_maximize` rewrites via `maximized_rect` (per-axis, workarea,
+/// border 0). The stacking order among presented windows is decided by the
+/// backend's `stack_overlay`, not here.
+pub fn present_into(state: &State, mon: &Monitor, placements: &mut Placements) {
     for entry in placements.iter_mut() {
         let win = entry.0;
         let tile = entry.1;
@@ -76,26 +62,14 @@ pub fn present_into(
         if let Some((rect, bw)) = present_rect {
             entry.1 = rect;
             entry.2 = bw;
-            raise.push(win);
-        }
-    }
-    // Focused presented window last: among several presented windows the focused
-    // one must be the topmost after the caller raises the whole list in order.
-    if let Some(f) = mon.focused {
-        if let Some(pos) = raise.iter().position(|w| *w == f) {
-            let win = raise.remove(pos);
-            raise.push(win);
         }
     }
 }
 
-/// [`present_into`] with an owned result. Convenience for tests and for callers
-/// that genuinely want the list; the per-frame paths use `present_into`.
+/// [`present_into`] as a statement, for tests.
 #[cfg(test)]
-pub fn present(state: &State, mon: &Monitor, placements: &mut Placements) -> Vec<WindowId> {
-    let mut raise = Vec::new();
-    present_into(state, mon, placements, &mut raise);
-    raise
+pub fn present(state: &State, mon: &Monitor, placements: &mut Placements) {
+    present_into(state, mon, placements);
 }
 
 /// The workarea, clipped to the axes the client actually maximized on.
@@ -123,7 +97,7 @@ fn maximized_rect(tile: Rect, workarea: Rect, client: &crate::types::Client) -> 
 mod tests {
     use super::*;
     use crate::config::Cfg;
-    use crate::types::{Client, LayoutKind, Monitor, Rect, State, WinFlags};
+    use crate::types::{Client, LayoutKind, Monitor, Rect, State, WinFlags, WindowId};
 
     fn setup() -> (State, Cfg) {
         let mut state = State::new();
@@ -160,20 +134,16 @@ mod tests {
         state.monitors[0].focused = Some(1);
 
         let mut p = Placements::new();
-        let registry = LayoutRegistry::new();
 
         crate::core::layout::arrange(
             &state,
             0,
             &cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut p,
             &mut RibbonScratch::default(),
         );
-        let raised = present(&state, &state.monitors[0], &mut p);
+        present(&state, &state.monitors[0], &mut p);
 
-        assert_eq!(raised, vec![1]);
         let (_, rect, bw) = p.iter().find(|e| e.0 == 1).copied().unwrap();
         assert_eq!(rect, state.monitors[0].screen);
         assert_eq!(bw, 0);
@@ -195,20 +165,16 @@ mod tests {
         state.monitors[0].focused = Some(2);
 
         let mut p = Placements::new();
-        let registry = LayoutRegistry::new();
 
         crate::core::layout::arrange(
             &state,
             0,
             &cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut p,
             &mut RibbonScratch::default(),
         );
-        let raised = present(&state, &state.monitors[0], &mut p);
+        present(&state, &state.monitors[0], &mut p);
 
-        assert_eq!(raised, vec![1], "unfocused fullscreen stays presented");
         let (_, rect, bw) = p.iter().find(|e| e.0 == 1).copied().unwrap();
         assert_eq!(
             rect, state.monitors[0].screen,
@@ -234,20 +200,16 @@ mod tests {
         state.monitors[0].workspaces[0].presented_maximize = Some(1);
 
         let mut p = Placements::new();
-        let registry = LayoutRegistry::new();
 
         crate::core::layout::arrange(
             &state,
             0,
             &cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut p,
             &mut RibbonScratch::default(),
         );
-        let raised = present(&state, &state.monitors[0], &mut p);
+        present(&state, &state.monitors[0], &mut p);
 
-        assert_eq!(raised, vec![1]);
         let (_, rect, bw) = p.iter().find(|e| e.0 == 1).copied().unwrap();
         assert_eq!(rect, state.monitors[0].workarea);
         assert_ne!(
@@ -272,23 +234,16 @@ mod tests {
         state.monitors[0].focused = Some(2);
 
         let mut p = Placements::new();
-        let registry = LayoutRegistry::new();
 
         crate::core::layout::arrange(
             &state,
             0,
             &cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut p,
             &mut RibbonScratch::default(),
         );
-        let raised = present(&state, &state.monitors[0], &mut p);
+        present(&state, &state.monitors[0], &mut p);
 
-        assert!(
-            !raised.contains(&1),
-            "unfocused maximized must not be presented as an overlay"
-        );
         let (_, rect, _) = p.iter().find(|e| e.0 == 1).copied().unwrap();
         assert_ne!(
             rect, state.monitors[0].workarea,
@@ -313,14 +268,11 @@ mod tests {
         state.monitors[0].workspaces[0].presented_maximize = Some(1);
 
         let mut p = Placements::new();
-        let registry = LayoutRegistry::new();
 
         crate::core::layout::arrange(
             &state,
             0,
             &cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut p,
             &mut RibbonScratch::default(),
         );
@@ -352,14 +304,11 @@ mod tests {
         state.monitors[0].workspaces[0].presented_maximize = Some(1);
 
         let mut p = Placements::new();
-        let registry = LayoutRegistry::new();
 
         crate::core::layout::arrange(
             &state,
             0,
             &cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut p,
             &mut RibbonScratch::default(),
         );
@@ -417,21 +366,17 @@ mod tests {
         state.monitors[0].focused = Some(1);
 
         let mut p = Placements::new();
-        let registry = LayoutRegistry::new();
 
         crate::core::layout::arrange(
             &state,
             0,
             &cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut p,
             &mut RibbonScratch::default(),
         );
         let snapshot = p.clone();
-        let raised = present(&state, &state.monitors[0], &mut p);
+        present(&state, &state.monitors[0], &mut p);
 
-        assert!(raised.is_empty());
         assert_eq!(p, snapshot);
     }
 }
@@ -442,9 +387,7 @@ mod tests {
 /// rects into the rects the reconciler writes to X11, so its contract is small
 /// and sharp:
 ///
-/// * it rewrites *in place* — the placement set itself never changes, and the
-///   raise list is a duplicate-free selection from it with the focused window
-///   last;
+/// * it rewrites *in place* — the placement set itself never changes;
 /// * `fullscreen > maximized`, and a presented window is always configured
 ///   with border 0 so the overlay it covers cannot overflow;
 /// * EWMH's two maximize axes are independent: a vertical maximize stretches
@@ -457,9 +400,10 @@ mod tests {
 mod proptests {
     use super::*;
     use crate::config::Cfg;
-    use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements, RibbonScratch};
+    use crate::core::layout::{arrange, Placements, RibbonScratch};
     use crate::types::{
         Client, Column, Edge, Focus, FullscreenPolicy, Monitor, Rect, SizeHints, State, WinFlags,
+        WindowId,
     };
     use proptest::prelude::*;
 
@@ -674,7 +618,6 @@ mod proptests {
                         windows: tiled[next..end].to_vec(),
                         focused: 0,
                         weight,
-                        boost: 0.0,
                     });
                     next = end;
                 }
@@ -683,7 +626,6 @@ mod proptests {
                         windows: vec![win],
                         focused: 0,
                         weight: 1.0,
-                        boost: 0.0,
                     });
                 }
                 ws.focus = Focus { column_idx: 0 };
@@ -716,36 +658,30 @@ mod proptests {
 
     /// Arrange and then present, returning the tile rects alongside the
     /// presented ones so a test can tell which entries the overlay rewrote.
-    fn project(state: &State, cfg: &Cfg) -> (Placements, Placements, Vec<WindowId>) {
-        let registry = LayoutRegistry::new();
+    fn project(state: &State, cfg: &Cfg) -> (Placements, Placements) {
         let mut out = Placements::new();
         arrange(
             state,
             0,
             cfg,
-            &registry,
-            Phase::Settled,
             &mut out,
             &mut RibbonScratch::default(),
         );
         let tiles = out.clone();
-        let mut raise: Vec<WindowId> = Vec::new();
-        present_into(state, &state.monitors[0], &mut out, &mut raise);
-        (tiles, out, raise)
+        present_into(state, &state.monitors[0], &mut out);
+        (tiles, out)
     }
 
-    /// `present_into` rewrites rects *in place* and collects the raise order in
-    /// the very buffer the caller reuses every frame, so the placement set has
-    /// to survive it untouched — every window `arrange` produced is still there,
-    /// in the same order — while the raise list stays a duplicate-free
-    /// selection from that set with the focused window moved last. A duplicate
-    /// or a lost entry here becomes a restack the caller cannot interpret.
+    /// `present_into` rewrites rects *in place*: the placement set has to
+    /// survive it untouched — every window `arrange` produced is still there,
+    /// in the same order. A dropped or reordered entry would make the
+    /// reconciler diff a different set than the layout produced.
     #[test]
-    fn presenting_preserves_the_placement_set_and_orders_the_raise_list() {
+    fn presenting_preserves_the_placement_set() {
         proptest!(|(s in scene())| {
             let state = s.state();
             let cfg = s.cfg();
-            let (tiles, presented, raise) = project(&state, &cfg);
+            let (tiles, presented) = project(&state, &cfg);
 
             let tile_windows: Vec<WindowId> = tiles.iter().map(|e| e.0).collect();
             let presented_windows: Vec<WindowId> = presented.iter().map(|e| e.0).collect();
@@ -755,56 +691,12 @@ mod proptests {
                 "the overlay must not add, drop or reorder placements"
             );
 
-            let mut seen: Vec<WindowId> = Vec::new();
-            for &win in &raise {
-                prop_assert!(
-                    presented_windows.contains(&win),
-                    "window {} was raised but never placed: {:?}",
-                    win,
-                    presented_windows
-                );
-                prop_assert!(
-                    !seen.contains(&win),
-                    "window {} appears twice in the raise list: {:?}",
-                    win,
-                    raise
-                );
-                seen.push(win);
-            }
-
-            // The raise order follows the placement order, with the focused
-            // window pulled to the end.
-            let focused = state.monitors[0].focused;
-            let tail: Vec<WindowId> = raise
-                .iter()
-                .copied()
-                .filter(|&w| Some(w) != focused)
-                .collect();
-            let head: Vec<WindowId> = presented_windows
-                .iter()
-                .copied()
-                .filter(|w| seen.contains(w) && Some(*w) != focused)
-                .collect();
-            prop_assert_eq!(
-                tail, head,
-                "the raise list must keep the placement order apart from the focused window"
-            );
-            if let Some(f) = focused {
-                if seen.contains(&f) {
-                    prop_assert_eq!(
-                        *raise.last().unwrap(),
-                        f,
-                        "the focused presented window must be raised last: {:?}",
-                        raise
-                    );
-                }
-            }
-
-            // Every presented window is configured with border 0: a fullscreen
-            // overlay covers the screen and a maximize fills the workarea, and
-            // either one that kept its border would overflow the area it covers.
-            for &(win, _, bw) in &presented {
-                if seen.contains(&win) {
+            // Every window the overlay rewrote is configured with border 0: a
+            // fullscreen overlay covers the screen and a maximize fills the
+            // workarea, and either one that kept its border would overflow the
+            // area it covers.
+            for (&(win, rect, bw), &(_, tile_rect, tile_bw)) in presented.iter().zip(tiles.iter()) {
+                if rect != tile_rect || bw != tile_bw {
                     prop_assert_eq!(bw, 0, "presented window {} kept a border", win);
                 }
             }
@@ -820,22 +712,12 @@ mod proptests {
         proptest!(|(s in scene())| {
             let state = s.state();
             let cfg = s.cfg();
-            let (_, once, raise_once) = project(&state, &cfg);
+            let (_, once) = project(&state, &cfg);
             let mut twice_placements = once.clone();
-            let mut twice_raise: Vec<WindowId> = Vec::new();
-            present_into(
-                &state,
-                &state.monitors[0],
-                &mut twice_placements,
-                &mut twice_raise,
-            );
+            present_into(&state, &state.monitors[0], &mut twice_placements);
             prop_assert_eq!(
                 twice_placements, once,
                 "presenting twice moved a window that was already presented"
-            );
-            prop_assert_eq!(
-                twice_raise, raise_once,
-                "presenting twice changed the raise order"
             );
         });
     }
@@ -872,8 +754,7 @@ mod proptests {
             prop_assume!(!client.is_fullscreen_overlay());
             let (v, h) = (client.is_maximized_v(), client.is_maximized_h());
 
-            let (tiles, out, raise) = project(&state, &cfg);
-            prop_assert!(raise.contains(&focus));
+            let (tiles, out) = project(&state, &cfg);
             let tile = tiles.iter().find(|e| e.0 == focus).unwrap().1;
             let got = out.iter().find(|e| e.0 == focus).unwrap().1;
             let wa = state.monitors[0].workarea;
@@ -943,8 +824,7 @@ mod proptests {
             let focus = state.monitors[0].focused.unwrap();
             prop_assume!(state.monitors[0].ws().presented_maximize == Some(focus));
 
-            let (_, out, raise) = project(&state, &cfg);
-            prop_assert!(raise.contains(&focus));
+            let (_, out) = project(&state, &cfg);
             let entry = out.iter().find(|e| e.0 == focus).unwrap();
             prop_assert_eq!(
                 entry.1,
@@ -967,18 +847,11 @@ mod proptests {
             s.present_maximize = false;
             let state = s.state();
             let cfg = s.cfg();
-            let (tiles, out, raise) = project(&state, &cfg);
+            let (tiles, out) = project(&state, &cfg);
             prop_assume!(state.monitors[0].ws().presented_maximize.is_none());
             for &(win, _, _) in &out {
                 let client = state.clients.get(&win).unwrap();
                 if client.is_maximized() && !client.is_fullscreen_overlay() {
-                    prop_assert!(
-                        !raise.contains(&win),
-                        "window {} is maximized but owns no presentation, so it must not \
-                         be raised: {:?}",
-                        win,
-                        raise
-                    );
                     let tile = tiles.iter().find(|e| e.0 == win).unwrap();
                     let kept = out.iter().find(|e| e.0 == win).unwrap();
                     prop_assert_eq!(
@@ -1021,12 +894,7 @@ mod proptests {
             prop_assert!(!client.is_fullscreen_overlay());
             prop_assert!(state.monitors[0].ws().presented_maximize.is_none());
 
-            let (tiles, out, raise) = project(&state, &cfg);
-            prop_assert!(
-                !raise.contains(&focus),
-                "a ribbon fullscreen must not be raised as an overlay: {:?}",
-                raise
-            );
+            let (tiles, out) = project(&state, &cfg);
             let tile = tiles.iter().find(|e| e.0 == focus).unwrap();
             let kept = out.iter().find(|e| e.0 == focus).unwrap();
             prop_assert_eq!(

@@ -1,10 +1,11 @@
-//! Shared X11 bootstrap — one Xlib display whose event queue is owned by XCB.
+//! Maverick's X11 bootstrap: one Xlib `Display*` whose event queue is owned by
+//! XCB, handed to the window manager as the `XConn` it issues requests on.
 //!
 //! `open_x` opens a `Display*`, hands the queue to XCB with
 //! `XSetEventQueueOwner(XCB_OWNS_EVENT_QUEUE)`, and wraps the display's own
 //! `xcb_connection_t*` (`XGetXCBConnection`) in `x11rb::xcb_ffi::XCBConnection`.
-//! The WM core and the compositor share that single socket, so there is exactly
-//! one sequence-number space and one event queue.
+//! That connection has one owner and one user — the window manager — so it
+//! carries one socket, one sequence-number space and one event queue.
 //!
 //! # Ownership
 //!
@@ -37,16 +38,15 @@
 //! they are left for x11rb — and the handler is not called for a request the
 //! server rejected. Two things follow, and both are load-bearing for callers:
 //!
-//! * The recorded code describes **Xlib and GLX requests only** *and* only ones
-//!   libXlib reads. Protocol errors on requests x11rb issues are reported by
-//!   libxcb to x11rb itself (`Cookie::reply` answers
-//!   `Err(ReplyError::X11Error(..))`), which is what the window manager's XCB
-//!   paths use `checked_void!` for.
-//! * The compositor's GLX probes with `take_x_error` are **best-effort**: they
-//!   cannot see a failure, so a caller must not branch on a negative answer as
-//!   though it meant the request succeeded. In `maverick-gl`'s renderer that
-//!   makes the per-visual fbconfig check a no-op; see
-//!   `Renderer::texture_from_pixmap`.
+//! * The recorded code describes **Xlib requests only** *and* only ones libXlib
+//!   itself reads. Protocol errors on requests x11rb issues are reported by
+//!   libxcb to x11rb instead (`Cookie::reply` answers
+//!   `Err(ReplyError::X11Error(..))`), which is how the window manager names a
+//!   failed request's error kind.
+//! * `take_x_error` is **best-effort**: it cannot see an asynchronous failure,
+//!   so a caller must not branch on a negative answer as though it meant the
+//!   request succeeded. Every request the window manager issues goes through
+//!   x11rb, so nothing outside this crate's tests reads it.
 //!
 //! `tests/x_error_signal.rs` measures all of this against a real server rather
 //! than asserting it, so a change in either direction is visible.
@@ -57,8 +57,9 @@
 //! way to *populate* this cell, and one obvious way to try that is fatal.
 //!
 //! [`open_x`] hands the event queue to XCB
-//! (`XSetEventQueueOwner(dpy, XCB_OWNS_EVENT_QUEUE)`) so the window manager and
-//! the compositor share one sequence-number space. A synchronous Xlib request —
+//! (`XSetEventQueueOwner(dpy, XCB_OWNS_EVENT_QUEUE)`) so exactly one reader
+//! drains the socket instead of Xlib and libxcb racing for the same events. A
+//! synchronous Xlib request —
 //! one that does its own round trip, such as `XGetGeometry` — expects to find its
 //! reply in a queue Xlib no longer owns. Issuing one against a drawable that
 //! produces `BadDrawable` was measured to end in
@@ -81,14 +82,14 @@
 //!   an x11rb request and read `ReplyError::X11Error` from it, which is what
 //!   `checked_void!` does. `XSync` is the one Xlib round trip that is safe,
 //!   because it cannot itself be the request that failed.
-//! * **The cell is therefore effectively write-only from production's point of
-//!   view.** Every request that can carry an error in the window manager goes
-//!   through x11rb, so `take_x_error` returns `None` there by construction. It
-//!   remains as a guard for a future Xlib or GLX call, and a caller that adds
-//!   one must verify it does not round-trip.
+//! * **The cell is therefore effectively write-only.** Every request that can
+//!   carry an error in the window manager goes through x11rb, so `take_x_error`
+//!   returns `None` there by construction. It remains as a guard for a future
+//!   Xlib call, and a caller that adds one must verify it does not round-trip.
 //!
-//! The tests that would have to provoke an error through Xlib are
-//! `#[ignore]`d for this reason; see `tests/x_error_signal.rs`.
+//! `tests/io_error_scope.rs` provokes the fatal case anyway — in a child
+//! process, so the fault it causes cannot take the harness down — and
+//! `tests/x_error_signal.rs` explains why no in-process test does.
 //!
 //! # Thread safety
 //!
@@ -106,6 +107,19 @@ use std::os::raw::{c_char, c_int, c_uchar, c_ulong, c_void};
 
 use x11rb::xcb_ffi::XCBConnection;
 
+/// The XCB connection the window manager issues every request on.
+///
+/// It wraps the very `xcb_connection_t*` the `Display*` owns: [`open_x`] builds
+/// it with `should_drop = false`, so dropping it does **not** `xcb_disconnect`
+/// and must not — libxcb is thread-safe except for `xcb_disconnect`, which makes
+/// closing the socket the owner's job alone. The connection therefore has to be
+/// used inside the lifetime of the [`XDisplay`] it was borrowed from, and the
+/// window manager keeps the pair for the process lifetime.
+///
+/// The window manager shares it as `Rc<XConn>`, which confines it to one thread —
+/// consistent with [`XDisplay`] being `Send` but not `Sync`. X errors from
+/// requests on this connection do not reach the cell [`take_x_error`] reads; they
+/// come back on the cookie (see the module docs).
 pub type XConn = XCBConnection;
 
 /// Opaque Xlib `Display*`.
@@ -179,8 +193,8 @@ thread_local! {
 // Returning `0` is load-bearing, not a convention: Xlib calls `exit()` when a
 // client-installed error handler returns non-zero. That is the whole reason
 // this handler exists — the default one prints the error and takes the window
-// manager down with it, which a compositor cannot afford when a client simply
-// unmapped a window between two requests.
+// manager down with it, which is not affordable when a client simply unmapped a
+// window between two requests.
 unsafe extern "C" fn silent_error_handler(_dpy: *mut Display, err: *mut XErrorEvent) -> c_int {
     if !err.is_null() {
         LAST_X_ERROR.with(|c| c.set((*err).error_code));
@@ -200,7 +214,7 @@ unsafe extern "C" fn silent_error_handler(_dpy: *mut Display, err: *mut XErrorEv
 /// * **Chaining to the previous handler would reintroduce the bug this
 ///   replaces.** libX11's default handler prints the protocol error and then
 ///   calls `exit()`. Any handler that chains to it kills the window manager on
-///   the first `BadWindow`, which for a compositor is a normal event.
+///   the first `BadWindow`, which for a window manager is a normal event.
 /// * **A window manager is the process.** Nothing else in it installs an error
 ///   handler: `open_x` is the only caller and the only one that ever opens a
 ///   `Display*`, so there is no foreign handler to preserve.
@@ -272,10 +286,10 @@ pub fn x_error_name(code: u8) -> &'static str {
 /// connection is already gone.
 ///
 /// Being `Copy` and not `Drop` is what makes the ownership graph acyclic: the
-/// window manager's `dpy` field, the compositor's handle built with
-/// [`XDisplay::from_raw`] and the local in `open_x` are all non-owning aliases
-/// of one `Display*`, so there is no path on which two of them can each decide
-/// to close it. [`close`](XDisplay::close) is the only closer, and nothing the
+/// window manager's `dpy` field, the local in `open_x` and any handle a caller
+/// builds with [`XDisplay::from_raw`] are all non-owning aliases of one
+/// `Display*`, so there is no path on which two of them can each decide to
+/// close it. [`close`](XDisplay::close) is the only closer, and nothing the
 /// crate returns can reach it.
 #[derive(Debug, Clone, Copy)]
 pub struct XDisplay(*mut Display);
@@ -294,10 +308,11 @@ pub struct XDisplay(*mut Display);
 // requests through `&Display` would interleave arbitrarily, and — the concrete
 // harm here — Xlib delivers protocol errors on whichever thread happens to read
 // the socket, so a thread's `clear_x_error` → request → `sync` → `take_x_error`
-// sequence could pick up a failure another thread provoked, and the compositor
-// would answer for a request that succeeded. `Send` alone says "one thread at a
-// time", which is the discipline every call site already follows; `Sync` would
-// claim what the error cell and the event queue cannot support.
+// sequence could pick up a failure another thread provoked, so a caller would
+// blame its own request for a failure that came from elsewhere. `Send` alone
+// says "one thread at a time", which is the discipline every call site already
+// follows; `Sync` would claim what the error cell and the event queue cannot
+// support.
 //
 // `tests/x_error_signal.rs` checks both halves against a real server: that the
 // error raised on one thread is not visible from another, and that
@@ -358,9 +373,8 @@ impl XDisplay {
     /// The flip side is worse: a *synchronous* Xlib request that fails on this
     /// connection desynchronises libXlib from the socket, libXlib reports an I/O
     /// error, and its default handler calls `exit(1)` — the whole window manager
-    /// goes down. So do not provoke X errors through Xlib here; the compositor
-    /// reads x11rb's per-request errors with `checked_void!` instead, and the
-    /// GLX paths that probe with [`take_x_error`] are best-effort.
+    /// goes down. So do not provoke X errors through Xlib here: issue the
+    /// request through x11rb and read `ReplyError::X11Error` off its cookie.
     pub fn sync(self) {
         // SAFETY: `self.0` is a live `Display*` for the whole process (the type
         // is not `Drop`, so nothing the caller can reach closes it) and
@@ -373,7 +387,8 @@ impl XDisplay {
     ///
     /// # Safety
     /// Every `XCBConnection` wrapping this display's connection must already be
-    /// dropped, and no GLX/Vulkan resource may still be alive.
+    /// dropped: the wrapper borrows the display's `xcb_connection_t*`, so
+    /// closing the display frees the connection underneath its borrower.
     ///
     /// Nothing this crate returns satisfies that: [`open_x`] hands back a live
     /// `XConn` alongside the display and the two are meant to live together

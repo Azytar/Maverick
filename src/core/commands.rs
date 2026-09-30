@@ -23,11 +23,11 @@
 //!   ordered `Vec<Effect>` for the backend to apply, never performed inline.
 //! - It returns at most one `Event` naming the domain fact it represents (see
 //!   `core::event`). A command knows its own event, never its consumers; the
-//!   renderer, IPC hub, bars, hooks and tests all subscribe to the `Engine`'s
+//!   backend, IPC hub, bars, hooks and tests all subscribe to the `Engine`'s
 //!   `EventBus`.
 //!
 //! This is what makes the reducer testable at all: tests assert on the returned
-//! `Effect` list with no X server, no compositor and no timing. It also means
+//! `Effect` list with no X server and no timing. It also means
 //! the returned order *is* the contract — the backend applies effects in
 //! sequence, so `MarkRestack` before `ArrangeMonitor` when stacking changed and
 //! `SetFullscreen`/`SetMaximized` after the arrange that the new presentation
@@ -53,7 +53,7 @@ pub struct ToggleMaximize(pub Option<WindowId>);
 
 /// Recenter the scroll camera of `mon_idx`/`ws_i` on its focused column. Every
 /// mutator that adds/removes/splits columns (`MoveToWorkspace`, `ToggleFloat`,
-/// …) must call this: a `camera.target` left over from a longer ribbon can land
+/// …) must call this: a camera left over from a longer ribbon can land
 /// past the new one, stranding the workspace scrolled off its own content. Kept
 /// as a single helper so the invariant "after any column change the camera
 /// follows the focus" lives in one place.
@@ -78,7 +78,7 @@ fn scroll_to_focused(state: &mut State, cfg: &Cfg, mi: usize, ws_i: usize) {
 /// the column `win` lives in comes to rest in view — the *logical* half of a
 /// pointer/EWMH focus change.
 ///
-/// Only `camera.target` moves; nothing is re-projected. `client.geom` — the rect
+/// Only the camera moves; nothing is re-projected. `client.geom` — the rect
 /// X11 hit-tests clicks against and the pointer warp reads — is refreshed only
 /// by a settled `arrange` of the returned monitor. That is why the return value
 /// is `#[must_use]`: the `Some(mi)` names the monitor whose settled projection
@@ -515,7 +515,7 @@ const VIEWPORT_ZOOM_MIN: f32 = 1.0;
 const VIEWPORT_ZOOM_MAX: f32 = 4.0;
 
 /// Zoom the workspace viewport in/out: a positive field zooms in, a negative one
-/// zooms out. Enters `ViewportMode::Zoomed` and animates the `page_zoom` spring.
+/// zooms out. Enters `ViewportMode::Zoomed` and rescales the ribbon immediately.
 /// Keeps the focused column centered by retargeting the scroll camera, so the
 /// enlargement grows around what the user is looking at.
 #[derive(Debug, Clone, Copy)]
@@ -537,39 +537,38 @@ impl Command for ViewportZoom {
         let ws = &mut state.monitors[mi].workspaces[ws_i];
 
         // Sanitize IPC/config input: `parse::<f32>` accepts NaN/inf, and
-        // `NaN.clamp()` returns NaN, which would persist `page_zoom_target=NaN`
+        // `NaN.clamp()` returns NaN, which would persist `page_zoom=NaN`
         // and poison every later `ribbon_geom` division.
         let delta = if self.0.is_finite() { self.0 } else { 0.0 };
         if !delta.is_finite() || delta.abs() > 10.0 {
             return CommandReport::new(cmds);
         }
         let factor = 1.0 + delta;
-        let new = (ws.page_zoom_target * factor).clamp(VIEWPORT_ZOOM_MIN, VIEWPORT_ZOOM_MAX);
-        // `clamp` still yields NaN if the stored target was already NaN (a
+        let new = (ws.page_zoom * factor).clamp(VIEWPORT_ZOOM_MIN, VIEWPORT_ZOOM_MAX);
+        // `clamp` still yields NaN if the stored factor was already NaN (a
         // session restored from a poisoned file): repair to 1.0 rather than
         // persisting the poison.
         let new = if new.is_finite() { new } else { 1.0 };
         if new <= VIEWPORT_ZOOM_MIN + 1e-3 {
-            // Back to normal: drop the viewport mode and let the spring ease the
-            // factor (and the camera) back home.
+            // Back to normal: drop the viewport mode and put the factor back.
             ws.viewport_mode = ViewportMode::Normal;
-            ws.page_zoom_target = 1.0;
+            ws.page_zoom = 1.0;
             // Mutually exclusive with Overview: leaving viewport zoom must also
-            // clear any Overview state, otherwise the live `zoom` spring would
-            // keep easing toward `overview_zoom_min` and surface as a phantom
-            // zoom-out once `alpha` is handed back to `zoom`.
+            // clear any Overview state, otherwise a stale `overview_zoom_min`
+            // would surface as a phantom zoom-out once `alpha` is handed back to
+            // `zoom`.
             ws.overview = false;
-            ws.zoom_target = 1.0;
+            ws.zoom = 1.0;
         } else {
             ws.viewport_mode = ViewportMode::Zoomed;
-            ws.page_zoom_target = new;
+            ws.page_zoom = new;
             // Same mutual exclusion on the way in: clearing Overview stops its
-            // zoom-out factor from corrupting the `zoom` spring while `alpha` is
-            // driven by `page_zoom`.
+            // zoom-out factor from corrupting `zoom` while `alpha` is driven by
+            // `page_zoom`.
             ws.overview = false;
-            ws.zoom_target = 1.0;
+            ws.zoom = 1.0;
         }
-        // Keep the focused column centered under the new zoom (camera animates).
+        // Keep the focused column centered under the new zoom.
         if ws.layout == LayoutKind::Column {
             ws.camera.retarget(ideal_scroll(ws, cfg, wa, fs));
         }
@@ -605,7 +604,7 @@ impl Command for PageSnap {
         if ws.layout != LayoutKind::Column || ws.columns.is_empty() {
             return CommandReport::new(cmds);
         }
-        let g = ribbon_geom(ws, cfg, wa, true, &fs);
+        let g = ribbon_geom(ws, cfg, wa, &fs);
         // One visible-page worth of world space at the settled zoom. The
         // geometry subtracts `gaps_outer` into `g.wa`, and the screen projection
         // scales that already-inset width; using the outer workarea here would
@@ -625,7 +624,7 @@ impl Command for PageSnap {
         } else {
             (cam_min, cam_max)
         };
-        let new = (ws.camera.target + dir * step).clamp(lo, hi);
+        let new = (ws.camera.position + dir * step).clamp(lo, hi);
         ws.camera.retarget(new);
         cmds.push(Effect::ArrangeMonitor(mi));
         CommandReport::with_event(
@@ -1067,9 +1066,10 @@ impl Command for ToggleFullscreen {
         let ws_i = state.monitors[mi].active_ws;
         if let Some(win) = target {
             // This command owns ALL fullscreen logical state. The backend's
-            // `SetFullscreen` handler is the X11-only half (EWMH atom +
-            // compositor bypass hint) and must not decide topology, border,
-            // snapshot, flags or camera — those belong to the core.
+            // `SetFullscreen` handler is the X11-only half (the EWMH atom and
+            // the `_NET_WM_BYPASS_COMPOSITOR` hint published for external
+            // compositors) and must not decide topology, border, snapshot, flags
+            // or camera — those belong to the core.
             let on = !state
                 .clients
                 .get(&win)
@@ -1933,7 +1933,7 @@ impl Command for ToggleOverview {
         let fs = fs_of(state, mi, ws_i);
         let ws = &mut state.monitors[mi].workspaces[ws_i];
         ws.overview = !ws.overview;
-        ws.zoom_target = if ws.overview {
+        ws.zoom = if ws.overview {
             cfg.overview_zoom_min
         } else {
             1.0
@@ -1943,7 +1943,7 @@ impl Command for ToggleOverview {
         // `page_zoom` (and leave `overview` ignored) — making Overview a silent
         // no-op or corrupting the live `zoom` spring.
         ws.viewport_mode = ViewportMode::Normal;
-        ws.page_zoom_target = 1.0;
+        ws.page_zoom = 1.0;
         let scroll = if layout == LayoutKind::Column {
             ideal_scroll(ws, cfg, wa, fs)
         } else {
@@ -1991,11 +1991,11 @@ impl Command for OverviewNav {
         ws.focus.column_idx = new;
         // Force Overview on: `OverviewNav` doubles as "show the strip".
         ws.overview = true;
-        ws.zoom_target = cfg.overview_zoom_min;
+        ws.zoom = cfg.overview_zoom_min;
         // Mutually exclusive with Viewport Zoom: entering Overview must reset
         // the page-zoom state or the zoom-out won't take effect.
         ws.viewport_mode = ViewportMode::Normal;
-        ws.page_zoom_target = 1.0;
+        ws.page_zoom = 1.0;
         let scroll = if layout == LayoutKind::Column {
             ideal_scroll(ws, cfg, wa, fs)
         } else {
@@ -2041,11 +2041,11 @@ impl Command for OverviewEnter {
         let fs = fs_of(state, mi, ws_i);
         let ws = &mut state.monitors[mi].workspaces[ws_i];
         ws.overview = false;
-        ws.zoom_target = 1.0;
+        ws.zoom = 1.0;
         // Mutually exclusive with Viewport Zoom: leaving Overview must also
         // drop any pending viewport zoom so the state stays consistent.
         ws.viewport_mode = ViewportMode::Normal;
-        ws.page_zoom_target = 1.0;
+        ws.page_zoom = 1.0;
         let scroll = if layout == LayoutKind::Column {
             ideal_scroll(ws, cfg, wa, fs)
         } else {

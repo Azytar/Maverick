@@ -1,23 +1,22 @@
 //! Columnar layout engine (niri-style) — pure coordinate computation.
 //!
-//! Owns the `Layout` trait and its registry, `Phase` (`Live` vs `Settled`),
-//! `RibbonScratch`/`RibbonGeom`, `FsCtx`, and the `arrange`/`arrange_columns`
-//! projection. Geometry is *computed*, never stored: `arrange` is a pure
-//! function of `State` + `Cfg` + `Phase` with no I/O, no X11 and no wall-clock,
-//! which is what makes the layout testable without a display.
+//! Owns `RibbonScratch`/`RibbonGeom`, `FsCtx`, and the
+//! `arrange`/`arrange_columns` projection. Geometry is
+//! *computed*, never stored: `arrange` is a pure function of `State` + `Cfg`
+//! with no I/O, no X11 and no wall-clock, which is what makes the layout
+//! testable without a display.
 //!
 //! `ribbon_geom` is the single geometry source: the arrange loop, the camera
 //! target (`ideal_scroll`) and the hit-test extents (`column_screen_extents`)
-//! all read the same table, so renderer, camera and hit-test cannot drift.
+//! all read the same table, so camera and hit-test cannot drift.
 //!
-//! `Phase::Live` reads `camera.position`/`boost`/`zoom` (what the compositor
-//! draws this frame); `Phase::Settled` reads `camera.target`/`zoom_target` and
-//! the boost targets (where X rests once the animation is over). Both run the
-//! identical projection.
+//! There is one projection, not two. Geometry is never interpolated: a scroll
+//! or a zoom rewrites the camera or the zoom factor and the next `arrange` is
+//! the final geometry.
 //!
 //! Not owned here: the presentation overlay (`present::present_into` rewrites
-//! placements after layout), the reconciler and `AppliedState`, and backend
-//! X11/GL.
+//! placements after layout), the reconciler and `AppliedState`, and the X11
+//! backend.
 
 use std::collections::HashMap;
 
@@ -30,63 +29,15 @@ use crate::types::{
 /// `DesiredState::from_placements` makes it explicit. Cleared on every call.
 pub type Placements = Vec<(WindowId, Rect, u32)>; // (win, geom, border_w)
 
-/// Which camera/zoom/boost values an `arrange` call should read.
-///
-/// * `Settled` — the values the layout is *easing toward* (`camera.target`,
-///   `zoom_target`, boosted focus column, `page_zoom_target`). The geometry the
-///   WM writes to X: the window rests here once the animation is over.
-/// * `Live` — the values *this frame* (`camera.position`, `boost`, `zoom`).
-///   The compositor draws the same window texture at this position while it
-///   glides, so the spring animation is a GPU transform and not a storm of
-///   `ConfigureWindow`s.
-///
-/// The two paths share every bit of projection math except this one choice, so
-/// they can never drift apart. This is the `Phase::Live`/`Phase::Settled`
-/// split that `arrange` takes as a parameter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Phase {
-    Settled,
-    Live,
-}
-
-impl Phase {
-    fn is_live(self) -> bool {
-        matches!(self, Phase::Live)
-    }
-    fn is_settled(self) -> bool {
-        matches!(self, Phase::Settled)
-    }
-}
-
-// A `Layout` is a pluggable arrangement strategy. The core never matches on
-// `LayoutKind` — it asks the registry for the strategy's `arrange()` — so
-// arrangement is the one concern a new layout can change on its own.
-
-pub trait Layout: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn arrange(
-        &self,
-        state: &State,
-        mon: &Monitor,
-        cfg: &Cfg,
-        phase: Phase,
-        out: &mut Placements,
-        scratch: &mut RibbonScratch,
-    );
-}
-
-/// Reusable scratch for the per-frame column projection.
+/// Reusable scratch for the per-monitor column projection.
 ///
 /// `ribbon_geom` builds a per-column `(x, width)` table that the arrange loop
 /// then reads back by column index. Building that table allocates a `Vec` every
-/// call, and `arrange` runs once per animating monitor per frame — so the table
-/// is owned here and reused. Boxed so the trait object stays thin and the
-/// scratch can be passed through `&dyn Layout` without sizing it into every
-/// caller.
+/// call, and `arrange` runs once per monitor per reconcile — so the table is
+/// owned here and reused across calls.
 pub struct RibbonScratch {
     cols: Vec<(f32, f32)>,
 }
-
 impl Default for RibbonScratch {
     fn default() -> Self {
         Self {
@@ -103,69 +54,9 @@ impl RibbonScratch {
         ws: &Workspace,
         cfg: &Cfg,
         workarea: Rect,
-        settled: bool,
         fs: &FsCtx,
     ) -> RibbonGeom<'_> {
-        ribbon_geom_into(ws, cfg, workarea, settled, fs, &mut self.cols)
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ColumnLayout;
-
-impl Layout for ColumnLayout {
-    fn name(&self) -> &'static str {
-        "column"
-    }
-    fn arrange(
-        &self,
-        state: &State,
-        mon: &Monitor,
-        cfg: &Cfg,
-        phase: Phase,
-        out: &mut Placements,
-        scratch: &mut RibbonScratch,
-    ) {
-        arrange_columns(state, mon, cfg, phase, out, scratch);
-    }
-}
-
-// Maps `LayoutKind` → `Box<dyn Layout>`. The backend builds one instance and
-// shares it with every arrange caller.
-
-pub struct LayoutRegistry {
-    layouts: HashMap<LayoutKind, Box<dyn Layout>>,
-}
-
-impl LayoutRegistry {
-    pub fn new() -> Self {
-        let mut r = Self {
-            layouts: HashMap::new(),
-        };
-        r.register(LayoutKind::Column, Box::new(ColumnLayout));
-        r
-    }
-
-    pub fn register(&mut self, kind: LayoutKind, layout: Box<dyn Layout>) {
-        self.layouts.insert(kind, layout);
-    }
-
-    pub fn get(&self, kind: LayoutKind) -> &dyn Layout {
-        match self.layouts.get(&kind) {
-            Some(layout) => layout.as_ref(),
-            // Fallback to Column if an unknown layout is somehow selected
-            None => self.layouts.get(&LayoutKind::Column).unwrap().as_ref(),
-        }
-    }
-
-    pub fn all_kinds(&self) -> Vec<LayoutKind> {
-        self.layouts.keys().copied().collect()
-    }
-}
-
-impl Default for LayoutRegistry {
-    fn default() -> Self {
-        Self::new()
+        ribbon_geom_into(ws, cfg, workarea, fs, &mut self.cols)
     }
 }
 
@@ -295,14 +186,14 @@ fn effective_gaps(ws: &Workspace, cfg: &Cfg) -> (i32, i32) {
 /// buffer is cleared and refilled, never appended to and never reallocated, so a
 /// caller may run this once per monitor per frame over a reused buffer.
 ///
-/// `phase` selects whether the window rests at its settled (target) geometry or
-/// is drawn at the live (current) geometry — see [`Phase`].
+/// One projection per monitor per turn: the geometry every managed window
+/// should have right now. There is no interpolated or "live" variant — the
+/// ribbon scrolls by rewriting the camera and re-projecting, so this is always
+/// the final geometry the WM writes to X.
 pub fn arrange(
     state: &State,
     mon_idx: usize,
     cfg: &Cfg,
-    registry: &LayoutRegistry,
-    phase: Phase,
     out: &mut Placements,
     scratch: &mut RibbonScratch,
 ) {
@@ -312,19 +203,17 @@ pub fn arrange(
         out.clear();
         return;
     };
-    let Some(ws) = mon.workspaces.get(mon.active_ws) else {
+    if mon.workspaces.get(mon.active_ws).is_none() {
         out.clear();
         return;
-    };
-    let layout = registry.get(ws.layout);
-    // `out` is the WM's *shared* `desired` buffer, which the compositor
-    // animation path also writes into (`compositor::live_placements`). Without
-    // this clear the previous frame's live placements leak in here, get
-    // re-applied by `apply_geom`, and physically re-show windows that
-    // `hide_offscreen` just moved off-screen — a fullscreen window on the
-    // previously active workspace would reappear covering the current one.
+    }
+    // `out` is the WM's *shared* `desired` buffer. It must be cleared, not
+    // appended to: a stale placement gets re-applied by `apply_geom` and
+    // physically re-shows a window that `hide_offscreen` just moved off-screen
+    // — a fullscreen window on the previously active workspace would reappear
+    // covering the current one.
     out.clear();
-    layout.arrange(state, mon, cfg, phase, out, scratch);
+    arrange_columns(state, mon, cfg, out, scratch);
 }
 
 // Each column sits at a fixed x position (derived from the sum of prior column
@@ -365,22 +254,16 @@ pub(crate) struct RibbonGeomOwned {
     pub total_w: f32,
 }
 
-/// `settled = true` uses the rest (animated) values of the per-column boost and
-/// of `zoom` (`ws.zoom_target`) so the camera can target where the layout *will*
-/// land. `settled = false` uses the live values so this matches what is
-/// actually on screen this frame.
-///
 /// Convenience wrapper: builds its own scratch. Callers on the per-frame path
 /// should use [`RibbonScratch::ribbon_geom`] with a reused buffer instead.
 pub(crate) fn ribbon_geom(
     ws: &Workspace,
     cfg: &Cfg,
     workarea: Rect,
-    settled: bool,
     fs: &FsCtx,
 ) -> RibbonGeomOwned {
     let mut scratch = RibbonScratch::default();
-    let g = ribbon_geom_into(ws, cfg, workarea, settled, fs, &mut scratch.cols);
+    let g = ribbon_geom_into(ws, cfg, workarea, fs, &mut scratch.cols);
     RibbonGeomOwned {
         wa: g.wa,
         alpha: g.alpha,
@@ -398,7 +281,6 @@ pub(crate) fn ribbon_geom_into<'s>(
     ws: &Workspace,
     cfg: &Cfg,
     workarea: Rect,
-    settled: bool,
     fs: &FsCtx,
     cols: &'s mut Vec<(f32, f32)>,
 ) -> RibbonGeom<'s> {
@@ -421,19 +303,14 @@ pub(crate) fn ribbon_geom_into<'s>(
         workarea.h.saturating_sub((2 * gap_outer) as u32),
     );
 
-    let alpha = (if settled { ws.zoom_target } else { ws.zoom }).max(0.05);
+    let alpha = ws.zoom.max(0.05);
     // Viewport zoom: when the workspace is in `Zoomed` mode the zoom factor is
     // `page_zoom` (which may be > 1 to *enlarge* the ribbon), not the Overview
     // `zoom`. They are kept separate on purpose — Overview zooms out
     // (`alpha < 1`), Viewport zooms in (`alpha > 1`). `ribbon_geom` has no
     // upper clamp on `alpha`, so the enlargement falls out for free.
     let alpha = if ws.viewport_mode == ViewportMode::Zoomed {
-        if settled {
-            ws.page_zoom_target
-        } else {
-            ws.page_zoom
-        }
-        .max(0.05)
+        ws.page_zoom.max(0.05)
     } else {
         alpha
     };
@@ -445,32 +322,20 @@ pub(crate) fn ribbon_geom_into<'s>(
     // The ribbon simply grows and the camera scrolls (niri-style).
     let usable_w = wa.w as f32;
 
-    // Per-column accordion boost: the focused column eases toward 1.0 and the
-    // others toward 0.0 (see `Workspace::tick_animations`), so changing focus
-    // makes the widths *glide* instead of snapping. In Overview the boost is
-    // forced to 0 so every column sits at its base width and the strip fits all
-    // of them.
+    // Per-column accordion boost: the focused column is worth 1.0 and every
+    // other column 0.0, so changing focus widens the focused column on the next
+    // projection. In Overview the boost is forced to 0 so every column sits at
+    // its base width and the strip fits all of them.
     let total_boost = cfg.accordion_boost.clamp(0.0, 0.9);
     let focus_i = ws.focus.column_idx;
 
     cols.clear();
     let mut x: f32 = 0.0;
     for (i, c) in ws.columns.iter().enumerate() {
-        let boost = if ws.overview {
+        let boost = if ws.overview || i != focus_i {
             0.0
-        } else if settled {
-            // The settled boost is the *target* of the animation: the focused
-            // column rests at 1.0 and every other column at 0.0. The camera
-            // eases toward this projection, so it needs a fixed point; reading
-            // the live boost here would make the target track the animation it
-            // drives, which reads as residual slowness.
-            if i == focus_i {
-                1.0
-            } else {
-                0.0
-            }
         } else {
-            c.boost
+            1.0
         };
         // A fullscreen column in the scrolling ribbon is exactly `mon.screen`
         // wide — already at maximum width — so the accordion boost does not
@@ -525,7 +390,6 @@ fn arrange_columns(
     state: &State,
     mon: &Monitor,
     cfg: &Cfg,
-    phase: Phase,
     out: &mut Placements,
     scratch: &mut RibbonScratch,
 ) {
@@ -538,24 +402,13 @@ fn arrange_columns(
     // `ribbon_geom` and the camera target can share it without a `&State` borrow.
     let fs = fs_ctx(&state.clients, ws, mon.screen);
 
-    // Single source of truth: the ribbon geometry for the requested phase.
-    // `ribbon_geom_into` takes `settled` (targets) — pass `is_settled()`, NOT
-    // `is_live()`: those are independent animations, and inverting this one
-    // inverts both (one-shot arranges read mid-flight springs, while live
-    // frames jump straight to targets and every glide snaps).
-    let g = scratch.ribbon_geom(ws, cfg, full_wa, phase.is_settled(), &fs);
+    // Single source of truth: the ribbon geometry this monitor's windows are
+    // placed from.
+    let g = scratch.ribbon_geom(ws, cfg, full_wa, &fs);
     let wa = g.wa;
 
-    // `Phase::Settled` projects to the camera's *rest* position (`target`) so a
-    // one-shot `arrange` (the compositor path, which does not reconfigure X
-    // every frame) leaves X windows at the final, correct spot — matching the
-    // compositor's drawn position at rest. `Phase::Live` projects to the live
-    // `position` so the X11-only path animates smoothly each frame.
-    let cam = if phase.is_live() {
-        ws.camera.position
-    } else {
-        ws.camera.target
-    };
+    // The camera offset is the geometry: whatever it holds is what X is told.
+    let cam = ws.camera.position;
 
     for (col_idx, col) in ws.columns.iter().enumerate() {
         // A fullscreen column in the scrolling ribbon is a single screen-filling
@@ -737,7 +590,7 @@ pub(crate) fn column_screen_extents_into(
     out: &mut Vec<(f32, f32)>,
     scratch: &mut RibbonScratch,
 ) {
-    let g = ribbon_geom_into(ws, cfg, workarea, false, fs, &mut scratch.cols);
+    let g = ribbon_geom_into(ws, cfg, workarea, fs, &mut scratch.cols);
     out.clear();
     out.extend(g.cols.iter().enumerate().map(|(i, &(x, w))| {
         // Match `arrange_columns`' geometry exactly: the right edge is the
@@ -759,11 +612,9 @@ pub(crate) fn column_screen_extents_into(
 /// Compute the ideal scroll so the focused column is fully visible (niri-style
 /// centering). Takes the explicit workspace and its real `workarea`, so it
 /// always targets the workspace the caller intends (not `mon.ws()`, which may
-/// be a different, active one). Returns a settled target: it reads the rest
-/// values of the animated factors (`zoom_target`, accordion as a step) so the
-/// spring eases to a fixed point and overshoots cleanly.
+/// be a different, active one).
 pub fn ideal_scroll(ws: &Workspace, cfg: &Cfg, workarea: Rect, fs: FsCtx) -> f32 {
-    let g = ribbon_geom(ws, cfg, workarea, true, &fs);
+    let g = ribbon_geom(ws, cfg, workarea, &fs);
     if g.cols.is_empty() {
         return 0.0;
     }
@@ -1165,7 +1016,6 @@ mod tests {
             windows: vec![1],
             focused: 0,
             weight: 1.0,
-            boost: 1.0,
         });
         ws.focus = Focus { column_idx: 0 };
         let mut c = Client::new(1, 0, 0);
@@ -1184,14 +1034,12 @@ mod tests {
         );
         let scroll = ideal_scroll(state.monitors[0].ws(), cfg, state.monitors[0].workarea, fs);
         state.monitors[0].workspaces[0].camera.position = scroll;
-        state.monitors[0].workspaces[0].camera.target = scroll;
         let mut out = Placements::new();
         let mut scratch = RibbonScratch::default();
         arrange_columns(
             state,
             &state.monitors[0],
             cfg,
-            Phase::Live,
             &mut out,
             &mut scratch,
         );
@@ -1241,13 +1089,11 @@ mod tests {
                 windows: vec![1],
                 focused: 0,
                 weight: 1.0,
-                boost: 1.0,
             });
             ws.columns.push(Column {
                 windows: vec![2],
                 focused: 0,
                 weight: 0.5,
-                boost: 0.0,
             });
             ws.focus = Focus { column_idx: 0 };
         }
@@ -1273,7 +1119,6 @@ mod tests {
             &state,
             &state.monitors[0],
             &cfg,
-            crate::core::layout::Phase::Live,
             &mut out,
             &mut scratch,
         );
@@ -1302,7 +1147,6 @@ mod tests {
             &state,
             &state.monitors[0],
             &cfg,
-            crate::core::layout::Phase::Live,
             &mut out2,
             &mut scratch,
         );
@@ -1326,7 +1170,6 @@ mod tests {
                 windows: vec![1, 2],
                 focused: 0,
                 weight: 1.0,
-                boost: 1.0,
             });
             ws.focus = Focus { column_idx: 0 };
         }
@@ -1345,7 +1188,6 @@ mod tests {
             &state,
             &state.monitors[0],
             &cfg,
-            crate::core::layout::Phase::Live,
             &mut out,
             &mut scratch,
         );
@@ -1372,13 +1214,11 @@ mod tests {
                 windows: vec![1],
                 focused: 0,
                 weight: 1.0,
-                boost: 1.0,
             });
             ws.columns.push(Column {
                 windows: vec![2],
                 focused: 0,
                 weight: 0.5,
-                boost: 0.0,
             });
             ws.focus = Focus { column_idx: 0 };
         }
@@ -1396,7 +1236,6 @@ mod tests {
             fs.clone(),
         );
         state.monitors[0].workspaces[0].camera.position = scroll;
-        state.monitors[0].workspaces[0].camera.target = scroll;
 
         let mut out = Placements::new();
         let mut scratch = RibbonScratch::default();
@@ -1404,7 +1243,6 @@ mod tests {
             &state,
             &state.monitors[0],
             &cfg,
-            crate::core::layout::Phase::Live,
             &mut out,
             &mut scratch,
         );
@@ -1456,7 +1294,6 @@ mod tests {
                 windows: vec![win],
                 focused: 0,
                 weight: 1.0 / n as f32,
-                boost: 0.0,
             });
         }
         for i in 0..n {
@@ -1526,7 +1363,6 @@ mod tests {
                     .collect(),
                 focused: 0,
                 weight: 1.0 / cols as f32,
-                boost: 0.0,
             });
         }
         ws.focus = Focus { column_idx: 0 };
@@ -1861,11 +1697,9 @@ mod proptests {
         border_w: u32,
         smart_gaps: bool,
         accordion_boost: f32,
-        columns: Vec<(f32, usize, f32)>,
+        columns: Vec<(f32, usize)>,
         focus_col: usize,
-        cam_pos: f32,
-        cam_target: f32,
-        cam_velocity: f32,
+        cam: f32,
         /// Overview zoom. The documented range is `<= 1.0` — Overview zooms
         /// *out*, and 1.0 is "not zoomed".
         zoom: f32,
@@ -1878,12 +1712,11 @@ mod proptests {
     }
 
     /// A column tree that is *always* a legal `Workspace`: weights inside the
-    /// documented `[0.05, 1.0]`, boosts inside `[0.0, 1.0]`, and a focus
-    /// pointer that indexes the columns. Row counts reach 0 so the empty-column
-    /// branch is exercised, and the column list itself may be empty, which is
-    /// the zero-window workspace.
+    /// documented `[0.05, 1.0]` and a focus pointer that indexes the columns.
+    /// Row counts reach 0 so the empty-column branch is exercised, and the
+    /// column list itself may be empty, which is the zero-window workspace.
     fn ribbon() -> impl Strategy<Value = Ribbon> {
-        let columns = prop::collection::vec((0.05f32..=1.0, 0usize..=6, 0.0f32..=1.0), 0..=8);
+        let columns = prop::collection::vec((0.05f32..=1.0, 0usize..=6), 0..=8);
         (
             screen_rect(),
             prop::collection::vec(reservation(), 0..=2),
@@ -1893,7 +1726,7 @@ mod proptests {
             any::<bool>(),
             0.0f32..=1.0,
             columns,
-            (camera_offset(), camera_offset(), camera_offset()),
+            (camera_offset(), camera_offset()),
             (
                 prop_oneof![0.05f32..=1.0, Just(1.0)],
                 any::<bool>(),
@@ -1911,13 +1744,13 @@ mod proptests {
                     smart_gaps,
                     accordion_boost,
                     columns,
-                    (cam_pos, cam_target, cam_velocity),
+                    (cam, focus_seed),
                     (zoom, overview, zoomed, page_zoom),
                 )| {
                     // Derive the focus pointer from a generated value so it is
                     // not correlated with the column count the shrinker also
                     // touches, then clamp it into range.
-                    let focus_col = (cam_velocity.abs() as usize) % (columns.len() + 1);
+                    let focus_col = (focus_seed.abs() as usize) % (columns.len() + 1);
                     Ribbon {
                         screen,
                         reserved,
@@ -1928,9 +1761,7 @@ mod proptests {
                         accordion_boost,
                         columns,
                         focus_col,
-                        cam_pos,
-                        cam_target,
-                        cam_velocity,
+                        cam,
                         zoom,
                         overview,
                         zoomed,
@@ -1952,7 +1783,7 @@ mod proptests {
             let mut next: WindowId = 1;
             {
                 let ws = &mut state.monitors[0].workspaces[0];
-                for &(weight, rows, boost) in &self.columns {
+                for &(weight, rows) in &self.columns {
                     let mut windows: Vec<WindowId> = Vec::with_capacity(rows);
                     for _ in 0..rows {
                         windows.push(next);
@@ -1962,17 +1793,13 @@ mod proptests {
                         windows,
                         focused: 0,
                         weight,
-                        boost,
                     });
                 }
                 ws.focus = Focus {
                     column_idx: self.effective_focus(),
                 };
-                ws.camera.position = self.cam_pos;
-                ws.camera.target = self.cam_target;
-                ws.camera.velocity = self.cam_velocity;
+                ws.camera.position = self.cam;
                 ws.zoom = self.zoom;
-                ws.zoom_target = self.zoom;
                 ws.overview = self.overview;
                 ws.viewport_mode = if self.zoomed {
                     ViewportMode::Zoomed
@@ -1980,7 +1807,6 @@ mod proptests {
                     ViewportMode::Normal
                 };
                 ws.page_zoom = self.page_zoom;
-                ws.page_zoom_target = self.page_zoom;
             }
             for &(edge, thickness) in &self.reserved {
                 state.monitors[0].set_reserved_region(0xD0C, edge, thickness);
@@ -2021,22 +1847,19 @@ mod proptests {
         fn with_extra_column(&self) -> Ribbon {
             let mut grown = self.clone();
             grown.focus_col = self.effective_focus();
-            grown.columns.push((0.5, 1, 0.0));
+            grown.columns.push((0.5, 1));
             grown
         }
     }
 
     /// Project monitor 0 of `state` through the public `arrange` entry point —
-    /// the path the reconciler and the compositor both use.
-    fn project(state: &State, cfg: &Cfg, phase: Phase) -> Placements {
-        let registry = LayoutRegistry::new();
+    /// the path the reconciler uses to write geometry to X.
+    fn project(state: &State, cfg: &Cfg) -> Placements {
         let mut out = Placements::new();
         arrange(
             state,
             0,
             cfg,
-            &registry,
-            phase,
             &mut out,
             &mut RibbonScratch::default(),
         );
@@ -2050,11 +1873,11 @@ mod proptests {
     fn inset_workarea(state: &State, cfg: &Cfg) -> Rect {
         let mon = &state.monitors[0];
         let fs = fs_ctx(&state.clients, mon.ws(), mon.screen);
-        ribbon_geom(mon.ws(), cfg, mon.workarea, false, &fs).wa
+        ribbon_geom(mon.ws(), cfg, mon.workarea, &fs).wa
     }
 
     /// `arrange` documents itself as idempotent over a caller-owned buffer: the
-    /// compositor runs it once per animating monitor per frame into a buffer
+    /// the backend runs it once per monitor per turn into a buffer
     /// that already holds the previous frame. Every frame must therefore
     /// produce exactly the frame it would have produced into an empty buffer —
     /// a second run over the same buffer, or a run over a buffer still holding
@@ -2062,7 +1885,6 @@ mod proptests {
     /// anything.
     #[test]
     fn arrange_is_idempotent_over_a_reused_buffer() {
-        let registry = LayoutRegistry::new();
         proptest!(|(r in ribbon())| {
             let state = r.state();
             let cfg = r.cfg();
@@ -2071,23 +1893,19 @@ mod proptests {
                 &state,
                 0,
                 &cfg,
-                &registry,
-                Phase::Live,
                 &mut out,
                 &mut RibbonScratch::default(),
             );
             let first = out.clone();
             prop_assert_eq!(
                 &out,
-                &project(&state, &cfg, Phase::Live),
+                &project(&state, &cfg),
                 "a dirty buffer must not leak the previous frame into the projection"
             );
             arrange(
                 &state,
                 0,
                 &cfg,
-                &registry,
-                Phase::Live,
                 &mut out,
                 &mut RibbonScratch::default(),
             );
@@ -2103,18 +1921,15 @@ mod proptests {
     /// current workspace" failure the clear exists for.
     #[test]
     fn a_stale_monitor_index_clears_the_buffer_instead_of_panicking() {
-        let registry = LayoutRegistry::new();
         proptest!(|(r in ribbon())| {
             let state = r.state();
             let cfg = r.cfg();
             let stale = state.monitors.len();
-            let mut out = project(&state, &cfg, Phase::Settled);
+            let mut out = project(&state, &cfg);
             arrange(
                 &state,
                 stale,
                 &cfg,
-                &registry,
-                Phase::Settled,
                 &mut out,
                 &mut RibbonScratch::default(),
             );
@@ -2126,38 +1941,7 @@ mod proptests {
         });
     }
 
-    /// Core invariant C: the scroll camera is an *input* to the projection, not
-    /// a source of truth for geometry. `Phase::Settled` is where X rests once
-    /// the animation is over, so it must be a function of `camera.target`
-    /// alone; `Phase::Live` is the frame the compositor draws, so it must be a
-    /// function of `camera.position` alone. If either phase read the other's
-    /// field, an in-flight animation would move the resting geometry — or the
-    /// drawn frame would jump to the destination — which is exactly what the
-    /// split exists to prevent.
-    #[test]
-    fn each_phase_reads_only_its_own_camera_field() {
-        proptest!(|(r in ribbon())| {
-            let state = r.state();
-            let cfg = r.cfg();
 
-            let mut moved = r.clone();
-            moved.cam_pos += 777.0;
-            moved.cam_velocity = 0.0;
-            prop_assert_eq!(
-                &project(&state, &cfg, Phase::Settled),
-                &project(&moved.state(), &cfg, Phase::Settled),
-                "settled geometry must ignore camera.position and camera.velocity"
-            );
-
-            let mut retargeted = r.clone();
-            retargeted.cam_target -= 1234.5;
-            prop_assert_eq!(
-                &project(&state, &cfg, Phase::Live),
-                &project(&retargeted.state(), &cfg, Phase::Live),
-                "live geometry must ignore camera.target"
-            );
-        });
-    }
 
     /// `Rect`'s contract is `w >= 1 && h >= 1` for every arranged window: a
     /// `ConfigureWindow` with a zero extent is `BadValue`, the server drops the
@@ -2169,12 +1953,11 @@ mod proptests {
         proptest!(|(r in ribbon())| {
             let state = r.state();
             let cfg = r.cfg();
-            for phase in [Phase::Live, Phase::Settled] {
-                for (win, rect, bw) in project(&state, &cfg, phase) {
+            {
+                for (win, rect, bw) in project(&state, &cfg) {
                     prop_assert!(
                         rect.w >= 1 && rect.h >= 1,
-                        "{:?} produced a degenerate rect for window {}: {:?} (bw={})",
-                        phase,
+                        "a degenerate rect for window {}: {:?} (bw={})",
                         win,
                         rect,
                         bw
@@ -2232,14 +2015,13 @@ mod proptests {
             let cfg = r.cfg();
             let expected = cfg.border_w.min(MAX_CFG_BORDER as u32);
             let wa = inset_workarea(&state, &cfg);
-            for phase in [Phase::Live, Phase::Settled] {
-                for (win, rect, bw) in project(&state, &cfg, phase) {
+            {
+                for (win, rect, bw) in project(&state, &cfg) {
                     prop_assert_eq!(
                         bw,
                         expected,
-                        "{:?} reported a border the geometry was not computed from \
+                        "reported a border the geometry was not computed from \
                          (window {}, cfg.border_w={}, reported={})",
-                        phase,
                         win,
                         cfg.border_w,
                         bw
@@ -2286,7 +2068,7 @@ mod proptests {
             let state = r.state();
             let cfg = r.cfg();
             let wa = inset_workarea(&state, &cfg);
-            for (win, rect, _) in project(&state, &cfg, Phase::Live) {
+            for (win, rect, _) in project(&state, &cfg) {
                 // The floor is one pixel per row of the column this window is
                 // in; the generous bound is `tiled_windows`, which every column
                 // fits under.
@@ -2338,11 +2120,10 @@ mod proptests {
                 windows: vec![1],
                 focused: 0,
                 weight: 1.0,
-                boost: 0.0,
             });
             state.add_client(Client::new(1, 0, 0));
 
-            let p = project(&state, &cfg, Phase::Settled);
+            let p = project(&state, &cfg);
             prop_assert_eq!(p.len(), 1, "a lone tiled window must be placed");
             let (_, rect, _) = p[0];
             let workarea = state.monitors[0].workarea;
@@ -2399,10 +2180,10 @@ mod proptests {
             prop_assume!(!r.smart_gaps);
             let state = r.state();
             let cfg = r.cfg();
-            let base = project(&state, &cfg, Phase::Settled);
+            let base = project(&state, &cfg);
 
             let grown = r.with_extra_column().state();
-            let after = project(&grown, &cfg, Phase::Settled);
+            let after = project(&grown, &cfg);
             prop_assert!(
                 after.len() >= base.len(),
                 "appending a column dropped placements: {} -> {}",
@@ -2422,7 +2203,6 @@ mod proptests {
                 mon.ws(),
                 &cfg,
                 mon.workarea,
-                true,
                 &fs_ctx(&state.clients, mon.ws(), mon.screen),
             );
             let gmon = &grown.monitors[0];
@@ -2431,7 +2211,6 @@ mod proptests {
                 gws,
                 &cfg,
                 gmon.workarea,
-                true,
                 &fs_ctx(&grown.clients, gws, gmon.screen),
             );
             prop_assert_eq!(
@@ -2456,7 +2235,6 @@ mod proptests {
                 mon.ws(),
                 &cfg,
                 mon.workarea,
-                true,
                 &fs_ctx(&state.clients, mon.ws(), mon.screen),
             );
             prop_assert_eq!(g.cols.len(), r.columns.len());
@@ -2473,10 +2251,10 @@ mod proptests {
                 );
                 prop_assert!(
                     w <= g.wa.w as f32 + f32::EPSILON,
-                    "column {} (weight={}, boost={}) is wider than the workarea: {} > {}",
+                    "column {} (weight={}, rows={}) is wider than the workarea: {} > {}",
                     i,
                     weight,
-                    r.columns[i].2,
+                    r.columns[i].1,
                     w,
                     g.wa.w
                 );
@@ -2500,12 +2278,11 @@ mod proptests {
             if let Some(col) = ws.columns.iter_mut().find(|c| !c.windows.is_empty()) {
                 col.windows.push(ghost_id);
             }
-            for phase in [Phase::Live, Phase::Settled] {
-                for (win, _, _) in project(&state, &cfg, phase) {
+            {
+                for (win, _, _) in project(&state, &cfg) {
                     prop_assert!(
                         state.clients.contains_key(&win),
-                        "{:?} placed window {}, which is not a managed client",
-                        phase,
+                        "placed window {}, which is not a managed client",
                         win
                     );
                     prop_assert_ne!(win, ghost_id, "a stale tree reference was projected");
@@ -2516,9 +2293,9 @@ mod proptests {
 
     /// A workarea change must re-derive the scroll target.
     ///
-    /// `camera.target` is a pixel offset, not a fraction: it is only meaningful
+    /// The camera is a pixel offset, not a fraction: it is only meaningful
     /// against the ribbon it was computed for, so any event that changes the
-    /// workarea invalidates it. A target that is not re-derived afterwards points
+    /// workarea invalidates it. A value that is not re-derived afterwards points
     /// into a ribbon that no longer exists. That is not cosmetic. Park the camera
     /// on the last of twelve full-width columns, then shrink the screen the way a
     /// real `RandR` mode change does, and the target lands thousands of pixels past
@@ -2544,11 +2321,9 @@ mod proptests {
             accordion_boost: 0.0,
             // Twelve full-width columns, so the ribbon is twelve screens long and
             // the camera is genuinely scrolled away from the origin.
-            columns: vec![(1.0, 1, 0.0); 12],
+            columns: vec![(1.0, 1); 12],
             focus_col: 11,
-            cam_pos: 0.0,
-            cam_target: 0.0,
-            cam_velocity: 0.0,
+            cam: 0.0,
             zoom: 1.0,
             overview: false,
             zoomed: false,
@@ -2596,7 +2371,7 @@ mod proptests {
         }
 
         assert!(
-            state.monitors[0].ws().camera.target < old_target,
+            state.monitors[0].ws().camera.position < old_target,
             "a shorter ribbon must target a smaller offset, not keep {old_target}"
         );
 
@@ -2606,8 +2381,6 @@ mod proptests {
             &state,
             0,
             &cfg,
-            &LayoutRegistry::new(),
-            Phase::Settled,
             &mut placements,
             &mut scratch,
         );
@@ -2639,7 +2412,7 @@ mod proptests {
             let cfg = r.cfg();
             let mon = &state.monitors[0];
             let fs = fs_ctx(&state.clients, mon.ws(), mon.screen);
-            let g = ribbon_geom(mon.ws(), &cfg, mon.workarea, true, &fs);
+            let g = ribbon_geom(mon.ws(), &cfg, mon.workarea, &fs);
             prop_assume!(!g.cols.is_empty());
             let cam = ideal_scroll(mon.ws(), &cfg, mon.workarea, fs.clone());
             prop_assert!(cam.is_finite(), "the camera target must be finite, got {}", cam);
@@ -2705,7 +2478,7 @@ mod proptests {
         proptest!(|(r in ribbon())| {
             let state = r.state();
             let cfg = r.cfg();
-            let placements = project(&state, &cfg, Phase::Live);
+            let placements = project(&state, &cfg);
             let mon = &state.monitors[0];
             let fs = fs_ctx(&state.clients, mon.ws(), mon.screen);
             let extents = column_screen_extents(mon.ws(), &cfg, mon.workarea, &fs);
@@ -2944,7 +2717,7 @@ mod proptests {
             c.float_client_authority = true;
             state.add_client(c);
 
-            let p = project(&state, &Cfg::default(), Phase::Settled);
+            let p = project(&state, &Cfg::default());
             prop_assert_eq!(p.len(), 1);
             prop_assert_eq!(p[0].0, 7);
             prop_assert_eq!(p[0].2, 3, "a float reports its own border width");
@@ -2957,7 +2730,7 @@ mod proptests {
             // Releasing the seal hands the authority back to the WM, which
             // normalizes the same rect against the workarea and the hints.
             state.clients.get_mut(&7).unwrap().float_client_authority = false;
-            let q = project(&state, &Cfg::default(), Phase::Settled);
+            let q = project(&state, &Cfg::default());
             prop_assert_eq!(
                 q[0].1,
                 normalize_float_geom(geom, h, wa, 3),
@@ -2988,7 +2761,7 @@ mod proptests {
 mod cross_monitor_float {
     use crate::config::Cfg;
     use crate::core::commands::{Command, MoveWindowToMonitor};
-    use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements, RibbonScratch};
+    use crate::core::layout::{arrange, Placements, RibbonScratch};
     use crate::types::{Client, Dir, LayoutKind, Monitor, Rect, State, WinFlags, WindowId};
     use proptest::prelude::*;
 
@@ -2999,8 +2772,6 @@ mod cross_monitor_float {
             state,
             mon_idx,
             &Cfg::default(),
-            &LayoutRegistry::new(),
-            Phase::Live,
             &mut out,
             &mut RibbonScratch::default(),
         );

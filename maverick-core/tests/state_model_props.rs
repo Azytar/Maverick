@@ -112,7 +112,7 @@ proptest! {
 // Removing a client unlinks it from every structure that can name a window.
 //
 // A dangling name is not cosmetic: `presented_maximize` and `pending_focus` are
-// read by the compositor to decide which window to present, and a stale entry
+// read by the projection to decide which window to place, and a stale entry
 // points it at a destroyed window. The contract is deliberately a full sweep, so
 // this checks the sweep rather than one call site at a time.
 proptest! {
@@ -577,7 +577,7 @@ proptest! {
 
 // Each flag predicate reads exactly the bit it documents, and nothing else.
 //
-// The layout, the compositor and the window rules all branch on these
+// The layout, the projection and the window rules all branch on these
 // predicates, so one that answered from a neighbouring bit would make a
 // single-axis maximize read as a full one, or an ordinary tile read as a float.
 // Bits 10 and up are documented as reserved, so a random word exercises them too.
@@ -919,10 +919,10 @@ fn window_set(st: &State, mi: usize, ws_i: usize) -> Vec<WindowId> {
 /// `PartialEq`.
 #[derive(Debug, PartialEq)]
 struct WsShape {
-    columns: Vec<(Vec<WindowId>, usize, f32, f32)>,
+    columns: Vec<(Vec<WindowId>, usize, f32)>,
     floats: Vec<WindowId>,
     focus: usize,
-    camera: (f32, f32, f32),
+    camera: f32,
 }
 
 fn workspace_shape(st: &State, mi: usize, ws_i: usize) -> WsShape {
@@ -931,11 +931,11 @@ fn workspace_shape(st: &State, mi: usize, ws_i: usize) -> WsShape {
         columns: ws
             .columns
             .iter()
-            .map(|c| (c.windows.clone(), c.focused, c.weight, c.boost))
+            .map(|c| (c.windows.clone(), c.focused, c.weight))
             .collect(),
         floats: ws.floats.clone(),
         focus: ws.focus.column_idx,
-        camera: (ws.camera.position, ws.camera.target, ws.camera.velocity),
+        camera: ws.camera.position,
     }
 }
 

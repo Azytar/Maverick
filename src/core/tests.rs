@@ -3,15 +3,13 @@
 mod unit_tests {
     use crate::config::Cfg;
     use crate::core::desired::DesiredState;
-    use crate::core::layout::{FsCtx, LayoutRegistry, RibbonScratch};
+    use crate::core::layout::{FsCtx, RibbonScratch};
+    use crate::core::commands::Command as CommandTrait;
     use crate::core::Engine;
     use crate::types::{
-        Action, Client, FullscreenPolicy, LayoutKind, Monitor, Rect, WinFlags, WindowId,
+        Action, Client, FullscreenPolicy, LayoutKind, Monitor, Rect, State, WinFlags, WindowId,
     };
 
-    fn default_registry() -> LayoutRegistry {
-        LayoutRegistry::new()
-    }
     fn default_cfg() -> Cfg {
         Cfg {
             border_w: 2,
@@ -64,7 +62,7 @@ mod unit_tests {
     #[test]
     fn fullscreen_horizontal_navigation_releases_exclusive_overlay() {
         use crate::core::commands::{FocusDirection, ToggleFullscreen};
-        use crate::core::layout::{arrange, Phase, Placements};
+        use crate::core::layout::{arrange, Placements};
         use crate::types::Dir;
 
         for (direction, policy) in [
@@ -108,15 +106,13 @@ mod unit_tests {
             assert!(engine.state.clients[&1].is_fullscreen());
             assert_eq!(engine.state.clients[&1].fs_snapshot, snapshot);
 
-            let camera = engine.state.monitors[0].ws().camera.target;
+            let camera = engine.state.monitors[0].ws().camera.position;
             engine.state.monitors[0].workspaces[0].camera.position = camera;
             let mut placements = Placements::new();
             arrange(
                 &engine.state,
                 0,
                 &engine.cfg,
-                &default_registry(),
-                Phase::Live,
                 &mut placements,
                 &mut RibbonScratch::default(),
             );
@@ -138,14 +134,12 @@ mod unit_tests {
             );
 
             engine.execute(FocusDirection(direction));
-            let camera = engine.state.monitors[0].ws().camera.target;
+            let camera = engine.state.monitors[0].ws().camera.position;
             engine.state.monitors[0].workspaces[0].camera.position = camera;
             arrange(
                 &engine.state,
                 0,
                 &engine.cfg,
-                &default_registry(),
-                Phase::Live,
                 &mut placements,
                 &mut RibbonScratch::default(),
             );
@@ -184,38 +178,6 @@ mod unit_tests {
         }
     }
 
-    #[test]
-    fn config_compositor_spring_reaches_camera() {
-        // Config is the only source of camera spring constants: `apply_camera_cfg`
-        // is the single writer, so a monitor attached later must get them too.
-        // The values stay inside `sanitize_spring`'s stability region, so the
-        // assertions can compare exactly.
-        let mut cfg = default_cfg();
-        cfg.animations.stiffness = 999.0;
-        cfg.animations.damping = 11.0;
-        let mut engine = Engine::new(cfg);
-        engine
-            .state
-            .monitors
-            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 9));
-        // Mirror what the backend does at startup / reload / hotplug.
-        engine.apply_camera_cfg();
-        let cam = &engine.state.monitors[0].workspaces[0].camera;
-        assert!((cam.stiffness - 999.0).abs() < 1e-6);
-        assert!((cam.damping - 11.0).abs() < 1e-6);
-        // Hotplug: monitors attached after the first pass must also be covered.
-        engine
-            .state
-            .monitors
-            .push(Monitor::new(Rect::new(1920, 0, 1920, 1080), 9));
-        engine.apply_camera_cfg();
-        for mon in &engine.state.monitors {
-            for ws in &mon.workspaces {
-                assert!((ws.camera.stiffness - 999.0).abs() < 1e-6);
-                assert!((ws.camera.damping - 11.0).abs() < 1e-6);
-            }
-        }
-    }
 
     #[test]
     fn test_cycle_layout_wraps_around() {
@@ -251,13 +213,10 @@ mod unit_tests {
 
         // Run the pure layout the live path uses (backend::arrange → layout::arrange).
         let mut placements = Placements::with_capacity(4);
-        let registry = default_registry();
         arrange(
             &engine.state,
             mi,
             &engine.cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut placements,
             &mut RibbonScratch::default(),
         );
@@ -287,13 +246,11 @@ mod unit_tests {
             windows: vec![10],
             focused: 0,
             weight: 0.5,
-            boost: 1.0,
         });
         ws.columns.push(Column {
             windows: vec![20],
             focused: 0,
             weight: 0.5,
-            boost: 1.0,
         });
         ws.focus = Focus { column_idx: 0 };
         engine.state.monitors[0].focused = Some(10);
@@ -334,7 +291,6 @@ mod unit_tests {
             windows: vec![10, 20],
             focused: 0,
             weight: 0.5,
-            boost: 1.0,
         });
         ws.focus = Focus { column_idx: 0 };
         engine.state.monitors[0].focused = Some(10);
@@ -356,7 +312,6 @@ mod unit_tests {
             windows: vec![10],
             focused: 0,
             weight: 0.5,
-            boost: 1.0,
         });
         ws.focus = Focus { column_idx: 0 };
         engine.state.monitors[0].focused = Some(10);
@@ -380,7 +335,7 @@ mod unit_tests {
         engine.execute(ViewportZoom(1.0)); // page_zoom * 2 → enters Zoomed
         let ws = &engine.state.monitors[0].workspaces[0];
         assert_eq!(ws.viewport_mode, ViewportMode::Zoomed);
-        assert!(ws.page_zoom_target > 1.0);
+        assert!(ws.page_zoom > 1.0);
         assert!(!ws.overview, "viewport zoom must clear overview");
         engine.execute(ToggleOverview);
         let ws = &engine.state.monitors[0].workspaces[0];
@@ -391,8 +346,8 @@ mod unit_tests {
             "overview must exit viewport zoom"
         );
         assert_eq!(
-            ws.page_zoom_target, 1.0,
-            "overview must reset page_zoom_target"
+            ws.page_zoom, 1.0,
+            "overview must reset page_zoom"
         );
     }
 
@@ -409,8 +364,8 @@ mod unit_tests {
         assert_eq!(ws.viewport_mode, ViewportMode::Zoomed);
         assert!(!ws.overview, "viewport zoom must clear overview (bug B1)");
         assert_eq!(
-            ws.zoom_target, 1.0,
-            "viewport zoom must reset the overview zoom_target"
+            ws.zoom, 1.0,
+            "viewport zoom must reset the overview zoom"
         );
     }
 
@@ -421,18 +376,22 @@ mod unit_tests {
         use crate::types::ViewportMode;
         let mut engine = setup_two_columns();
         engine.execute(ViewportZoom(1.0));
+        // Entering Overview after a viewport zoom must clear the viewport axis:
+        // the two are mutually exclusive, so `alpha` follows `zoom` alone and
+        // the enlargement does not leak into the film-strip.
         engine.execute(ToggleOverview);
         let ws = &engine.state.monitors[0].workspaces[0];
+        assert!(ws.overview);
         assert_eq!(ws.viewport_mode, ViewportMode::Normal);
-        // 200 steps at 1/60 s is past the spring's settling horizon for the
-        // default 220/30 constants, so the residual is animation, not state.
-        for _ in 0..200 {
-            engine.state.tick_animations(1.0 / 60.0);
-        }
-        let ws = &engine.state.monitors[0].workspaces[0];
         assert!(
-            (ws.zoom - ws.zoom_target).abs() < 0.01,
-            "live zoom must track the overview target, not a phantom value"
+            (ws.page_zoom - 1.0).abs() < 0.01,
+            "entering Overview must reset the viewport zoom, got {}",
+            ws.page_zoom
+        );
+        assert!(
+            (ws.zoom - engine.cfg.overview_zoom_min).abs() < 0.01,
+            "Overview zooms out to the configured minimum, got {}",
+            ws.zoom
         );
     }
 
@@ -452,13 +411,11 @@ mod unit_tests {
             windows: vec![10, 11],
             focused: 0,
             weight: 0.5,
-            boost: 1.0,
         });
         ws.columns.push(Column {
             windows: vec![20],
             focused: 0,
             weight: 0.5,
-            boost: 1.0,
         });
         ws.focus = Focus { column_idx: 0 };
         engine.state.monitors[0].focused = Some(10);
@@ -676,7 +633,6 @@ mod unit_tests {
                 windows: vec![10],
                 focused: 0,
                 weight: 0.5,
-                boost: 1.0,
             });
             ws.focus = crate::types::Focus { column_idx: 0 };
         }
@@ -722,7 +678,6 @@ mod unit_tests {
                 windows: vec![42],
                 focused: 0,
                 weight: 0.5,
-                boost: 1.0,
             });
             ws.focus = Focus { column_idx: 0 };
         }
@@ -822,7 +777,6 @@ mod unit_tests {
                 windows: vec![7, 42],
                 focused: 1,
                 weight: 0.5,
-                boost: 1.0,
             });
             ws.focus = Focus { column_idx: 0 };
         }
@@ -926,13 +880,10 @@ mod unit_tests {
         let wa = engine.state.monitors[0].workarea;
         let gap = engine.cfg.gaps_inner as i32;
         let mut placements = Placements::new();
-        let registry = default_registry();
         arrange(
             &engine.state,
             0,
             &engine.cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut placements,
             &mut RibbonScratch::default(),
         );
@@ -989,7 +940,7 @@ mod unit_tests {
 
     #[test]
     fn test_fullscreen_unfocused_layering() {
-        use crate::core::layout::{arrange, LayoutRegistry, Placements};
+        use crate::core::layout::{arrange, Placements};
         use crate::core::present::present;
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
@@ -1012,22 +963,15 @@ mod unit_tests {
         engine.state.monitors[0].focus_stack = vec![1, 2];
 
         let mut p = Placements::new();
-        let registry = LayoutRegistry::new();
         arrange(
             &engine.state,
             0,
             &engine.cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut p,
             &mut RibbonScratch::default(),
         );
-        let raised = present(&engine.state, &engine.state.monitors[0], &mut p);
+        present(&engine.state, &engine.state.monitors[0], &mut p);
 
-        assert!(
-            !raised.contains(&1),
-            "unfocused maximized must not bleed into overlay"
-        );
         let (_, rect1, _) = p.iter().find(|e| e.0 == 1).copied().unwrap();
         assert!(rect1.w < engine.state.monitors[0].workarea.w);
     }
@@ -1049,13 +993,11 @@ mod unit_tests {
                 windows: vec![1],
                 focused: 0,
                 weight: 1.0,
-                boost: 1.0,
             });
             ws.columns.push(Column {
                 windows: vec![2],
                 focused: 0,
                 weight: 1.0,
-                boost: 1.0,
             });
             ws.focus = Focus { column_idx: 0 };
         }
@@ -1091,16 +1033,13 @@ mod unit_tests {
         let mi = engine.state.sel_mon;
         let ws_i = engine.state.monitors[mi].active_ws;
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
-        let cam = ws.camera.target;
+        let cam = ws.camera.position;
         let mut p = Placements::new();
-        let registry = LayoutRegistry::new();
         engine.state.monitors[mi].workspaces[ws_i].camera.position = cam;
         crate::core::layout::arrange(
             &engine.state,
             mi,
             &engine.cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut p,
             &mut RibbonScratch::default(),
         );
@@ -1127,13 +1066,11 @@ mod unit_tests {
                 windows: vec![1],
                 focused: 0,
                 weight: 1.0,
-                boost: 1.0,
             });
             ws.columns.push(Column {
                 windows: vec![2],
                 focused: 0,
                 weight: 1.0,
-                boost: 1.0,
             });
             ws.focus = Focus { column_idx: 0 };
         }
@@ -1172,16 +1109,13 @@ mod unit_tests {
         // And it is still laid out (covering the screen) by the column layout
         // because it remains the focused window.
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
-        let cam = ws.camera.target;
+        let cam = ws.camera.position;
         let mut p = Placements::new();
-        let registry = LayoutRegistry::new();
         engine.state.monitors[mi].workspaces[ws_i].camera.position = cam;
         crate::core::layout::arrange(
             &engine.state,
             mi,
             &engine.cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut p,
             &mut RibbonScratch::default(),
         );
@@ -1201,9 +1135,7 @@ mod unit_tests {
 
     /// Build a workspace on monitor 0 with `n` single-window columns of weight
     /// `[1.0, 0.6, 0.6, …]`, focused at `focus_ci`. `overview` drives the
-    /// Overview (zoom-out) state. Per-column `boost` is forced to its settled
-    /// steady-state so `arrange` and `ideal_scroll` agree (the focused column
-    /// is boosted, the rest are at rest; in Overview every column is at rest).
+    /// Overview (zoom-out) state.
     fn build_ribbon(n: usize, focus_ci: usize, overview: bool) -> Engine {
         use crate::types::{Client, Column, Focus};
         let mut engine = setup_engine();
@@ -1213,18 +1145,10 @@ mod unit_tests {
             let weights: Vec<f32> = (0..n).map(|i| if i == 0 { 1.0 } else { 0.6 }).collect();
             for (i, w) in weights.iter().enumerate() {
                 let win = (i + 1) as u32;
-                let boost_val = if overview {
-                    0.0
-                } else if i == focus_ci {
-                    1.0
-                } else {
-                    0.0
-                };
                 ws.columns.push(Column {
                     windows: vec![win],
                     focused: 0,
                     weight: *w,
-                    boost: boost_val,
                 });
             }
             ws.focus = Focus {
@@ -1233,7 +1157,6 @@ mod unit_tests {
             if overview {
                 ws.overview = true;
                 ws.zoom = 0.25;
-                ws.zoom_target = 0.25;
             }
         }
         for i in 0..n {
@@ -1262,13 +1185,10 @@ mod unit_tests {
                 );
                 engine.state.monitors[mi].workspaces[0].camera.position = scroll;
                 let mut placements = Placements::new();
-                let registry = default_registry();
                 arrange(
                     &engine.state,
                     mi,
                     &cfg,
-                    &registry,
-                    crate::core::layout::Phase::Live,
                     &mut placements,
                     &mut RibbonScratch::default(),
                 );
@@ -1321,13 +1241,10 @@ mod unit_tests {
                 );
                 engine.state.monitors[mi].workspaces[0].camera.position = scroll;
                 let mut placements = Placements::new();
-                let registry = default_registry();
                 arrange(
                     &engine.state,
                     mi,
                     &cfg,
-                    &registry,
-                    crate::core::layout::Phase::Live,
                     &mut placements,
                     &mut RibbonScratch::default(),
                 );
@@ -1386,13 +1303,10 @@ mod unit_tests {
                 );
                 engine.state.monitors[mi].workspaces[0].camera.position = scroll;
                 let mut placements = Placements::new();
-                let registry = default_registry();
                 arrange(
                     &engine.state,
                     mi,
                     &cfg,
-                    &registry,
-                    crate::core::layout::Phase::Live,
                     &mut placements,
                     &mut RibbonScratch::default(),
                 );
@@ -1433,13 +1347,10 @@ mod unit_tests {
         );
         engine.state.monitors[mi].workspaces[0].camera.position = scroll;
         let mut placements = Placements::new();
-        let registry = default_registry();
         arrange(
             &engine.state,
             mi,
             &cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut placements,
             &mut RibbonScratch::default(),
         );
@@ -1490,12 +1401,8 @@ mod unit_tests {
                     windows: vec![i],
                     focused: 0,
                     weight: 0.4,
-                    // Live boost already converged (focused column 1.0,
-                    // others 0.0): a `Phase::Live` arrange below must read a
-                    // self-consistent live state. Leaving every boost at 1.0
-                    // describes no reachable live moment and mis-centers the
-                    // camera target (which is computed from settled targets).
-                    boost: if i == 2 { 1.0 } else { 0.0 },
+                    // The accordion is derived from the focus pointer, so no
+                    // per-column state is seeded here.
                 });
             }
             ws.focus = Focus { column_idx: 0 };
@@ -1528,8 +1435,6 @@ mod unit_tests {
             &engine.state,
             mi,
             &cfg,
-            &default_registry(),
-            crate::core::layout::Phase::Live,
             &mut placements,
             &mut RibbonScratch::default(),
         );
@@ -1566,7 +1471,6 @@ mod unit_tests {
             windows: vec![10, 20],
             focused: 0,
             weight: 0.5,
-            boost: 1.0,
         });
         ws.focus = Focus { column_idx: 0 };
 
@@ -1659,7 +1563,6 @@ mod unit_tests {
                     windows: vec![],
                     focused: 0,
                     weight: if i == 0 { 1.0 } else { 0.6 },
-                    boost: 1.0,
                 });
             }
             ws1.focus = Focus { column_idx: 1 };
@@ -1710,7 +1613,6 @@ mod unit_tests {
                     windows: vec![i],
                     focused: 0,
                     weight: 1.0 / 3.0,
-                    boost: 1.0,
                 });
             }
             ws.focus = Focus { column_idx: 1 };
@@ -1762,19 +1664,16 @@ mod unit_tests {
                 windows: vec![1, 2, 3],
                 focused: 2, // row 2 == window 3
                 weight: 0.4,
-                boost: 1.0,
             });
             ws.columns.push(Column {
                 windows: vec![4, 5, 6],
                 focused: 0, // stale: never visited
                 weight: 0.4,
-                boost: 1.0,
             });
             ws.columns.push(Column {
                 windows: vec![7], // shorter than the row we come from
                 focused: 0,
                 weight: 0.4,
-                boost: 1.0,
             });
             ws.focus = Focus { column_idx: 0 };
         }
@@ -1829,13 +1728,11 @@ mod unit_tests {
                 windows: vec![1],
                 focused: 0,
                 weight: 0.5,
-                boost: 1.0,
             });
             ws.columns.push(Column {
                 windows: vec![2],
                 focused: 0,
                 weight: 0.5,
-                boost: 1.0,
             });
             ws.focus = Focus { column_idx: 1 };
         }
@@ -1915,13 +1812,11 @@ mod unit_tests {
                 windows: vec![1],
                 focused: 0,
                 weight: 0.5,
-                boost: 1.0,
             });
             ws.columns.push(Column {
                 windows: vec![2],
                 focused: 0,
                 weight: 0.5,
-                boost: 1.0,
             });
             ws.focus = Focus { column_idx: 0 };
         }
@@ -1935,7 +1830,6 @@ mod unit_tests {
                 windows: vec![3],
                 focused: 0,
                 weight: 1.0,
-                boost: 1.0,
             });
             ws.focus = Focus { column_idx: 0 };
         }
@@ -2040,13 +1934,10 @@ mod unit_tests {
         // And it must project to the full inner width.
         let mut out = crate::core::layout::Placements::new();
         let mut scratch = crate::core::layout::RibbonScratch::default();
-        let registry = default_registry();
         crate::core::layout::arrange(
             &engine.state,
             mi,
             &engine.cfg,
-            &registry,
-            crate::core::layout::Phase::Settled,
             &mut out,
             &mut scratch,
         );
@@ -2144,13 +2035,11 @@ mod unit_tests {
                 windows: vec![1],
                 focused: 0,
                 weight: 1.0,
-                boost: 1.0,
             });
             ws.columns.push(Column {
                 windows: vec![2],
                 focused: 0,
                 weight: 0.5,
-                boost: 0.0,
             });
             ws.focus = Focus { column_idx: 0 };
         }
@@ -2176,13 +2065,10 @@ mod unit_tests {
         );
         engine.state.monitors[mi].workspaces[0].camera.position = scroll;
         let mut p = Placements::new();
-        let registry = default_registry();
         arrange(
             &engine.state,
             mi,
             &cfg,
-            &registry,
-            crate::core::layout::Phase::Live,
             &mut p,
             &mut RibbonScratch::default(),
         );
@@ -2515,17 +2401,10 @@ mod unit_tests {
             &engine.state,
             mi,
             &cfg,
-            &default_registry(),
-            crate::core::layout::Phase::Live,
             &mut p,
             &mut RibbonScratch::default(),
         );
-        crate::core::present::present_into(
-            &engine.state,
-            &engine.state.monitors[mi],
-            &mut p,
-            &mut Vec::new(),
-        );
+        crate::core::present::present_into(&engine.state, &engine.state.monitors[mi], &mut p);
 
         let (_, rect, bw) = p
             .iter()
@@ -2875,23 +2754,18 @@ mod unit_tests {
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
         assert_eq!(ws.viewport_mode, ViewportMode::Zoomed);
         assert!(
-            ws.page_zoom_target > 1.0,
+            ws.page_zoom > 1.0,
             "page_zoom target must grow past 1.0"
         );
 
-        // The live `page_zoom` is an animated spring; advance it so
-        // `ribbon_geom` reads the enlarged factor.
-        for _ in 0..40 {
-            engine.state.tick_animations(1.0 / 60.0);
-        }
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
-        assert!(ws.page_zoom > 1.0, "page_zoom spring must ease past 1.0");
+        assert!(ws.page_zoom > 1.0, "the viewport zoom must enlarge past 1.0");
 
         // `ribbon_geom` must feed the viewport factor into `alpha` so columns
         // are enlarged (alpha > 1), independent of the Overview zoom.
         let wa = engine.state.monitors[mi].workarea;
         let fs = fs_ctx(&engine.state.clients, ws, engine.state.monitors[mi].screen);
-        let g = ribbon_geom(ws, &engine.cfg, wa, true, &fs);
+        let g = ribbon_geom(ws, &engine.cfg, wa, &fs);
         assert!(
             g.alpha > 1.0,
             "a zoomed viewport must enlarge the ribbon (alpha > 1)"
@@ -2913,7 +2787,7 @@ mod unit_tests {
         engine.dispatch(Action::ViewportZoom(-0.5));
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
         assert_eq!(ws.viewport_mode, ViewportMode::Normal);
-        assert!((ws.page_zoom_target - 1.0).abs() < 1e-6);
+        assert!((ws.page_zoom - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -2930,10 +2804,10 @@ mod unit_tests {
             engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, cfg.column_width);
         }
         // Start the camera at the left edge, then snap one page to the right.
-        engine.state.monitors[mi].workspaces[ws_i].camera.target = 0.0;
-        let before = engine.state.monitors[mi].workspaces[ws_i].camera.target;
+        engine.state.monitors[mi].workspaces[ws_i].camera.position = 0.0;
+        let before = engine.state.monitors[mi].workspaces[ws_i].camera.position;
         engine.dispatch(Action::PageSnap(Dir::Right));
-        let after = engine.state.monitors[mi].workspaces[ws_i].camera.target;
+        let after = engine.state.monitors[mi].workspaces[ws_i].camera.position;
         let wa = engine.state.monitors[mi].workarea;
         let expected_step = wa.w as f32; // alpha = 1.0 → one screen-width page
         assert!(
@@ -2954,13 +2828,13 @@ mod unit_tests {
         // Recompute the settled center through the same command used by zoom
         // navigation, then install it as the current visual endpoint.
         engine.dispatch(Action::ViewportZoom(0.0));
-        let center = engine.state.monitors[mi].workspaces[ws_i].camera.target;
+        let center = engine.state.monitors[mi].workspaces[ws_i].camera.position;
         engine.state.monitors[mi].workspaces[ws_i]
             .camera
             .snap(center);
         engine.dispatch(Action::PageSnap(Dir::Right));
         assert!(
-            (engine.state.monitors[mi].workspaces[ws_i].camera.target - center).abs() < 1e-4,
+            (engine.state.monitors[mi].workspaces[ws_i].camera.position - center).abs() < 1e-4,
             "a page snap inside a non-overflowing ribbon must be a no-op"
         );
     }
@@ -2980,7 +2854,7 @@ mod unit_tests {
             OverviewNav, SetLayout, ToggleFloat, ToggleFullscreen, ToggleMaximize, ToggleOverview,
         };
         use crate::core::effect::Effect;
-        use crate::core::layout::{arrange, Phase, Placements, RibbonScratch};
+        use crate::core::layout::{arrange, Placements, RibbonScratch};
         use crate::types::{Client, Dir, LayoutKind, WinFlags, WindowId};
 
         const SEED: u64 = 0x56ec_73ed_1234_5678;
@@ -3182,8 +3056,6 @@ mod unit_tests {
                     &engine.state,
                     mi,
                     &engine.cfg,
-                    &default_registry(),
-                    Phase::Settled,
                     &mut p1,
                     &mut r1,
                 );
@@ -3191,8 +3063,6 @@ mod unit_tests {
                     &engine.state,
                     mi,
                     &engine.cfg,
-                    &default_registry(),
-                    Phase::Settled,
                     &mut p2,
                     &mut r2,
                 );
@@ -4340,27 +4210,18 @@ mod unit_tests {
     /// Run the production geometry pipeline for monitor `mi` and return the
     /// explicit `DesiredState` (exactly what `reconcile` is later diffed against).
     fn pipeline_desired(engine: &Engine, mi: usize) -> DesiredState {
-        use crate::core::layout::{arrange, LayoutRegistry, Phase, Placements, RibbonScratch};
+        use crate::core::layout::{arrange, Placements, RibbonScratch};
         use crate::core::present::present_into;
         let mut placements = Placements::new();
-        let registry = LayoutRegistry::new();
         arrange(
             &engine.state,
             mi,
             &engine.cfg,
-            &registry,
-            Phase::Settled,
             &mut placements,
             &mut RibbonScratch::default(),
         );
-        let mut raise = Vec::new();
-        present_into(
-            &engine.state,
-            &engine.state.monitors[mi],
-            &mut placements,
-            &mut raise,
-        );
-        DesiredState::from_placements(&placements, &raise)
+        present_into(&engine.state, &engine.state.monitors[mi], &mut placements);
+        DesiredState::from_placements(&placements)
     }
 
     #[test]
@@ -4854,8 +4715,7 @@ mod unit_tests {
         }
         // Pre-toggle state as in production: `arrange` has already written the
         // projected tile into `client.geom` (typically off-grid w.r.t. hints).
-        use crate::core::commands::Command;
-        let pre = pipeline_desired(&engine, mi);
+            let pre = pipeline_desired(&engine, mi);
         let tile = pre
             .windows
             .iter()
@@ -4925,8 +4785,6 @@ mod unit_tests {
             &engine.state,
             mi,
             &engine.cfg,
-            &default_registry(),
-            crate::core::layout::Phase::Settled,
             &mut p,
             &mut RibbonScratch::default(),
         );
@@ -5127,7 +4985,6 @@ mod unit_tests {
             for mi in 0..engine.state.monitors.len() {
                 let d = pipeline_desired(engine, mi);
                 all.windows.extend(d.windows);
-                all.raise.extend(d.raise);
             }
             all
         };
@@ -6032,8 +5889,6 @@ mod unit_tests {
             &engine.state,
             mi,
             &engine.cfg,
-            &default_registry(),
-            crate::core::layout::Phase::Settled,
             &mut p,
             &mut RibbonScratch::default(),
         );
@@ -7206,11 +7061,10 @@ mod unit_tests {
     // effects. Coverage counters guarantee the run was not vacuous.
     //
     // The column/ribbon scroll model (niri-style) deliberately scrolls
-    // NON-FOCUSED columns partially or fully off-screen and the compositor
-    // clips them per monitor, so `State::check_invariants` asserts neither
-    // geometry positivity nor on-screen bounds. Off-screen Desired rects are by
-    // design, and even the focused window can be off-screen while the camera
-    // spring is mid-animation — so this harness asserts only that every Desired
+    // NON-FOCUSED columns partially or fully off-screen, so
+    // `State::check_invariants` asserts neither geometry positivity nor
+    // on-screen bounds. Off-screen Desired rects are by design — so this
+    // harness asserts only that every Desired
     // rect is positive, every Desired window id exists in `state.clients`, and
     // the `raise` list names known windows. `check_invariants` itself runs every
     // step, which also exercises reconcile convergence, the
@@ -7297,7 +7151,6 @@ mod unit_tests {
             for mi in 0..engine.state.monitors.len() {
                 let d = pipeline_desired(engine, mi);
                 all.windows.extend(d.windows);
-                all.raise.extend(d.raise);
             }
             all
         };
@@ -7764,60 +7617,20 @@ mod unit_tests {
                         &engine.cfg,
                         w,
                     );
-                    // `retarget_focus_to_window` centers the camera via `ideal_scroll`,
-                    // which uses the LIVE accordion boost. The harness never ticks the
-                    // boost animation, so the live boost is stale; `pipeline_desired`
-                    // projects with `Phase::Settled` (boost forced to its rest value),
-                    // and a camera centered on the stale live widths drifts the focused
-                    // column off-screen. Re-center the camera on the SAME settled
-                    // geometry so the focused column is on-screen (the real compositor
-                    // eases the boost to rest, so Live==Settled there too).
+                    // The camera has to sit where `ideal_scroll` would put it:
+                    // the harness never runs the focus commands, so without this
+                    // the focused column starts off-screen and every later
+                    // assertion about it is vacuous.
                     let aws = engine.state.monitors[mi].active_ws;
                     let scroll = {
                         let m = &engine.state.monitors[mi];
                         let ws = &m.workspaces[aws];
                         let fs = crate::core::layout::fs_ctx(&engine.state.clients, ws, m.screen);
-                        let g = crate::core::layout::ribbon_geom(
-                            ws,
-                            &engine.cfg,
-                            m.workarea,
-                            true,
-                            &fs,
-                        );
-                        if g.cols.is_empty() {
-                            0.0f32
-                        } else {
-                            let i = ws.focus.column_idx.min(g.cols.len() - 1);
-                            let (cx0, cw) = g.cols[i];
-                            let waw = g.wa.w as f32;
-                            let cam_min = g.cx / g.alpha;
-                            let cam_max = g.total_w - (waw - g.cx) / g.alpha;
-                            if fs.cols.contains(&i) && ws.layout == crate::types::LayoutKind::Column
-                            {
-                                let cam =
-                                    cx0 + (g.wa.x as f32 + g.cx - fs.screen.x as f32) / g.alpha;
-                                if cam_max <= cam_min {
-                                    (g.total_w - waw) / 2.0
-                                } else {
-                                    cam.clamp(cam_min, cam_max)
-                                }
-                            } else {
-                                let want = cx0 + cw / 2.0 - waw / 2.0;
-                                if cam_max <= cam_min {
-                                    (g.total_w - waw) / 2.0
-                                } else {
-                                    want.clamp(cam_min, cam_max)
-                                }
-                            }
-                        }
+                        crate::core::layout::ideal_scroll(ws, &engine.cfg, m.workarea, fs)
                     };
                     let m = &mut engine.state.monitors[mi];
-                    m.workspaces[aws].camera.target = scroll;
                     m.workspaces[aws].camera.position = scroll;
                 }
-                let aws = engine.state.monitors[mi].active_ws;
-                let target = engine.state.monitors[mi].workspaces[aws].camera.target;
-                engine.state.monitors[mi].workspaces[aws].camera.position = target;
             }
 
             // Build the whole-desktop Desired for this step.
@@ -7828,7 +7641,6 @@ mod unit_tests {
             //  - every Desired window id exists in state.clients
             //  - every Desired rect is positive (a non-positive size is real
             //    corruption; coords are i32 so NaN/inf cannot occur)
-            //  - the raise list references only known windows
             for d in &desired.windows {
                 assert!(
                     engine.state.clients.contains_key(&d.window),
@@ -7842,12 +7654,6 @@ mod unit_tests {
                     "Desired window {} has non-finite or non-positive rect {:?}",
                     dw.window,
                     dw.rect
-                );
-            }
-            for &rw in &desired.raise {
-                assert!(
-                    engine.state.clients.contains_key(&rw),
-                    "seed {seed:#x} step {step}: raise references unknown window {rw}"
                 );
             }
 
@@ -8690,14 +8496,11 @@ mod unit_tests {
                 engine.state.monitors[0].workspaces[0].add_tiled(win, 1.0);
             }
 
-            let registry = default_registry();
             let mut placements = crate::core::layout::Placements::new();
             arrange(
                 &engine.state,
                 0,
                 &engine.cfg,
-                &registry,
-                crate::core::layout::Phase::Live,
                 &mut placements,
                 &mut RibbonScratch::default(),
             );
@@ -9215,26 +9018,22 @@ mod unit_tests {
                 for (wi, ws) in mon.workspaces.iter().enumerate() {
                     let _ = writeln!(
                         d,
-                        "  ws{wi} tag={} layout={:?} overview={} zoom={:.4}/{:.4} vz={:?} pz={:.4}/{:.4} pmax={:?} cam={:.4}/{:.4}/{:.4} floats={:?}",
+                        "  ws{wi} tag={} layout={:?} overview={} zoom={:.4} vz={:?} pz={:.4} pmax={:?} cam={:.4} floats={:?}",
                         ws.tag,
                         ws.layout,
                         ws.overview,
                         ws.zoom,
-                        ws.zoom_target,
                         ws.viewport_mode,
                         ws.page_zoom,
-                        ws.page_zoom_target,
                         ws.presented_maximize,
                         ws.camera.position,
-                        ws.camera.target,
-                        ws.camera.velocity,
                         ws.floats
                     );
                     for (ci, col) in ws.columns.iter().enumerate() {
                         let _ = writeln!(
                             d,
-                            "    col{ci} w={:.6} focused={} boost={:.4} wins={:?}",
-                            col.weight, col.focused, col.boost, col.windows
+                            "    col{ci} w={:.6} focused={} wins={:?}",
+                            col.weight, col.focused, col.windows
                         );
                     }
                 }
@@ -9272,14 +9071,12 @@ mod unit_tests {
             }
             let _ = writeln!(
                 d,
-                "cfg gaps=({},{}) border={} colw={:.4} ntags={} anim=({},{})",
+                "cfg gaps=({},{}) border={} colw={:.4} ntags={}",
                 e.cfg.gaps_inner,
                 e.cfg.gaps_outer,
                 e.cfg.border_w,
                 e.cfg.column_width,
-                e.cfg.n_tags,
-                e.cfg.animations.stiffness,
-                e.cfg.animations.damping
+                e.cfg.n_tags
             );
             d
         }
@@ -10443,110 +10240,7 @@ mod unit_tests {
             }
         }
 
-        proptest! {
-            #![proptest_config(ProptestConfig {
-                cases: 96,
-                max_shrink_iters: 4096,
-                ..ProptestConfig::default()
-            })]
 
-            /// Contract: `Engine::apply_camera_cfg` puts the integrator's stable
-            /// spring pair into every workspace camera, whatever the config file
-            /// says, and does so purely.
-            ///
-            /// The docs promise a NaN/inf or non-positive stiffness "can never
-            /// reach the physics", and `Camera::step` assumes the values it is
-            /// handed are already inside the stability region. Purity matters
-            /// just as much: the same `Cfg` must always produce the same camera,
-            /// or a reload would change how the same layout scrolls.
-            #[test]
-            fn prop_camera_spring_cfg_is_sanitized_and_pure(
-                n_mon in 1usize..=2,
-                k_bits in any::<u32>(),
-                d_bits in any::<u32>(),
-                k2_bits in any::<u32>(),
-                d2_bits in any::<u32>(),
-                steps in 0u32..=64,
-            ) {
-                let mut engine = if n_mon >= 2 {
-                    setup_engine_multi()
-                } else {
-                    setup_engine()
-                };
-                let k = f32::from_bits(k_bits);
-                let d = f32::from_bits(d_bits);
-                engine.cfg.animations.stiffness = k;
-                engine.cfg.animations.damping = d;
-                engine.apply_camera_cfg();
-                let a = camera_springs(&engine);
-
-                for (ws, s) in &a {
-                    prop_assert!(
-                        s.0.is_finite() && (1.0..=62_500.0).contains(&s.0),
-                        "stiffness {} from ({}, {}) is outside the integrator's range at {:?}",
-                        s.0,
-                        k,
-                        d,
-                        ws
-                    );
-                    prop_assert!(
-                        s.1.is_finite() && s.1 >= 0.1,
-                        "damping {} from ({}, {}) is below the stability floor at {:?}",
-                        s.1,
-                        k,
-                        d,
-                        ws
-                    );
-                    prop_assert!(
-                        s.1 <= 10.0 * s.0.max(1.0).sqrt() + 1.0,
-                        "damping {} is not bounded relative to sqrt(stiffness {}) at {:?}",
-                        s.1,
-                        s.0,
-                        ws
-                    );
-                }
-
-                // Purity: a different config replaces the pair outright rather
-                // than accumulating into whatever is there.
-                engine.cfg.animations.stiffness = f32::from_bits(k2_bits);
-                engine.cfg.animations.damping = f32::from_bits(d2_bits);
-                engine.apply_camera_cfg();
-                let b = camera_springs(&engine);
-                engine.cfg.animations.stiffness = k;
-                engine.cfg.animations.damping = d;
-                engine.apply_camera_cfg();
-                let c = camera_springs(&engine);
-                prop_assert_eq!(&a, &c, "the same config produced different camera springs");
-                prop_assert!(a != b || camera_springs(&engine) == a);
-
-                // And no number of animation ticks may poison a camera:
-                // invariant C requires a finite target/position at all times.
-                for _ in 0..steps {
-                    engine.state.tick_animations(1.0 / 60.0);
-                }
-                prop_assert!(
-                    engine.state.check_invariants().is_ok(),
-                    "ticking with a hostile spring config broke the contract:\n  - {}",
-                    engine
-                        .state
-                        .check_invariants()
-                        .err()
-                        .unwrap_or_default()
-                        .join("\n  - ")
-                );
-            }
-        }
-
-        /// `(monitor, workspace) → (stiffness, damping)` for every camera.
-        fn camera_springs(e: &Engine) -> Vec<((usize, usize), (f32, f32))> {
-            let mut out = Vec::new();
-            for (mi, mon) in e.state.monitors.iter().enumerate() {
-                for (wi, ws) in mon.workspaces.iter().enumerate() {
-                    out.push(((mi, wi), (ws.camera.stiffness, ws.camera.damping)));
-                }
-            }
-            out
-        }
 
         /// The canonical wire spelling of an action: its `name()` plus the
         /// argument shape the `ACTIONS` table declares for that verb.
@@ -10779,8 +10473,13 @@ mod unit_tests {
                 // arithmetic path would leave behind.
                 for mon in &mut engine.state.monitors {
                     for ws in &mut mon.workspaces {
-                        ws.camera.position = f32::NAN;
-                        ws.camera.target = f32::INFINITY;
+                        // Alternate the two kinds of poison, so both are covered
+                        // instead of the second write clobbering the first.
+                        ws.camera.position = if ws.tag % 2 == 0 {
+                            f32::NAN
+                        } else {
+                            f32::INFINITY
+                        };
                         for col in &mut ws.columns {
                             col.weight = f32::NAN;
                         }
@@ -10815,5 +10514,63 @@ mod unit_tests {
                 );
             }
         }
+    }
+
+    /// A state whose only column holds three windows and weighs `weight` — the
+    /// shape `MoveWindow` splits, since a split needs a column with more than one
+    /// window to take one out of.
+    fn stacked_column(weight: f32) -> State {
+        let mut st = State::new();
+        st.monitors
+            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 1));
+        for i in 0..3u32 {
+            let mut c = Client::new(0x300 + i, 0, 0);
+            c.flags.clear(WinFlags::MAXIMIZED);
+            st.add_client(c);
+            st.monitors[0].workspaces[0].add_tiled(0x300 + i, 0.5);
+        }
+        // Merge the two later windows into the first column, then point the focus
+        // and the monitor's focus at its leading window, as a focus command would.
+        let ws = &mut st.monitors[0].workspaces[0];
+        for win in 0x301..0x303u32 {
+            ws.remove_window(win);
+        }
+        for win in 0x301..0x303u32 {
+            let pos = ws.columns[0].windows.len();
+            ws.drop_into_column(0, win, pos);
+        }
+        ws.columns[0].weight = weight;
+        ws.focus.column_idx = 0;
+        ws.columns[0].focused = 0;
+        st.monitors[0].focused = Some(0x300);
+        st
+    }
+
+    fn weights(st: &State) -> Vec<f32> {
+        st.monitors[0].workspaces[0]
+            .columns
+            .iter()
+            .map(|c| c.weight)
+            .collect()
+    }
+
+    /// A new column placed next to one already at the 0.05 floor must not yield
+    /// a half outside the documented band - the checker enforces the band after
+    /// the very next command, so placing has to clamp, not just divide.
+    #[test]
+    fn placing_next_to_a_column_at_the_band_floor_keeps_every_width_in_band() {
+        let st = stacked_column(0.05);
+        let mut eng = Engine::new(Cfg::default());
+        eng.state = st;
+        eng.execute(crate::core::commands::NewColumn);
+        eng.state.assert_invariants();
+        assert!(
+            eng.state.monitors[0].workspaces[0]
+                .columns
+                .iter()
+                .all(|c| c.weight >= 0.05 - 1e-6),
+            "every half must stay inside the documented band, got {:?}",
+            weights(&eng.state)
+        );
     }
 }

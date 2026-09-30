@@ -110,35 +110,22 @@ pub fn query_json(state: &State, cfg: &Cfg, topic: &str) -> String {
         "workspaces" => workspaces_json(state, cfg),
         "tree" => tree_json(state),
         "focused" => focused_json(state),
-        "inspect" => inspect_json(state, cfg, &BackendFacts::default()),
+        "inspect" => inspect_json(state, cfg),
         _ => format!("error unknown-query: {topic}"),
     }
 }
 
 /// Facts the backend knows and `State` cannot.
 ///
-/// Split out rather than passed in individually because these are exactly the
-/// things a `State` snapshot is not allowed to record: whether the GL
-/// compositor came up is a property of the *live* X connection, and a stale
-/// `true` in the state would be a lie the reconciler could act on. Keeping them
-/// out of `State` is what makes it safe for the plain `query_json` path to
-/// answer `inspect` with a default — a caller that wants the truth has to
-/// supply it from the backend.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BackendFacts {
-    /// Animations are enabled by configuration.
-    pub animations: bool,
-}
-
 /// `query inspect` — what this window manager is, in one document.
 ///
 /// The topic exists because "what is this session doing" spans three questions
 /// that no existing answer covered together: how many windows it manages and
 /// how they are arranged (which the tree query answers as a tree, not as
-/// totals), whether the compositor it was configured for is actually running
-/// (which only the backend knows), and the camera the layout is scrolled to.
+/// totals), whether animations are enabled (which only the backend knows), and
+/// the camera the layout is scrolled to.
 /// `maverickctl inspect` renders this plus what the session manager knows.
-pub fn inspect_json(state: &State, cfg: &Cfg, facts: &BackendFacts) -> String {
+pub fn inspect_json(state: &State, cfg: &Cfg) -> String {
     use std::fmt::Write;
     let mi = state.sel_mon.min(state.monitors.len().saturating_sub(1));
     let mon = state.monitors.get(mi);
@@ -174,7 +161,7 @@ pub fn inspect_json(state: &State, cfg: &Cfg, facts: &BackendFacts) -> String {
     if let Some(mon) = mon {
         write!(
             s,
-            "\"monitor\":{{\"index\":{mi},\"screen\":[{},{}],\"workarea\":[{},{}],\"active_ws\":{},\"focused\":{}}},",
+            "\"monitor\":{{\"index\":{mi},\"screen\":[{},{}],\"workarea\":[{},{}],\"active_ws\":{},\"focused\":{}}}",
             mon.screen.w,
             mon.screen.h,
             mon.workarea.w,
@@ -184,9 +171,8 @@ pub fn inspect_json(state: &State, cfg: &Cfg, facts: &BackendFacts) -> String {
         )
         .unwrap();
     } else {
-        s.push_str("\"monitor\":null,");
+        s.push_str("\"monitor\":null");
     }
-    write!(s, "\"animations\":{}", facts.animations).unwrap();
     s.push('}');
     s
 }
@@ -469,7 +455,7 @@ mod tests {
     /// `inspect` is the one document assembled from two sources — `State` and
     /// the backend's own facts — so both halves have to appear, and the
     #[test]
-    fn the_inspect_document_reports_totals_layout_and_animations() {
+    fn the_inspect_document_reports_totals_layout_and_no_fiction() {
         use crate::types::Client;
         let mut state = crate::types::State::new();
         state.monitors.push(crate::types::Monitor::new(
@@ -493,8 +479,7 @@ mod tests {
             }
         }
         let cfg = crate::config::Cfg::default();
-        let facts = BackendFacts { animations: true };
-        let doc = inspect_json(&state, &cfg, &facts);
+        let doc = inspect_json(&state, &cfg);
         let v = parses(&doc);
 
         let windows = v.get("windows").expect("windows totals");
@@ -508,13 +493,17 @@ mod tests {
             2,
             "two tiled columns, one float"
         );
-        assert!(v.bool_field("animations"));
-        // Maverick has no compositor, so the document must not report one:
-        // a `compositor` key here would be a claim about a subsystem that no
-        // longer exists, and a tool reading it would branch on a fiction.
+        // Maverick has no compositor and no animation subsystem, so the
+        // document must not report either: a key here would be a claim about a
+        // subsystem that does not exist, and a tool reading it would branch on
+        // a fiction.
         assert!(
             v.get("compositor").is_none(),
             "inspect still reports a compositor"
+        );
+        assert!(
+            v.get("animations").is_none(),
+            "inspect still reports animations"
         );
         // And the monitor the user can actually see.
         let mon = v.get("monitor").expect("monitor");
@@ -530,36 +519,14 @@ mod tests {
     #[test]
     fn the_inspect_document_survives_an_empty_state() {
         let state = crate::types::State::new();
-        let doc = inspect_json(
-            &state,
-            &crate::config::Cfg::default(),
-            &BackendFacts::default(),
-        );
+        let doc = inspect_json(&state, &crate::config::Cfg::default());
         let v = parses(&doc);
         assert_eq!(v.num_field("sel_mon"), 0);
         assert_eq!(v.get("monitor"), Some(&maverick_sys::json::Json::Null));
         assert_eq!(v.get("windows").expect("windows").num_field("total"), 0);
     }
 
-    /// The default facts must report the compositor as *not* running: a caller
-    /// that reaches `inspect` without a backend answer has no evidence it came
-    /// up, and claiming otherwise would report a session as composited when
-    /// nothing says it is.
-    #[test]
-    fn default_backend_facts_claim_nothing_the_wm_cannot_do() {
-        let state = crate::types::State::new();
-        let doc = inspect_json(
-            &state,
-            &crate::config::Cfg::default(),
-            &BackendFacts::default(),
-        );
-        let v = parses(&doc);
-        assert!(
-            !v.bool_field("animations"),
-            "default facts must not claim animation"
-        );
-        assert!(v.get("compositor").is_none());
-    }
+
 
     /// The state snapshot is what every client polls, so the screen size added
     /// for resolution reporting has to be there for every monitor and survive a

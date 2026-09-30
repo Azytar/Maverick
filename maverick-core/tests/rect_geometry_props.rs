@@ -37,7 +37,7 @@ proptest! {
 // neighbouring rect.
 //
 // Two adjacent tiled columns share a seam, and if both claimed the seam pixel
-// the compositor would either leave it unpainted or paint it twice.
+// X11 would either drop the rect or apply it twice.
 proptest! {
     #[test]
     fn containment_is_half_open_on_the_right_and_bottom_edges(
@@ -77,54 +77,6 @@ proptest! {
             prop_assert!(a.contains(px, py), "{:?} contains {:?} but not ({}, {})", a, b, px, py);
         }
     }
-}
-
-// `union` is the smallest box holding both rects, in either order.
-//
-// The animation damage path unions the old and the new rect of a sliding
-// window: it must cover both, and it must not depend on which one the caller
-// happened to have in hand.
-proptest! {
-    #[test]
-    fn union_is_the_commutative_minimal_envelope(a in arb_rect(), b in arb_rect()) {
-        let u = a.union(b);
-        prop_assert_eq!(u.x, a.x.min(b.x), "the envelope does not start at the leftmost edge");
-        prop_assert_eq!(u.y, a.y.min(b.y), "the envelope does not start at the topmost edge");
-        prop_assert_eq!(u, b.union(a), "union is order dependent");
-        if !envelope_representable(a, b) {
-            // Past `i32::MAX` of extent or span, the box a rect describes has
-            // no representable `i32` edge, so every edge helper saturates and
-            // the type can no longer name the box. No rect the WM builds comes
-            // near that (a screen is thousands of pixels across), so the
-            // covering claims below are asserted on the representable domain.
-            return Ok(());
-        }
-        prop_assert!(u.contains_rect(a), "{:?} does not cover {:?}", u, a);
-        prop_assert!(u.contains_rect(b), "{:?} does not cover {:?}", u, b);
-        prop_assert_eq!(u, u.union(u), "union is not idempotent");
-        prop_assert!(u.w >= a.w && u.h >= a.h, "{:?} is smaller than {:?}", u, a);
-        prop_assert!(u.area() >= a.area() && u.area() >= b.area(), "{:?} covers less area than its inputs", u);
-    }
-}
-
-// Whether both rects and the box they span have all four edges exactly
-// representable as `i32`, i.e. whether `union` can express the envelope without
-// saturating any of the edge helpers.
-//
-// The criterion is the *sum* `x + w`, not the extent alone: an extent wider than
-// `i32::MAX` is still exactly representable as an edge whenever the origin is
-// far enough left, and the edge helpers are required to report it.
-fn envelope_representable(a: Rect, b: Rect) -> bool {
-    let edges_exact = |r: Rect| {
-        i64::from(r.x) + i64::from(r.w) <= i64::from(i32::MAX)
-            && i64::from(r.y) + i64::from(r.h) <= i64::from(i32::MAX)
-    };
-    if !edges_exact(a) || !edges_exact(b) {
-        return false;
-    }
-    let span_x = i64::from(a.right().max(b.right())) - i64::from(a.x.min(b.x));
-    let span_y = i64::from(a.bottom().max(b.bottom())) - i64::from(a.y.min(b.y));
-    span_x <= i64::from(i32::MAX) && span_y <= i64::from(i32::MAX)
 }
 
 // `area` never wraps, whatever the extent pair.
@@ -213,26 +165,5 @@ proptest! {
             a,
             b
         );
-    }
-}
-
-// The damage envelope covers both rects on the whole coordinate domain, with no
-// representability escape hatch.
-//
-// The animation damage path unions a window's old and new rect, and the damage
-// pass coalesces overlapping quads. A union that does not cover one of its
-// inputs leaves a stripe of stale pixels exactly where a window just moved, and
-// a coalescing pass that tests `a.contains_rect(b)` on such a union drops a
-// quad it should have merged. This claims the envelope unconditionally: the
-// saturating limit is the same limit both the union's edge and the covered
-// rect's edge reach, so containment still holds where the box is not
-// representable — it is only the *numeric* extent claims above that need an
-// exact edge.
-proptest! {
-    #[test]
-    fn the_union_covers_both_rects_whatever_the_coordinates(a in arb_rect(), b in arb_rect()) {
-        let u = a.union(b);
-        prop_assert!(u.contains_rect(a), "the envelope {:?} does not cover {:?}", u, a);
-        prop_assert!(u.contains_rect(b), "the envelope {:?} does not cover {:?}", u, b);
     }
 }

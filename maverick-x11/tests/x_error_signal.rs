@@ -1,10 +1,10 @@
 //! What the X error signal actually does on this crate's connection, measured.
 //!
 //! The crate documents a sequence — `clear_x_error` → request →
-//! `XDisplay::sync` → `take_x_error` — and two callers rely on it (the renderer's
-//! per-visual fbconfig check and nothing else). Those tests are written to
-//! *measure* that sequence rather than assert a hoped-for answer, because the
-//! answer is not the one the docs originally claimed:
+//! `XDisplay::sync` → `take_x_error` — that no production caller uses: every
+//! request the window manager issues goes through x11rb. These tests are written
+//! to *measure* that sequence rather than assert a hoped-for answer, because the
+//! measured answer is not the one the sequence implies:
 //!
 //! * an **asynchronous** request the server rejects never reaches the Xlib error
 //!   handler on a connection whose event queue XCB owns — not through `XFlush`,
@@ -76,7 +76,7 @@ unsafe extern "C" fn io_error_handler(_dpy: *mut c_void, code: c_int) -> c_int {
     std::process::exit(70);
 }
 
-/// Open the shared bootstrap, or `None` when there is no server to talk to.
+/// Open the crate's X11 bootstrap, or `None` when there is no server to talk to.
 fn x() -> Option<(XDisplay, XConn, usize)> {
     let opened = maverick_x11::open_x().ok()?;
     // From here on the process must not be killable by libXlib's default I/O
@@ -110,10 +110,11 @@ fn install_counting_handler() {
 /// The request the tests use to provoke a protocol error.
 ///
 /// `XChangeProperty` is **asynchronous** — it sends and returns without waiting
-/// for a reply — which is exactly the shape of a GLX call and, crucially, not
-/// the shape that takes the process down. `XGetGeometry` would be a synchronous
-/// request and is deliberately not used for error provocation anywhere in this
-/// file.
+/// for a reply — which is the shape that fails without taking the process down:
+/// the error is never delivered to the handler (see the test below), where a
+/// *synchronous* request would desynchronise libXlib and end the process.
+/// `XGetGeometry` is synchronous and is deliberately not used for error
+/// provocation anywhere in this file.
 fn provoke_bad_window(dpy: &XDisplay) {
     maverick_x11::clear_x_error();
     // SAFETY: `dpy.as_ptr()` is a live `Display*` from `open_x`; the request
@@ -125,11 +126,12 @@ fn provoke_bad_window(dpy: &XDisplay) {
 
 /// An asynchronous failure on this connection does not reach the error handler.
 ///
-/// This is the finding that makes the renderer's fbconfig check dead code, and
-/// the reason [`maverick_x11::XDisplay::sync`] is documented as not being an
+/// This is the finding that makes `take_x_error` report nothing in production,
+/// and the reason [`maverick_x11::XDisplay::sync`] is documented as not being an
 /// error barrier. If this test ever fails, a caller that branched on
-/// `take_x_error` may have become live — which is a *good* failure, and would
-/// mean the renderer needs to be revisited.
+/// `take_x_error` would become live — which is a *good* failure, because it would
+/// mean the crate's documented pessimism is out of date rather than that a caller
+/// is silently wrong.
 #[test]
 fn an_asynchronous_failure_never_reaches_the_error_handler() {
     let Some((dpy, _conn, _screen)) = x() else {
@@ -151,7 +153,7 @@ fn an_asynchronous_failure_never_reaches_the_error_handler() {
         0,
         "an asynchronous failure reached the Xlib error handler, so the \
          documented `clear -> request -> sync -> take` sequence works after all \
-         and the renderer's fbconfig check is no longer dead code"
+         and a caller may branch on `take_x_error` being `None`"
     );
     assert_eq!(take_x_error(), None);
 }
@@ -266,12 +268,12 @@ fn the_display_handle_is_send() {
 
 /// Every alias of a `Display*` is non-owning.
 ///
-/// The window manager holds one, `Compositor` builds a second with
-/// `XDisplay::from_raw`, and `open_x` had a third before it returned. If any of
-/// them were `Drop`, or if `close` were reachable from a returned display,
-/// letting them all go would `XCloseDisplay` a pointer the others still use and
-/// the next request would touch freed memory. So: drop every alias, then use the
-/// connection.
+/// The window manager holds one and `open_x` had another before it returned;
+/// this test builds a third with `XDisplay::from_raw`, which is how any caller
+/// makes one. If any of them were `Drop`, or if `close` were reachable from a
+/// returned display, letting them all go would `XCloseDisplay` a pointer the
+/// others still use and the next request would touch freed memory. So: drop
+/// every alias, then use the connection.
 #[test]
 fn every_alias_of_the_display_is_non_owning() {
     let Some((dpy, conn, screen)) = x() else {
@@ -285,10 +287,10 @@ fn every_alias_of_the_display_is_non_owning() {
     let raw = dpy.as_ptr();
 
     {
-        // The alias the compositor makes.
+        // A second alias of the same pointer, the way any caller would make one.
         // SAFETY: `raw` is the live `Display*` `open_x` returned, and the alias
-        // leaves this scope without being closed — the same discipline
-        // `Compositor::init` relies on.
+        // leaves this scope without being closed — the discipline
+        // `XDisplay::from_raw`'s safety contract requires.
         let alias = unsafe { XDisplay::from_raw(raw) };
         assert_eq!(alias.as_ptr(), raw);
         assert!(!alias.is_null());

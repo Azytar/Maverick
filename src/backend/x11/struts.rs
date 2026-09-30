@@ -264,7 +264,7 @@ impl WindowManager {
                 // `client.geom` from the new (post-strut) scroll target — not the
                 // stale one. Otherwise the dock change leaves geometry on the old
                 // target until the next unrelated arrange (invariant: every
-                // `camera.target` mutation must precede the settled projection).
+                // camera mutation must precede the projection).
                 self.retarget_cameras(mi);
                 self.arrange(mi)?;
                 self.update_workarea()?;

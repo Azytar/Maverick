@@ -9,10 +9,9 @@
 //!
 //! See [`StateExt`] for why the predicate lives here instead of in the core.
 
-#![allow(unused_imports)]
 
 pub use maverick_core::types::*;
-pub use maverick_core::types::{sanitize_spring, spring_smooth};
+
 
 /// Extension trait for the layout-dependent "covering fullscreen" predicate.
 ///
@@ -42,8 +41,9 @@ pub trait StateExt {
     /// the workarea as a wide column) but is **not** a presented overlay; an
     /// exclusive overlay (`FullscreenPolicy::True`) and the `presented_maximize`
     /// owner **are** overlays but may not be *covering* in this ribbon sense.
-    /// Composition policy (`compositor_policy::bypass_candidate`) unions both
-    /// predicates and enforces `candidates.len() == 1` and `covers_screen`.
+    /// A caller that composes the two predicates — deciding whether to publish
+    /// `_NET_WM_BYPASS_COMPOSITOR` — must enforce `candidates.len() == 1` and
+    /// `covers_screen` itself.
     ///
     /// # Purity
     ///
@@ -62,8 +62,8 @@ impl StateExt for State {
         // Column + Normal-policy: the fullscreen ribbon tile. `fs_ctx` owns that
         // definition (gaps and camera included) and deliberately excludes
         // `FullscreenPolicy::True` overlays, which `presented_overlay_owner`
-        // reports instead — the two helpers stay disjoint, which is what
-        // `compositor_policy::bypass_candidate` relies on.
+        // reports instead — the two helpers stay disjoint, so a caller can union
+        // them without double-counting a window.
         if ws.layout == LayoutKind::Column {
             let fs = crate::core::layout::fs_ctx(&self.clients, ws, mon.screen);
             if fs.win.is_some() {

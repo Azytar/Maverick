@@ -850,7 +850,7 @@ mod wait_bounds {
     /// unchanged.
     #[test]
     fn an_idle_loop_with_no_deadline_blocks_indefinitely() {
-        assert_eq!(wait_timeout(None, None, None), None);
+        assert_eq!(wait_timeout(None, None), None);
     }
 
     /// The regression. A settled loop asks for no wait, and the budget is the
@@ -859,7 +859,7 @@ mod wait_bounds {
     /// shutdown would get.
     #[test]
     fn a_pending_shutdown_budget_bounds_an_otherwise_unbounded_wait() {
-        let bounded = wait_timeout(None, None, Some(Instant::now() + Duration::from_secs(3)))
+        let bounded = wait_timeout(None, Some(Instant::now() + Duration::from_secs(3)))
             .expect("a shutdown budget must produce a wait");
         assert!(
             bounded <= Duration::from_secs(3),
@@ -872,32 +872,12 @@ mod wait_bounds {
     /// loop owns.
     #[test]
     fn a_pending_keyboard_refresh_bounds_an_otherwise_unbounded_wait() {
-        let bounded = wait_timeout(None, Some(Instant::now() + Duration::from_millis(50)), None)
+        let bounded = wait_timeout(Some(Instant::now() + Duration::from_millis(50)), None)
             .expect("a keyboard refresh must produce a wait");
         assert!(bounded <= Duration::from_millis(50), "got {bounded:?}");
     }
 
-    /// A frame already due must not be postponed by a deadline further out, or
-    /// the frame scheduler would miss its own rate limit during a shutdown.
-    #[test]
-    fn a_due_frame_is_not_postponed_by_a_later_deadline() {
-        assert_eq!(
-            wait_timeout(
-                Some(Duration::ZERO),
-                None,
-                Some(Instant::now() + Duration::from_secs(3))
-            ),
-            Some(Duration::ZERO)
-        );
-        assert_eq!(
-            wait_timeout(
-                Some(Duration::from_millis(8)),
-                None,
-                Some(Instant::now() + Duration::from_secs(3))
-            ),
-            Some(Duration::from_millis(8))
-        );
-    }
+
 
     /// An elapsed deadline yields a zero wait, which the loop treats as "do not
     /// block" and returns on — which is how the budget check in `run` gets the
@@ -908,7 +888,7 @@ mod wait_bounds {
             .checked_sub(Duration::from_secs(1))
             .expect("a monotonic clock can go back a second");
         assert_eq!(
-            wait_timeout(None, None, Some(elapsed)),
+            wait_timeout(None, Some(elapsed)),
             Some(Duration::ZERO)
         );
     }
@@ -919,7 +899,6 @@ mod wait_bounds {
     fn the_earlier_of_the_two_deadlines_wins() {
         let now = Instant::now();
         let bounded = wait_timeout(
-            Some(Duration::from_secs(30)),
             Some(now + Duration::from_millis(50)),
             Some(now + Duration::from_secs(3)),
         )

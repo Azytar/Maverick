@@ -30,8 +30,9 @@
 //!
 //! `x_error_signal.rs` measures the milder half — an *asynchronous* failure is
 //! never delivered to the error handler at all, so a caller must not branch on
-//! `take_x_error` answering `None`. That is the case the compositor actually hits;
-//! this one is the reason no test should provoke errors through Xlib.
+//! `take_x_error` answering `None`. That is the case this connection produces for
+//! every asynchronous request; this one is the reason no test should provoke
+//! errors through Xlib.
 
 use std::os::raw::{c_int, c_uchar, c_ulong, c_void};
 use std::process::Command;

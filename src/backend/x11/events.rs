@@ -1,13 +1,13 @@
 //! X11 event handlers dispatched from `mod.rs::dispatch`.
 //!
 //! Each function handles one X11 event type and translates it into a `Command`
-//! (executed by `Engine`) or a direct side effect (compositor track/damage,
+//! (executed by `Engine`) or a direct side effect (stack/damage,
 //! EWMH update).
 //!
 //! # Ownership & lifecycle
 //!
 //! `WindowManager::dispatch` owns the event queue; each `on_*` borrows
-//! `&mut self` and may mutate `State`, `AppliedState`, focus, or the compositor.
+//! `&mut self` and may mutate `State`, `AppliedState`, or focus.
 //! No handler retains a borrow across the X round-trip — cookies are collected
 //! before any reply-driven branch.
 //!
@@ -31,7 +31,7 @@
 //!   (Compliant, ignored) or stale traffic whose model is re-asserted; a
 //!   reported rect never becomes the model, for a float or a tile.
 //! - **`MapRequest`** — manages the window (creates `Client`, applies rules).
-//! - **DestroyNotify/UnmapNotify** — unmanages, cleans compositor texture,
+//! - **DestroyNotify/UnmapNotify** — unmanages, cleans window state,
 //!   refocuses; the synthetic `SendEvent` `ConfigureNotify` is discarded
 //!   (`response_type & 0x80`).
 //! - **`ClientMessage`** — `_NET_WM_STATE` fullscreen/maximize via
@@ -305,7 +305,7 @@ impl WindowManager {
         // Observation of X11 Real, never an instruction.
         //
         // Only the root-targeted (SubstructureNotify) copy is considered here;
-        // the window also delivers a StructureNotify copy that the compositor
+        // the window also delivers a StructureNotify copy that the backend
         // sync below consumes.
         //
         // While this WM holds `SUBSTRUCTURE_REDIRECT` on the root the server
@@ -436,7 +436,6 @@ impl WindowManager {
                 self.engine.state.monitors = result;
                 // Re-apply the configured scroll-camera spring constants to the
                 // (possibly freshly created) workspace cameras.
-                self.engine.apply_camera_cfg();
                 for c in self.engine.state.clients.values_mut() {
                     let idx = c.monitor;
                     if let Some(Some(ni)) = old_to_new.get(idx).copied() {
@@ -576,28 +575,6 @@ impl WindowManager {
         // without any strut property fall through to a no-op `remove_dock`.
         if e.atom == self.atoms.net_wm_strut_partial || e.atom == self.atoms.net_wm_strut {
             self.apply_dock_strut(e.window)?;
-            return Ok(());
-        }
-
-        // `_NET_WM_BYPASS_COMPOSITOR`: EWMH hint 1=force ON, 2=force bypass. Handled
-        // even on DELETE (property removed -> None), and mirrored into the client
-        // record the same way `WM_HINTS` is. Maverick publishes this property on
-        // its own fullscreen windows (see `manage.rs`) for *external* compositors;
-        // it consumes none itself.
-        if e.atom == self.atoms.net_wm_bypass_compositor {
-            if e.state == Property::DELETE {
-                if let Some(cl) = self.engine.state.clients.get_mut(&e.window) {
-                    cl.bypass_hint = None;
-                }
-            } else if let Some(v) =
-                read_bypass_hint(&self.conn, e.window, self.atoms.net_wm_bypass_compositor)
-            {
-                if let Some(cl) = self.engine.state.clients.get_mut(&e.window) {
-                    cl.bypass_hint = Some(v);
-                }
-            } else if let Some(cl) = self.engine.state.clients.get_mut(&e.window) {
-                cl.bypass_hint = None;
-            }
             return Ok(());
         }
 
@@ -972,16 +949,4 @@ impl WindowManager {
             self.schedule_keyboard_refresh();
         }
     }
-}
-
-/// Read `_NET_WM_BYPASS_COMPOSITOR` (CARDINAL 0/1/2). Returns `None` when absent.
-fn read_bypass_hint(conn: &maverick_x11::XConn, win: Window, atom: Atom) -> Option<u32> {
-    let ty = u32::from(AtomEnum::CARDINAL);
-    let reply = conn
-        .get_property(false, win, atom, ty, 0, 1)
-        .ok()?
-        .reply()
-        .ok()?;
-    let v = reply.value32().and_then(|mut it| it.next())?;
-    Some(v)
 }

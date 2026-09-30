@@ -14,7 +14,7 @@
 //!     → reconciler::reconcile (diff vs AppliedState)
 //!     → emit_geometry (single X sink)
 //!     → stack_overlay (focus order)
-//!     → compositor.invalidate
+//!     → reconcile
 //! ```
 //!
 //! # Geometry authority
@@ -71,7 +71,7 @@ use super::*;
 use crate::backend::x11::reconciler::{reconcile, wire_geometry, GeometryEffect};
 use crate::core::commands::retarget_focus_to_window;
 use crate::core::desired::DesiredState;
-use crate::core::layout::{clamp_float_geom, normalize_float_geom, Phase};
+use crate::core::layout::{clamp_float_geom, normalize_float_geom};
 use crate::core::present::present_into;
 use crate::types::StateExt;
 use x11rb::protocol::shape;
@@ -110,8 +110,8 @@ macro_rules! wtrace {
 /// rectangle per row of each rounded corner (inset by the circle's chord at
 /// that row). This is the same technique window managers have used for
 /// XShape-based rounding for decades — O(r) rectangles, no external deps,
-/// no compositor required. `r` is clamped so it can never exceed half of
-/// either dimension.
+/// nothing but X11. `r` is clamped so it can never exceed half of either
+/// dimension.
 fn rounded_rectangles(w: i32, h: i32, r: i32) -> Vec<Rectangle> {
     let r = r.clamp(0, w.min(h) / 2);
     if r <= 0 || w <= 0 || h <= 0 {
@@ -254,7 +254,7 @@ const MAX_MASK_RECTS: usize = 32_765;
 /// So the frame is clamped to what the protocol can describe *before* it is
 /// narrowed. A frame past [`MAX_MASKED_FRAME`] has no exact mask; describing the
 /// part that fits is strictly better than wrapping, and matches what the
-/// compositor already does for the overlay shape (`update_overlay_shape`).
+/// overlay shape (`update_overlay_shape`).
 /// The outer frame a window's border produces: the window plus the border on
 /// both sides, in each axis.
 ///
@@ -594,19 +594,6 @@ impl WindowManager {
         mon_idx: usize,
         do_hide: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.arrange_full_phase(mon_idx, do_hide, Phase::Settled)
-    }
-
-    /// `arrange_full` with an explicit projection phase. `Settled` (the
-    /// compositor path, one-shot) projects to the camera's rest `target`;
-    /// `Live` (the X11-only animation path, per-frame) projects to the live
-    /// `position` so windows ease smoothly.
-    pub(super) fn arrange_full_phase(
-        &mut self,
-        mon_idx: usize,
-        do_hide: bool,
-        phase: Phase,
-    ) -> Result<(), Box<dyn std::error::Error>> {
         if mon_idx >= self.engine.state.monitors.len() {
             return Ok(());
         }
@@ -620,8 +607,6 @@ impl WindowManager {
             &self.engine.state,
             mon_idx,
             &self.engine.cfg,
-            &self.layout_registry,
-            phase,
             &mut self.desired,
             &mut self.ribbon_scratch,
         );
@@ -632,11 +617,10 @@ impl WindowManager {
             &self.engine.state,
             &self.engine.state.monitors[mon_idx],
             &mut self.desired,
-            &mut self.present_scratch,
         );
         // Collect into a local so the immutable borrow of `desired`
         // ends before `apply_geom` mutates `self`.
-        let desired = DesiredState::from_placements(&self.desired, &self.present_scratch);
+        let desired = DesiredState::from_placements(&self.desired);
         let effects = reconcile(&desired, &self.engine.state, &mut self.applied);
         #[cfg(feature = "window-trace")]
         let effect_count = effects.len();
@@ -664,7 +648,6 @@ impl WindowManager {
         // Overlay stacking: presented windows above tiles, popups of presented
         // windows above the overlay, focused window on top (or peek).
         self.stack_overlay(mon_idx);
-        self.engine.state.monitors[mon_idx].layout_dirty = true;
         Ok(())
     }
 
@@ -713,7 +696,7 @@ impl WindowManager {
 
         // Take the buffer so the loop can borrow `state.clients` mutably at the
         // same time, then hand it back. The four sibling scratch buffers in
-        // `compositor_gl` use the same take-and-restore, and the reason is the
+        // take-and-restore, and the reason is the
         // point: this one is reserved with capacity 64 at construction so the
         // per-frame path never reallocates, and dropping it here threw that
         // capacity away once a frame, so the `extend` above had to grow a fresh
@@ -963,8 +946,6 @@ impl WindowManager {
             Some(c) => c,
             None => return Ok(()),
         };
-        // Monitor whose live projection is invalidated by this geometry write.
-        let mon = client.monitor;
         // Captured before the mutable borrow below flips geom/border_w.
         let is_fullscreen = client.is_fullscreen();
 
@@ -1043,11 +1024,6 @@ impl WindowManager {
                 c.border_w = wire_bw;
             }
             c.geometry_dirty = false;
-        }
-        // Invalidate this monitor's cached live projection so the compositor
-        // re-projects it on the next frame (the geometry it drew is now stale).
-        if mon < self.engine.state.monitors.len() {
-            self.engine.state.monitors[mon].layout_dirty = true;
         }
 
         self.sync_rounded_frame(win, geom, bw, is_fullscreen);
@@ -1316,7 +1292,7 @@ impl WindowManager {
             // Keep X11 geometry (`client.geom`) in sync with the just-retargeted
             // camera. The keyboard focus path emits `ArrangeMonitor` before
             // `FocusWindow`, which makes `arrange` rewrite `client.geom` from the
-            // new `camera.target`. The mouse path (`on_button_press`, `on_enter`,
+            // new camera position. The mouse path (`on_button_press`, `on_enter`,
             // `_NET_ACTIVE_WINDOW`) calls `focus()` directly with no
             // `ArrangeMonitor`, so `client.geom` would still point at the
             // previous settled position and the next X hit-test (`find_client`)
@@ -1327,11 +1303,10 @@ impl WindowManager {
             // turn's drain settles it before the loop can block, so no event is
             // ever dispatched against geometry that has not caught up. What the
             // deferral is for is the requests — `arrange` only *reads*
-            // `camera.{target,position}`, never mutating the spring, so the
-            // compositor keeps interpolating `position → target`, and
-            // `hide_offscreen` is skipped during a drag (guarded in
-            // `arrange_full_phase`) so a focus change mid-drag cannot un-hide or
-            // mis-place windows.
+            // `camera.position` and never mutates it, so the ribbon cannot move
+            // under the hit-test, and `hide_offscreen` is skipped during a drag
+            // (guarded in `arrange_full`) so a focus change mid-drag cannot
+            // un-hide or mis-place windows.
             self.pending.mark(retargeted.unwrap_or(mon_i), Some(w));
 
             let _ = self.conn.change_property32(
@@ -2738,7 +2713,7 @@ mod tests {
     // render list must be total, deterministic and convergent.
     use crate::backend::x11::reconciler::AppliedState;
     use crate::config::Cfg;
-    use crate::core::layout::{arrange, LayoutRegistry, Placements, RibbonScratch};
+    use crate::core::layout::{arrange, Placements, RibbonScratch};
     use proptest::prelude::*;
 
     /// Screen geometry as a real output reports it: any origin (a second
@@ -2830,9 +2805,9 @@ mod tests {
         screen: Rect,
         workarea: Rect,
         wins: Vec<WinSpec>,
-        cam: (f32, f32),
-        zoom: (f32, f32),
-        page_zoom: (f32, f32),
+        cam: f32,
+        zoom: f32,
+        page_zoom: f32,
         overview: bool,
         gaps: (u32, u32),
         border: u32,
@@ -2852,12 +2827,9 @@ mod tests {
         mon.workarea = workarea;
         {
             let ws = &mut mon.workspaces[0];
-            ws.camera.position = cam.0;
-            ws.camera.target = cam.1;
-            ws.zoom = zoom.0;
-            ws.zoom_target = zoom.1;
-            ws.page_zoom = page_zoom.0;
-            ws.page_zoom_target = page_zoom.1;
+            ws.camera.position = cam;
+            ws.zoom = zoom;
+            ws.page_zoom = page_zoom;
             ws.overview = overview;
         }
         let mut state = State::new();
@@ -2924,21 +2896,18 @@ mod tests {
     /// `arrange_full_phase` builds it: the layout projection, then the
     /// presentation overlay. `None` for a monitor index the state does not
     /// have, which the caller must treat as "nothing to place".
-    fn projected(state: &State, cfg: &Cfg, mon_idx: usize) -> Option<(Placements, Vec<WindowId>)> {
+    fn projected(state: &State, cfg: &Cfg, mon_idx: usize) -> Option<Placements> {
         let mon = state.monitors.get(mon_idx)?;
         let mut placements = Placements::new();
         arrange(
             state,
             mon_idx,
             cfg,
-            &LayoutRegistry::new(),
-            Phase::Live,
             &mut placements,
             &mut RibbonScratch::default(),
         );
-        let mut raise = Vec::new();
-        present_into(state, mon, &mut placements, &mut raise);
-        Some((placements, raise))
+        present_into(state, mon, &mut placements);
+        Some(placements)
     }
 
     /// The `ConfigureWindow` calls a reconcile would issue, as plain data so a
@@ -3588,9 +3557,9 @@ mod tests {
             screen in prop_output_rect(),
             workarea in prop_output_rect(),
             wins in proptest::collection::vec(prop_win(), 0..=8),
-            cam in (-4000.0f32..4000.0, -4000.0f32..4000.0),
-            zoom in (0.05f32..=2.0, 0.05f32..=2.0),
-            page_zoom in (0.05f32..=2.0, 0.05f32..=2.0),
+            cam in -4000.0f32..4000.0,
+            zoom in 0.05f32..=2.0,
+            page_zoom in 0.05f32..=2.0,
             overview in any::<bool>(),
             gaps in (0u32..=200, 0u32..=200),
             border in 0u32..=8,
@@ -3614,7 +3583,7 @@ mod tests {
             // One past the last index is the stale-index case `arrange` has to
             // absorb rather than panic on.
             for mon_idx in 0..=monitors {
-                let Some((placements, _raise)) = projected(&state, &cfg, mon_idx) else {
+                let Some(placements) = projected(&state, &cfg, mon_idx) else {
                     prop_assert!(
                         mon_idx >= monitors,
                         "monitor {} exists but produced no render list",
@@ -3646,20 +3615,18 @@ mod tests {
         }
 
         /// Render-list determinism. The projection is documented as a pure
-        /// function of `State` + `Cfg` + `Phase` and is re-run for the same
-        /// monitor several times per frame (once per animating monitor, plus
-        /// the compositor's live pass). A render list whose order or contents
-        /// varied between two identical runs would make the presentation
-        /// overlay's `raise` order — and therefore the stacking the user sees —
-        /// depend on hash iteration order.
+        /// function of `State` + `Cfg` + `Phase`, and the same monitor is
+        /// projected again on every arrange. A render list whose order or
+        /// contents varied between two identical runs would make the geometry
+        /// X11 ends up holding depend on hash iteration order.
         #[test]
         fn prop_render_list_is_deterministic(
             screen in prop_output_rect(),
             workarea in prop_output_rect(),
             wins in proptest::collection::vec(prop_win(), 0..=8),
-            cam in (-4000.0f32..4000.0, -4000.0f32..4000.0),
-            zoom in (0.05f32..=2.0, 0.05f32..=2.0),
-            page_zoom in (0.05f32..=2.0, 0.05f32..=2.0),
+            cam in -4000.0f32..4000.0,
+            zoom in 0.05f32..=2.0,
+            page_zoom in 0.05f32..=2.0,
             overview in any::<bool>(),
             gaps in (0u32..=200, 0u32..=200),
             border in 0u32..=8,
@@ -3700,9 +3667,9 @@ mod tests {
             screen in prop_output_rect(),
             workarea in prop_output_rect(),
             wins in proptest::collection::vec(prop_win(), 0..=8),
-            cam in (-4000.0f32..4000.0, -4000.0f32..4000.0),
-            zoom in (0.05f32..=2.0, 0.05f32..=2.0),
-            page_zoom in (0.05f32..=2.0, 0.05f32..=2.0),
+            cam in -4000.0f32..4000.0,
+            zoom in 0.05f32..=2.0,
+            page_zoom in 0.05f32..=2.0,
             overview in any::<bool>(),
             gaps in (0u32..=200, 0u32..=200),
             border in 0u32..=8,
@@ -3724,9 +3691,9 @@ mod tests {
             );
             let mut applied = AppliedState::default();
             let first = projected(&state, &cfg, 0);
-            let placed = first.as_ref().map_or(0, |(p, _)| p.len());
-            let emitted = first.as_ref().map(|(placements, raise)| {
-                let desired = DesiredState::from_placements(placements, raise);
+            let placed = first.as_ref().map_or(0, Placements::len);
+            let emitted = first.as_ref().map(|placements| {
+                let desired = DesiredState::from_placements(placements);
                 configures(reconcile(&desired, &state, &mut applied))
             });
             // Nothing is lost on the way there either: a window X11 has never
@@ -3740,7 +3707,7 @@ mod tests {
 
             // The write-back `emit_geometry` performs once the requests are on
             // the wire: the client now really has this rect and this border.
-            if let Some((placements, _raise)) = &first {
+            if let Some(placements) = &first {
                 for (win, rect, bw) in placements {
                     if let Some(c) = state.clients.get_mut(win) {
                         c.geom = *rect;
@@ -3749,8 +3716,8 @@ mod tests {
                     }
                 }
             }
-            let reemitted = projected(&state, &cfg, 0).map(|(placements, raise)| {
-                let desired = DesiredState::from_placements(&placements, &raise);
+            let reemitted = projected(&state, &cfg, 0).map(|placements| {
+                let desired = DesiredState::from_placements(&placements);
                 configures(reconcile(&desired, &state, &mut applied))
             });
             prop_assert!(

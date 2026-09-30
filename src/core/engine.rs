@@ -3,7 +3,7 @@
 //! What owns: `Engine` (`State` + `Cfg` + `EventBus`), and the wiring that maps
 //! a wire `Action` into typed `Command`s via `dispatch`.
 //!
-//! Exposes: `Engine::new`, `apply_camera_cfg`, `subscribe`/`notify`, `query`,
+//! Exposes: `Engine::new`, `subscribe`/`notify`, `query`,
 //! `execute` (single command), `execute_batch` (coalesced transaction), and
 //! `dispatch` (canonical wire → command adapter).
 //!
@@ -41,28 +41,6 @@ impl Engine {
             state: State::new(),
             cfg,
             bus: EventBus::new(),
-        }
-    }
-
-    /// Push the configured scroll-camera spring constants
-    /// (`Cfg::animations.stiffness` / `Cfg::animations.damping`) into every
-    /// workspace camera. `Camera::new` can't take them at construction — a
-    /// workspace is built from its tag alone and `Monitor::reconcile_workspaces`
-    /// creates fresh ones on hotplug — so the configured values reach the
-    /// runtime scroll physics here. Call after every (re)build of the
-    /// monitor/workspace set: startup, config reload, and `RandR` hotplug.
-    pub fn apply_camera_cfg(&mut self) {
-        // Every spring value coming from config is sanitized against the
-        // real stability region of the integrator (see `sanitize_spring`), so a
-        // NaN/inf or zero/negative stiffness from a config file can never
-        // reach the physics.
-        let (stiffness, damping) =
-            sanitize_spring(self.cfg.animations.stiffness, self.cfg.animations.damping);
-        for mon in &mut self.state.monitors {
-            for ws in &mut mon.workspaces {
-                ws.camera.stiffness = stiffness;
-                ws.camera.damping = damping;
-            }
         }
     }
 

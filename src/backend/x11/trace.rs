@@ -1,7 +1,7 @@
 //! Fixed-size in-memory trace of one session, dumped as TSV on shutdown.
 //!
-//! Enabled at runtime with `MAVERICK_COMPOSITOR_TRACE=1` (path overridable with
-//! `MAVERICK_COMPOSITOR_TRACE_PATH`, default `$TMPDIR/maverick-compositor-<pid>.trace`),
+//! Enabled at runtime with `MAVERICK_TRACE=1` (path overridable with
+//! `MAVERICK_TRACE_PATH`, default `$TMPDIR/maverick-<pid>.trace`),
 //! not by a cargo feature. This is a distinct mechanism from the compile-time
 //! `input-trace` / `window-trace` stderr macros in `render.rs`, `pointer.rs` and
 //! `reconciler.rs`: those cost nothing when the feature is off, while this ring
@@ -95,11 +95,11 @@ fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 pub(super) fn init() {
-    if std::env::var_os("MAVERICK_COMPOSITOR_TRACE").as_deref() != Some(std::ffi::OsStr::new("1")) {
+    if std::env::var_os("MAVERICK_TRACE").as_deref() != Some(std::ffi::OsStr::new("1")) {
         return;
     }
-    let path = std::env::var_os("MAVERICK_COMPOSITOR_TRACE_PATH").map_or_else(
-        || std::env::temp_dir().join(format!("maverick-compositor-{}.trace", std::process::id())),
+    let path = std::env::var_os("MAVERICK_TRACE_PATH").map_or_else(
+        || std::env::temp_dir().join(format!("maverick-{}.trace", std::process::id())),
         PathBuf::from,
     );
     BUFFER.with(|slot| {
@@ -294,7 +294,7 @@ pub(super) fn dump(end: TraceEnd) -> DumpReport {
         let mut out = io::BufWriter::new(std::fs::File::create(&path)?);
         writeln!(
             out,
-            "# maverick_compositor_trace_v1 clock=Instant units=ns x_time=server_ms capacity={} dropped={} truncated={} end={end} x_teardown={} swap_returned_is_not_visible=true off_geometry_is_not_gl_present=true",
+            "# maverick_trace_v1 clock=Instant units=ns x_time=server_ms capacity={} dropped={} truncated={} end={end} x_teardown={}",
             buffer.capacity,
             buffer.dropped,
             buffer.truncated,

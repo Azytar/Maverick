@@ -2,17 +2,16 @@
 //!
 //! `manage` is the core of the client lifecycle. It creates
 //! a `Client`, pipelines the property reads, parses
-//! title/class/window-type/state/size-hints/bypass-hint,
+//! title/class/window-type/state/size-hints,
 //! applies rules, and maps the window. `unmanage` reverses
-//! it: remove from state, clean up the compositor texture,
-//! refocus.
+//! it: remove from state and refocus.
 //!
 //! # Manage pipeline (pipelined property read)
 //!
 //! All 8 `get_property` cookies are pipelined before any
 //! `.reply()` is called — one RTT for all properties,
 //! not 8. The properties are: title, class, instance,
-//! window type, state, hints, size hints, bypass hint.
+//! window type, state, hints, size hints.
 //!
 //! # Transient deferral
 //!
@@ -216,14 +215,6 @@ impl WindowManager {
                 0,
                 18,
             )?;
-            let c_bypass = self.conn.get_property(
-                false,
-                win,
-                self.atoms.net_wm_bypass_compositor,
-                AtomEnum::CARDINAL,
-                0,
-                1,
-            )?;
 
             if let Ok(ref prop) = c_title_net.reply() {
                 if !prop.value.is_empty() {
@@ -343,14 +334,6 @@ impl WindowManager {
                             client.flags.set(WinFlags::FIXED);
                             client.flags.set(WinFlags::FLOAT);
                         }
-                    }
-                }
-            }
-
-            if let Ok(ref prop) = c_bypass.reply() {
-                if let Some(v) = prop.value32().and_then(|mut i| i.next()) {
-                    if v == 1 || v == 2 {
-                        client.bypass_hint = Some(v);
                     }
                 }
             }
@@ -509,7 +492,6 @@ impl WindowManager {
                 self.engine.state.monitors[mon_i].workspaces[ws_i]
                     .floats
                     .push(win);
-                self.stack_dirty = true;
             } else {
                 // Capture emptiness BEFORE adding so we know whether to snap.
                 let was_empty = self.engine.state.monitors[mon_i].workspaces[ws_i].is_empty();

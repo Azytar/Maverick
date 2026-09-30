@@ -315,11 +315,9 @@ pub fn build(spec: &Spec) -> Built {
             st.monitors[mi].focus_stack = own.iter().rev().copied().take(3).collect();
         }
 
-        // A camera caught mid-transition plus a second workspace already
-        // parked, so both the animated and the settled branch of every camera
-        // property are reached.
+        // A scrolled camera, so projections that depend on the ribbon offset
+        // are not all exercised at 0.0.
         st.monitors[mi].workspaces[0].camera.retarget(120.0);
-        st.monitors[mi].workspaces[0].camera.step(1.0 / 60.0);
     }
 
     // The maximize overlay is presented only on the active workspace of a
