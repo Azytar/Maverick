@@ -7,6 +7,25 @@ All notable changes to this project are documented here. Format follows
 
 ### Fixed
 
+- **A successful install left the binaries unreachable.** The default prefix
+  is `$HOME/.local`, and `$HOME/.local/bin` is not on `PATH` on every
+  distribution, so the first thing a person who had just run `./install.sh`
+  got from their shell was `maverick: command not found` — and the installer's
+  answer was a line to paste into a profile by hand. That was also never the
+  whole fix: `export PATH` dies with the terminal it was typed into.
+
+  The installer now does that step itself. When the bin directory is missing
+  from `PATH` it offers to write one marked, self-guarding block into the two
+  startup files the caller's shell actually reads (the login file plus the
+  interactive rc of `$SHELL`, fish syntax where fish is what it reads), and
+  never outside `$HOME`. It never answers a question twice: a file that
+  already names the directory — Debian and Ubuntu ship such a line in
+  `~/.profile` — is reported rather than rewritten, a re-run finds its own
+  block and changes nothing, and the block is a no-op if the directory turns
+  out to be there after all. `--yes` accepts the offer, `--add-path` skips the
+  question, and `--no-path` refuses it while still printing the `export` line,
+  so a caller who does not want their startup files touched is told exactly
+  what to run instead.
 - **Losing the X server left a stale identity record and lost the compositor
   trace.** A window manager whose X server was killed exited without running its
   teardown at all, so its identity record stayed in the runtime directory

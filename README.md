@@ -259,11 +259,25 @@ needs no privileges:
 ./install.sh
 ```
 
-That builds and installs into `$HOME/.local`, so make sure it is on `PATH`:
+That builds and installs into `$HOME/.local`. When that directory is not
+already on `PATH`, the installer asks before adding a marked block to the
+startup files your shell reads (`~/.profile` plus the rc file of your login
+shell) and then tells you to open a new terminal:
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+# >>> maverick (install.sh) >>>
+# Added by install.sh — delete these lines to undo.
+case ":$PATH:" in
+  *":/home/you/.local/bin:"*) ;;
+  *) PATH="/home/you/.local/bin:$PATH"; export PATH ;;
+esac
+# <<< maverick (install.sh) <<<
 ```
+
+`--yes` accepts that block, `--add-path` writes it without asking, and
+`--no-path` leaves your startup files alone and prints the `export` line
+instead. A startup file that already names the directory — Debian and Ubuntu
+ship such a line in `~/.profile` — is reported rather than rewritten.
 
 Other forms:
 
@@ -278,6 +292,8 @@ Other forms:
 ./install.sh --yes --with-compositor
 # Additionally publish the session file where a display manager reads it.
 ./install.sh --system --xsessions-dir /usr/share/xsessions
+# Leave shell startup files alone and get the export line printed instead.
+./install.sh --no-path
 ```
 
 The prefix is a hard boundary: the installer writes nothing outside the prefix
@@ -285,6 +301,10 @@ it was given, and it never runs `sudo`. A prefix you cannot write is reported
 as a permission error rather than escalated around, so a system-wide install
 needs write access to `/usr/local` arranged by you — the installer will tell
 you so plainly if it does not have it.
+
+Outside the prefix it touches only your own files: `~/.config/maverick/config.toml`,
+and — only when the bin directory is missing from `PATH`, and never under
+`--no-path` — the marked block above inside a startup file under `$HOME`.
 
 The session entry is written inside the prefix (`$prefix/share/xsessions`).
 Display managers generally read only system locations, which is why publishing
@@ -305,9 +325,10 @@ directory. See `./install.sh --help` for the remaining options.
 
 To remove an installation, delete the two binaries from `$prefix/bin` and the
 session file from `$prefix/share/xsessions`. Nothing else is installed into the
-prefix; the only other file the installer may write is your own
-`~/.config/maverick/config.toml`, and a retained build log under
-`~/.local/share/maverick/` if you pass `--keep-log`.
+prefix; the only other files the installer may write are your own
+`~/.config/maverick/config.toml`, the marked PATH block in a startup file
+(remove the lines between the `# >>> maverick` markers to undo it), and a
+retained build log under `~/.local/share/maverick/` if you pass `--keep-log`.
 
 ## Running
 

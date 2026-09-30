@@ -5,8 +5,10 @@
 #
 #  Installs the release binaries into a prefix. The default prefix is
 #  $HOME/.local, so a normal installation needs no privileges. A system or
-#  custom prefix is always explicit, and the installer never writes outside
-#  the prefix it was given and never escalates privileges on its own.
+#  custom prefix is always explicit, and outside the prefix the installer
+#  writes only the caller's own files — the config under ~/.config and, when
+#  the bin directory is missing from PATH and the caller agrees, one marked
+#  block in a shell startup file. It never escalates privileges on its own.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -19,6 +21,9 @@ XSESSIONS_DIR=""
 YES=false
 NO_CONFIG=false
 NO_BUILD=false
+# "" = ask when the bin directory is missing from PATH, "yes" = do it without
+# asking, "no" = never touch a shell startup file.
+PATH_CHOICE=""
 NO_ANIM="${MAVERICK_NO_ANIM:-0}"
 WITH_COMPOSITOR=""
 KEEP_LOG=false
@@ -39,6 +44,8 @@ while [[ $# -gt 0 ]]; do
         --yes|-y)    YES=true; shift ;;
         --no-config) NO_CONFIG=true; shift ;;
         --no-build)  NO_BUILD=true; shift ;;
+        --add-path)  PATH_CHOICE="yes"; shift ;;
+        --no-path)   PATH_CHOICE="no"; shift ;;
         --no-anim)   NO_ANIM=1; shift ;;
         --keep-log)  KEEP_LOG=true; shift ;;
         --with-compositor)   WITH_COMPOSITOR="yes"; shift ;;
@@ -49,8 +56,10 @@ while [[ $# -gt 0 ]]; do
 Usage: ./install.sh [options]
 
 Installs maverick and maverickctl into a prefix. The default prefix is
-$HOME/.local and needs no privileges. Nothing is ever written outside the
-selected prefix, and the installer never invokes sudo.
+$HOME/.local and needs no privileges. Outside the prefix the installer writes
+only your own files — the config under ~/.config and, when the bin directory
+is missing from PATH, a marked block in a shell startup file (see --no-path).
+It never invokes sudo.
 
 Options:
   --system         Install into /usr/local (requires write access to it)
@@ -63,6 +72,10 @@ Options:
   --yes, -y        Skip installer confirmations
   --no-config      Don't create ~/.config/maverick/config.toml
   --no-build       Skip cargo build (use existing target/release/*)
+  --add-path       Add the bin directory to PATH in your shell startup files
+                   without asking. Offered by default when it is missing.
+  --no-path        Never modify shell startup files; print the export line
+                   to run instead.
   --no-anim        Disable all animations (or export MAVERICK_NO_ANIM=1)
   --keep-log       Keep build log even on success (saved to share/maverick/)
   --with-compositor         Build WITH compositor (experimental)
@@ -83,6 +96,12 @@ Notes:
   $XDG_CACHE_HOME; the checkout is never used as a build directory.
   Binaries are compiled with -C target-cpu=native for maximum performance
   on THIS machine. They will NOT work on different CPU architectures.
+  If the bin directory is not already on PATH, the installer offers to add a
+  marked, idempotent block to your shell startup files — the login file of
+  your shell plus its interactive rc, all of them inside $HOME. The block
+  guards itself, so re-running the installer adds nothing twice, and a
+  startup file that already names the directory is left alone. --yes accepts
+  the offer, --no-path refuses it.
 
 Examples:
   ./install.sh
@@ -299,12 +318,19 @@ t() {
             tip)             echo "consejo" ;;
             tip_text)        echo "maverick --check-config valida tu config sin iniciar el WM" ;;
             s_binaries)      echo "binarios" ;;
+            s_path)          echo "PATH" ;;
             s_session)       echo "sesión" ;;
             s_config)        echo "config" ;;
             s_mode)          echo "modo" ;;
             s_time)          echo "tiempo" ;;
             installed)       echo "instalado" ;;
             not_in_path)     echo "no está en PATH — añade:" ;;
+            path_ok)         echo "ya en PATH" ;;
+            path_q)          echo "¿Añadir a PATH en" ;;
+            path_added)      echo "PATH añadido a" ;;
+            path_configured) echo "ya configurado en" ;;
+            path_restart)    echo "abre una nueva terminal para que surta efecto" ;;
+            path_write_fail) echo "no se pudo añadir a PATH" ;;
             checks_ok)       echo "todos los sistemas listos" ;;
             ready_line)      echo "listo para el despegue" ;;
             disk_space_warn) echo "espacio en disco bajo (<2GB libres)" ;;
@@ -366,12 +392,19 @@ t() {
             tip)             echo "tip" ;;
             tip_text)        echo "maverick --check-config validates your config without starting the WM" ;;
             s_binaries)      echo "binaries" ;;
+            s_path)          echo "PATH" ;;
             s_session)       echo "session" ;;
             s_config)        echo "config" ;;
             s_mode)          echo "mode" ;;
             s_time)          echo "time" ;;
             installed)       echo "installed" ;;
             not_in_path)     echo "not in PATH — add:" ;;
+            path_ok)         echo "already on PATH" ;;
+            path_q)          echo "Add to PATH in" ;;
+            path_added)      echo "PATH added to" ;;
+            path_configured) echo "already configured in" ;;
+            path_restart)    echo "open a new terminal for it to take effect" ;;
+            path_write_fail) echo "could not add to PATH" ;;
             checks_ok)       echo "all systems go" ;;
             ready_line)      echo "cleared for takeoff" ;;
             disk_space_warn) echo "low disk space (<2GB free)" ;;
@@ -955,6 +988,8 @@ _panel_draw() {
     printf '  %s├%s┤%s\n' "$GREY" "$h" "$RESET"
     _panel_row "$(t s_binaries)" "$BIN_DIR · $RUNTIME_BIN_COUNT"
     _nap 0.05
+    _panel_row "$(t s_path)"     "${PATH_VALUE:-$(t skipped_word)}"
+    _nap 0.05
     _panel_row "$(t s_session)"  "${SESSION_VALUE:-$(t skipped_word)}"
     _nap 0.05
     _panel_row "$(t s_config)"   "${CONFIG_VALUE:-$(t skipped_word)}"
@@ -1072,6 +1107,239 @@ check_disk_space() {
             fi
         fi
         return 1
+    fi
+    return 0
+}
+
+# ── PATH ─────────────────────────────────────────────────────────────────────
+# The default prefix installs into $HOME/.local/bin, which plenty of
+# distributions do not put on PATH. A person who has just run an installer
+# should not have to edit a startup file by hand to run what it installed, so
+# the installer does that part too: one marked block, in the two files the
+# caller's shell actually reads, guarded so it is a no-op once the directory
+# is there.
+#
+# Three properties keep this from being the kind of edit that teaches people
+# to distrust installers. It is asked for first (and refused outright with
+# --no-path). It never leaves $HOME. And it never answers a question that has
+# been answered: a startup file that already names the directory is reported
+# rather than rewritten, so a distribution's own ~/.local/bin line is respected
+# instead of doubled up.
+PATH_MARKER_BEGIN='# >>> maverick (install.sh) >>>'
+PATH_MARKER_END='# <<< maverick (install.sh) <<<'
+PATH_FILES=()
+PATH_RESULT=""   # in-path | configured | added | refused | failed
+PATH_VALUE=""
+PATH_FAILED=""
+# Every startup file the installer understands, for the "is this already
+# handled?" probe. A file outside this set is never read, never written.
+PATH_KNOWN_FILES=(
+    "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.bashrc"
+    "$HOME/.zshenv" "$HOME/.zprofile" "$HOME/.zshrc"
+    "${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
+)
+
+# The block itself — POSIX or fish, depending on the file it is going into.
+# The directory is expanded and quoted so the guard matches in a shell where
+# $HOME is not exported and so a prefix containing spaces (which the installer
+# otherwise supports end to end) stays one word here too.
+path_block() {
+    local file="$1" dir="$BIN_DIR"
+    dir="${dir//\\/\\\\}"
+    dir="${dir//\"/\\\"}"
+    printf '%s\n' "$PATH_MARKER_BEGIN"
+    printf '%s\n' '# Added by install.sh — delete these lines to undo.'
+    if [[ "$file" == *"/fish/"* ]]; then
+        printf 'if not contains -- "%s" $PATH\n' "$dir"
+        printf '    set -gx PATH "%s" $PATH\n' "$dir"
+        printf 'end\n'
+    else
+        printf 'case ":$PATH:" in\n'
+        printf '  *":%s:"*) ;;\n' "$dir"
+        printf '  *) PATH="%s:$PATH"; export PATH ;;\n' "$dir"
+        printf 'esac\n'
+    fi
+    printf '%s\n' "$PATH_MARKER_END"
+    return 0
+}
+
+# The directory is under $HOME, so a startup file may name it three ways: as
+# it is, or with $HOME spelled with braces or without. Recognising only the
+# expanded form would call a distribution's own line "unconfigured" and append
+# a second answer to a working one.
+path_dir_is_named() {
+    local f rest
+    local -a forms=("$BIN_DIR") args=()
+    if [[ -n "${HOME:-}" && "$BIN_DIR" == "$HOME/"* ]]; then
+        rest="${BIN_DIR#"$HOME"/}"
+        forms+=('${HOME}/'"$rest" '$HOME/'"$rest")
+    fi
+    # An empty pattern would match every line, so the arguments are built
+    # first and only from forms that actually exist.
+    for f in "${forms[@]}"; do args+=(-e "$f"); done
+    for f in "${PATH_KNOWN_FILES[@]}"; do
+        [[ -f "$f" ]] || continue
+        if grep -qF "${args[@]}" -- "$f" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Which files this caller's shell reads: its login file and its interactive
+# rc. The choice follows $SHELL rather than the parent process, because what
+# has to work is the next terminal the user opens, not this one.
+path_target_files() {
+    local name login="" rc=""
+    name="${SHELL:-}"
+    name="${name##*/}"
+    [[ -n "$name" ]] || name="sh"
+    case "$name" in
+        bash)
+            # bash reads the first of these three for a login shell, and
+            # ~/.bashrc for an interactive non-login one.
+            if   [[ -f "$HOME/.bash_profile" ]]; then login="$HOME/.bash_profile"
+            elif [[ -f "$HOME/.bash_login" ]];   then login="$HOME/.bash_login"
+            else                                       login="$HOME/.profile"; fi
+            rc="$HOME/.bashrc" ;;
+        zsh)
+            # zsh reads no POSIX profile of its own, so ~/.profile is chosen
+            # only when it is already there; ~/.zshrc is created if missing,
+            # because it is the file an interactive zsh reads either way.
+            if   [[ -f "$HOME/.zprofile" ]]; then login="$HOME/.zprofile"
+            elif [[ -f "$HOME/.profile" ]];  then login="$HOME/.profile"; fi
+            rc="$HOME/.zshrc" ;;
+        fish)
+            rc="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish" ;;
+        csh|tcsh|nu|elvish|xonsh)
+            # These read no POSIX startup file, and writing POSIX syntax into
+            # the one they do read would break it instead of adding a PATH
+            # entry. Nothing to target: the export line is the honest answer.
+            PATH_FILES=()
+            return 0 ;;
+        *)
+            login="$HOME/.profile" ;;
+    esac
+    PATH_FILES=()
+    local f
+    for f in "$login" "$rc"; do
+        # A startup file outside $HOME is not this installer's to edit (an
+        # XDG_CONFIG_HOME pointed at a system path, say). No writes there:
+        # the caller gets the export line instead.
+        [[ -n "$f" && "$f" == "$HOME/"* ]] || continue
+        if [[ ${#PATH_FILES[@]} -gt 0 && "${PATH_FILES[${#PATH_FILES[@]}-1]}" == "$f" ]]; then
+            continue
+        fi
+        PATH_FILES+=("$f")
+    done
+    return 0
+}
+
+# Rewrite one startup file with the current block. A block a previous install
+# left behind is dropped first, so the file holds exactly one answer, and the
+# file is rewritten in place rather than replaced: mode, owner and inode are
+# not this installer's to change.
+path_write_block() {
+    local file="$1" tmp
+    mkdir -p -- "$(dirname -- "$file")" 2>/dev/null || return 1
+    tmp="$(mktemp "${INSTALL_TMP:-${TMPDIR:-/tmp}}/path.XXXXXX" 2>/dev/null)" || return 1
+    if [[ -f "$file" ]]; then
+        awk -v b="$PATH_MARKER_BEGIN" -v e="$PATH_MARKER_END" '
+            $0 == b { skip = 1; next }
+            $0 == e { skip = 0; next }
+            skip    { next }
+                      { print }
+        ' "$file" >"$tmp" || { rm -f -- "$tmp"; return 1; }
+    fi
+    path_block "$file" >>"$tmp" || { rm -f -- "$tmp"; return 1; }
+    cat "$tmp" >"$file" || { rm -f -- "$tmp"; return 1; }
+    rm -f -- "$tmp"
+    return 0
+}
+
+# The files as the summary shows them: shortened against $HOME so the line
+# fits a panel and reads like a path the user recognises.
+path_files_display() {
+    local out="" f s
+    for f in "${PATH_FILES[@]}"; do
+        if [[ -n "${HOME:-}" && "$f" == "$HOME/"* ]]; then
+            s="~${f#"$HOME"}"
+        else
+            s="$f"
+        fi
+        [[ -z "$out" ]] || out+=" · "
+        out+="$s"
+    done
+    printf '%s' "$out"
+    return 0
+}
+
+# Decided, prompted and (when accepted) written. The result is reported by the
+# summary rather than here, so the decision is taken after the install is
+# known to have succeeded and before the panel that describes it.
+path_setup() {
+    PATH_FILES=()
+    PATH_VALUE="$(t skipped_word)"
+    PATH_RESULT="refused"
+    PATH_FAILED=""
+
+    # The common case must cost nothing: a distribution that already ships
+    # this directory on PATH, or a --system install into /usr/local, gets no
+    # prompt and no file.
+    if [[ ":${PATH:-}" == *":$BIN_DIR:"* ]]; then
+        PATH_RESULT="in-path"
+        PATH_VALUE="$(t path_ok)"
+        return 0
+    fi
+
+    [[ "$PATH_CHOICE" != "no" ]] || return 0
+
+    path_target_files
+    if [[ ${#PATH_FILES[@]} -eq 0 ]]; then
+        # No file this installer may write — a shell with no POSIX startup
+        # file, or one configured to keep its rc outside $HOME. Nothing was
+        # attempted, so this reads as a refusal rather than a failure.
+        PATH_RESULT="refused"
+        return 0
+    fi
+
+    # The directory is named by a startup file already: the answer exists and
+    # this shell is simply older than it. Appending would duplicate a line
+    # that works, so say where it is and leave every file untouched.
+    if path_dir_is_named; then
+        PATH_RESULT="configured"
+        PATH_VALUE="$(path_files_display)"
+        return 0
+    fi
+
+    # No terminal, no answer to give: take the default, exactly as the install
+    # confirmation itself does. --add-path and --yes skip the question too.
+    if [[ "$PATH_CHOICE" != "yes" && "$YES" != true && -t 0 ]]; then
+        ask "$(t path_q) $(path_files_display)?" "$(t confirm_hint)"
+        if ! is_yes yes; then
+            echo
+            return 0
+        fi
+        echo
+    fi
+
+    local f ok=0
+    for f in "${PATH_FILES[@]}"; do
+        if path_write_block "$f"; then
+            ok=$(( ok + 1 ))
+        elif [[ -z "$PATH_FAILED" ]]; then
+            PATH_FAILED="$f"
+        fi
+    done
+    if (( ok == 0 )); then
+        PATH_RESULT="failed"
+        PATH_VALUE="$(t skipped_word)"
+        return 0
+    fi
+    PATH_RESULT="added"
+    PATH_VALUE="$(path_files_display)"
+    if [[ -n "$PATH_FAILED" ]]; then
+        printf '  %s⡿⠿%s  %s %s\n' "$YELLOW" "$RESET" "$PATH_FAILED" "$(t path_write_fail)"
     fi
     return 0
 }
@@ -1540,6 +1808,10 @@ fi
 BLOCK_OPEN=0
 _now_ms
 TOTAL_MS=$(( NOW_MS - T_START ))
+# The PATH decision belongs here: the install has succeeded, the live block is
+# closed and timed, and the summary that reports the outcome is not drawn yet.
+# It is timed out of TOTAL_MS — a prompt is the caller's seconds, not ours.
+path_setup
 
 # ── resumen + celebración ────────────────────────────────────────────────────
 echo
@@ -1551,11 +1823,34 @@ _panel_draw
 echo
 printf '  %s%s%s\n' "$DIM" "$(t done_hint)" "$RESET"
 printf '  %s⠤%s  %s%s%s\n' "$DIM" "$RESET" "$BOLD" "$BIN_DIR/maverick" "$RESET"
-if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-    echo
-    printf '  %s⡿⠿%s  %s: %s\n' "$YELLOW" "$RESET" "$BIN_DIR" "$(t not_in_path)"
-    printf '  %s  export PATH="%s:$PATH"%s\n' "$DIM" "$BIN_DIR" "$RESET"
-fi
+
+# What happened to PATH, in full. The panel shows the outcome in one line;
+# this is the part the caller has to act on, so every branch either points at
+# the files it touched or hands over the command to run instead.
+case "$PATH_RESULT" in
+    in-path) ;;
+    configured)
+        echo
+        printf '  %s⠆%s  %s: %s%s%s\n' "$GREY" "$RESET" \
+            "$(t path_configured)" "$BOLD" "$(path_files_display)" "$RESET"
+        printf '  %s  %s%s\n' "$DIM" "$(t path_restart)" "$RESET"
+        ;;
+    added)
+        echo
+        printf '  %s⠤%s  %s: %s%s%s\n' "$GREEN" "$RESET" \
+            "$(t path_added)" "$BOLD" "$(path_files_display)" "$RESET"
+        printf '  %s  %s%s\n' "$DIM" "$(t path_restart)" "$RESET"
+        ;;
+    refused|failed)
+        echo
+        if [[ "$PATH_RESULT" == "failed" && -n "$PATH_FAILED" ]]; then
+            printf '  %s⡿⠿%s  %s: %s\n' "$YELLOW" "$RESET" "$PATH_FAILED" "$(t path_write_fail)"
+        else
+            printf '  %s⡿⠿%s  %s: %s\n' "$YELLOW" "$RESET" "$BIN_DIR" "$(t not_in_path)"
+        fi
+        printf '  %s  export PATH="%s:$PATH"%s\n' "$DIM" "$BIN_DIR" "$RESET"
+        ;;
+esac
 
 # Report where the retained log went, if one was kept.
 if [[ -n "$FINAL_LOG_PATH" && -f "$FINAL_LOG_PATH" ]]; then

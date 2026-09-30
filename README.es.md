@@ -291,12 +291,25 @@ instalación por usuario que no necesita privilegios:
 ./install.sh
 ```
 
-Esto compila e instala en `$HOME/.local`, así que asegúrate de que esté en
-`PATH`:
+Esto compila e instala en `$HOME/.local`. Si ese directorio no está ya en
+`PATH`, el instalador pregunta antes de añadir un bloque marcado a los
+ficheros de inicio que lee tu shell (`~/.profile` más el rc de tu shell de
+login) y luego te pide abrir una terminal nueva:
 
 ```bash
-export PATH="$HOME/.local/bin:$PATH"
+# >>> maverick (install.sh) >>>
+# Added by install.sh — delete these lines to undo.
+case ":$PATH:" in
+  *":/home/tu/.local/bin:"*) ;;
+  *) PATH="/home/tu/.local/bin:$PATH"; export PATH ;;
+esac
+# <<< maverick (install.sh) <<<
 ```
+
+`--yes` acepta ese bloque, `--add-path` lo escribe sin preguntar y `--no-path`
+no toca tus ficheros de inicio: en su lugar imprime la línea `export`. Un
+fichero de inicio que ya nombra el directorio — Debian y Ubuntu traen esa
+línea en `~/.profile` — se informa en lugar de reescribirse.
 
 Otras formas:
 
@@ -311,6 +324,8 @@ Otras formas:
 ./install.sh --yes --with-compositor
 # Publicar además el archivo de sesión donde lo lee un display manager.
 ./install.sh --system --xsessions-dir /usr/share/xsessions
+# No tocar los ficheros de inicio y recibir la línea export en su lugar.
+./install.sh --no-path
 ```
 
 El prefijo es una frontera estricta: el instalador no escribe nada fuera del
@@ -318,6 +333,11 @@ prefijo indicado y nunca ejecuta `sudo`. Un prefijo en el que no puedas
 escribir se informa como error de permisos en lugar de escalarlo, así que una
 instalación en todo el sistema necesita que tú mismo arregles el acceso de
 escritura a `/usr/local` — el instalador te lo dirá claramente si no lo tiene.
+
+Fuera del prefijo solo toca tus propios archivos:
+`~/.config/maverick/config.toml` y — solo si el directorio de binarios no está
+en `PATH`, y nunca con `--no-path` — el bloque marcado de arriba dentro de un
+fichero de inicio bajo `$HOME`.
 
 La entrada de sesión se escribe dentro del prefijo
 (`$prefix/share/xsessions`). Los display managers normalmente solo leen
@@ -339,10 +359,12 @@ directorio de compilación. Véase `./install.sh --help` para las opciones
 restantes.
 
 Para desinstalar, borra los dos binarios de `$prefix/bin` y el archivo de
-sesión de `$prefix/share/xsessions`. No se instala nada más en el prefijo; el
-único otro archivo que el instalador puede escribir es tu propio
-`~/.config/maverick/config.toml`, y un log de compilación retenido bajo
-`~/.local/share/maverick/` si usas `--keep-log`.
+sesión de `$prefix/share/xsessions`. No se instala nada más en el prefijo; los
+únicos otros archivos que el instalador puede escribir son tu propio
+`~/.config/maverick/config.toml`, el bloque marcado de PATH en un fichero de
+inicio (borra las líneas entre los marcadores `# >>> maverick` para deshacerlo)
+y un log de compilación retenido bajo `~/.local/share/maverick/` si usas
+`--keep-log`.
 
 ## Ejecución
 

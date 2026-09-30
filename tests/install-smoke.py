@@ -10,15 +10,30 @@ reported as a successful install, and that a repeated install converges.
 """
 import os
 from pathlib import Path
+import pty
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 BINS = ("maverick", "maverickctl")
 # Obsolete artifacts that must never reappear in an install.
 OBSOLETE = ("maverick-setup", "maverick-msg")
+
+# The marker the installer brackets its PATH block with. A startup file that
+# gains one of these carries a line the user did not write, so the count is
+# asserted, not just the presence.
+PATH_MARKER = "# >>> maverick (install.sh) >>>"
+
+# Every startup file the installer is allowed to touch. All of them live
+# inside $HOME; a path outside it must never appear in this list.
+def startup_files(box):
+    return [box.home / name for name in
+            (".profile", ".bash_profile", ".bash_login", ".bashrc",
+             ".zshenv", ".zprofile", ".zshrc", ".config/fish/config.fish")]
 
 # A stand-in for a real Maverick binary: it answers the three commands the
 # installer verifies with, so a passing install means the installer really
@@ -142,6 +157,65 @@ class Sandbox:
                 for p in paths if p.exists()}
 
 
+def interactive_install(box, keys, args=()):
+    """Run install.sh on a real pty, answering each prompt as it appears.
+
+    The PATH offer is only made when stdin is a terminal, so without a pty
+    there is no way to reach the branch that decides it. Answers are queued
+    against the text of the question rather than a fixed order, so a prompt
+    that is skipped (no existing config, say) cannot shift the rest.
+    """
+    master, slave = pty.openpty()
+    env = box.env(SHELL="/bin/bash", TERM="xterm-256color")
+    command = ["bash", str(box.repo / "install.sh"), "--no-build", "--lang", "en"]
+    command += list(args)
+    proc = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
+                            env=env, close_fds=True)
+    os.close(slave)
+    out = bytearray()
+    pending = [dict(k) for k in keys]
+    deadline = time.time() + 60
+    while time.time() < deadline and proc.poll() is None:
+        ready, _, _ = select.select([master], [], [], 0.2)
+        if ready:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        for index, key in enumerate(pending):
+            if key["q"].encode() in out:
+                pending.pop(index)
+                os.write(master, key["a"].encode())
+                break
+    while True:
+        ready, _, _ = select.select([master], [], [], 0.3)
+        if not ready:
+            break
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+    os.close(master)
+    if proc.poll() is None:
+        # Never leave a child stuck on a prompt nobody answered; the caller's
+        # assertions on the exit status are what reports the hang.
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    else:
+        proc.wait(timeout=30)
+    return proc.returncode, out.decode("utf-8", "replace")
+
+
 def check_success(box, result, expect_prefix=None):
     """Assertions that must hold after any successful installation."""
     name = expect_prefix or box.prefix
@@ -202,8 +276,168 @@ def suite_default_prefix_is_user_local():
         print("PASS: bare ./install.sh defaults to $HOME/.local with no sudo")
 
 
+def suite_path_setup():
+    """A default install must leave the binaries reachable from the next shell.
+
+    The binaries land in $HOME/.local/bin, which is not on PATH on every
+    distribution, and telling a person who has just run an installer to export
+    PATH by hand is the one step they are most likely to get wrong. The
+    installer writes a marked block into the shell's own startup files
+    instead. What matters is not that the block exists but that sourcing the
+    file resolves maverick, and that a repeat install adds no second answer.
+    """
+    with tempfile.TemporaryDirectory(prefix="maverick-install-test-") as d:
+        box = Sandbox(Path(d))
+        box.seed_build()
+        env = box.env(SHELL="/bin/bash")
+        result = box.install("--no-build", env=env)
+        assert result.returncode == 0, (result.stdout[-2000:], result.stderr[-2000:])
+        touched = [p for p in startup_files(box) if p.exists()]
+        assert touched, "the installer wrote no shell startup file"
+        for path in touched:
+            text = path.read_text()
+            assert PATH_MARKER in text, f"{path} carries no PATH block"
+            assert text.count(PATH_MARKER) == 1, f"{path} holds more than one PATH block"
+            assert str(box.home / ".local/bin") in text, path
+        # Execute the block: in a shell that starts without the directory on
+        # PATH, sourcing the file must resolve maverick to what was installed.
+        profile = box.home / ".profile"
+        assert profile.is_file(), "no POSIX profile for a bash login shell"
+        probe = subprocess.run(
+            ["sh", "-c", f'. "{profile}"; command -v maverick'],
+            capture_output=True, text=True,
+            env={"HOME": str(box.home), "PATH": "/usr/bin:/bin"})
+        assert probe.returncode == 0, (probe.stdout, probe.stderr)
+        assert probe.stdout.strip() == str(box.home / ".local/bin/maverick")
+        # A repeat install finds its own block and rewrites nothing.
+        before = {p: p.read_bytes() for p in touched}
+        repeat = box.install("--no-build", env=env)
+        assert repeat.returncode == 0, (repeat.stdout[-2000:], repeat.stderr[-2000:])
+        after = {p: p.read_bytes() for p in touched}
+        assert before == after, "a repeat install rewrote the startup files"
+        print("PASS: PATH block is written once, works, and is not duplicated")
+
+
+def suite_path_opt_out():
+    """Nothing is written when the caller opted out or PATH already has it."""
+    with tempfile.TemporaryDirectory(prefix="maverick-install-test-") as d:
+        box = Sandbox(Path(d))
+        box.seed_build()
+        env = box.env(SHELL="/bin/bash")
+        result = box.install("--no-build", "--no-path", env=env)
+        assert result.returncode == 0, (result.stdout[-2000:], result.stderr[-2000:])
+        assert not any(p.exists() for p in startup_files(box)), \
+            "--no-path wrote a shell startup file"
+        assert "export PATH=" in result.stdout, "no command was offered instead"
+        # Already reachable: no prompt, no file, nothing for the caller to do.
+        bin_dir = str(box.home / ".local/bin")
+        env = box.env(SHELL="/bin/bash", PATH=f"{bin_dir}:{box.tools}:/usr/bin:/bin")
+        second = box.install("--no-build", env=env)
+        assert second.returncode == 0, (second.stdout[-2000:], second.stderr[-2000:])
+        assert not any(p.exists() for p in startup_files(box)), \
+            "a directory already on PATH still earned a startup file"
+        assert "already on PATH" in second.stdout
+        print("PASS: --no-path and an already-present PATH entry write nothing")
+
+
+def suite_path_respects_existing_config():
+    """A startup file that already names the directory is reported, not doubled."""
+    with tempfile.TemporaryDirectory(prefix="maverick-install-test-") as d:
+        box = Sandbox(Path(d))
+        box.seed_build()
+        profile = box.home / ".profile"
+        # Debian and Ubuntu ship exactly this line in ~/.profile; it puts the
+        # directory on PATH for the whole graphical session.
+        profile.write_text('if [ -d "$HOME/.local/bin" ] ; then\n'
+                           '    PATH="$HOME/.local/bin:$PATH"\n'
+                           'fi\n')
+        result = box.install("--no-build", env=box.env(SHELL="/bin/bash"))
+        assert result.returncode == 0, (result.stdout[-2000:], result.stderr[-2000:])
+        text = profile.read_text()
+        assert PATH_MARKER not in text, "the installer duplicated an existing PATH line"
+        assert 'PATH="$HOME/.local/bin:$PATH"' in text, "the distro line was rewritten"
+        assert not (box.home / ".bashrc").exists(), "a second answer was written"
+        assert "already configured in" in result.stdout
+        print("PASS: an existing PATH configuration is respected, not duplicated")
+
+
+def suite_path_follows_shell():
+    """The files edited are the files the caller's shell actually reads."""
+    with tempfile.TemporaryDirectory(prefix="maverick-install-test-") as d:
+        box = Sandbox(Path(d))
+        box.seed_build()
+        result = box.install("--no-build", env=box.env(SHELL="/usr/bin/zsh"))
+        assert result.returncode == 0, (result.stdout[-2000:], result.stderr[-2000:])
+        assert PATH_MARKER in (box.home / ".zshrc").read_text()
+        # zsh reads no POSIX profile of its own: none is invented for it.
+        assert not (box.home / ".profile").exists(), "a file zsh never reads was created"
+        print("PASS: PATH block goes to the rc file of the shell in use")
+    with tempfile.TemporaryDirectory(prefix="maverick-install-test-") as d:
+        box = Sandbox(Path(d))
+        box.seed_build()
+        result = box.install("--no-build", env=box.env(SHELL="/usr/bin/fish"))
+        assert result.returncode == 0, (result.stdout[-2000:], result.stderr[-2000:])
+        text = (box.home / ".config/fish/config.fish").read_text()
+        assert PATH_MARKER in text
+        assert "set -gx PATH" in text, "fish was handed POSIX syntax"
+        assert "export PATH" not in text, "fish does not read export"
+        print("PASS: fish gets fish syntax")
+
+
+def suite_path_interactive():
+    """The PATH offer only exists on a terminal, so it is tested on one."""
+    # Refusing must leave every startup file exactly as it was.
+    with tempfile.TemporaryDirectory(prefix="maverick-install-test-") as d:
+        box = Sandbox(Path(d))
+        box.seed_build()
+        rc, out = interactive_install(box, [
+            {"q": "Install Maverick to", "a": "\r"},
+            {"q": "Add to PATH in", "a": "n\r"}])
+        assert rc == 0, (rc, out[-3000:])
+        assert "Add to PATH in" in out, "the PATH prompt was never offered"
+        assert "export PATH=" in out, "a refusal offered nothing to run instead"
+        assert not any(p.exists() for p in startup_files(box)), \
+            "a refused PATH edit wrote a startup file"
+    # Accepting must write the block, name the files, and never ask twice.
+    with tempfile.TemporaryDirectory(prefix="maverick-install-test-") as d:
+        box = Sandbox(Path(d))
+        box.seed_build()
+        rc, out = interactive_install(box, [
+            {"q": "Install Maverick to", "a": "\r"},
+            {"q": "Add to PATH in", "a": "\r"}])
+        assert rc == 0, (rc, out[-3000:])
+        assert "PATH added to" in out, out[-3000:]
+        assert "new terminal" in out, "the caller was not told how to pick it up"
+        assert PATH_MARKER in (box.home / ".profile").read_text()
+        assert out.count("Add to PATH in") == 1
+        rc, out = interactive_install(box, [
+            {"q": "Install Maverick to", "a": "\r"},
+            {"q": "Overwrite?", "a": "\r"}])
+        assert rc == 0, (rc, out[-3000:])
+        assert "Add to PATH in" not in out, "a block already present was asked about"
+        assert "already configured in" in out, out[-3000:]
+        for path in startup_files(box):
+            if path.is_file():
+                assert path.read_text().count(PATH_MARKER) <= 1, path
+    # --add-path is the same edit with the question removed.
+    with tempfile.TemporaryDirectory(prefix="maverick-install-test-") as d:
+        box = Sandbox(Path(d))
+        box.seed_build()
+        rc, out = interactive_install(box, [{"q": "Install Maverick to", "a": "\r"}],
+                                      args=("--add-path",))
+        assert rc == 0, (rc, out[-3000:])
+        assert "Add to PATH in" not in out, "the question was asked anyway"
+        assert PATH_MARKER in (box.home / ".profile").read_text()
+    print("PASS: the interactive PATH prompt asks, accepts and refuses correctly")
+
+
 def suite_prefix_is_a_boundary():
-    """Nothing outside the chosen prefix may be created or modified."""
+    """Nothing outside the chosen prefix may be created or modified.
+
+    The two documented exceptions are both the caller's own files: the config
+    under ~/.config, and the marked PATH block written under $HOME
+    (covered by the suites above). Everything a system path holds is watched.
+    """
     watched = [Path("/usr/local/bin"), Path("/usr/share/xsessions"),
                Path("/usr/local/share/xsessions")]
     with tempfile.TemporaryDirectory(prefix="maverick-install-test-") as d:
@@ -343,12 +577,24 @@ def suite_prefix_with_spaces():
         box = Sandbox(Path(d))
         box.seed_build()
         prefix = box.base / "prefix with space"
-        result = box.install("--prefix", str(prefix), "--no-build")
+        result = box.install("--prefix", str(prefix), "--no-build",
+                             env=box.env(SHELL="/bin/bash"))
         check_success(box, result, expect_prefix=prefix)
         for binary in BINS:
             assert (prefix / "bin" / binary).is_file()
         assert f'Exec="{prefix}/bin/maverick"' in \
             (prefix / "share/xsessions/maverick.desktop").read_text()
+        # The PATH block writes the directory into a file a shell parses, so a
+        # directory with spaces has to survive that too — quoting here is the
+        # difference between one word and three.
+        profile = box.home / ".profile"
+        assert profile.is_file()
+        probe = subprocess.run(
+            ["sh", "-c", f'. "{profile}"; command -v maverick'],
+            capture_output=True, text=True,
+            env={"HOME": str(box.home), "PATH": "/usr/bin:/bin"})
+        assert probe.returncode == 0, (probe.stdout, probe.stderr)
+        assert probe.stdout.strip() == str(prefix / "bin" / "maverick"), probe.stdout
         print("PASS: a prefix containing spaces installs and verifies")
 
 
@@ -365,6 +611,13 @@ def suite_cli_contract():
     assert helped.returncode == 0
     assert "$HOME/.local" in helped.stdout
     assert "--system" in helped.stdout
+    assert "--add-path" in helped.stdout
+    assert "--no-path" in helped.stdout
+    # An option that takes no value must reject one rather than swallow it.
+    for option in ("--add-path", "--no-path"):
+        result = subprocess.run(["bash", str(ROOT / "install.sh"), option, "--nope"],
+                                capture_output=True, text=True)
+        assert result.returncode == 2, (option, result.returncode)
     print("PASS: CLI argument contract")
 
 
@@ -373,6 +626,11 @@ def main():
     suites = [
         suite_local_install,
         suite_default_prefix_is_user_local,
+        suite_path_setup,
+        suite_path_opt_out,
+        suite_path_respects_existing_config,
+        suite_path_follows_shell,
+        suite_path_interactive,
         suite_prefix_is_a_boundary,
         suite_rejects_unwritable_prefix,
         suite_broken_binary_is_caught,
