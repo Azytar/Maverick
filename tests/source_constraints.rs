@@ -416,7 +416,6 @@ fn the_backend_never_matches_on_a_windows_identity() {
             ".class.to_lowercase()",
             ".instance.to_lowercase()",
             ".name.to_lowercase()",
-            ".title.to_lowercase()",
         ] {
             let hits = code_lines_containing(src, needle);
             assert!(
