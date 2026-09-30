@@ -114,12 +114,10 @@ version = "1.0.0"
 dependencies = [
  "libc",
  "maverick-core",
- "maverick-img",
  "maverick-sys",
  "maverick-toml",
  "maverick-x11",
  "proptest",
- "tempfile",
  "x11rb",
 ]
 
@@ -128,14 +126,6 @@ name = "maverick-core"
 version = "1.0.0"
 dependencies = [
  "proptest",
-]
-
-[[package]]
-name = "maverick-img"
-version = "1.0.0"
-dependencies = [
- "proptest",
- "tempfile",
 ]
 
 [[package]]

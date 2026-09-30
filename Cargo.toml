@@ -4,7 +4,6 @@ members = [
     "maverick-sys",
     "maverick-x11",
     "maverick-toml",
-    "maverick-img",
     "maverickctl",
 ]
 # `maverick-vk` is an unwired Vulkan/X11 bootstrap. No crate depends on it, so
@@ -19,8 +18,8 @@ resolver = "2"
 # will not record it and the declaration is dead weight.
 [workspace.dependencies]
 # Property-based testing for the pure deterministic core: layout geometry,
-# state transitions, configuration normalization and image decoding. A member
-# crate opts in with `proptest.workspace = true` in its own manifest.
+# state transitions, configuration normalization and control-socket replies. A
+# member crate opts in with `proptest.workspace = true` in its own manifest.
 proptest = "1"
 # Filesystem-isolated config loading tests. `UserConfig::load_from_path` reads a
 # real file, so the reload/parse-fallback tests need a private directory rather
@@ -48,7 +47,6 @@ path = "src/main.rs"
 maverick-core = { path = "maverick-core" }
 maverick-sys = { path = "maverick-sys" }
 maverick-toml = { path = "maverick-toml" }
-maverick-img = { path = "maverick-img" }
 libc = "0.2"
 # The X11 connection bootstrap lives in `maverick-x11` and is the WM's only
 # windowing-system dependency. There is no renderer backend: Maverick draws
