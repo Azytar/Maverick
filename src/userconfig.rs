@@ -46,7 +46,6 @@
 //! and only warns (see `load_from_path_classified`).
 
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use maverick_toml::{parse, Event, ParseError, Value};
 use x11rb::protocol::xproto::ModMask;
@@ -96,8 +95,8 @@ struct UserConfig {
     keybindings: Vec<KeybindEntry>,
     rules: Vec<RuleEntry>,
     autostart: Option<AutostartCfg>,
-    wallpaper: Option<WallpaperEntry>,
     /// `[compositor]` table. Maverick has no compositor; the table survives only
+
     /// as the deprecated home of the `stiffness`/`damping` animation aliases.
     compositor: Option<CompositorEntry>,
     /// `[animations]` table. Mirrors `config::AnimationsCfg`.
@@ -118,12 +117,6 @@ struct AnimationsEntry {
     enabled: Option<bool>,
     stiffness: Option<f32>,
     damping: Option<f32>,
-}
-
-#[derive(Debug, Default)]
-struct WallpaperEntry {
-    path: Option<String>,
-    mode: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -438,14 +431,6 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                                 "[autostart].{key} must be a list of string lists; ignoring it"
                             ));
                         }
-                    }
-                }
-                Some(Cur::Plain("wallpaper")) => {
-                    let w = user.wallpaper.get_or_insert_with(WallpaperEntry::default);
-                    match key {
-                        "path" => set_string(&mut w.path, key, &value, diag),
-                        "mode" => set_string(&mut w.mode, key, &value, diag),
-                        _ => {}
                     }
                 }
                 Some(Cur::Plain("compositor")) => {
@@ -797,11 +782,9 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
             })
             .collect();
     }
-    if let Some(wp) = user.wallpaper {
-        apply_wallpaper(&mut cfg, wp, diag);
-    }
 
     normalize_tag_names(&mut cfg);
+
     cfg
 }
 
@@ -964,39 +947,6 @@ fn apply_colors(cfg: &mut Cfg, colors: ColorsCfg, _diag: &mut Diagnostics) {
     }
     if let Some(v) = colors.urgent {
         cfg.col_urgent = v;
-    }
-}
-
-/// Expand a leading `~` (or `~/`) to `$HOME` so `path = "~/img/wp.png"` in the
-/// config resolves as users expect (TOML strings are literal; the shell does
-/// not expand them). Anything else is returned unchanged.
-fn expand_tilde(path: &str) -> String {
-    if path == "~" {
-        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-            return home.to_string_lossy().into_owned();
-        }
-    } else if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-            return Path::new(&home).join(rest).to_string_lossy().into_owned();
-        }
-    }
-    path.to_string()
-}
-
-/// Apply the `[wallpaper]` section. A `path` sets the native wallpaper source
-/// (image/shader inferred by extension); `mode` overrides the mapping mode.
-/// Only validated values are written — a bad `mode` is reported and ignored.
-fn apply_wallpaper(cfg: &mut Cfg, wp: WallpaperEntry, diag: &mut Diagnostics) {
-    if let Some(path) = wp.path {
-        cfg.wallpaper.path = Some(expand_tilde(&path));
-    }
-    if let Some(mode) = wp.mode {
-        match crate::core::wallpaper::WallpaperMode::from_str(&mode) {
-            Ok(m) => cfg.wallpaper.mode = m,
-            Err(e) => diag
-                .warnings
-                .push(format!("[wallpaper].mode: {e}; keeping default (fill)")),
-        }
     }
 }
 

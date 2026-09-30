@@ -38,7 +38,6 @@
 //! - `ipc` — JSON serialization for the control socket.
 //! - `layout` — columnar layout engine (coordinates only, never stored).
 //! - `present` — presentation overlay: fullscreen/maximize geometry rewrites.
-//! - `wallpaper` — re-exports + GPU abstraction for the compositor.
 //! - `invariants` — test-only end-state contract between the focus pipeline
 //!   and the pointer.
 //! - `framebench` — test-only heap-allocation counter (allocation-free proof).
@@ -58,7 +57,6 @@ pub mod event;
 pub mod ipc;
 pub mod layout;
 pub mod present;
-pub mod wallpaper;
 
 #[cfg(test)]
 mod tests;
@@ -82,4 +80,3 @@ pub use effect::Effect;
 pub use engine::Engine;
 pub use event::{CommandReport, Event, EventHandler};
 pub use ipc::state_json;
-pub use wallpaper::{GpuImage, WallpaperMode, WallpaperSource, WallpaperSpec};

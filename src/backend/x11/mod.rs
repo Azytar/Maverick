@@ -27,8 +27,6 @@
 //! - **`ewmh`** publishes EWMH properties on the root window.
 //! - **`struts`** translates dock strut properties into workarea
 //!   reservations.
-//! - **`rootwall`** applies the wallpaper as a root pixmap when the
-//!   compositor is disabled.
 //! - **`actions`** bridges `Effect` into X11 calls (the future
 //!   Wayland backend replaces only this module).
 //! - **`framesched`** decides when to render based on animation,
@@ -99,7 +97,6 @@ mod manage;
 mod pointer;
 pub(crate) mod reconciler;
 mod render;
-mod rootwall;
 mod struts;
 mod teardown;
 pub use teardown::ShutdownReason;
@@ -243,15 +240,6 @@ pub struct WindowManager {
     /// the applied border changed, so fullscreen/maximize/border-rule
     /// transitions stay in sync without a property write per configure.
     frame_extents: std::collections::HashMap<Window, u32>,
-    /// No-compositor wallpaper (`rootwall.rs`): the pixmap ID last installed as
-    /// the root background, if any. `apply_root_wallpaper` runs repeatedly
-    /// (startup, config reload, monitor reconfiguration, GL-failure fallback)
-    /// and each run allocates a fresh root-sized pixmap, so the previous one is
-    /// freed as soon as the root stops pointing at it — only our own creation
-    /// can still reference it by then. Without that, every reload or `RandR`
-    /// event would leak a full-screen (`root_w`*`root_h`*4 byte) pixmap in the
-    /// X server for the rest of the session.
-    last_root_pixmap: Option<Pixmap>,
     /// Reusable buffers for `hide_offscreen` — avoids reallocation per arrange.
     hide_ws_set: std::collections::HashSet<Window>,
     hide_mon_vec: Vec<Window>,
@@ -649,12 +637,6 @@ impl WindowManager {
         let _ = conn.delete_property(self.root, self.atoms.net_client_list);
         let _ = conn.destroy_window(self.check_win);
 
-        // The last root pixmap has no successor that would release it, so it is
-        // freed here rather than on the next install.
-        if let Some(pm) = self.last_root_pixmap.take() {
-            let _ = conn.free_pixmap(pm);
-        }
-
         conn.flush()?;
         Ok(())
     }
@@ -911,16 +893,6 @@ impl WindowManager {
             }
         }
 
-        // Seed the native wallpaper from config: a configured `path` becomes the
-        // wallpaper source (image/shader inferred by extension); the compositor
-        // decodes/uploads it below when GL is available. A missing path leaves
-        // `WallpaperSource::None` so the legacy root pixmap (if any) shows.
-        if let Some(path) = engine.cfg.wallpaper.path.clone() {
-            engine.state.wallpaper.source =
-                crate::core::wallpaper::WallpaperSource::from_path(path.into());
-            engine.state.wallpaper.mode = engine.cfg.wallpaper.mode;
-        }
-
         let check_win = conn.generate_id()?;
         conn.create_window(
             COPY_DEPTH_FROM_PARENT,
@@ -992,7 +964,6 @@ impl WindowManager {
             applied: crate::backend::x11::reconciler::AppliedState::default(),
             shape_mask_cache: std::collections::HashMap::new(),
             frame_extents: std::collections::HashMap::new(),
-            last_root_pixmap: None,
             hide_ws_set: std::collections::HashSet::with_capacity(32),
             hide_mon_vec: Vec::with_capacity(64),
             desired: Placements::with_capacity(32),
@@ -1034,12 +1005,6 @@ impl WindowManager {
         // this they only appear after the first strut/RandR event, leaving
         // EWMH clients with no workarea straight after startup.
         wm.update_workarea()?;
-
-        // No compositor: paint the configured wallpaper on the root window
-        // (feh-style) now — the WM is fully loaded, owns the screen and knows
-        // the final monitor layout. This is exactly the moment `feh` would be
-        // launched, except it needs no race-prone external process.
-        wm.apply_root_wallpaper();
 
         wm.conn.flush()?;
         log::info!("maverick ready");

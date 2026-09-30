@@ -361,20 +361,8 @@ impl WindowManager {
         self.engine.cfg = cfg;
         self.engine.apply_camera_cfg();
         self.keymap = build_keymap(&self.engine.cfg);
-        self.grab_keys()?;
 
-        // Re-seed the native wallpaper from the freshly reloaded config. The
-        // startup path does this too; without it `reload` would silently ignore
-        // `[wallpaper]` changes (the wallpaper is only read from config here,
-        // never from IPC state — IPC `wallpaper set` updates `state` directly).
-        if let Some(path) = self.engine.cfg.wallpaper.path.clone() {
-            self.engine.state.wallpaper.source =
-                crate::core::wallpaper::WallpaperSource::from_path(path.into());
-            self.engine.state.wallpaper.mode = self.engine.cfg.wallpaper.mode;
-        } else {
-            self.engine.state.wallpaper.source = crate::core::wallpaper::WallpaperSource::None;
-        }
-        self.apply_root_wallpaper();
+        self.grab_keys()?;
 
         // Republish EWMH desktop state for external bars/taskbars. Only the
         // count/names need a refresh here — `_NET_CURRENT_DESKTOP` must NOT be

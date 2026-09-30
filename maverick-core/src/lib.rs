@@ -1,7 +1,8 @@
 //! Core domain model — authoritative logical state for placement, focus,
-//! workspace membership, layout geometry, floats, cameras, dock reservations,
-//! and the wallpaper spec.
+//! workspace membership, layout geometry, floats, cameras, and dock
+//! reservations.
 //!
+
 //! `std`-only, no `unsafe`, and free of X11/GL/rendering types: the core speaks
 //! `WindowId` (a plain `u32`) and `Rect`, so every transition can be reasoned
 //! about and tested without an X server or a GPU.
@@ -78,7 +79,6 @@
 )]
 
 pub mod types;
-pub mod wallpaper;
 
 pub use types::{
     Action, Camera, Client, Column, Dir, Edge, Focus, FullscreenPolicy, FullscreenSnapshot,

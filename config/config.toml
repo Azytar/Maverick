@@ -113,17 +113,12 @@ normal  = 0x45475a        # catppuccin-mocha surface
 focused = 0x89b4fa        # catppuccin-mocha blue
 urgent  = 0xf38ba8        # catppuccin-mocha red
 
-# Native wallpaper, painted onto the root pixmap. The source type is inferred
-# from the file extension: .png/.jpg/.jpeg/.webp/.avif/.bmp/.qoi/.ppm/.ff →
-# image (PNG decoded natively; the rest via ffmpeg); .glsl/.frag/.vert/.shader/
-# .fs → GLSL fragment shader, which needs a GPU pipeline and so is not drawn on
-# the root path. `path = null` (default) disables it. Applied at startup, or
-# live via `maverickctl wallpaper set <path>`,
-# `maverickctl wallpaper clear`, `maverickctl wallpaper mode <fill|fit|
-# stretch|center>`. A `~` in the path is expanded to $HOME.
-[wallpaper]
-# path = "~/Pictures/wallpaper.png"
-# mode = "fill"          # fill (cover) | fit (contain) | stretch | center
+# There is no `[wallpaper]` table: a window manager arranges windows, and the
+# root window's background is decoration rather than a window to manage. Set one
+# the ordinary X11 way — an external program paints the root pixmap and nothing
+# here needs to know about it:
+#     autostart = [["feh", "--bg-fill", "/path/to/image.png"]]
+# A compositor started the same way will draw over it.
 
 # ── Keybindings ──────────────────────────────────────────────────────────────
 # Each entry is one [[keybindings]] table with `key` and `action`.

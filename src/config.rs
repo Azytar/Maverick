@@ -6,8 +6,9 @@
 //! which owns file I/O, TOML tokenization and diagnostics.
 //!
 //! Boundary: owns no I/O, no X connection, and no atom interning. The
-//! `Cfg` type family (`Cfg`, `AnimationsCfg`, `WallpaperCfg`, `Rule`) is a
+//! `Cfg` type family (`Cfg`, `AnimationsCfg`, `Rule`) is a
 //! plain owned value that the
+
 //! caller clones; the WM owns it for the session.
 //!
 //! # Invariants
@@ -63,11 +64,6 @@ pub struct Cfg {
     /// Animation configuration.
     pub animations: AnimationsCfg,
 
-    /// Native wallpaper configuration (source + mode). `None` path ⇒ no native
-    /// wallpaper (transparent root). Applied to `State.wallpaper` at startup
-    /// and painted onto the root pixmap by `backend::x11::rootwall`.
-    pub wallpaper: WallpaperCfg,
-
     // Catppuccin Mocha; also the `Default` baseline below and the values
     // `theme_palette` returns for the same preset. Stored as 0xRRGGBB.
     pub col_normal: u32,
@@ -112,7 +108,6 @@ impl Default for Cfg {
             accordion_boost: 0.0,
             overview_zoom_min: 0.25,
             animations: AnimationsCfg::default(),
-            wallpaper: WallpaperCfg::default(),
             col_normal: 0x45475a,
             col_focused: 0x89b4fa,
             col_urgent: 0xf38ba8,
@@ -146,26 +141,6 @@ impl Default for AnimationsCfg {
             enabled: true,
             stiffness: 220.0,
             damping: 30.0,
-        }
-    }
-}
-
-/// Native wallpaper configuration, exposed as `[wallpaper]` in the TOML.
-/// `path = null` (the default) means no native wallpaper is set and the WM
-/// leaves the root pixmap alone.
-#[derive(Debug, Clone)]
-pub struct WallpaperCfg {
-    /// Path to a wallpaper image or GLSL shader. `None` ⇒ disabled.
-    pub path: Option<String>,
-    /// Mapping mode applied to the source.
-    pub mode: crate::core::wallpaper::WallpaperMode,
-}
-
-impl Default for WallpaperCfg {
-    fn default() -> Self {
-        Self {
-            path: None,
-            mode: crate::core::wallpaper::WallpaperMode::Fill,
         }
     }
 }

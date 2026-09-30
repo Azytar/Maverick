@@ -1142,7 +1142,7 @@ mod tests {
         parts.sort();
         parts.push(format!(
             "monitors={:?} sel={} serial={} running={} status={:?} transients={:?} \
-             focus={:?} pending={:?} wallpaper={:?} rev={}",
+             focus={:?} pending={:?}",
             state.monitors,
             state.sel_mon,
             state.focus_serial,
@@ -1151,8 +1151,6 @@ mod tests {
             state.pending_transients,
             state.x11_input_focus,
             state.pending_focus,
-            state.wallpaper,
-            state.wallpaper_rev
         ));
         parts
     }

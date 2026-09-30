@@ -548,10 +548,6 @@ impl WindowManager {
             #[cfg(debug_assertions)]
             self.engine.state.assert_invariants();
             self.update_workarea()?;
-
-            // Re-paint the root-pixmap wallpaper so it covers the new
-            // (possibly resized/rearranged) monitors.
-            self.apply_root_wallpaper();
         }
         Ok(())
     }

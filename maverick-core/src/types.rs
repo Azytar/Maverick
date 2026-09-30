@@ -29,8 +29,6 @@
 //! full list.
 
 use std::collections::HashMap;
-use crate::wallpaper::{WallpaperMode, WallpaperSource, WallpaperSpec};
-
 
 /// Backend-agnostic window identifier used throughout the core domain model.
 ///
@@ -1689,14 +1687,6 @@ pub struct State {
     /// parent's monitor/workspace and re-floats it, instead of leaving the
     /// popup stranded on whatever monitor happened to be focused at map time.
     pub pending_transients: Vec<WindowId>,
-    /// Native wallpaper configuration (source + mode). Pure `State` data — the
-    /// compositor reads it and uploads/draws the GPU texture; it never affects
-    /// focus, stacking, input, layout or window geometry.
-    pub wallpaper: WallpaperSpec,
-    /// Monotonic revision of `wallpaper`. Bumped on every `SetWallpaper` so the
-    /// compositor can tell whether it must re-decode and re-upload the texture
-    /// instead of doing that on every frame.
-    pub wallpaper_rev: u64,
 }
 
 impl State {
@@ -1712,8 +1702,6 @@ impl State {
             pending_transients: Vec::new(),
             x11_input_focus: None,
             pending_focus: None,
-            wallpaper: WallpaperSpec::default(),
-            wallpaper_rev: 0,
         }
     }
 
@@ -1978,16 +1966,6 @@ impl State {
     pub fn add_client(&mut self, c: Client) {
         let win = c.window;
         self.clients.insert(win, c);
-    }
-
-    /// Read-only view of the wallpaper for the compositor: source, mode, and the
-    /// current revision. Pure query — never mutates `State`.
-    pub fn wallpaper_layer(&self) -> (WallpaperSource, WallpaperMode, u64) {
-        (
-            self.wallpaper.source.clone(),
-            self.wallpaper.mode,
-            self.wallpaper_rev,
-        )
     }
 
     /// Remove `win` from `clients` and all placement/overlay/focus structures.
