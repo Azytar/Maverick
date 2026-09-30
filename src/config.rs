@@ -8,16 +8,14 @@
 //! Boundary: owns no I/O, no X connection, and no atom interning. The
 //! `Cfg` type family (`Cfg`, `AnimationsCfg`, `Rule`) is a
 //! plain owned value that the
-
 //! caller clones; the WM owns it for the session.
 //!
 //! # Invariants
 //!
-//! Maverick has no compositor, and `MAVERICK_NO_COMPOSITOR` is no longer read:
-//! there is nothing for it to veto. A `[compositor]` table in an existing config
-//! is still parsed, because it is the historical home of the
-//! `stiffness`/`damping` animation aliases, but every other key in it is inert
-//! and reported as ignored rather than silently accepted.
+//! Every key here describes something the WM does. A section that configures a
+//! subsystem Maverick does not have (a compositor, an animation) is not parsed
+//! and not honoured — it falls through to the unknown-key path and is dropped
+//! with a diagnostic, rather than being accepted and silently ignored.
 
 use std::path::Path;
 
@@ -60,9 +58,6 @@ pub struct Cfg {
     pub accordion_boost: f32,
     /// Minimum zoom factor for the Overview film-strip.
     pub overview_zoom_min: f32,
-
-    /// Animation configuration.
-    pub animations: AnimationsCfg,
 
     // Catppuccin Mocha; also the `Default` baseline below and the values
     // `theme_palette` returns for the same preset. Stored as 0xRRGGBB.
@@ -107,7 +102,6 @@ impl Default for Cfg {
             warp_cursor: false,
             accordion_boost: 0.0,
             overview_zoom_min: 0.25,
-            animations: AnimationsCfg::default(),
             col_normal: 0x45475a,
             col_focused: 0x89b4fa,
             col_urgent: 0xf38ba8,
@@ -116,31 +110,6 @@ impl Default for Cfg {
             rules: vec![],
             autostart: vec![],
             honor_initial_state: false,
-        }
-    }
-}
-
-/// Animation configuration, exposed as `[animations]` in the TOML (a deprecated
-/// `[general].camera_stiffness`/`camera_damping` pair still maps here).
-/// Independent from `[compositor]`: animations can be disabled while keeping
-/// vsync, and vice versa.
-#[derive(Debug, Clone)]
-pub struct AnimationsCfg {
-    /// Master switch for spring animations (scroll, zoom, accordion). Default `true`.
-    pub enabled: bool,
-    /// Spring stiffness for the scroll camera (see `Camera::step`). Higher =
-    /// snappier. Default 220.
-    pub stiffness: f32,
-    /// Spring damping for the scroll camera. Higher = less overshoot. Default 30.
-    pub damping: f32,
-}
-
-impl Default for AnimationsCfg {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            stiffness: 220.0,
-            damping: 30.0,
         }
     }
 }
@@ -384,7 +353,7 @@ pub fn compiled_config() -> Cfg {
 
         // Programs launched once the WM is ready. Each entry is a command plus
         // its argv: vec!["binary", "arg1", "arg2", ...]. Nothing here is
-        // special-cased, the compositor included — they are all just spawned.
+        // special-cased, a compositor included — they are all just spawned.
         autostart: vec![
             // Absolute paths on purpose: these are not on $PATH by convention
             // (Arch installs them under /usr/lib). Without them, GTK/portal
@@ -402,12 +371,6 @@ pub fn compiled_config() -> Cfg {
         ],
         ..Default::default()
     }
-}
-
-/// Whether spring animations should run. When false, the WM snaps directly to
-/// the target (no interpolation) and never requests animation frames.
-pub fn animations_enabled(cfg: &Cfg) -> bool {
-    cfg.animations.enabled
 }
 
 /// Build the runtime config: the compiled baseline, with an optional user

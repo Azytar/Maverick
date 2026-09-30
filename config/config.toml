@@ -53,20 +53,17 @@ overview_zoom_min = 0.25
 # part of the compiled default too, so they exist even with no config file.
 auto_workspace_binds = true
 
-# There is no built-in compositor to switch on: Maverick draws through X11 and
-# nothing else. `compositor_enabled` under `[general]` and the `[compositor]`
-# table are both still accepted, so a config written for the old compositor
-# loads, and both report themselves as ignored at startup rather than looking
-# applied. An external compositor still works — start it from `autostart` — and
-# Maverick publishes `_NET_WM_BYPASS_COMPOSITOR` and
-# `_NET_WM_WINDOW_OPACITY` on its own windows for it to honour.
-
-# Scroll-camera spring constants now live under `[animations]` (see below).
-# The old `general.camera_stiffness` / `camera_damping` aliases are deprecated
-# and emit warnings; they are kept for compat but left commented here so the
-# sample validates clean (0 warnings).
-# camera_stiffness = 220.0
-# camera_damping = 30.0
+# Maverick has no compositor and no animations: it draws through X11 and
+# nothing else, and every state change is written to the server in one configure
+# at its final position. There is no `[compositor]` table and no `[animations]`
+# table, and a config carrying either is read past like any other section for a
+# subsystem Maverick does not have.
+#
+# Compositing is somebody else's job and it composes with a window manager the
+# ordinary way, over the wire: Maverick publishes `_NET_WM_BYPASS_COMPOSITOR`
+# on a window taking a true exclusive fullscreen, and `_NET_WM_WINDOW_OPACITY`
+# from `[[rules]] opacity`. Start picom/compton from your display manager or
+# from `autostart` and it will honour both.
 
 # Normalize the `_NET_WM_STATE_MAXIMIZED_*` / `_NET_WM_STATE_FULLSCREEN` a
 # window requests at map time, so every new client opens as a normal tile
@@ -87,22 +84,6 @@ tag_names = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
 # One of: nord, dracula, gruvbox, everforest, solarized,
 #         catppuccin-mocha, catppuccin-latte
 theme = "catppuccin-mocha"
-
-# Maverick has no compositor: it draws through X11 and nothing else. There is
-# nothing to enable here, and `enabled`, `backend`, `vsync` and
-# `fullscreen_bypass` in a `[compositor]` table are reported as ignored at load
-# time rather than silently accepted. The table itself is still read because it
-# used to be the home of the `stiffness`/`damping` aliases below.
-
-[animations]
-# Spring animation tuning, kept for the camera. Geometry itself is never
-# interpolated: every state change is written to X11 in one configure at its
-# final position.
-# stiffness = 220.0
-# damping = 30.0
-# Spring tuning for the scroll camera.
-# stiffness = 220.0
-# damping = 30.0
 
 [colors]
 # Colors are 0xRRGGBB. Both hex and decimal are accepted by the parser.
