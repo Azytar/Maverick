@@ -110,7 +110,6 @@ impl WindowManager {
             Effect::Spawn(cmd) => self.spawn(&cmd),
             Effect::Quit => self.begin_shutdown(),
             Effect::Restart => self.restart(),
-            Effect::SetWallpaper => self.apply_root_wallpaper(),
             Effect::PublishIpcState => self.publish_state(),
         }
         Ok(())

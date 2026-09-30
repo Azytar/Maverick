@@ -504,9 +504,9 @@ COMMANDS:
                                 (topic may also be a bare CLI action like
                                 \"focus-left\" / \"view 3\", forwarded verbatim)
     msg <action> [--name <id>] [--session <sid>] Dispatch an action; e.g.
-                                \"focus-left\", \"view 3\", or wallpaper verbs:
-                                \"wallpaper set /ruta\", \"wallpaper clear\",
-                                \"wallpaper mode fill\"
+                                \"focus-left\" or \"view 3\". The vocabulary is
+                                the window manager's: it accepts what a
+                                window manager acts on, and nothing else
     command <action>           Alias for msg (dispatch)
     subscribe   [--name <id>] [--session <sid>]  Stream WM events until interrupted
     quit     [--name <id>] [--session <sid>] [--confirm] [--yes]

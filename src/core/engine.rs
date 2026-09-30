@@ -20,7 +20,7 @@ use crate::config::Cfg;
 use crate::core::commands::{
     CollapseColumn, Command, FocusDirection, FocusMonitor, FocusWindow, GrowColumn, KillWindow,
     MoveToWorkspace, MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav,
-    PageSnap, Quit, Restart, SetLayout, SetWallpaper, Spawn, ToggleFloat, ToggleFullscreen,
+    PageSnap, Quit, Restart, SetLayout, Spawn, ToggleFloat, ToggleFullscreen,
     ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
 };
 use crate::core::effect::Effect;
@@ -310,7 +310,6 @@ impl Engine {
             Action::OverviewEnter => self.execute(OverviewEnter),
             Action::ViewportZoom(delta) => self.execute(ViewportZoom(delta)),
             Action::PageSnap(dir) => self.execute(PageSnap(dir)),
-            Action::Wallpaper(cmd) => self.execute(SetWallpaper(cmd)),
         }
     }
 }

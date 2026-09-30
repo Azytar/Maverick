@@ -42,11 +42,10 @@ use crate::config::Cfg;
 use crate::core::effect::Effect;
 use crate::core::event::{CommandReport, Event};
 use crate::core::layout::{fs_ctx, ideal_scroll, ribbon_geom, FsCtx};
-use crate::core::wallpaper::WallpaperSource;
 
 use crate::types::{
     Column, Dir, FullscreenPolicy, FullscreenSnapshot, LayoutKind, Rect, State, ViewportMode,
-    WallpaperCmd, WinFlags, WindowId, WindowMode,
+    WinFlags, WindowId, WindowMode,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -1916,51 +1915,6 @@ impl Command for Restart {
     }
 }
 
-/// Apply a `WallpaperCmd` to `state.wallpaper` (pure State mutation) and emit
-/// `Effect::SetWallpaper` so the backend uploads/draws the GPU texture, plus a
-/// `WallpaperChanged` domain event. Bumps `state.wallpaper_rev` on any change so
-/// the compositor can detect a new source without re-decoding every frame.
-#[derive(Debug, Clone)]
-pub struct SetWallpaper(pub WallpaperCmd);
-
-impl Command for SetWallpaper {
-    fn execute(&mut self, state: &mut State, _cfg: &mut Cfg) -> CommandReport {
-        let changed = match &self.0 {
-            WallpaperCmd::Set(path) => {
-                let src = WallpaperSource::from_path(path.clone());
-                if state.wallpaper.source == src {
-                    false
-                } else {
-                    state.wallpaper.source = src;
-                    true
-                }
-            }
-            WallpaperCmd::Clear => {
-                if state.wallpaper.source == WallpaperSource::None {
-                    false
-                } else {
-                    state.wallpaper.source = WallpaperSource::None;
-                    true
-                }
-            }
-            WallpaperCmd::Mode(mode) => {
-                if state.wallpaper.mode == *mode {
-                    false
-                } else {
-                    state.wallpaper.mode = *mode;
-                    true
-                }
-            }
-        };
-        if changed {
-            state.wallpaper_rev += 1;
-            CommandReport::with_event(vec![Effect::SetWallpaper], Event::WallpaperChanged)
-        } else {
-            CommandReport::new(vec![])
-        }
-    }
-}
-
 /// Toggle the Overview mode on the active workspace: zooms the whole ribbon out
 /// (animated) so every column is visible, and back in.
 #[derive(Debug, Clone, Copy)]
@@ -2118,64 +2072,5 @@ impl Command for OverviewEnter {
                 workspace: ws_i,
             },
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::effect::Effect;
-    use crate::core::event::Event;
-    use crate::core::wallpaper::WallpaperSpec;
-    use crate::core::wallpaper::{WallpaperMode, WallpaperSource};
-    use crate::types::WallpaperCmd;
-
-    #[test]
-    fn set_wallpaper_mutates_state_and_bumps_rev() {
-        let mut s = State::new();
-        let mut c = Cfg::default();
-        let before = s.wallpaper_rev;
-        let rep = SetWallpaper(WallpaperCmd::Set("/tmp/wp.png".into())).execute(&mut s, &mut c);
-        assert_eq!(
-            s.wallpaper.source,
-            WallpaperSource::Image("/tmp/wp.png".into())
-        );
-        assert_eq!(s.wallpaper.mode, WallpaperSpec::default().mode);
-        assert_eq!(s.wallpaper_rev, before + 1);
-        assert!(rep
-            .effects
-            .iter()
-            .any(|e| matches!(e, Effect::SetWallpaper)));
-        assert_eq!(rep.event, Some(Event::WallpaperChanged));
-    }
-
-    #[test]
-    fn wallpaper_clear_and_mode() {
-        let mut s = State::new();
-        let mut c = Cfg::default();
-        s.wallpaper.source = WallpaperSource::Image("/tmp/a.png".into());
-        let rep = SetWallpaper(WallpaperCmd::Clear).execute(&mut s, &mut c);
-        assert_eq!(s.wallpaper.source, WallpaperSource::None);
-        assert!(rep
-            .effects
-            .iter()
-            .any(|e| matches!(e, Effect::SetWallpaper)));
-
-        let rev = s.wallpaper_rev;
-        let _rep = SetWallpaper(WallpaperCmd::Mode(WallpaperMode::Fit)).execute(&mut s, &mut c);
-        assert_eq!(s.wallpaper.mode, WallpaperMode::Fit);
-        assert_eq!(s.wallpaper_rev, rev + 1);
-    }
-
-    #[test]
-    fn wallpaper_noop_does_not_bump_rev() {
-        let mut s = State::new();
-        let mut c = Cfg::default();
-        s.wallpaper.source = WallpaperSource::Image("/tmp/a.png".into());
-        let rev = s.wallpaper_rev;
-        let rep = SetWallpaper(WallpaperCmd::Set("/tmp/a.png".into())).execute(&mut s, &mut c);
-        assert_eq!(s.wallpaper_rev, rev);
-        assert!(rep.effects.is_empty());
-        assert!(rep.event.is_none());
     }
 }

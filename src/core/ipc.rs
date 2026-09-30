@@ -9,7 +9,6 @@
 #![allow(clippy::unwrap_used, clippy::map_unwrap_or)]
 
 use crate::config::Cfg;
-use crate::core::wallpaper::{WallpaperMode, WallpaperSource};
 use crate::types::{Action, LayoutKind, Rect, State, WindowId};
 use std::fmt::Write;
 
@@ -90,30 +89,6 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
         s.push('}');
     }
     s.push(']');
-
-    // Native wallpaper (source + mode) so bars and status tools can observe the
-    // active wallpaper without walking the compositor.
-    s.push_str(",\"wallpaper\":{");
-    let (kind, wpath) = match &state.wallpaper.source {
-        WallpaperSource::None => ("none", String::new()),
-        WallpaperSource::Image(p) => ("image", p.display().to_string()),
-        WallpaperSource::Shader(p) => ("shader", p.display().to_string()),
-        WallpaperSource::Video(_) => ("video", String::new()),
-    };
-    write!(
-        s,
-        "\"kind\":\"{kind}\",\"path\":\"{}\",",
-        maverick_sys::json::json_escape(&wpath)
-    )
-    .unwrap();
-    let mode = match state.wallpaper.mode {
-        WallpaperMode::Fill => "fill",
-        WallpaperMode::Fit => "fit",
-        WallpaperMode::Stretch => "stretch",
-        WallpaperMode::Center => "center",
-    };
-    write!(s, "\"mode\":\"{mode}\",\"rev\":{}", state.wallpaper_rev).unwrap();
-    s.push('}');
 
     s.push('}');
     s

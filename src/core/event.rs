@@ -55,8 +55,6 @@ pub enum Event {
     SessionQuit,
     /// The WM is about to re-exec itself.
     SessionRestart,
-    /// The native wallpaper source/mode changed (set/clear/mode).
-    WallpaperChanged,
 }
 
 /// What `Command::execute` returns: the effects for the backend plus the

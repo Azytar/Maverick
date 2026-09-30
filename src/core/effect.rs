@@ -74,8 +74,4 @@ pub enum Effect {
     Restart,
     /// Publish the current state snapshot to IPC subscribers.
     PublishIpcState,
-    /// Apply the engine's current `state.wallpaper` to the compositor: decode +
-    /// upload (or compile a shader) and request one full repaint. Emitted by
-    /// `SetWallpaper`; the backend decides how (the GL calls stay in x11/GL).
-    SetWallpaper,
 }

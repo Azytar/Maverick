@@ -8761,21 +8761,19 @@ mod unit_tests {
             CollapseColumn, Command, CycleLayout, FocusDirection, FocusMonitor, FocusWindow,
             GapKind, GrowColumn, KillWindow, ManageFocusIntent, MoveResize, MoveToWorkspace,
             MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav, PageSnap, Quit,
-            Restart, SetBorderWidth, SetGaps, SetLayout, SetWallpaper, Spawn, ToggleFloat,
+            Restart, SetBorderWidth, SetGaps, SetLayout, Spawn, ToggleFloat,
             ToggleFullscreen, ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
         };
         use crate::core::effect::Effect;
         use crate::core::event::CommandReport;
         use crate::core::ipc::{query_json, state_json};
-        use crate::core::wallpaper::WallpaperMode;
         use crate::core::Engine;
         use crate::types::{
-            Action, Client, Dir, LayoutKind, PendingFocus, Rect, State, WallpaperCmd, WinFlags,
+            Action, Client, Dir, LayoutKind, PendingFocus, Rect, State, WinFlags,
             WindowId,
         };
         use proptest::prelude::*;
         use std::fmt::Write as _;
-        use std::path::PathBuf;
 
         use super::{setup_engine, setup_engine_multi, t_focus, t_manage};
 
@@ -8815,43 +8813,11 @@ mod unit_tests {
             }
         }
 
-        fn wallpaper_mode_of(i: u8) -> WallpaperMode {
-            match i % 4 {
-                0 => WallpaperMode::Fill,
-                1 => WallpaperMode::Fit,
-                2 => WallpaperMode::Stretch,
-                _ => WallpaperMode::Center,
-            }
-        }
-
-        fn wallpaper_mode_name(m: WallpaperMode) -> &'static str {
-            match m {
-                WallpaperMode::Fill => "fill",
-                WallpaperMode::Fit => "fit",
-                WallpaperMode::Stretch => "stretch",
-                WallpaperMode::Center => "center",
-            }
-        }
-
         /// Any `f32` bit pattern, so NaN, ±inf and subnormals are all
         /// reachable. `ViewportZoom` and the camera spring config both document
         /// sanitising exactly these values.
         fn arb_f32_bits() -> impl Strategy<Value = f32> {
             any::<u32>().prop_map(f32::from_bits)
-        }
-
-        fn arb_wallpaper_cmd() -> impl Strategy<Value = WallpaperCmd> {
-            prop_oneof![
-                3 => Just(WallpaperCmd::Clear),
-                // A path with a space, an uppercase extension (the shader
-                // classifier is case-insensitive) and a relative path.
-                4 => (0u32..1000).prop_map(|i| {
-                    WallpaperCmd::Set(PathBuf::from(format!("/tmp/My Wallpaper {i}.png")))
-                }),
-                1 => Just(WallpaperCmd::Set(PathBuf::from("/tmp/wp.GLSL"))),
-                1 => Just(WallpaperCmd::Set(PathBuf::from("relative.frag"))),
-                2 => (0u8..=3).prop_map(|i| WallpaperCmd::Mode(wallpaper_mode_of(i))),
-            ]
         }
 
         /// The typed command vocabulary, generated with arguments taken from each
@@ -8877,7 +8843,6 @@ mod unit_tests {
             PageSnap(u8),
             SetGaps(bool, u32),
             SetBorderWidth(u32),
-            SetWallpaper(WallpaperCmd),
             Spawn(u32),
             FocusWindow(u32),
             FocusDirection(u8),
@@ -8925,7 +8890,6 @@ mod unit_tests {
                         *v,
                     )),
                     Self::SetBorderWidth(v) => Box::new(SetBorderWidth(*v)),
-                    Self::SetWallpaper(c) => Box::new(SetWallpaper(c.clone())),
                     Self::Spawn(n) => Box::new(Spawn(vec![
                         "sh".to_string(),
                         "-c".to_string(),
@@ -8979,7 +8943,6 @@ mod unit_tests {
                 2 => Just(Action::Kill),
                 1 => Just(Action::SetLayout(LayoutKind::Column)),
                 1 => (0u32..64).prop_map(|n| Action::Spawn(vec!["sh".into(), n.to_string()])),
-                1 => arb_wallpaper_cmd().prop_map(Action::Wallpaper),
             ]
         }
 
@@ -9026,7 +8989,6 @@ mod unit_tests {
                 3 => (0u8..=5).prop_map(GenCmd::PageSnap),
                 3 => (any::<bool>(), any::<u32>()).prop_map(|(b, v)| GenCmd::SetGaps(b, v)),
                 2 => any::<u32>().prop_map(GenCmd::SetBorderWidth),
-                2 => arb_wallpaper_cmd().prop_map(GenCmd::SetWallpaper),
                 1 => any::<u32>().prop_map(GenCmd::Spawn),
                 1 => Just(GenCmd::CycleLayout),
                 1 => Just(GenCmd::Quit),
@@ -9243,11 +9205,6 @@ mod unit_tests {
                 s.x11_input_focus,
                 s.pending_focus,
                 s.pending_transients
-            );
-            let _ = writeln!(
-                d,
-                "wallpaper={:?} mode={:?} rev={}",
-                s.wallpaper.source, s.wallpaper.mode, s.wallpaper_rev
             );
             for (mi, mon) in s.monitors.iter().enumerate() {
                 let _ = writeln!(
@@ -10030,7 +9987,6 @@ mod unit_tests {
             SetLayout,
             ViewCurrent,
             MoveToCurrent,
-            Wallpaper(WallpaperCmd),
             FullscreenTopology { pick: u32, entering: bool },
             Maximize { pick: u32, vert: bool, horiz: bool },
             GeomRestore { pick: u32 },
@@ -10041,7 +9997,6 @@ mod unit_tests {
                 2 => Just(Absorb::SetLayout),
                 3 => Just(Absorb::ViewCurrent),
                 3 => Just(Absorb::MoveToCurrent),
-                3 => arb_wallpaper_cmd().prop_map(Absorb::Wallpaper),
                 6 => (
                     any::<u32>(),
                     any::<bool>(),
@@ -10083,7 +10038,6 @@ mod unit_tests {
             Quit,
             Restart,
             PublishIpcState,
-            SetWallpaper,
         }
 
         fn effect_kind(e: &Effect) -> EffectKind {
@@ -10105,7 +10059,6 @@ mod unit_tests {
                 Effect::Quit => EffectKind::Quit,
                 Effect::Restart => EffectKind::Restart,
                 Effect::PublishIpcState => EffectKind::PublishIpcState,
-                Effect::SetWallpaper => EffectKind::SetWallpaper,
             }
         }
 
@@ -10145,9 +10098,6 @@ mod unit_tests {
                         .and_then(|w| engine.state.clients.get(&w).map(|c| c.workspace))
                         .unwrap_or(active);
                     out.effects = kinds(&engine.execute(MoveToWorkspace(home)));
-                }
-                Absorb::Wallpaper(c) => {
-                    out.effects = kinds(&engine.execute(SetWallpaper(c.clone())));
                 }
                 Absorb::FullscreenTopology { pick, entering } => {
                     out.changed = target(*pick).map(|w| {
@@ -10197,7 +10147,7 @@ mod unit_tests {
             /// `apply_fullscreen_topology` ("running it twice for the same
             /// transition is a no-op… returns true when the topology actually
             /// changed"), `apply_fullscreen_geom_restore` ("returns `None` when
-            /// there was nothing to restore"), and the view/move/wallpaper
+            /// there was nothing to restore"), and the view/move
             /// commands that bail out on an already-satisfied target must all
             /// leave the state *and* the effect list unchanged when repeated.
             /// A second application that re-arranges, re-publishes or re-flips a
@@ -10245,7 +10195,7 @@ mod unit_tests {
                 // no arrange, no focus, not even an IPC publish.
                 if matches!(
                     op,
-                    Absorb::ViewCurrent | Absorb::MoveToCurrent | Absorb::Wallpaper(_)
+                    Absorb::ViewCurrent | Absorb::MoveToCurrent
                 ) {
                     prop_assert!(
                         second.effects.is_empty(),
@@ -10614,11 +10564,6 @@ mod unit_tests {
                 Action::GrowCol(px) => px.to_string(),
                 Action::View(i) | Action::MoveToWs(i) => (i + 1).to_string(),
                 Action::ViewportZoom(z) => format!("{z}"),
-                Action::Wallpaper(c) => match c {
-                    WallpaperCmd::Clear => "clear".to_string(),
-                    WallpaperCmd::Mode(m) => format!("mode {}", wallpaper_mode_name(*m)),
-                    WallpaperCmd::Set(p) => format!("set {}", p.display()),
-                },
                 _ => String::new(),
             };
             if arg.is_empty() {

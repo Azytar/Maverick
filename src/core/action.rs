@@ -21,10 +21,7 @@
 //! vocabulary). Unknown or malformed input yields `None` — the caller logs and
 //! ignores it rather than guessing.
 
-use crate::core::wallpaper::WallpaperMode;
-use crate::types::{Action, Dir, LayoutKind, WallpaperCmd, WindowId};
-use std::path::PathBuf;
-use std::str::FromStr;
+use crate::types::{Action, Dir, LayoutKind, WindowId};
 
 /// What argument shape an action verb accepts. Used by the `ACTIONS` table as
 /// a machine-checkable contract of the vocabulary (see `tests` for the round
@@ -73,7 +70,6 @@ pub static ACTIONS: &[(&str, ArgKind)] = &[
     ("overview_enter", ArgKind::None),
     ("viewport_zoom", ArgKind::F32Opt),
     ("page_snap", ArgKind::Dir),
-    ("wallpaper", ArgKind::Cmd),
 ];
 
 /// Canonical `snake_case` name of an `Action` (no argument). Exhaustive over
@@ -108,7 +104,6 @@ pub fn name(a: &Action) -> &'static str {
         Action::OverviewEnter => "overview_enter",
         Action::ViewportZoom(_) => "viewport_zoom",
         Action::PageSnap(_) => "page_snap",
-        Action::Wallpaper(_) => "wallpaper",
     }
 }
 
@@ -322,32 +317,6 @@ pub fn parse(input: &str) -> Option<Action> {
             .then(|| dir_from(arg))
             .flatten()
             .map(Action::PageSnap),
-        "wallpaper" => {
-            if !has_arg {
-                return None;
-            }
-            // Sub-verb is the first token; the rest (re-joined with spaces) is a
-            // verbatim path, so paths containing spaces survive. `splitn(2, …)`
-            // keeps only the first whitespace as the boundary, leaving any spaces
-            // inside the path intact.
-            let mut it = arg.splitn(2, |c: char| c == ':' || c.is_whitespace());
-            let sub = it.next().unwrap_or("");
-            let rest = it.next().unwrap_or("").trim();
-            match sub {
-                "clear" => Some(Action::Wallpaper(WallpaperCmd::Clear)),
-                "set" => {
-                    if rest.is_empty() {
-                        return None;
-                    }
-                    Some(Action::Wallpaper(WallpaperCmd::Set(PathBuf::from(rest))))
-                }
-                "mode" => WallpaperMode::from_str(rest)
-                    .ok()
-                    .map(WallpaperCmd::Mode)
-                    .map(Action::Wallpaper),
-                _ => None,
-            }
-        }
         _ => None,
     }
 }
@@ -372,7 +341,7 @@ mod tests {
     #[test]
     fn every_canonical_name_parses() {
         for (verb, kind) in ACTIONS {
-            let mut sample = match kind {
+            let sample = match kind {
                 ArgKind::None => String::new(),
                 ArgKind::Dir => ":left".to_string(),
                 ArgKind::Layout => ":column".to_string(),
@@ -381,10 +350,6 @@ mod tests {
                 ArgKind::Ws => ":2".to_string(),
                 ArgKind::Cmd => ":alacritty -e htop".to_string(),
             };
-            // `wallpaper` parses a sub-verb; `:clear` is the argumentless form.
-            if *verb == "wallpaper" {
-                sample = ":clear".to_string();
-            }
             let input = format!("{verb}{sample}");
             assert!(
                 parse(&input).is_some(),
@@ -596,35 +561,5 @@ mod tests {
         assert!(parse("view 0").is_none());
         assert!(parse("grow_col:abc").is_none());
         assert!(parse("spawn:").is_none());
-    }
-
-    #[test]
-    fn wallpaper_subverbs_parse() {
-        // set: a path (spaces preserved).
-        match parse("wallpaper set /home/u/My Pic.png") {
-            Some(Action::Wallpaper(WallpaperCmd::Set(p))) => {
-                assert_eq!(p, PathBuf::from("/home/u/My Pic.png"));
-            }
-            other => panic!("wallpaper set failed: {other:?}"),
-        }
-        // Fused colon form with a shader-ish path.
-        match parse("wallpaper:set:/tmp/wp.glsl") {
-            Some(Action::Wallpaper(WallpaperCmd::Set(p))) => {
-                assert_eq!(p, PathBuf::from("/tmp/wp.glsl"));
-            }
-            other => panic!("wallpaper:set failed: {other:?}"),
-        }
-        assert_eq!(
-            parse("wallpaper clear"),
-            Some(Action::Wallpaper(WallpaperCmd::Clear))
-        );
-        assert_eq!(
-            parse("wallpaper mode fit"),
-            Some(Action::Wallpaper(WallpaperCmd::Mode(WallpaperMode::Fit)))
-        );
-        assert!(parse("wallpaper").is_none());
-        assert!(parse("wallpaper bogus").is_none());
-        assert!(parse("wallpaper set").is_none());
-        assert!(parse("wallpaper mode bogus").is_none());
     }
 }

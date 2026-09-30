@@ -29,9 +29,8 @@
 //! full list.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-
 use crate::wallpaper::{WallpaperMode, WallpaperSource, WallpaperSpec};
+
 
 /// Backend-agnostic window identifier used throughout the core domain model.
 ///
@@ -1617,25 +1616,8 @@ pub enum Action {
     /// Scroll the camera by one screen-width in the given direction (a "page"
     /// of the zoomed ribbon). Reuses `ideal_scroll`/`camera` — no focus change.
     PageSnap(Dir),
-    /// Native wallpaper control (set/clear/mode). Pure State mutation in the
-    /// core; the backend uploads/draws the GPU texture. Never affects focus,
-    /// stacking, input, layout or geometry.
-    Wallpaper(WallpaperCmd),
 }
 
-/// Imperative sub-verbs of the `wallpaper` action. Paths with spaces are
-/// preserved verbatim (the caller joins the rest of the line before handing it
-/// here), so a wallpaper at `/home/u/My Pic.png` works unchanged.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WallpaperCmd {
-    /// Set the wallpaper to the image/shader at `PathBuf` (the source type is
-    /// inferred from the extension; see `WallpaperSource::from_path`).
-    Set(PathBuf),
-    /// Clear the native wallpaper, falling back to the legacy root pixmap.
-    Clear,
-    /// Change only the mapping mode of the current source.
-    Mode(WallpaperMode),
-}
 
 /// A deferred focus request created while an overlay (fullscreen/maximize owner)
 /// is presented. It carries the *context* it was created under: the exact
