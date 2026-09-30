@@ -328,3 +328,85 @@ fn wheel_notches_are_queued_not_applied_inline() {
         "flush_pending must apply the queued notches, once per turn"
     );
 }
+
+// Arrange emits ConfigureWindow only for changed windows.
+//
+// One column step legitimately moves every visible window — the ribbon scrolls
+// by rewriting the camera and re-projecting, so each window gets one
+// ConfigureWindow plus its one synthetic ConfigureNotify. What must never come
+// back is *amplification*: re-running the projection with identical geometry
+// must cost zero X requests. That holds only while every geometry write goes
+// through the `AppliedState` diff — `reconcile` for the arrange path,
+// `apply_geom` for the out-of-band sinks — and `emit_geometry` stays the
+// single writer pairing one ConfigureWindow with its one ConfigureNotify.
+//
+// The entry point is `arrange_full`; the projection it emits must pass the
+// diff, whether `arrange_full` diffs itself or delegates to
+// `arrange_full_phase`. The constraint fails closed if neither diffs.
+#[test]
+fn arrange_emits_geometry_only_through_the_reconciler() {
+    let render = production_source("backend/x11/render.rs");
+    // No direct X geometry write on the arrange entry path: geometry leaves
+    // only via `emit_geometry`, fed with the diff's effects. (Stack-only
+    // `configure_window`s live in `raise`/`stack_overlay`, not here.)
+    let arrange = fn_body(render, "arrange_full");
+    for needle in ["configure_window", "send_event"] {
+        assert!(
+            code_lines_containing(&arrange, needle).is_empty(),
+            "arrange_full must not issue `{needle}` directly; \
+             every geometry write goes through the reconciler's effects"
+        );
+    }
+    // The entry point diffs Desired vs Applied itself, or delegates to the
+    // function that does. Without that call the projection would re-emit
+    // every window on every pass.
+    assert!(
+        !code_lines_containing(&arrange, "reconcile(").is_empty()
+            || !code_lines_containing(&arrange, "arrange_full_phase(").is_empty(),
+        "arrange_full must diff Desired vs Applied through `reconcile`, \
+         directly or via `arrange_full_phase`; emitting the projection without \
+         the diff is one ConfigureWindow per window per pass"
+    );
+    if render.contains("fn arrange_full_phase(") {
+        let phase = fn_body(render, "arrange_full_phase");
+        assert!(
+            !code_lines_containing(&phase, "reconcile(").is_empty(),
+            "arrange_full_phase must diff Desired vs Applied through `reconcile`; \
+             emitting the projection directly is one ConfigureWindow per window per pass"
+        );
+        for needle in ["configure_window", "send_event"] {
+            assert!(
+                code_lines_containing(&phase, needle).is_empty(),
+                "arrange_full_phase must not issue `{needle}` directly; \
+                 every geometry write goes through the reconciler's effects"
+            );
+        }
+    }
+    // The out-of-band sinks (hide/re-show, float settle, client requests)
+    // share the same gate: diff first, emit only on change.
+    let apply = fn_body(render, "apply_geom");
+    assert!(
+        !code_lines_containing(&apply, "applied.diff").is_empty(),
+        "apply_geom must diff against `AppliedState` before emitting; \
+         it is the reconciler's gate for every non-arrange geometry write"
+    );
+    assert!(
+        code_lines_containing(&apply, "configure_window").is_empty(),
+        "apply_geom must not call `configure_window` directly; \
+         `emit_geometry` is the single writer"
+    );
+    // The single writer pairs exactly one ConfigureWindow with its one
+    // synthetic ConfigureNotify: SendEvent is 1:1 with a legitimate move,
+    // not an independent storm.
+    let emit = fn_body(render, "emit_geometry");
+    assert_eq!(
+        code_lines_containing(&emit, "configure_window").len(),
+        1,
+        "emit_geometry must hold the only `configure_window` on the geometry path"
+    );
+    assert_eq!(
+        code_lines_containing(&emit, "send_event").len(),
+        1,
+        "emit_geometry pairs one synthetic ConfigureNotify with each real configure"
+    );
+}
