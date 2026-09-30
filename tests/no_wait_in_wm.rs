@@ -10,10 +10,10 @@
 //! window manager's own event-loop thread, for a duration the child chooses.
 //!
 //! `tests/child_lifecycle.rs` proves the *consequence* of the rule at runtime,
-//! by observing that a delegated decode completes. This test proves the
-//! *absence of the cause* at build time, so the regression is caught by
-//! `cargo test` in a fraction of a second rather than only when a delegated
-//! decode happens to hang.
+//! by observing that a child of this process cannot be waited for at all. This
+//! test proves the *absence of the cause* at build time, so the regression is
+//! caught by `cargo test` in a fraction of a second rather than only when some
+//! child happens to hang.
 //!
 //! The rule spans a boundary that is now a crate boundary. `maverick-sys` is
 //! linked into both binaries, but the waiting code lives in `maverickctl`,
@@ -22,11 +22,10 @@
 //! and `maverickctl` never installs `SA_NOCLDWAIT`). The walked directories
 //! below therefore need no exemptions: `ALLOWED` is empty on purpose, and an
 //! entry may only ever be added with the reason waiting there is sound. Any
-//! other crate gaining a `wait` in a path that reaches the WM is a violation,
-//! and a crate that reaches the WM without depending on `maverick-sys` — as
-//! `maverick-img` deliberately does — cannot be protected by any convention in
-//! `maverick-sys` at all. That is the reason this test is a source scan rather
-//! than an architectural note.
+//! crate gaining a `wait` in a path that reaches the WM is a violation, and a
+//! crate that reaches the WM without depending on `maverick-sys` cannot be
+//! protected by any convention in `maverick-sys` at all. That is the reason
+//! this test is a source scan rather than an architectural note.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -69,7 +68,6 @@ const FORBIDDEN: &[(&str, &str)] = &[
 const WM_SOURCE_DIRS: &[&str] = &[
     "src",
     "maverick-core/src",
-    "maverick-img/src",
     "maverick-sys/src",
     "maverick-toml/src",
     "maverick-x11/src",

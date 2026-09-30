@@ -65,10 +65,6 @@ x11rb = { version = "0.13", default-features = false, features = [
 
 [dev-dependencies]
 proptest.workspace = true
-# `tests/child_lifecycle.rs` hands a real file to `maverick_img` to exercise the
-# external-converter fallback, so it needs a private directory that cleans
-# itself up when the test panics.
-tempfile.workspace = true
 
 [features]
 # There is no `default` feature: the window manager has no optional subsystems.

@@ -14,16 +14,17 @@
 //! 2. That is exactly right for the window manager's own children (autostart
 //!    clients and keybind-spawned programs), which are never waited on and are
 //!    therefore better auto-reaped than left as zombies.
-//! 3. It is *not* right for anything in the same process that needs a child's
-//!    exit status. `maverick_img` is that thing: its external fallback for
-//!    formats with no native decoder runs a converter. This test proves that
-//!    path keeps working under `SA_NOCLDWAIT`.
+//!
+//! There is deliberately no third clause. The one thing in this process that
+//! wanted a child's exit status was the wallpaper decoder's fallback to an
+//! external converter, and Maverick no longer decodes anything: the root
+//! window's background belongs to an external program with its own process.
+//! `no_wait_in_wm.rs` covers the other half of the rule — that no code linked
+//! into `maverick` calls a wait at all.
 //!
 //! The order matters: every assertion here runs in a process that has already
 //! installed the production dispositions, because that is the only state in
 //! which the contract is meaningful.
-
-use std::io::Read;
 
 /// Install exactly the dispositions the window manager installs at startup.
 ///
@@ -110,133 +111,4 @@ fn a_spawned_child_leaves_no_zombie_without_an_explicit_reap() {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-}
-
-/// `maverick_img::decode` delegates every format without a native decoder —
-/// JPEG, WebP, AVIF — plus any native decode failure, to an external
-/// converter. That fallback used `Command::output()`, i.e. `waitpid`, which
-/// `SA_NOCLDWAIT` makes impossible; inside the running window manager the
-/// fallback therefore failed with `ECHILD` for every such file.
-#[test]
-fn the_external_image_fallback_does_not_depend_on_a_childs_exit_status() {
-    install_window_manager_signals();
-
-    // ImageMagick probes by content, not by extension, so a PNG wearing a
-    // `.jpg` name exercises the delegated path end to end without adding a
-    // fixture the repository does not already have. ffmpeg keys off the name
-    // and rejects it, which is fine: the fallback tries each converter in turn.
-    if resolve_converter("convert").is_none() && resolve_converter("magick").is_none() {
-        let err = maverick_img::decode(std::path::Path::new("/nonexistent.jpg"))
-            .expect_err("a missing file must not decode");
-        assert_no_wait_failure(&err);
-        return;
-    }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("maverick-img/tests/fixtures/rgb3x1.png");
-    let disguised = dir.path().join("delegated.jpg");
-    std::fs::copy(&source, &disguised).expect("copy fixture");
-
-    let decoded = maverick_img::decode(&disguised).unwrap_or_else(|e| {
-        panic!("the external converter path must work under SA_NOCLDWAIT: {e}")
-    });
-
-    assert_eq!((decoded.w, decoded.h), (3, 1), "dimensions must round-trip");
-    assert_eq!(decoded.data.len(), 3 * 4, "one RGBA pixel per source pixel");
-    // Alpha exists only if the converter's PPM was re-widened to RGBA here,
-    // and the three pixels differ only if the converter's real output came
-    // through rather than a constant fill. The channel *values* are
-    // deliberately not asserted. The fixture is a PNG carrying no gAMA, cHRM,
-    // iCCP or sRGB chunk, so it declares no colour space and both decoders
-    // return its stored samples verbatim — there is no colour management for a
-    // converter to apply, and on the reference toolchain the two paths agree
-    // byte for byte. Pinning the values would still be wrong, because it would
-    // make this test assert against whichever converter the host happens to
-    // have installed, when what it exists to prove is that the delegated path
-    // completes under `SA_NOCLDWAIT` without a waitable child. Pixel equality
-    // across the two decoders is covered in `maverick-img` against an
-    // independent model of the PNG spec, not here.
-    for px in decoded.data.chunks_exact(4) {
-        assert_eq!(px[3], 0xff, "every pixel must be opaque");
-    }
-    assert_ne!(
-        decoded.data[0..3],
-        decoded.data[4..7],
-        "the fixture's pixels differ, so a constant fill means the converter's \
-         output was not what got parsed"
-    );
-}
-
-/// A missing file takes the same code path but ends in the error arm, so it is
-/// the cheapest proof that the error text reports a converter problem rather
-/// than a wait failure.
-#[test]
-fn a_failed_external_decode_does_not_report_a_wait_failure() {
-    install_window_manager_signals();
-    if !["ffmpeg", "convert", "magick"]
-        .iter()
-        .any(|name| resolve_converter(name).is_some())
-    {
-        return;
-    }
-    let err = maverick_img::decode(std::path::Path::new("/nonexistent.jpg"))
-        .expect_err("a missing file must not decode");
-    assert_no_wait_failure(&err);
-    assert!(
-        err.starts_with("maverick-img:"),
-        "unexpected error shape: {err}"
-    );
-}
-
-fn assert_no_wait_failure(err: &str) {
-    let lower = err.to_ascii_lowercase();
-    assert!(
-        !(lower.contains("no child") || lower.contains("echild") || lower.contains("os error 10")),
-        "a converter failure must be reported as a converter failure, not as \
-         ECHILD from a wait this process is not allowed to make: {err}"
-    );
-}
-
-/// The same `PATH` scan `maverick_img` uses, so the test's idea of "is a
-/// converter installed" cannot drift from the crate's.
-fn resolve_converter(name: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find_map(|dir| {
-        let candidate = dir.join(name);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::metadata(&candidate)
-                .ok()
-                .filter(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-                .map(|_| candidate)
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::metadata(&candidate).ok().map(|_| candidate)
-        }
-    })
-}
-
-/// The shape `decode_external` uses to collect a converter's output: read the
-/// pipe to EOF, drop the `Child`, never wait. Reading to EOF is what
-/// synchronises the child, so it has to work with no waitable child at all.
-#[test]
-fn a_bounded_pipe_read_does_not_depend_on_the_childs_status() {
-    install_window_manager_signals();
-    let mut child = std::process::Command::new("/bin/sh")
-        .args(["-c", "printf 'P6\\n1 1\\n255\\n\\000\\000\\000'"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn");
-    let mut buf = Vec::new();
-    child
-        .stdout
-        .take()
-        .expect("piped stdout")
-        .read_to_end(&mut buf)
-        .expect("read to EOF");
-    drop(child);
-    assert_eq!(buf, b"P6\n1 1\n255\n\0\0\0");
 }

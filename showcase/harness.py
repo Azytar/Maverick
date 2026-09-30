@@ -258,8 +258,6 @@ damping = 30.0
 enabled = true
 backend = "opengl"
 fullscreen_bypass = false
-[wallpaper]
-mode = "fill"
 """,
             encoding="utf-8",
         )
