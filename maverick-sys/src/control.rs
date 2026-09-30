@@ -139,7 +139,6 @@ fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
 pub struct ControlServer {
     name: String,
     stop: Arc<AtomicBool>,
-    #[allow(dead_code)]
     /// The uid allowed to talk to this instance, from the kernel.
     owner_uid: u32,
 }
