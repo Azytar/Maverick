@@ -580,7 +580,7 @@ proptest! {
 // The layout, the projection and the window rules all branch on these
 // predicates, so one that answered from a neighbouring bit would make a
 // single-axis maximize read as a full one, or an ordinary tile read as a float.
-// Bits 10 and up are documented as reserved, so a random word exercises them too.
+// Bits 4 and 9 and up are documented as reserved, so a random word exercises them too.
 proptest! {
     #[test]
     fn every_flag_predicate_reads_only_its_documented_bit(
@@ -598,7 +598,6 @@ proptest! {
         prop_assert_eq!(c.is_sticky(), has(WinFlags::STICKY), "is_sticky read the wrong bit");
         prop_assert_eq!(c.is_maximized_v(), has(WinFlags::MAXIMIZED_V), "is_maximized_v read the wrong bit");
         prop_assert_eq!(c.is_maximized_h(), has(WinFlags::MAXIMIZED_H), "is_maximized_h read the wrong bit");
-        prop_assert_eq!(c.flags.has(WinFlags::FIXED), has(WinFlags::FIXED), "FIXED is not readable");
         prop_assert_eq!(c.flags.has(WinFlags::URGENT), has(WinFlags::URGENT), "URGENT is not readable");
         prop_assert_eq!(c.flags.has(WinFlags::FS_WAS_FLOAT), has(WinFlags::FS_WAS_FLOAT), "FS_WAS_FLOAT is not readable");
         // Documented: only both axes together mean "maximized", because EWMH
@@ -628,7 +627,7 @@ proptest! {
 //
 // So this table is stated as literals, not in terms of the constants. It also
 // pins the two structural facts the rest of the WM relies on and that no other
-// test asserts: the used bits are exactly 0..=9, and no two constants share a
+// test asserts: the used bits are exactly 0..=3 and 5..=8, and no two constants share a
 // bit. `MAXIMIZED_H` is deliberately *not* adjacent to `MAXIMIZED_V` — the two
 // EWMH axes are independent states, and nothing else in the tree would notice
 // if the pair collapsed onto neighbouring bits and a single-axis maximize began
@@ -639,7 +638,6 @@ fn the_ewmh_and_icccm_bit_layout_is_the_one_the_protocol_defines() {
     assert_eq!(WinFlags::FULLSCREEN, 1 << 1, "_NET_WM_STATE_FULLSCREEN");
     assert_eq!(WinFlags::URGENT, 1 << 2, "_NET_WM_STATE_DEMANDS_ATTENTION");
     assert_eq!(WinFlags::NO_FOCUS, 1 << 3, "ICCCM 4.1.7 InputHint false");
-    assert_eq!(WinFlags::FIXED, 1 << 4, "ICCCM 4.1.2.3 P_MIN == P_MAX");
     assert_eq!(
         WinFlags::MAXIMIZED_V,
         1 << 5,
@@ -668,13 +666,12 @@ fn the_ewmh_and_icccm_bit_layout_is_the_one_the_protocol_defines() {
     assert_eq!(SizeHints::P_BASE_SIZE, 1 << 8, "XPBaseSize");
     assert_eq!(SizeHints::P_WIN_GRAVITY, 1 << 9, "XPWinGravity");
 
-    // Every bit is distinct, and the used range is exactly 0..=9.
+    // Every bit is distinct, and the used range is exactly 0..=3 and 5..=8.
     let used = [
         WinFlags::FLOAT,
         WinFlags::FULLSCREEN,
         WinFlags::URGENT,
         WinFlags::NO_FOCUS,
-        WinFlags::FIXED,
         WinFlags::MAXIMIZED_V,
         WinFlags::STICKY,
         WinFlags::FS_WAS_FLOAT,
@@ -694,7 +691,10 @@ fn the_ewmh_and_icccm_bit_layout_is_the_one_the_protocol_defines() {
         );
         all |= f;
     }
-    assert_eq!(all, 0x01FF, "bits 0..=8 are in use and 9..=15 are reserved");
+    assert_eq!(
+        all, 0x01EF,
+        "bits 0..=3 and 5..=8 are in use; 4 and 9..=15 are reserved"
+    );
 }
 
 // A column added and then removed again must leave the workspace exactly as it

@@ -337,7 +337,6 @@ impl WindowManager {
                     if let Some(h) = parse_wm_normal_hints(&v) {
                         client.hints = h;
                         if fixed_size_hints(&h) {
-                            client.flags.set(WinFlags::FIXED);
                             client.flags.set(WinFlags::FLOAT);
                         }
                     }

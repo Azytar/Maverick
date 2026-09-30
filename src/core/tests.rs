@@ -9034,7 +9034,7 @@ mod unit_tests {
                 let c = &s.clients[&win];
                 let _ = writeln!(
                     d,
-                    "client{win} mon={} ws={} geom={:?} saved={:?} bw={}/{} dirty={} policy={:?} snap={:?} parent={:?} name={:?} class={:?} inst={:?} flags[fs={} maxv={} maxh={} sticky={} fswas={} urgent={} fixed={} nofocus={}] des={:?} rep={:?}",
+                    "client{win} mon={} ws={} geom={:?} saved={:?} bw={}/{} dirty={} policy={:?} snap={:?} parent={:?} name={:?} class={:?} inst={:?} flags[fs={} maxv={} maxh={} sticky={} fswas={} urgent={} nofocus={}] des={:?} rep={:?}",
                     c.monitor,
                     c.workspace,
                     c.geom,
@@ -9054,7 +9054,6 @@ mod unit_tests {
                     c.is_sticky(),
                     c.flags.has(WinFlags::FS_WAS_FLOAT),
                     c.flags.has(WinFlags::URGENT),
-                    c.flags.has(WinFlags::FIXED),
                     c.no_focus(),
                     c.last_desired,
                     c.last_reported

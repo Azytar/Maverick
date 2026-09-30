@@ -584,8 +584,8 @@ impl WindowManager {
         // constraints and answer every update with a corrective resize — the
         // sustained bigger/smaller flicker. Handled even on DELETE (property
         // removed → constraints withdrawn). Only the `hints` struct is
-        // refreshed here: flags (`FLOAT`/`FIXED`) are map-time layout
-        // decisions and must never yank a window mid-life.
+        // refreshed here: `FLOAT` is a map-time layout decision and must
+        // never yank a window mid-life.
         if e.atom == u32::from(AtomEnum::WM_NORMAL_HINTS) {
             // Read before the mutable client borrow below (`read_size_hints`
             // only needs `&self`).

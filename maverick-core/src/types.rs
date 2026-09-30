@@ -142,7 +142,10 @@ impl Rect {
 ///
 /// # Invariants
 ///
-/// - Bits 0-8 are in use; bits >= 9 are reserved.
+/// - Bits 0-3 and 5-8 are in use; bit 4 and bits >= 9 are reserved. The gap
+///   is deliberate: a reserved bit keeps every remaining constant on the
+///   value its protocol names, so `_NET_WM_STATE` and ICCCM correspondence
+///   is not disturbed by a removal.
 /// - `MAXIMIZED` is the union `MAXIMIZED_V | MAXIMIZED_H`, and `has()` tests
 ///   bit *overlap*, so `has(MAXIMIZED)` is already true when a single axis is
 ///   set. Callers must test both axes (`is_maximized_v() && is_maximized_h()`).
@@ -160,8 +163,6 @@ impl WinFlags {
     pub const URGENT: u16 = 1 << 2;
     /// Window does not want input (`WM_HINTS` `InputHint` false).
     pub const NO_FOCUS: u16 = 1 << 3;
-    /// Fixed size hints — column resizing must not change geometry.
-    pub const FIXED: u16 = 1 << 4;
     /// Maximized *vertically* — `_NET_WM_STATE_MAXIMIZED_VERT`. The window's
     /// height (and y) come from the workarea; its width and x stay whatever the
     /// layout gave it. Kept as an axis of its own because EWMH treats the two as
