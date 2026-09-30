@@ -1126,11 +1126,9 @@ mod tests {
             .collect();
         parts.sort();
         parts.push(format!(
-            "monitors={:?} sel={} serial={} running={} status={:?} transients={:?} \
-             focus={:?} pending={:?}",
+            "monitors={:?} sel={} running={} status={:?} transients={:?} focus={:?} pending={:?}",
             state.monitors,
             state.sel_mon,
-            state.focus_serial,
             state.running,
             state.status,
             state.pending_transients,

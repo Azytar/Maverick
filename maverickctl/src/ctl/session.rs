@@ -1227,7 +1227,7 @@ fn merge_inspect(
         _ => Vec::new(),
     };
     if let Some(live) = live {
-        for key in ["windows", "layout", "monitor", "animations"] {
+        for key in ["windows", "layout", "monitor"] {
             if let Some(v) = live.get(key) {
                 fields.retain(|(k, _)| k != key);
                 fields.push((key.to_string(), v.clone()));

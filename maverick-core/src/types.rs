@@ -481,11 +481,6 @@ impl Workspace {
         }
     }
 
-    /// Alias for `new` — empty workspace with `tag`.
-    pub fn empty(tag: u32) -> Self {
-        Self::new(tag)
-    }
-
     /// True when no tiled columns and no floats.
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty() && self.floats.is_empty()
@@ -768,8 +763,6 @@ pub struct Client {
     /// `_NET_WM_WINDOW_TYPE` values this window declared, as lowercase atom
     /// names (`"dialog"`, `"utility"`, `"toolbar"`, …). Used by window rules.
     pub window_types: Vec<String>,
-    /// Monotonic focus serial (bumped on focus changes).
-    pub focus_serial: u64,
     /// Observability-only mirror of the last *desired* rect this client was
     /// arranged to. Written by the render reconcile path; NEVER read for
     /// layout, focus, or overlay decisions.
@@ -852,7 +845,6 @@ impl Client {
             workspace: ws,
             transient_parent: None,
             window_types: Vec::new(),
-            focus_serial: 0,
             last_desired: None,
             last_reported: None,
             is_unmanaged: false,
@@ -1212,25 +1204,14 @@ pub enum Dir {
     Down,
 }
 
-/// Workspace layout kind. The scrolling column ribbon is the only layout that
-/// exists; it stays an enum so another one can be added without changing
-/// `Workspace`.
+/// Workspace layout kind, as reported over the control socket and set through
+/// `Action::SetLayout`. The scrolling column ribbon is the only layout that
+/// exists; it is an enum because that tag is part of the wire vocabulary a
+/// second layout would extend, not because arrangement is dispatched through it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayoutKind {
     /// Scrolling column ribbon (niri-style).
     Column,
-}
-
-impl LayoutKind {
-    /// Parse a layout name. Always resolves to `Column` today; kept as a parser
-    /// so config strings stay stable.
-    pub fn from_str(_s: &str) -> Self {
-        Self::Column
-    }
-    /// Short symbol for status display (`[|]` for column).
-    pub fn symbol(&self) -> &'static str {
-        "[|]"
-    }
 }
 
 /// Workspace viewport display mode — a *display-state* axis of the workspace,
@@ -1369,8 +1350,6 @@ pub struct State {
     pub monitors: Vec<Monitor>,
     /// Selected monitor index.
     pub sel_mon: usize,
-    /// Monotonic focus serial.
-    pub focus_serial: u64,
     /// False when the WM should exit.
     pub running: bool,
     /// Status text for the bar.
@@ -1409,7 +1388,6 @@ impl State {
             clients: HashMap::new(),
             monitors: Vec::new(),
             sel_mon: 0,
-            focus_serial: 0,
             running: false,
             status: String::new(),
             pending_transients: Vec::new(),
@@ -1667,12 +1645,6 @@ impl State {
             }
         }
         self.sel_mon
-    }
-
-    /// Bump and return the next focus serial.
-    pub fn next_serial(&mut self) -> u64 {
-        self.focus_serial += 1;
-        self.focus_serial
     }
 
     /// Insert a client into `self.clients` (does not place it in a workspace).

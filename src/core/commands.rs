@@ -1238,39 +1238,6 @@ impl Command for MoveResize {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct CycleLayout;
-
-impl Command for CycleLayout {
-    fn execute(&mut self, state: &mut State, cfg: &mut Cfg) -> CommandReport {
-        let mut cmds = Vec::new();
-        let mi = state.sel_mon;
-        if mi < state.monitors.len() {
-            let ws_i = state.monitors[mi].active_ws;
-            if ws_i >= state.monitors[mi].workspaces.len() {
-                return CommandReport::new(cmds);
-            }
-            state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
-            let layout = state.monitors[mi].workspaces[ws_i].layout;
-            if layout == LayoutKind::Column {
-                let wa = state.monitors[mi].workarea;
-                let fs = fs_of(state, mi, ws_i);
-                let scroll = ideal_scroll(&state.monitors[mi].workspaces[ws_i], cfg, wa, fs);
-                state.monitors[mi].workspaces[ws_i].camera.retarget(scroll);
-            }
-            cmds.push(Effect::ArrangeMonitor(mi));
-            return CommandReport::with_event(
-                cmds,
-                Event::LayoutChanged {
-                    monitor: mi,
-                    workspace: ws_i,
-                },
-            );
-        }
-        CommandReport::new(cmds)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct SetLayout(pub LayoutKind);
 
 impl Command for SetLayout {
@@ -1839,52 +1806,6 @@ impl Command for MoveWindowToMonitor {
         drop_deferral_yielded_by_focus_move(state, Some(win));
         cmds.push(Effect::FocusWindow(Some(win)));
         CommandReport::with_event(cmds, Event::WindowMoved(win))
-    }
-}
-
-/// Which set of gaps a `SetGaps` command targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GapKind {
-    Inner,
-    Outer,
-    Both,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SetGaps(pub GapKind, pub u32);
-
-impl Command for SetGaps {
-    fn execute(&mut self, state: &mut State, cfg: &mut Cfg) -> CommandReport {
-        let mut cmds = Vec::new();
-        match self.0 {
-            GapKind::Inner => cfg.gaps_inner = self.1,
-            GapKind::Outer => cfg.gaps_outer = self.1,
-            GapKind::Both => {
-                cfg.gaps_inner = self.1;
-                cfg.gaps_outer = self.1;
-            }
-        }
-        let mi = state.sel_mon;
-        if mi < state.monitors.len() {
-            cmds.push(Effect::ArrangeMonitor(mi));
-        }
-        CommandReport::with_event(cmds, Event::GapsChanged)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct SetBorderWidth(pub u32);
-
-impl Command for SetBorderWidth {
-    fn execute(&mut self, state: &mut State, cfg: &mut Cfg) -> CommandReport {
-        cfg.border_w = self.0;
-        let mi = state.sel_mon;
-        let effects = if mi < state.monitors.len() {
-            vec![Effect::ArrangeMonitor(mi)]
-        } else {
-            vec![]
-        };
-        CommandReport::with_event(effects, Event::BorderChanged)
     }
 }
 

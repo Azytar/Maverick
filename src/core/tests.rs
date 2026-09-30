@@ -459,18 +459,6 @@ mod unit_tests {
     }
 
     #[test]
-    fn test_set_gaps_command_updates_cfg() {
-        let mut engine = setup_engine();
-        let before = engine.cfg.gaps_inner;
-        engine.execute(crate::core::commands::SetGaps(
-            crate::core::commands::GapKind::Inner,
-            before + 10,
-        ));
-        assert_eq!(engine.cfg.gaps_inner, before + 10);
-        assert_eq!(engine.cfg.gaps_outer, before, "Outer must be untouched");
-    }
-
-    #[test]
     fn test_noop_command_emits_no_publish() {
         // A command that produces no effects (e.g. focusing a nonexistent
         // window) must not spam IPC state to subscribers.
@@ -8561,10 +8549,10 @@ mod unit_tests {
         use crate::core::commands::{
             apply_fullscreen_geom_restore, apply_fullscreen_topology, apply_maximize,
             decide_manage_focus, focus_logical_on, reconcile_pending_focus_after_transition,
-            CollapseColumn, Command, CycleLayout, FocusDirection, FocusMonitor, FocusWindow,
-            GapKind, GrowColumn, KillWindow, ManageFocusIntent, MoveResize, MoveToWorkspace,
+            CollapseColumn, Command, FocusDirection, FocusMonitor, FocusWindow, GrowColumn,
+            KillWindow, ManageFocusIntent, MoveResize, MoveToWorkspace,
             MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav, PageSnap, Quit,
-            Restart, SetBorderWidth, SetGaps, SetLayout, Spawn, ToggleFloat,
+            Restart, SetLayout, Spawn, ToggleFloat,
             ToggleFullscreen, ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
         };
         use crate::core::effect::Effect;
@@ -8644,8 +8632,6 @@ mod unit_tests {
             OverviewEnter,
             ViewportZoom(u32),
             PageSnap(u8),
-            SetGaps(bool, u32),
-            SetBorderWidth(u32),
             Spawn(u32),
             FocusWindow(u32),
             FocusDirection(u8),
@@ -8655,7 +8641,6 @@ mod unit_tests {
             ToggleFloat,
             ToggleFullscreen,
             ToggleMaximize,
-            CycleLayout,
             Quit,
             Restart,
         }
@@ -8688,11 +8673,6 @@ mod unit_tests {
                     Self::OverviewEnter => Box::new(OverviewEnter),
                     Self::ViewportZoom(bits) => Box::new(ViewportZoom(f32::from_bits(*bits))),
                     Self::PageSnap(d) => Box::new(PageSnap(dir_of(*d))),
-                    Self::SetGaps(both, v) => Box::new(SetGaps(
-                        if *both { GapKind::Both } else { GapKind::Inner },
-                        *v,
-                    )),
-                    Self::SetBorderWidth(v) => Box::new(SetBorderWidth(*v)),
                     Self::Spawn(n) => Box::new(Spawn(vec![
                         "sh".to_string(),
                         "-c".to_string(),
@@ -8700,7 +8680,6 @@ mod unit_tests {
                     ])),
                     Self::Quit => Box::new(Quit),
                     Self::Restart => Box::new(Restart),
-                    Self::CycleLayout => Box::new(CycleLayout),
                     Self::FocusDirection(d) => Box::new(FocusDirection(dir_of(*d))),
                     Self::ToggleFloat => Box::new(ToggleFloat(None)),
                     Self::ToggleFullscreen => Box::new(ToggleFullscreen(None)),
@@ -8790,10 +8769,7 @@ mod unit_tests {
                 3 => Just(GenCmd::OverviewEnter),
                 4 => any::<u32>().prop_map(GenCmd::ViewportZoom),
                 3 => (0u8..=5).prop_map(GenCmd::PageSnap),
-                3 => (any::<bool>(), any::<u32>()).prop_map(|(b, v)| GenCmd::SetGaps(b, v)),
-                2 => any::<u32>().prop_map(GenCmd::SetBorderWidth),
                 1 => any::<u32>().prop_map(GenCmd::Spawn),
-                1 => Just(GenCmd::CycleLayout),
                 1 => Just(GenCmd::Quit),
                 1 => Just(GenCmd::Restart),
                 6 => (any::<u32>(), 0u8..=5).prop_map(|(_, d)| GenCmd::FocusDirection(d)),
@@ -9000,9 +8976,8 @@ mod unit_tests {
             let mut d = String::new();
             let _ = writeln!(
                 d,
-                "sel_mon={} serial={} running={} status={:?} x11={:?} pending={:?} transients={:?}",
+                "sel_mon={} running={} status={:?} x11={:?} pending={:?} transients={:?}",
                 s.sel_mon,
-                s.focus_serial,
                 s.running,
                 s.status,
                 s.x11_input_focus,

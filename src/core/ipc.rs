@@ -22,7 +22,6 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
     s.push('{');
 
     write!(s, "\"sel_mon\":{},", state.sel_mon).unwrap();
-    write!(s, "\"focus_serial\":{},", state.focus_serial).unwrap();
     write!(
         s,
         "\"status\":\"{}\",",
@@ -122,8 +121,8 @@ pub fn query_json(state: &State, cfg: &Cfg, topic: &str) -> String {
 /// The topic exists because "what is this session doing" spans three questions
 /// that no existing answer covered together: how many windows it manages and
 /// how they are arranged (which the tree query answers as a tree, not as
-/// totals), whether animations are enabled (which only the backend knows), and
-/// the camera the layout is scrolled to.
+/// totals), where the camera is scrolled to, and the resolution and workarea
+/// the selected monitor is using.
 /// `maverickctl inspect` renders this plus what the session manager knows.
 pub fn inspect_json(state: &State, cfg: &Cfg) -> String {
     use std::fmt::Write;
@@ -492,18 +491,6 @@ mod tests {
             layout.num_field("columns"),
             2,
             "two tiled columns, one float"
-        );
-        // Maverick has no compositor and no animation subsystem, so the
-        // document must not report either: a key here would be a claim about a
-        // subsystem that does not exist, and a tool reading it would branch on
-        // a fiction.
-        assert!(
-            v.get("compositor").is_none(),
-            "inspect still reports a compositor"
-        );
-        assert!(
-            v.get("animations").is_none(),
-            "inspect still reports animations"
         );
         // And the monitor the user can actually see.
         let mon = v.get("monitor").expect("monitor");

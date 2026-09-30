@@ -242,9 +242,8 @@ const MAX_MASK_RECTS: usize = 32_765;
 ///
 /// A Shape `BOUNDING` mask is a union of X11 rectangles, so its geometry travels
 /// as CARD16/INT16. The frame the caller derives is `geom + 2*bw`, and `bw` is
-/// user config: `userconfig` copies `border_width` into `Cfg` without a bound,
-/// `SetBorderWidth` overwrites it from IPC, and `manage` copies it into
-/// `Client::border_w`. A `border_width` of 40 000 therefore asks for an 80 001 px
+/// user config: `userconfig` copies `border_width` into `Cfg` without a bound
+/// and `manage` copies it into `Client::border_w`. A `border_width` of 40 000 therefore asks for an 80 001 px
 /// frame, and narrowing that with `as` is a *modulo*, not a saturation — the
 /// server receives a mask a fraction of the frame's size, anchored at a wrapped
 /// (possibly negative) origin. Worse, a dimension above `i32::MAX` arrives as a
@@ -260,8 +259,8 @@ const MAX_MASK_RECTS: usize = 32_765;
 ///
 /// `bw` here is the model's border, which is user config and therefore bounded
 /// by nothing this arithmetic can assume — `userconfig` copies `border_width`
-/// into `Cfg` without a range check, `SetBorderWidth` overwrites it from IPC, and
-/// `manage` copies it into `Client::border_w`. A `border_width` of 2147483648 in
+/// into `Cfg` without a range check and `manage` copies it into
+/// `Client::border_w`. A `border_width` of 2147483648 in
 /// the config file reaches here, and plain `2 * bw` overflows `u32` at
 /// `bw >= 2^31`, which a debug build traps ("attempt to multiply with overflow")
 /// rather than wrapping.
@@ -1238,7 +1237,6 @@ impl WindowManager {
                 .conn
                 .change_window_attributes(w, &ChangeWindowAttributesAux::new().border_pixel(col));
 
-            let serial = self.engine.state.next_serial();
             let was_urgent = if let Some(c) = self.engine.state.clients.get_mut(&w) {
                 // Consume the urgency flag so its border color and the
                 // `_NET_WM_STATE` demands-attention atom don't stick once the
@@ -1247,7 +1245,6 @@ impl WindowManager {
                 if was {
                     c.flags.clear(WinFlags::URGENT);
                 }
-                c.focus_serial = serial;
                 was
             } else {
                 false
@@ -2981,8 +2978,9 @@ mod tests {
         /// rectangle covering a fraction of the frame at the wrong offset.
         ///
         /// `border_width` is attacker-of-self supplied and unclamped all the way
-        /// from the config file (`userconfig` -> `Cfg::border_w` -> `SetBorderWidth`
-        /// IPC), and the frame is `geom + 2*bw`, so the unrepresentable case is
+        /// from the config file (`userconfig` -> `Cfg::border_w` ->
+        /// `Client::border_w`), and the frame is `geom + 2*bw`, so the
+        /// unrepresentable case is
         /// reachable from an ordinary `border_width = 40000`. The mask must stay
         /// inside the *representable* frame — `min(w, u16::MAX)` — and must never
         /// wrap below it.

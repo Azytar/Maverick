@@ -371,7 +371,7 @@ pub(crate) const MAX_CFG_BORDER: i32 = 1_000_000;
 
 /// The border width the projection may reserve around a tiled window, resolved
 /// from a `Cfg::border_w` the caller is free to set without validating it (the
-/// config file and the IPC `SetBorderWidth` command both do).
+/// config file does).
 ///
 /// This is the u32→i32 representation boundary for user config: a raw
 /// `border_w` above `i32::MAX` wraps negative here and would *add* the frame to
@@ -1996,9 +1996,8 @@ mod proptests {
         });
     }
 
-    /// A user-supplied `border_w` reaches the layout from the config file and
-    /// from the IPC `SetBorderWidth` command without validation, so it is only
-    /// safe because of the documented ceiling: past `i32::MAX / 2` the `2 * bw`
+    /// A user-supplied `border_w` reaches the layout from the config file
+    /// without validation, so it is only safe because of the documented ceiling: past `i32::MAX / 2` the `2 * bw`
     /// the frame costs overflows `i32`, and past `i32::MAX` the `u32 as i32`
     /// cast wraps negative and *adds* the frame to a row instead of reserving
     /// it. The placement must therefore report exactly the clamped value — a
