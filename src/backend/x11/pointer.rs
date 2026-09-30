@@ -131,9 +131,6 @@ pub(super) struct DragState {
     /// opposite corner stays anchored.
     pub(super) resize_l: bool,
     pub(super) resize_t: bool,
-    /// Whether the pointer actually travelled (≥4px) — distinguishes a click
-    /// from a drag, so only real drags can drop into a column.
-    pub(super) moved: bool,
 }
 
 impl WindowManager {
@@ -435,7 +432,6 @@ impl WindowManager {
                             resize: is_resize,
                             resize_l,
                             resize_t,
-                            moved: false,
                         });
                         // The WM claims geometry for the rest of the drag: the
                         // client-authority seal dies here, not on the next
@@ -647,11 +643,6 @@ impl WindowManager {
                 )
             };
 
-            if let Some(drag) = &mut self.drag {
-                if gx != drag.start_geom.x || gy != drag.start_geom.y {
-                    drag.moved = true;
-                }
-            }
             // Route the drag through the `MoveResize` Command so the float
             // geometry state mutation lives in the core funnel; the emitted
             // `Effect::ConfigureWindow` is carried out by the reconciler's
