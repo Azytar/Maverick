@@ -97,7 +97,6 @@ maverickctl session remove  <name> [--force]
 | `--binary <path>` | the Maverick binary (default: `maverick` on `$PATH`) |
 | `--cwd <path>` | working directory for Maverick |
 | `--debug` | run at debug level — this is what makes `logs` worth reading |
-| `--no-compositor` | run without the compositor, to compare against a session that has one |
 | `-- <args…>` | everything after `--` is passed to Maverick, verbatim |
 
 A bare name is a `$PATH` lookup and a value with a `/` is a path, so
@@ -216,8 +215,8 @@ maverickctl debug   <session> [--window <id>]
 `debug` is two real sources: the structured event stream from the window manager,
 and the recent tail of the session's own log. Neither alone answers "what is this
 session doing" — the stream is ordered and cheap but only carries transitions,
-while the log at `MAVERICK_LOG=debug` carries the reconciliation, geometry,
-compositor and damage detail. `--window` keeps lines about that window and lines
+while the log at `MAVERICK_LOG=debug` carries the reconciliation and geometry
+detail. `--window` keeps lines about that window and lines
 that name no window, and drops lines about *other* windows: a failure with no
 window reference is exactly the one a filter would otherwise hide.
 
@@ -287,7 +286,7 @@ and leaves the log; `session remove` deletes the directory.
 The reverse order is handled by the window manager itself, because a tool can
 only clean up what it is asked to. When the X server dies first, the window
 manager runs the half of its teardown that needs no server — removing its
-identity record and its control socket, and writing the compositor trace with
+identity record and its control socket, and writing the trace with
 `end=x_connection_lost x_teardown=skipped` — so an X server's death is a
 reported state rather than a record left behind. It issues no X or GLX request
 on the way out, which is the part that matters: a request on a display whose
@@ -329,8 +328,7 @@ cannot mean the boundary was never checked.
 
 `xserver` is a backend abstraction and Xephyr is its default implementation. The
 alternatives were compared against what this feature actually needs — a real
-server, a real GLX for the compositor, no privileges, scriptable, present on a
-stock install:
+server, no privileges, scriptable, present on a stock install:
 
 - **Nested Xorg** is the most real option and is what a distribution would ship,
   but it needs the Xorg driver modules to bind a driver at all, races the host
@@ -339,9 +337,7 @@ stock install:
   distribution-specific driver package.
 - **Xvfb** is a real X server and needs no privileges, but it is *headless*:
   nothing renders into the parent display, so a user cannot see the session they
-  just created, and its GLX is software-rasterised or absent, which means the
-  real compositor either fails to initialise or runs a path it never runs on real
-  hardware. It remains available for headless and CI use.
+  just created. It remains available for headless and CI use.
 - **Xephyr** is a real X server whose framebuffer *is* a window on the parent
   display, with real GLX, Composite, Damage and RANDR. It is the only option that
   gives a developer what this feature is for: a second Maverick they can watch,

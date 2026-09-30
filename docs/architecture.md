@@ -107,6 +107,13 @@ motion. Rounded corners survive as the X11 `Shape` mask
 (`render::sync_rounded_frame`), which was already implemented as the
 non-compositor path and is now the only one.
 
+The animation subsystem went with it, and not only the drawing: the spring had
+no driver left. `Camera` is a single `f32` scroll offset, `zoom` and
+`page_zoom` are single values rather than a value chasing a target, and
+`Column::boost` is gone — the accordion computes "the focused column, or not"
+directly. There is no `Phase::Live` to choose, because there is only one
+projection, and it is the one X11 is told about.
+
 `_NET_WM_BYPASS_COMPOSITOR` and `_NET_WM_WINDOW_OPACITY` are still **published**
 on Maverick's own windows. Those are EWMH interoperability aimed at *external*
 compositors, not at Maverick's own, and removing them would be a regression for
@@ -123,13 +130,15 @@ that would break if it were violated.
 `render::emit_geometry`, driven by the `Reconciler` diffing `DesiredState`
 against `AppliedState`. No other code positions a window.
 
-**One animation policy, and it is the settled one.** `run_once` calls
-`State::snap_animations()` on every turn (`backend::x11/mod.rs`). The logical
-state is left settled, which is what makes the integer rect the final rect.
+**One projection, and it is the geometry.** `arrange` takes no phase and no
+frame delta: the camera is a number the layout reads, not a value easing toward
+another. The integer rect the reconciler writes is therefore the only rect there
+is, with no second geometry model to disagree with it.
 
-**One loop, and it is idle.** The event loop drains the X queue, settles
-animation, and blocks on X11 plus the control self-pipe with no frame deadline.
-There is no heartbeat and no frame timer: an idle session costs no CPU.
+**One loop, and it is idle.** The event loop drains the X queue, flushes the
+geometry it owes, and blocks on X11 plus the control self-pipe with no frame
+deadline. There is no heartbeat and no frame timer: an idle session costs no
+CPU.
 
 **`maverick-core` is pure.** No X11, no clock, no filesystem, no environment.
 `State`, `Camera`, layout and the command layer are deterministic functions of
@@ -141,10 +150,11 @@ signalling) and a control protocol. Signal disposition stays on `libc` because
 rustix does not implement `sigaction` — verified at
 `rustix-1.1.4/src/not_implemented.rs:72`.
 
-**Configuration is data, not control flow.** `[compositor]` in a config file
-still parses, because it is the historical home of the `stiffness`/`damping`
-animation aliases, and every other key in it reports itself as ignored rather
-than being silently accepted.
+**Configuration is data, not control flow.** A section that configures a
+subsystem Maverick does not have — `[compositor]`, `[animations]` — is not
+parsed. Its keys take the same path as any other unknown key: skipped, with the
+rest of the file still merged. A config carried over from an older Maverick
+keeps working, and keeps the keys it still means.
 
 ---
 
@@ -164,14 +174,14 @@ happens once, at the X11 boundary, at `src/core/layout.rs:649`:
 let screen_col_x = (wa.x as f32 + (world_x - cam) * alpha + cx).round() as i32;
 ```
 
-`Camera::step` integrates in `f64` and never reads the rounded `position` back,
-so quantisation cannot accumulate in the camera. The one running `f32` sum is
+`Camera` holds a plain `f32` that is rounded exactly once, here, so
+quantisation cannot accumulate in the camera. The one running `f32` sum is
 the per-column `x += w + gap_f` (`layout.rs:485`); it measures 0.028 px at 50
 columns, 0.41 px at 200 and 0.93 px at 500, and it is the only accumulation in
 the pipeline.
 
-The consequence of there being no compositor: **the integer rectangle in X11 is
-the only rectangle.** There is no second geometry model to disagree with it.
+The consequence of there being no compositor and no animation: **the integer
+rectangle in X11 is the only rectangle.**
 
 ---
 
@@ -184,8 +194,8 @@ the only rectangle.** There is no second geometry model to disagree with it.
   because the compiler had noticed. It was deleted rather than kept as a
   placeholder, because an abstraction held alive by a comment is the thing that
   had already gone wrong once.
-- **No Vulkan backend.** `maverick-vk` is an unwired bootstrap. No crate
-  depends on it, so it is excluded from the workspace rather than deleted. A
+- **No Vulkan backend.** `maverick-vk` was an unwired bootstrap that no crate
+  depended on. A
   `compositor-vulkan` feature once named it and selected nothing, which is how
   a user could get an error telling them to rebuild with a flag that would have
   done nothing.

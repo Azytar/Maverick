@@ -2,8 +2,8 @@
 
 Maverick is an experimental X11 window manager for Linux, written in Rust.
 It combines a horizontally scrolling ribbon of tiled columns with per-monitor
-workspaces and independent floating windows. An optional OpenGL/GLX compositor
-adds animated presentation without owning the window-management state.
+workspaces and independent floating windows. It talks to X11 and nothing else:
+no compositor, no GPU renderer, no GL or Vulkan dependency.
 
 [Overview](#overview) · [Design](#design) · [Installation](#installation) ·
 [Configuration](#configuration) · [Testing](#testing) · [Screenshots](#screenshots)
@@ -55,16 +55,15 @@ notification service, lock screen, or application launcher.
 
 ### Rendering and session behavior
 
-- Plain X11 operation without the built-in compositor; geometry changes settle
-  immediately, without spring animation.
-- Optional OpenGL/GLX rendering: scroll/zoom animation, window opacity, rounded
-  corners, image wallpaper, and GLSL wallpaper.
+- X11 only. Every state change is written to the server in one configure at its
+  final position; there is no frame loop and no interpolation.
+- The scroll camera is a plain offset: scrolling rewrites it and re-projects.
+  No window is ever resized frame by frame, because no frames are drawn.
+- `_NET_WM_BYPASS_COMPOSITOR` and `_NET_WM_WINDOW_OPACITY` published on managed
+  windows, so an external compositor (picom, compton) can honour them.
 - In-place restart, adoption of existing windows with `--replace`, and isolated
   control sockets for multiple Maverick instances.
 - Unit/regression tests in Rust and separate real-X11 integration harnesses.
-
-Vulkan is an **unintegrated experimental bootstrap**, not an alternative working
-WM compositor. See [Compositor](#compositor) and [Current status](#current-status).
 
 ## Design
 
@@ -87,7 +86,6 @@ Key / pointer / IPC actions       X11 lifecycle events
                          v
                         X11
 
-State + Cfg -- layout Phase::Live --> optional OpenGL compositor
 ```
 
 `maverick-core` defines the domain types, including clients, columns, workspaces,
@@ -102,11 +100,10 @@ The surrounding X11 backend handles visibility, stacking, and focus separately.
 Applied state is a backend cache, not a claim that asynchronous X11 requests can
 never fail.
 
-The layout has two phases. `Phase::Settled` uses camera targets for the geometry
-sent to X11. `Phase::Live` uses interpolated camera values for compositor drawing.
-The same projection math serves both: animations move textures rather than resize
-X windows on every spring frame. Without the compositor, state changes go straight
-to settled geometry.
+The layout has one projection. The camera is a plain scroll offset, and the
+rectangles it produces are the rectangles X11 is told about — there is no
+interpolated view alongside the settled one, and no window whose size is rewritten
+on the way there.
 
 The ribbon is a logical coordinate system, not another X11 screen. Its projection
 includes the monitor's global origin and workarea; X11 still sees ordinary windows
@@ -166,47 +163,28 @@ Maximize instead uses the workarea (also without a border), with independent
 horizontal and vertical state bits. These policies are still evolving; fullscreen
 is neither a permanently pinned ribbon tile nor a universal input lock.
 
-## Compositor
+## Compositing
 
-Window management does not require the built-in compositor. Disabling it is a
-supported operating mode, useful for a simpler rendering path, nested-X testing,
-or running an external X11 compositor. It does not disable tiling, floating,
-workspaces, or fullscreen.
+Maverick has no compositor and draws through X11 alone: no frame loop, no GPU,
+no GL or Vulkan library, no extra runtime dependency. Compositing is somebody
+else's job, and it composes with a window manager the ordinary way — over the
+wire.
 
-### Without the built-in compositor
+Two EWMH properties make that work, and Maverick publishes both:
 
-```bash
-MAVERICK_NO_COMPOSITOR=1 maverick
-```
+- `_NET_WM_BYPASS_COMPOSITOR` is set to `2` on a window that takes a true
+  exclusive fullscreen, and deleted when it leaves fullscreen. An external
+  compositor reads it and steps aside for that window.
+- `_NET_WM_WINDOW_OPACITY` is written on managed windows from
+  `[[rules]] opacity`. It is a per-window property, not a rendering mode.
 
-Alternatively, set `[compositor] enabled = false`, or build the WM with
-`--no-default-features`. Geometry changes are immediate. Rounded
-corners can use the X Shape path. An external compositor owns its own effects;
-Maverick's GPU animations are not delegated to it.
+Both are ordinary EWMH, so `picom`, `compton` or anything else that speaks it
+works unmodified, and the WM is no larger for it. An external compositor owns
+its own effects; Maverick does not delegate or emulate them.
 
-### OpenGL
-
-The default **Cargo build** includes `compositor-opengl`. The implementation uses
-OpenGL 3.3, GLX texture-from-pixmap, and the WM's shared X11 connection. `libGL.so.1`
-is loaded at runtime. Initialization can fall back to plain X11 if GL is unavailable,
-context creation fails, or another compositor owns the screen selection.
-
-Implemented effects are window opacity (`_NET_WM_WINDOW_OPACITY`, also settable
-by rule) and rounded corners—not blur or shadows. Partial redraw needs
-`GLX_EXT_buffer_age` and a usable back buffer; otherwise frames are fully redrawn.
-Fullscreen bypass is conditional on the actual presentation and stacking state,
-not guaranteed for every fullscreen client.
-
-The installer treats this path as experimental and defaults to a non-composited
-build. Driver and nested-server compatibility need testing; a configuration flag
-alone is not evidence that the GL compositor successfully started.
-
-### Vulkan
-
-`maverick-vk` contains instance/device/surface/swapchain infrastructure and a
-clear/present path. The root `compositor-vulkan` feature is a placeholder; it does
-not wire that crate into the WM. Setting `backend = "vulkan"`, even with the feature,
-does **not** provide a working Vulkan desktop compositor. Use OpenGL or plain X11.
+If you want blur, shadows, fading or animated window transitions, run a
+compositor in your session — from your display manager, or from
+`[autostart] commands` — and Maverick gets out of the way.
 
 ## Installation
 
@@ -219,8 +197,6 @@ edition 2021 and Rust **1.82** as the minimum; current CI uses stable Rust.
 sudo pacman -S --needed base-devel rust libx11 libxcb
 # For an X11 session started with startx:
 sudo pacman -S --needed xorg-server xorg-xinit
-# For the optional OpenGL path:
-sudo pacman -S --needed mesa libxcomposite
 ```
 
 The compiled launch bindings use `alacritty` and `rofi`; install those or override
@@ -234,13 +210,6 @@ These applications are not required by the layout engine.
 git clone https://github.com/Azytar/Maverick.git
 cd Maverick
 cargo build --release --workspace
-```
-
-For a WM build without GL, select the runtime packages explicitly:
-
-```bash
-cargo build --release --no-default-features \
-  -p maverick -p maverick-sys
 ```
 
 The runtime binaries are `maverick` (the window manager) and `maverickctl` (its
@@ -279,14 +248,10 @@ ship such a line in `~/.profile` — is reported rather than rewritten.
 Other forms:
 
 ```bash
-# Skip the compositor: a pure X11 build, the recommended default.
-./install.sh --yes --without-compositor
 # System-wide install into /usr/local.
 ./install.sh --system
 # Any explicit prefix.
 ./install.sh --prefix /opt/maverick
-# Explicitly opt into the experimental GL build.
-./install.sh --yes --with-compositor
 # Additionally publish the session file where a display manager reads it.
 ./install.sh --system --xsessions-dir /usr/share/xsessions
 # Leave shell startup files alone and get the export line printed instead.
@@ -362,7 +327,7 @@ and capture the WM's standard error in a test session:
 
 ```bash
 cargo build -p maverick --features input-trace,window-trace
-MAVERICK_NO_COMPOSITOR=1 ./target/debug/maverick --config /path/to/test.toml \
+./target/debug/maverick --config /path/to/test.toml \
   2> /tmp/maverick-debug.log
 ```
 
@@ -383,9 +348,6 @@ column_width = 0.5
 gaps_inner = 10
 gaps_outer = 14
 focus_mouse = false
-
-[compositor]
-enabled = false
 ```
 
 Leaving out `[autostart]` keeps the compiled defaults; see the autostart notes
@@ -405,8 +367,6 @@ bindings, rules, and autostart. In particular:
   `auto_workspace_binds = false`. `n_tags` is limited to 1–9.
 - `column_width` is a workarea fraction (0.1–1.0); `accordion_boost` defaults to
   `0.0`, so focused-column expansion is opt-in.
-- `[animations] enabled = false` snaps camera/zoom transitions even when GL is active.
-  `stiffness` and `damping` tune the spring.
 - `[colors]` accepts `0xRRGGBB` values for `normal`, `focused`, and `urgent`, overriding
   a `[general] theme` preset.
 
@@ -559,13 +519,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 exercise the supporting crates. Tests cover layout and state invariants,
 presentation/focus transitions, floating geometry convergence, configuration and
 action parsing, IPC/session discovery, image decoding, and renderer helpers.
-They do not constitute a real-driver compositor or application compatibility test.
-Some Vulkan integration tests require explicit opt-in and an X11/Vulkan environment.
+They do not constitute an application compatibility test against real drivers.
 
 [CI](.github/workflows/ci.yml) runs three jobs: workspace tests with strict
 Clippy, installer checks (`bash -n` plus `tests/install-smoke.py`), and an
-X11 smoke job that builds the `--no-default-features` profile and runs the Xvfb
-stacking regression. It does not run the Xephyr scenarios.
+X11 smoke job that runs the Xvfb stacking regression. It does not run the Xephyr
+scenarios.
 
 ### Real X11 and installer tests
 
@@ -581,17 +540,16 @@ The installer smoke test uses isolated temporary directories and stubbed privile
 commands; it is not a system installation.
 
 `tests/xephyr-*.sh` covers fullscreen/pointer interactions, client death, restart,
-shutdown, IPC edge cases, compositor damage, and monitor scenarios.
+shutdown, IPC edge cases, and monitor scenarios.
 `tests/xephyr-suite.sh` is a separate manual integration harness with optional real
-applications; it forces the built-in compositor off because of known nested-GLX
-failures. These scripts are **not all isolated to the same standard**: some older
+applications. These scripts are **not all isolated to the same standard**: some older
 helpers in `tests/common.sh` kill processes by name or use fixed displays. Inspect
 a script before running it, and run the legacy suite only in a disposable graphical
 session, not alongside work you need to preserve.
 
 The screenshot harness below is separate: it owns its server and clients and never
 uses that global cleanup helper. Captures demonstrate selected states, not full
-application compatibility or animation correctness.
+application compatibility.
 
 ## Development
 
@@ -608,8 +566,8 @@ Use `cargo fmt --all -- --check` for a read-only formatting check. Existing
 formatting drift should be handled independently rather than mixed into a
 documentation or behavior change. Keep new layout/policy work covered by pure
 state tests; use an isolated X server for protocol, stacking, and focus behavior.
-When changing compositor code, validate on a real driver as well as any nested
-server that supports the required GLX path.
+When changing EWMH interop (struts, bypass hints, opacity), validate against a
+real session and against a server with an external compositor running.
 
 ## Architecture
 
@@ -618,13 +576,10 @@ server that supports the required GLX path.
 | `src/main.rs` | CLI, configuration selection, signals, instance/control lifetime, backend startup |
 | `maverick-core/` | Dependency-free domain types |
 | `src/core/` | Engine, actions/commands/effects/events, layout, presentation, desired state, session recovery |
-| `src/backend/x11/` | Event handling, client management, input, EWMH, struts, reconciliation, frame scheduling |
+| `src/backend/x11/` | Event handling, client management, input, EWMH, struts, reconciliation |
 | `src/config.rs`, `src/userconfig.rs` | Compiled defaults, config merging, validation |
 | `maverick-x11/` | Shared Xlib/XCB connection bootstrap |
 | `maverick-sys/` | Instance identity/discovery, control socket/hub, the Maverick Session model, `maverickctl` |
-| `maverick-render/` | Renderer-facing types and trait; no in-tree backend implements `Renderer` yet |
-| `maverick-gl/` | OpenGL/GLX renderer and in-tree FFI/loading |
-| `maverick-vk/` | Experimental Vulkan device/surface/swapchain code, not integrated into the WM |
 | `maverick-toml/` | TOML-subset parser |
 | `tests/` | Real-X11 probes and integration scripts, installer smoke tests |
 | `showcase/` | Isolated, reproducible technical presentation harness |
@@ -641,9 +596,6 @@ or async-runtime requirement, but still depends on native X11 libraries.
 ├── src/                 # Main window manager
 ├── maverick-core/       # Shared state and core types
 ├── maverick-x11/        # X11 integration
-├── maverick-gl/         # OpenGL compositor
-├── maverick-vk/         # Vulkan backend
-├── maverick-render/     # Renderer types/trait (no in-tree implementor)
 ├── maverick-toml/       # TOML/config support
 ├── maverick-sys/        # IPC/control interfaces, Maverick Sessions
 ├── config/              # Example configuration
@@ -652,29 +604,15 @@ or async-runtime requirement, but still depends on native X11 libraries.
 └── tests/               # Integration and X11 tests
 ```
 
-`maverick-vk` is an unintegrated experimental bootstrap (see
-[Compositor](#compositor)); it is not a working compositor backend.
-
-`maverick-render` likewise defines a backend-agnostic `Renderer` trait and
-shared value types, but no crate in the workspace implements that trait yet —
-`maverick-gl` ships its own unrelated `Renderer` type. The crate is currently
-re-exported through `src/backend/renderer.rs` and used by its own contract
-tests only.
-
 ## Current status
 
-Maverick is in **preview** and is not yet declared production-ready. The
-recommended evaluation profile is Linux/X11 with the built-in compositor
-disabled (`--no-default-features` for builds, or `MAVERICK_NO_COMPOSITOR=1` at
-runtime). That profile avoids depending on the experimental GL renderer, but it
-still needs validation on the target machine and with the applications used in
-the session. CI and the integration scripts are regression checks, not a
+Maverick is in **preview** and is not yet declared production-ready. It still
+needs validation on the target machine and with the applications used in the
+session. CI and the integration scripts are regression checks, not a
 certification of broad application compatibility or long-running reliability.
 
-- **Experimental rendering:** OpenGL is implemented but remains optional and
-  driver-sensitive. Vulkan is not connected to window compositing.
-- **Scope:** Linux/X11 only; no Wayland backend, built-in desktop shell, blur,
-  or shadows.
+- **Scope:** Linux/X11 only; no Wayland backend, compositor, animation,
+  built-in desktop shell, blur, or shadows.
 - **Layout:** Column is the only implemented layout. Workspace indices are limited
   to 1–9; names are cosmetic.
 - **Compatibility:** ICCCM/EWMH support is implemented for the WM's needs, not a
@@ -684,9 +622,9 @@ certification of broad application compatibility or long-running reliability.
   assume arbitrary hotplug/reordering preserves assignments.
 - **Geometry:** X11 has a global root coordinate space and protocol size/coordinate
   bounds. Scroll projection and multi-monitor workareas must respect those limits.
-- **Interfaces:** configuration, internal APIs, presentation policy, and experimental
-  renderer behavior can change. The in-tree TOML parser supports a subset, not all
-  of the TOML specification.
+- **Interfaces:** configuration, internal APIs and presentation policy can
+  change. The in-tree TOML parser supports a subset, not all of the TOML
+  specification.
 
 ### Preview launch checklist
 
@@ -695,8 +633,8 @@ disposable X11 session on the target machine. Confirm login and clean exit,
 application launch and close, focus/input, fullscreen, floating/transient dialogs,
 workspace switching, display sleep/wake, and monitor changes. Keep a way to return
 to the previous session and preserve the user's work before testing shutdown.
-Do not treat the compositor, Vulkan bootstrap, arbitrary monitor hotplug, or
-unlisted Linux distributions as supported release targets yet.
+Do not treat arbitrary monitor hotplug or unlisted Linux distributions as
+supported release targets yet.
 
 ## Roadmap
 
@@ -705,11 +643,10 @@ release dates:
 
 - Extend real-client regression coverage for floating geometry, focus, fullscreen,
   restart, and monitor/workarea changes.
-- Harden OpenGL startup, damage handling, fullscreen bypass, and driver coverage.
-- Evaluate integrating the Vulkan bootstrap with real window textures and the
-  renderer contract before calling it a supported backend.
-- Keep the workarea and struts honest against docks that reserve screen space
-  the window manager does not own.
+- Keep the EWMH interop (`_NET_WM_BYPASS_COMPOSITOR`, `_NET_WM_WINDOW_OPACITY`)
+  honest against a real external compositor.
+- Keep the workarea and struts honest against docks that reserve space the
+  window manager does not own.
 
 ## Screenshots
 
