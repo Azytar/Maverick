@@ -107,8 +107,8 @@ urgent  = 0xf38ba8        # catppuccin-mocha red
 #     [autostart]
 #     commands = [["feh", "--bg-fill", "/path/to/image.png"]]
 # A bare `autostart = [...]` key is not the table: with no section open it lands
-# on no table at all and is dropped without a diagnostic. A compositor started
-# the same way will draw over the background.
+# on no table at all, so it is ignored and `--check-config` names it. A
+# compositor started the same way will draw over the background.
 
 # ── Keybindings ──────────────────────────────────────────────────────────────
 # Each entry is one [[keybindings]] table with `key` and `action`.

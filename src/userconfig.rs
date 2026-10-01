@@ -434,6 +434,14 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                         apply_rule_key(row, key, &value, diag);
                     }
                 }
+                // A key with no table open is a different mistake from a key in
+                // a table Maverick has never heard of, and only the first is a
+                // typo. No valid config places a key at file scope, so say so
+                // rather than dropping it on the floor the way an unknown table
+                // is dropped.
+                None => diag.warnings.push(format!(
+                    "key '{key}' appears before any [table] header; ignoring it"
+                )),
                 // Unknown sections and rows are ignored: a config written for
                 // a newer Maverick must still load on an older one. That is
                 // also where `[compositor]` and `[animations]` land — the
@@ -1888,6 +1896,32 @@ border_width = 0
         // to fail the CI gate: "the file loads" is not "the file is what you
         // wrote".
         assert!(!diag.is_clean(), "{diag:?}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A key written before any table header is a typo, not a forward-
+    /// compatibility case, and must be reported the way a typo inside a known
+    /// table is. The two are different mistakes: an unknown `[table]` has keys
+    /// Maverick cannot judge, but a bare key at file scope matches nothing at
+    /// all and was being dropped without a word.
+    #[test]
+    fn a_key_before_any_table_is_reported() {
+        let path = write_temp("n_tgas = 3\n[general]\ngaps_inner = 11\n");
+        let (_source, cfg, diag) = load_from_path_classified(&path);
+        // The rest of the file must still merge: the bad key is degraded, not
+        // discarded, and it must not abort the tables after it.
+        assert_eq!(cfg.gaps_inner, 11);
+        assert!(diag.errors.is_empty(), "{:?}", diag.errors);
+        assert_eq!(diag.warnings.len(), 1, "{:?}", diag.warnings);
+        let warning = &diag.warnings[0];
+        assert!(
+            warning.contains("n_tgas"),
+            "the warning must name the key: {warning}"
+        );
+        assert!(
+            !diag.is_clean(),
+            "--check-config must fail the gate on a bare key: {diag:?}"
+        );
         let _ = std::fs::remove_file(path);
     }
 
