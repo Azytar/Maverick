@@ -8,6 +8,8 @@ no compositor, no GPU renderer, no GL or Vulkan dependency.
 [Overview](#overview) · [Design](#design) · [Installation](#installation) ·
 [Configuration](#configuration) · [Testing](#testing) · [Screenshots](#screenshots)
 
+Read this in Spanish: [README.es.md](README.es.md).
+
 ## Overview
 
 Maverick explores a spatial alternative to fitting every window onto one screen.
@@ -683,15 +685,14 @@ A directional-focus step reveals a different view of the same real
 application set. The scene is a navigation state, not a second desktop
 mock-up.
 
-### Legibilidad
+### Legibility
 
 ![Maverick legibility adjustment](docs/screenshots/legibility.png)
 
-La escena parte de una composición compacta y luego utiliza las combinaciones
-reales `Mod+Ctrl+H` y `Mod+Ctrl+L` sobre la columna enfocada. El showcase
-comprueba que la columna se reduce, que `Mod+Ctrl+L` recupera un ancho más
-cómodo, que no aparecen solapamientos y que el resultado mantiene el contenido
-real legible.
+The scene starts from a compact composition and then uses the real `Mod+Ctrl+H`
+and `Mod+Ctrl+L` chords on the focused column. The harness checks that the
+column narrows, that `Mod+Ctrl+L` restores a more comfortable width, that no
+overlap appears, and that the result keeps the real content legible.
 
 ### Floating isolation
 
