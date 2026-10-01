@@ -5,8 +5,6 @@
 //! not complete must not exit 0. A discarded `Result` is only acceptable when
 //! discarding it cannot change what the caller is told.
 
-mod common;
-
 use maverickctl::session::SessionName;
 use std::process::Command;
 

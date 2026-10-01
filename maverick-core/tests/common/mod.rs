@@ -7,6 +7,11 @@
 //! than a restatement of the code under test: a violation can only come from the
 //! transition being exercised, never from the fixture being impossible.
 
+// Every integration test is its own crate, so this module is compiled once per
+// `proptest!` binary and each binary reaches only the helpers its own properties
+// use: `state_model_props` never asks for an `Edge`, `rect_geometry_props` never
+// asks for a `Spec`. No item here is unused by *all* of them, so a
+// per-item-level lint would only ever report the file's own reuse pattern.
 #![allow(dead_code)]
 
 use maverick_core::types::{
@@ -46,37 +51,6 @@ pub fn arb_rect() -> impl Strategy<Value = Rect> {
 pub fn arb_screen() -> impl Strategy<Value = Rect> {
     (arb_coord(), arb_coord(), 1u32..=8192, 1u32..=8192)
         .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
-}
-
-/// A finite scroll offset. The small branches matter: layout scroll values live
-/// near zero, and a domain made only of huge magnitudes would never exercise the
-/// sub-pixel settle envelope.
-pub fn arb_offset() -> impl Strategy<Value = f32> {
-    prop_oneof![-1.0e6f32..=1.0e6, -4096.0f32..=4096.0, -1.0f32..=1.0]
-}
-
-/// A float that may be non-finite, for the domains that explicitly document how
-/// poisoned input is handled.
-pub fn arb_poisoned() -> impl Strategy<Value = f32> {
-    prop_oneof![
-        any::<f32>(),
-        Just(f32::NAN),
-        Just(f32::INFINITY),
-        Just(f32::NEG_INFINITY),
-        -1.0e30f32..=1.0e30
-    ]
-}
-
-/// A guaranteed non-finite float. `any::<f32>()` is useless for this: it yields
-/// non-finite values only rarely, so a "the API must reject this" property built
-/// on it would exercise the rejection path in a handful of cases out of 256.
-pub fn arb_non_finite() -> impl Strategy<Value = f32> {
-    prop_oneof![
-        Just(f32::NAN),
-        Just(-f32::NAN),
-        Just(f32::INFINITY),
-        Just(f32::NEG_INFINITY)
-    ]
 }
 
 /// An edge for a reservation.
@@ -176,16 +150,6 @@ pub struct Built {
     pub wins: Vec<WindowId>,
     /// The subset of [`Self::wins`] that is tiled (present in `columns`).
     pub tiled: Vec<WindowId>,
-}
-
-impl Built {
-    /// Look a client up, panicking when the generator promised it exists.
-    pub fn client(&self, win: WindowId) -> &Client {
-        self.state
-            .clients
-            .get(&win)
-            .expect("builder promised this window is managed")
-    }
 }
 
 /// Move the monitor's logical focus, the way the single focus funnel does: the

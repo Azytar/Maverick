@@ -43,36 +43,22 @@
 use super::render::clamp_float_to_workarea;
 use super::*;
 
-// `itrace!` is a no-op unless the `input-trace` feature is on, so the call sites
-// below cost nothing in normal builds.
+// `itrace!` exists only when the `input-trace` feature is on; its call sites
+// carry the same `cfg`, so a normal build compiles neither.
 #[cfg(feature = "input-trace")]
-#[allow(unused_macros)]
 macro_rules! itrace {
     ($($arg:tt)*) => {{
         eprintln!("[INPUT-TRACE] {}", format!($($arg)*));
     }};
 }
-#[cfg(not(feature = "input-trace"))]
-#[allow(unused_macros)]
-macro_rules! itrace {
-    ($($arg:tt)*) => {{}};
-}
-
-// `wtrace!` is the window-level counterpart of `itrace!`: same no-op-unless-
-// enabled trick, different event stream.
+// `wtrace!` is the window-level counterpart of `itrace!`: same arrangement
+// against the `window-trace` feature, different event stream.
 #[cfg(feature = "window-trace")]
-#[allow(unused_macros)]
 macro_rules! wtrace {
     ($($arg:tt)*) => {{
         eprintln!("[WINDOW-TRACE] {}", format!($($arg)*));
     }};
 }
-#[cfg(not(feature = "window-trace"))]
-#[allow(unused_macros)]
-macro_rules! wtrace {
-    ($($arg:tt)*) => {{}};
-}
-
 /// How a pointer grab must be undone on exit: either release the frozen
 /// `ButtonPress` back to the client, or drop the active drag grab.
 enum GrabRelease {

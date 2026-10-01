@@ -10,6 +10,11 @@
 //! are exactly the characters that decide whether a payload survives the CLI
 //! parser and the line framing of the control protocol.
 
+// Each integration test is its own crate, so this module is compiled once per
+// test binary: `control_props` only draws hostile text, while `ctl_props` also
+// needs `isolate_runtime_dir` to keep the CLI from reaching a live instance.
+// Both helpers are live in the crate, so a per-item lint here would only report
+// which properties a given binary happens to use.
 #![allow(dead_code)]
 
 use proptest::prelude::*;

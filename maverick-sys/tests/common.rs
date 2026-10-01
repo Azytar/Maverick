@@ -6,8 +6,6 @@
 //! places and must stay equivalent. Only what the JSON escaper tests need
 //! lives here; CLI runtime isolation lives with the CLI.
 
-#![allow(dead_code)]
-
 use proptest::prelude::*;
 use proptest::string::string_regex;
 

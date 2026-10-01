@@ -76,35 +76,22 @@ use crate::core::present::present_into;
 use crate::types::StateExt;
 use x11rb::protocol::shape;
 
-// `itrace!`/`wtrace!` expand to nothing unless their feature is enabled, so the
-// call sites below cost no runtime in normal builds.
+// `itrace!`/`wtrace!` are defined only under their feature, and every call site
+// carries the same `cfg` — so a normal build compiles neither the macro nor the
+// code around its call.
 #[cfg(feature = "input-trace")]
-#[allow(unused_macros)]
 macro_rules! itrace {
     ($($arg:tt)*) => {{
         eprintln!("[INPUT-TRACE] {}", format!($($arg)*));
     }};
 }
-#[cfg(not(feature = "input-trace"))]
-#[allow(unused_macros)]
-macro_rules! itrace {
-    ($($arg:tt)*) => {{}};
-}
-
 // `wtrace!` mirrors `itrace!` for the desired→applied→real→x11_focus pipeline.
 #[cfg(feature = "window-trace")]
-#[allow(unused_macros)]
 macro_rules! wtrace {
     ($($arg:tt)*) => {{
         eprintln!("[WINDOW-TRACE] {}", format!($($arg)*));
     }};
 }
-#[cfg(not(feature = "window-trace"))]
-#[allow(unused_macros)]
-macro_rules! wtrace {
-    ($($arg:tt)*) => {{}};
-}
-
 /// Approximate a rounded rectangle of size `w`×`h` with corner radius `r` as
 /// a list of X11 `Rectangle`s: one full-width middle band, plus one 1px-tall
 /// rectangle per row of each rounded corner (inset by the circle's chord at
@@ -2787,24 +2774,90 @@ mod tests {
             )
     }
 
-    /// Build a one-monitor session from generated parameters: the screen and
-    /// its workarea, the windows, the camera/zoom state and the config knobs
-    /// the projection reads. Windows are numbered from 1 in strategy order, so
-    /// a shrunk counterexample names the exact window.
-    #[allow(clippy::too_many_arguments)]
-    fn scenario(
+    /// One generated projection scenario: everything the properties below vary,
+    /// and nothing else. The three properties that consume it read no individual
+    /// field — they project the state and assert on the render list — so the
+    /// parameters belong to the scenario rather than to any one property, and
+    /// the same list is not restated at each `proptest!`.
+    #[derive(Debug)]
+    struct Scenario {
         screen: Rect,
         workarea: Rect,
         wins: Vec<WinSpec>,
+        /// Camera offset, zoom factor and page zoom are the three scalars the
+        /// projection multiplies a column width by.
         cam: f32,
         zoom: f32,
         page_zoom: f32,
         overview: bool,
+        /// Inner and outer gap, in that order.
         gaps: (u32, u32),
         border: u32,
         smart_gaps: bool,
         boost: f32,
-    ) -> (State, Cfg) {
+    }
+
+    fn prop_scenario() -> impl Strategy<Value = Scenario> {
+        (
+            prop_output_rect(),
+            prop_output_rect(),
+            proptest::collection::vec(prop_win(), 0..=8),
+            -4000.0f32..4000.0,
+            0.05f32..=2.0,
+            0.05f32..=2.0,
+            any::<bool>(),
+            (0u32..=200, 0u32..=200),
+            0u32..=8,
+            any::<bool>(),
+            0.0f32..=1.0,
+        )
+            .prop_map(
+                |(
+                    screen,
+                    workarea,
+                    wins,
+                    cam,
+                    zoom,
+                    page_zoom,
+                    overview,
+                    gaps,
+                    border,
+                    smart_gaps,
+                    boost,
+                )| Scenario {
+                    screen,
+                    workarea,
+                    wins,
+                    cam,
+                    zoom,
+                    page_zoom,
+                    overview,
+                    gaps,
+                    border,
+                    smart_gaps,
+                    boost,
+                },
+            )
+    }
+
+    /// Build a one-monitor session from a generated scenario: the screen and its
+    /// workarea, the windows, the camera/zoom state and the config knobs the
+    /// projection reads. Windows are numbered from 1 in strategy order, so a
+    /// shrunk counterexample names the exact window.
+    fn scenario(sc: Scenario) -> (State, Cfg) {
+        let Scenario {
+            screen,
+            workarea,
+            wins,
+            cam,
+            zoom,
+            page_zoom,
+            overview,
+            gaps,
+            border,
+            smart_gaps,
+            boost,
+        } = sc;
         let cfg = Cfg {
             border_w: border,
             gaps_inner: gaps.0,
@@ -3545,32 +3598,8 @@ mod tests {
         /// and a zero-area rect is a `BadValue` the server silently drops,
         /// leaving `Applied` ahead of reality forever.
         #[test]
-        fn prop_render_list_is_total_and_names_only_real_windows(
-            screen in prop_output_rect(),
-            workarea in prop_output_rect(),
-            wins in proptest::collection::vec(prop_win(), 0..=8),
-            cam in -4000.0f32..4000.0,
-            zoom in 0.05f32..=2.0,
-            page_zoom in 0.05f32..=2.0,
-            overview in any::<bool>(),
-            gaps in (0u32..=200, 0u32..=200),
-            border in 0u32..=8,
-            smart_gaps in any::<bool>(),
-            boost in 0.0f32..=1.0,
-        ) {
-            let (state, cfg) = scenario(
-                screen,
-                workarea,
-                wins,
-                cam,
-                zoom,
-                page_zoom,
-                overview,
-                gaps,
-                border,
-                smart_gaps,
-                boost,
-            );
+        fn prop_render_list_is_total_and_names_only_real_windows(sc in prop_scenario()) {
+            let (state, cfg) = scenario(sc);
             let monitors = state.monitors.len();
             // One past the last index is the stale-index case `arrange` has to
             // absorb rather than panic on.
@@ -3612,32 +3641,8 @@ mod tests {
         /// contents varied between two identical runs would make the geometry
         /// X11 ends up holding depend on hash iteration order.
         #[test]
-        fn prop_render_list_is_deterministic(
-            screen in prop_output_rect(),
-            workarea in prop_output_rect(),
-            wins in proptest::collection::vec(prop_win(), 0..=8),
-            cam in -4000.0f32..4000.0,
-            zoom in 0.05f32..=2.0,
-            page_zoom in 0.05f32..=2.0,
-            overview in any::<bool>(),
-            gaps in (0u32..=200, 0u32..=200),
-            border in 0u32..=8,
-            smart_gaps in any::<bool>(),
-            boost in 0.0f32..=1.0,
-        ) {
-            let (state, cfg) = scenario(
-                screen,
-                workarea,
-                wins,
-                cam,
-                zoom,
-                page_zoom,
-                overview,
-                gaps,
-                border,
-                smart_gaps,
-                boost,
-            );
+        fn prop_render_list_is_deterministic(sc in prop_scenario()) {
+            let (state, cfg) = scenario(sc);
             prop_assert_eq!(
                 projected(&state, &cfg, 0),
                 projected(&state, &cfg, 0),
@@ -3655,32 +3660,8 @@ mod tests {
         /// answers every configure with a `ConfigureRequest` turns the storm
         /// into a visible fight.
         #[test]
-        fn prop_applied_geometry_is_what_the_next_cycle_wants(
-            screen in prop_output_rect(),
-            workarea in prop_output_rect(),
-            wins in proptest::collection::vec(prop_win(), 0..=8),
-            cam in -4000.0f32..4000.0,
-            zoom in 0.05f32..=2.0,
-            page_zoom in 0.05f32..=2.0,
-            overview in any::<bool>(),
-            gaps in (0u32..=200, 0u32..=200),
-            border in 0u32..=8,
-            smart_gaps in any::<bool>(),
-            boost in 0.0f32..=1.0,
-        ) {
-            let (mut state, cfg) = scenario(
-                screen,
-                workarea,
-                wins,
-                cam,
-                zoom,
-                page_zoom,
-                overview,
-                gaps,
-                border,
-                smart_gaps,
-                boost,
-            );
+        fn prop_applied_geometry_is_what_the_next_cycle_wants(sc in prop_scenario()) {
+            let (mut state, cfg) = scenario(sc);
             let mut applied = AppliedState::default();
             let first = projected(&state, &cfg, 0);
             let placed = first.as_ref().map_or(0, Placements::len);

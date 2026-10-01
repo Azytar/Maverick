@@ -33,36 +33,26 @@
 
 use super::*;
 
-// Observability macro for the `input-trace` feature: compiles to nothing
-// unless the feature is enabled.
+// Observability macro for the `input-trace` feature.
+// Defined only when its feature is on: every call site is behind the same
+// `cfg`, so a build without the feature compiles none of them and has no
+// use for the macro at all.
 #[cfg(feature = "input-trace")]
-#[allow(unused_macros)]
 macro_rules! itrace {
     ($($arg:tt)*) => {{
         eprintln!("[INPUT-TRACE] {}", format!($($arg)*));
     }};
 }
-#[cfg(not(feature = "input-trace"))]
-#[allow(unused_macros)]
-macro_rules! itrace {
-    ($($arg:tt)*) => {{}};
-}
-
-// Observability macro for the `window-trace` feature: compiles to nothing
-// unless the feature is enabled.
+// Observability macro for the `window-trace` feature.
+// Defined only when its feature is on: every call site is behind the same
+// `cfg`, so a build without the feature compiles none of them and has no
+// use for the macro at all.
 #[cfg(feature = "window-trace")]
-#[allow(unused_macros)]
 macro_rules! wtrace {
     ($($arg:tt)*) => {{
         eprintln!("[WINDOW-TRACE] {}", format!($($arg)*));
     }};
 }
-#[cfg(not(feature = "window-trace"))]
-#[allow(unused_macros)]
-macro_rules! wtrace {
-    ($($arg:tt)*) => {{}};
-}
-
 impl WindowManager {
     pub(super) fn setup_root(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let a = &self.atoms;

@@ -5,8 +5,9 @@
 // Hand-rolled JSON serializer: `write!` onto the buffer avoids serde and the
 // per-field `String` temporaries `format!` would allocate, consistent with the
 // project's zero-extra-deps stance. Writing to a `String` is infallible (its
-// `Write` impl never errors), so the `.unwrap()` calls below are safe.
-#![allow(clippy::unwrap_used, clippy::map_unwrap_or)]
+// `Write` impl only ever pushes, and `String` has no capacity limit to hit), so
+// the `.unwrap()` on each `write!` below is a statement about a `Result` that
+// cannot exist, not a swallowed failure.
 
 use crate::config::Cfg;
 use crate::types::{Action, LayoutKind, Rect, State, WindowId};

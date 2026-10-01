@@ -1,5 +1,4 @@
 #[cfg(test)]
-#[allow(clippy::if_same_then_else)]
 mod unit_tests {
     use crate::config::Cfg;
     use crate::core::commands::Command as CommandTrait;
@@ -434,8 +433,12 @@ mod unit_tests {
     // workspace through `alpha`, so whichever was entered last owns that scalar
     // and the other axis must be reset to 1.0 — otherwise one mode is a silent
     // no-op or a later scale is pulled from a phantom value.
-    // Exact float compares are sound here: the commands assign exactly 1.0.
-    #[allow(clippy::float_cmp)]
+    //
+    // The `== 1.0` compares below are exact on purpose, not approximate: both
+    // commands *assign* the literal `1.0` on the reset path (`ViewportZoom`
+    // writes it in both the "back to normal" and the "stay zoomed" arms,
+    // `ToggleOverview` writes it on every toggle), so 1.0 is the contract and a
+    // tolerance would hide a command that reset to 1.0000001 instead.
     #[test]
     fn b1_viewport_then_overview_resets_viewport() {
         use crate::core::commands::{ToggleOverview, ViewportZoom};
@@ -456,8 +459,6 @@ mod unit_tests {
         );
         assert_eq!(ws.page_zoom, 1.0, "overview must reset page_zoom");
     }
-
-    #[allow(clippy::float_cmp)]
     #[test]
     fn b1_overview_then_viewport_resets_overview() {
         use crate::core::commands::{ToggleOverview, ViewportZoom};
@@ -472,7 +473,6 @@ mod unit_tests {
         assert_eq!(ws.zoom, 1.0, "viewport zoom must reset the overview zoom");
     }
 
-    #[allow(clippy::float_cmp)]
     #[test]
     fn b1_viewport_zoom_does_not_corrupt_live_zoom() {
         use crate::core::commands::{ToggleOverview, ViewportZoom};
@@ -3135,12 +3135,10 @@ mod unit_tests {
                     run_cmd(&mut engine, SetLayout(LayoutKind::Column));
                 }
                 16 => {
-                    let lk = if rng.below(2) == 0 {
-                        LayoutKind::Column
-                    } else {
-                        LayoutKind::Column
-                    };
-                    run_cmd(&mut engine, SetLayout(lk));
+                    // `LayoutKind` has one variant, so there is nothing to draw
+                    // at random: this arm only exists to keep `SetLayout` in the
+                    // command mix at its own weight.
+                    run_cmd(&mut engine, SetLayout(LayoutKind::Column));
                 }
                 17 => {
                     let dx = if rng.below(2) == 0 { 20 } else { -20 };
@@ -5249,16 +5247,11 @@ mod unit_tests {
                         crate::core::commands::focus_logical_on(&mut engine.state, m, b);
                     }
                 }
-                // LayoutChange (set a random LayoutKind on a random workspace).
+                // LayoutChange (set the layout on a random workspace).
                 _ => {
                     let m = rng.below(nmon as u32) as usize;
                     let ws_i = rng.below(engine.state.monitors[m].workspaces.len() as u32) as usize;
-                    let lk = if rng.below(2) == 0 {
-                        LayoutKind::Column
-                    } else {
-                        LayoutKind::Column
-                    };
-                    engine.state.monitors[m].workspaces[ws_i].layout = lk;
+                    engine.state.monitors[m].workspaces[ws_i].layout = LayoutKind::Column;
                 }
             }
 
@@ -6849,12 +6842,7 @@ mod unit_tests {
                     // LayoutChange on a random monitor/workspace.
                     let m = rng.below(nmon as u32) as usize;
                     let ws_i = rng.below(engine.state.monitors[m].workspaces.len() as u32) as usize;
-                    let lk = if rng.below(2) == 0 {
-                        LayoutKind::Column
-                    } else {
-                        LayoutKind::Column
-                    };
-                    engine.state.monitors[m].workspaces[ws_i].layout = lk;
+                    engine.state.monitors[m].workspaces[ws_i].layout = LayoutKind::Column;
                 }
             }
 

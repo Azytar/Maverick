@@ -57,19 +57,14 @@
 use crate::core::desired::DesiredState;
 use crate::types::{Rect, State, WindowId};
 
-// Observability-only macro for the reconcile/desired→applied pipeline: no-op
-// unless `window-trace` is enabled.
+// Observability-only macro for the reconcile/desired→applied pipeline. Defined
+// only when `window-trace` is on: its one call site sits in `reconcile` behind
+// the same `cfg`, so a normal build compiles neither the macro nor the call.
 #[cfg(feature = "window-trace")]
-#[allow(unused_macros)]
 macro_rules! wtrace {
     ($($arg:tt)*) => {{
         eprintln!("[WINDOW-TRACE] {}", format!($($arg)*));
     }};
-}
-#[cfg(not(feature = "window-trace"))]
-#[allow(unused_macros)]
-macro_rules! wtrace {
-    ($($arg:tt)*) => {{}};
 }
 
 /// One window's last *applied* (written to X11) geometry + border state.
@@ -166,7 +161,9 @@ impl AppliedState {
     /// answer with another `ConfigureRequest` — the feedback loop that reads on
     /// screen as a window that moves by itself.
     // Exercised by the unit tests below, which install already-applied geometry
-    // to pin the echo/Stale contract; the production sink records through `diff`.
+    // to pin the echo/Stale contract. The production path records what X11 has
+    // through `diff`, not through this setter, so the release build has no
+    // caller for it and the lint is scoped to exactly that build.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn observe(&mut self, win: WindowId, rect: Rect, border_w: u32) {
         let prev = self.windows.entry(win).or_default();

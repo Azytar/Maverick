@@ -5,8 +5,6 @@
 //! is a different defect from an option forwarded by mistake, and so is a
 //! failure reported as a success.
 
-mod common;
-
 use maverick_sys::identity::InstanceInfo;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
