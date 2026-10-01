@@ -263,3 +263,43 @@ fn every_binary_asks_for_its_own_namespace() {
         );
     }
 }
+
+/// Isolation is published once, and never moved by a test.
+///
+/// `XDG_RUNTIME_DIR` is one variable for the whole binary. A test that needs a
+/// directory of its own — one with to be empty, say — has to hand it to the
+/// child it spawns; setting the variable instead moves the directory every
+/// sibling test running in parallel resolves against. That surfaces as a
+/// connection error against a socket a neighbour had already bound, which reads
+/// like a defect in the code under test and is not one.
+///
+/// `runtime_dir` and this file are the only places allowed to write it, and this
+/// file does so to prove the guarantee above.
+#[test]
+fn no_test_moves_the_shared_runtime_directory() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    for entry in std::fs::read_dir(&dir).expect("the tests directory") {
+        let path = entry.expect("a readable directory entry").path();
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        if path
+            .file_name()
+            .is_some_and(|n| n == "runtime_dir_contract.rs")
+        {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("a readable test source");
+        for (n, line) in source.lines().enumerate() {
+            assert!(
+                !line.contains("set_var(\"XDG_RUNTIME_DIR\""),
+                "{}:{} republishes XDG_RUNTIME_DIR for the whole test binary, \
+                 which moves the directory every test running in parallel \
+                 resolves against. Pass the directory to the child with \
+                 `Command::env` instead.",
+                path.file_name().unwrap().to_string_lossy(),
+                n + 1
+            );
+        }
+    }
+}

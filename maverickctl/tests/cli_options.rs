@@ -232,17 +232,19 @@ fn a_global_before_the_group_verb_does_not_become_the_session_name() {
 /// pins that it did not move them somewhere else.
 #[test]
 fn the_session_after_the_verb_is_still_resolved() {
-    // A fresh directory per invocation: the fixtures above leave live records
-    // behind, and a command that resolves its session from *context* would then
-    // report an ambiguity instead of the missing session this asserts on.
-    let dir = std::env::temp_dir().join(format!(
-        "maverick-cli-after-verb-{}-{}",
-        std::process::id(),
-        line!()
-    ));
+    // A fresh directory: the fixtures above leave live records behind, and a
+    // command that resolves its session from *context* would then report an
+    // ambiguity instead of the missing session this asserts on.
+    //
+    // It is handed to the child rather than published through the environment.
+    // `XDG_RUNTIME_DIR` is one variable for the whole binary and the tests run
+    // in parallel: setting it here would move the directory every sibling test
+    // resolves against, out from under a fixture that had already been bound
+    // there — which is a connection refused because the socket it published is
+    // gone, not a verdict about option parsing.
+    let dir = runtime_dir::dir_for("maverick-cli-after-verb");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("fresh runtime dir");
-    std::env::set_var("XDG_RUNTIME_DIR", &dir);
     for args in [
         vec!["window", "list", "sessA"],
         vec!["window", "--json", "list", "sessA"],
@@ -252,6 +254,7 @@ fn the_session_after_the_verb_is_still_resolved() {
         vec!["camera", "sessA", "left"],
     ] {
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_maverickctl"))
+            .env("XDG_RUNTIME_DIR", &dir)
             .args(&args)
             .output()
             .expect("run maverickctl");
