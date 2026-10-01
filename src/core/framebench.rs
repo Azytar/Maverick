@@ -157,25 +157,13 @@ mod frame_alloc_tests {
         // Whatever the first few frames allocate is start-up cost, not the
         // per-frame cost we care about.
         for _ in 0..8 {
-            arrange(
-                &state,
-                0,
-                &cfg,
-                &mut out,
-                &mut scratch,
-            );
+            arrange(&state, 0, &cfg, &mut out, &mut scratch);
             present_into(&state, &state.monitors[0], &mut out);
         }
 
         let counter = CountAllocs::start();
         for _ in 0..16 {
-            arrange(
-                &state,
-                0,
-                &cfg,
-                &mut out,
-                &mut scratch,
-            );
+            arrange(&state, 0, &cfg, &mut out, &mut scratch);
             present_into(&state, &state.monitors[0], &mut out);
         }
         let total = counter.finish();

@@ -22,8 +22,7 @@ use crate::core::commands::{
     Command, MoveWindow, PageSnap, ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
 };
 use crate::core::layout::{
-    arrange, column_screen_extents, fs_ctx, ideal_scroll, ribbon_geom,
-    RibbonScratch,
+    arrange, column_screen_extents, fs_ctx, ideal_scroll, ribbon_geom, RibbonScratch,
 };
 use crate::core::present::present;
 use crate::core::Engine;
@@ -66,7 +65,10 @@ fn setup_engine() -> Engine {
 /// `arrange()` → `apply_geom`, then write the resulting rect/border back into
 /// `client.geom` / `client.border_w` (what X11 then reads for input). Returns
 /// the pre-overlay projection, which is what the backend writes every frame.
-fn apply_settled(engine: &mut Engine, mi: usize) -> std::collections::HashMap<WindowId, (Rect, u32)> {
+fn apply_settled(
+    engine: &mut Engine,
+    mi: usize,
+) -> std::collections::HashMap<WindowId, (Rect, u32)> {
     let mut placements = Vec::new();
     arrange(
         &engine.state,
@@ -89,8 +91,6 @@ fn apply_settled(engine: &mut Engine, mi: usize) -> std::collections::HashMap<Wi
     }
     projected
 }
-
-
 
 /// Replicate the geometry half of `Backend::focus()`: retarget the camera onto
 /// column `ci`, then project. No `ArrangeMonitor` is emitted — this is the
@@ -238,10 +238,7 @@ fn focus_window(
     engine: &mut Engine,
     win: WindowId,
 ) -> std::collections::HashMap<WindowId, (Rect, u32)> {
-    focus_step(
-        engine,
-        crate::core::commands::FocusWindow(Some(win)),
-    )
+    focus_step(engine, crate::core::commands::FocusWindow(Some(win)))
 }
 
 #[test]
@@ -762,10 +759,7 @@ fn mouse_and_keyboard_focus_converge() {
     }
     kb.state.monitors[mi].focused = Some(1u32);
     kb.state.monitors[mi].focus_stack = vec![1u32, 2u32, 3u32];
-    focus_step(
-        &mut kb,
-        crate::core::commands::FocusWindow(Some(2u32)),
-    );
+    focus_step(&mut kb, crate::core::commands::FocusWindow(Some(2u32)));
     let kb_map: std::collections::HashMap<WindowId, Rect> =
         kb.state.clients.iter().map(|(w, c)| (*w, c.geom)).collect();
 

@@ -877,8 +877,6 @@ mod wait_bounds {
         assert!(bounded <= Duration::from_millis(50), "got {bounded:?}");
     }
 
-
-
     /// An elapsed deadline yields a zero wait, which the loop treats as "do not
     /// block" and returns on — which is how the budget check in `run` gets the
     /// turn it needs to force-kill the remaining clients.
@@ -887,10 +885,7 @@ mod wait_bounds {
         let elapsed = Instant::now()
             .checked_sub(Duration::from_secs(1))
             .expect("a monotonic clock can go back a second");
-        assert_eq!(
-            wait_timeout(None, Some(elapsed)),
-            Some(Duration::ZERO)
-        );
+        assert_eq!(wait_timeout(None, Some(elapsed)), Some(Duration::ZERO));
     }
 
     /// Both deadlines at once, the case a shutdown that also has a keyboard

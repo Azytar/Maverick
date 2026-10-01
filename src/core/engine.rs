@@ -20,8 +20,8 @@ use crate::config::Cfg;
 use crate::core::commands::{
     CollapseColumn, Command, FocusDirection, FocusMonitor, FocusWindow, GrowColumn, KillWindow,
     MoveToWorkspace, MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav,
-    PageSnap, Quit, Restart, SetLayout, Spawn, ToggleFloat, ToggleFullscreen,
-    ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
+    PageSnap, Quit, Restart, SetLayout, Spawn, ToggleFloat, ToggleFullscreen, ToggleMaximize,
+    ToggleOverview, ViewWorkspace, ViewportZoom,
 };
 use crate::core::effect::Effect;
 use crate::core::event::{Event, EventBus, EventHandler};

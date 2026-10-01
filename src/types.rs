@@ -9,9 +9,7 @@
 //!
 //! See [`StateExt`] for why the predicate lives here instead of in the core.
 
-
 pub use maverick_core::types::*;
-
 
 /// Extension trait for the layout-dependent "covering fullscreen" predicate.
 ///

@@ -1036,13 +1036,7 @@ mod tests {
         state.monitors[0].workspaces[0].camera.position = scroll;
         let mut out = Placements::new();
         let mut scratch = RibbonScratch::default();
-        arrange_columns(
-            state,
-            &state.monitors[0],
-            cfg,
-            &mut out,
-            &mut scratch,
-        );
+        arrange_columns(state, &state.monitors[0], cfg, &mut out, &mut scratch);
         out
     }
 
@@ -1115,13 +1109,7 @@ mod tests {
         state.monitors[0].workspaces[0].camera.position = scroll0;
         let mut out = Placements::new();
         let mut scratch = RibbonScratch::default();
-        arrange_columns(
-            &state,
-            &state.monitors[0],
-            &cfg,
-            &mut out,
-            &mut scratch,
-        );
+        arrange_columns(&state, &state.monitors[0], &cfg, &mut out, &mut scratch);
         let (_, fs_rect_focused, _) = out.iter().find(|e| e.0 == 1).copied().unwrap();
         assert_eq!(
             fs_rect_focused.x, screen.x,
@@ -1143,13 +1131,7 @@ mod tests {
         state.monitors[0].workspaces[0].camera.position = scroll1;
         let mut out2 = Placements::new();
         let mut scratch = RibbonScratch::default();
-        arrange_columns(
-            &state,
-            &state.monitors[0],
-            &cfg,
-            &mut out2,
-            &mut scratch,
-        );
+        arrange_columns(&state, &state.monitors[0], &cfg, &mut out2, &mut scratch);
         let (_, fs_rect_away, _) = out2.iter().find(|e| e.0 == 1).copied().unwrap();
         assert!(
             fs_rect_away.x < screen.x,
@@ -1184,13 +1166,7 @@ mod tests {
         state.monitors[0].workspaces[0].camera.position = scroll;
         let mut out = Placements::new();
         let mut scratch = RibbonScratch::default();
-        arrange_columns(
-            &state,
-            &state.monitors[0],
-            &cfg,
-            &mut out,
-            &mut scratch,
-        );
+        arrange_columns(&state, &state.monitors[0], &cfg, &mut out, &mut scratch);
 
         assert_eq!(out.len(), 1, "only the fullscreen window is placed");
         assert_eq!(out[0].0, 1, "the sibling is hidden, not placed");
@@ -1239,13 +1215,7 @@ mod tests {
 
         let mut out = Placements::new();
         let mut scratch = RibbonScratch::default();
-        arrange_columns(
-            &state,
-            &state.monitors[0],
-            &cfg,
-            &mut out,
-            &mut scratch,
-        );
+        arrange_columns(&state, &state.monitors[0], &cfg, &mut out, &mut scratch);
         let (_, rect, _) = out.iter().find(|e| e.0 == 1).copied().unwrap();
 
         let extents = column_screen_extents(
@@ -1856,13 +1826,7 @@ mod proptests {
     /// the path the reconciler uses to write geometry to X.
     fn project(state: &State, cfg: &Cfg) -> Placements {
         let mut out = Placements::new();
-        arrange(
-            state,
-            0,
-            cfg,
-            &mut out,
-            &mut RibbonScratch::default(),
-        );
+        arrange(state, 0, cfg, &mut out, &mut RibbonScratch::default());
         out
     }
 
@@ -1940,8 +1904,6 @@ mod proptests {
             );
         });
     }
-
-
 
     /// `Rect`'s contract is `w >= 1 && h >= 1` for every arranged window: a
     /// `ConfigureWindow` with a zero extent is `BadValue`, the server drops the
@@ -2376,13 +2338,7 @@ mod proptests {
 
         let mut placements = Vec::new();
         let mut scratch = RibbonScratch::default();
-        arrange(
-            &state,
-            0,
-            &cfg,
-            &mut placements,
-            &mut scratch,
-        );
+        arrange(&state, 0, &cfg, &mut placements, &mut scratch);
         let rect = placements
             .iter()
             .find(|p| p.0 == focused)
