@@ -242,9 +242,11 @@ pub fn load_config(path: Option<&Path>) -> Cfg {
 ///
 /// Every fallback path in the loader (no path, missing file, unreadable file,
 /// broken TOML) returns this, so a WM that never reads a config file still
-/// starts with a reachable workspace keymap. `compiled_config()` itself stays
-/// free of workspace binds: it is the unit-test baseline, not a configuration
-/// anyone runs.
+/// starts with a reachable workspace keymap. A file that *does* parse is never
+/// merged onto it: `merge_config` takes [`compiled_config`] as its baseline and
+/// adds the generated binds itself, so they reflect the file's `n_tags` and
+/// `auto_workspace_binds`. The compiled baseline therefore stays free of
+/// workspace binds — they are generated, never configured.
 fn default_config() -> Cfg {
     let mut cfg = compiled_config();
     append_numeric_keybindings(&mut cfg.keybinds, cfg.n_tags);
@@ -280,7 +282,7 @@ pub enum ConfigSource {
 /// it is for.
 pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics) {
     log::config_trace("defaults_start", format_args!("path={}", path.display()));
-    let baseline = default_config();
+    let fallback = default_config();
     log::config_trace("defaults_end", format_args!(""));
     let mut diag = Diagnostics::default();
 
@@ -293,15 +295,15 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
     let source = match read_result {
         Ok(source) => source,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log::config_snapshot("normalized_missing_file", &baseline);
-            return (ConfigSource::CompiledBaseline, baseline, diag);
+            log::config_snapshot("normalized_missing_file", &fallback);
+            return (ConfigSource::CompiledBaseline, fallback, diag);
         }
         Err(e) => {
             diag.errors.push(format!(
                 "cannot read '{}': {e}; using compiled defaults",
                 path.display()
             ));
-            return (ConfigSource::CompiledBaseline, baseline, diag);
+            return (ConfigSource::CompiledBaseline, fallback, diag);
         }
     };
 
@@ -338,12 +340,18 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
                 e.line,
                 e.kind
             ));
-            return (ConfigSource::CompiledBaseline, baseline, diag);
+            return (ConfigSource::CompiledBaseline, fallback, diag);
         }
     };
 
     log::config_trace("validation_start", format_args!("phase=semantic_merge"));
-    let cfg = merge_config(baseline, user, &mut diag);
+    // The merge baseline is the compiled keymap, NOT the fail-safe `fallback`
+    // above: `merge_config` generates the workspace binds itself, for the
+    // `n_tags` the file ended up with and only when `auto_workspace_binds`
+    // allows it. Starting from `fallback` would pre-seed a bind for every digit
+    // of the compiled tag count, which no flag could then take away — the
+    // generated binds are indistinguishable from the user's own once merged in.
+    let cfg = merge_config(compiled_config(), user, &mut diag);
     log::config_trace(
         "validation_end",
         format_args!(
@@ -1318,6 +1326,135 @@ action = "kill"
             .iter()
             .any(|(_, key, action)| { *key == u32::from(b'q') && matches!(action, Action::Kill) }));
         assert_eq!(cfg.keybinds.len(), 19); // valid q plus 18 generated workspace binds
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn user_numeric_bind_keeps_other_auto_binds() {
+        // A user binding on a digit slot claims only that slot; the other
+        // auto-generated workspace binds survive (there is no full
+        // suppression), and the claimed slot keeps the user's action.
+        let user = parse_string(
+            r#"
+[[keybindings]]
+key = "super+1"
+action = "view:2"
+"#,
+        );
+        let mut diag = Diagnostics::default();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        // 1 user bind + 17 remaining generated (the other 8 super-view binds
+        // plus the 9 super+shift move binds; super+1's generated view is skipped).
+        assert_eq!(cfg.keybinds.len(), 18, "other auto binds must survive");
+        let sup = u16::from(ModMask::M4);
+        assert!(
+            cfg.keybinds
+                .iter()
+                .any(|(m, k, a)| *m == sup && *k == b'1' as u32 && matches!(a, Action::View(1))),
+            "user's claimed slot keeps view:2"
+        );
+        assert!(
+            !cfg.keybinds.iter().any(|(m, k, a)| {
+                *m == sup && *k == b'1' as u32 && matches!(a, Action::View(0))
+            }),
+            "generated view:0 for the claimed slot must be suppressed"
+        );
+        assert!(
+            cfg.keybinds
+                .iter()
+                .any(|(m, k, a)| *m == sup && *k == b'2' as u32 && matches!(a, Action::View(1))),
+            "a non-claimed slot keeps its generated bind"
+        );
+    }
+
+    #[test]
+    fn auto_workspace_binds_false_disables_generation() {
+        // Both branches that can generate binds: the no-user-keybindings path
+        // keeps the compiled keymap as-is, and the `[[keybindings]]` path
+        // rebuilds the list from the user's own entries.
+        let user = parse_string(
+            r"
+[general]
+auto_workspace_binds = false
+",
+        );
+        let mut diag = Diagnostics::default();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert!(!cfg.keybinds.iter().any(|(_, k, a)| {
+            (b'1'..=b'9').contains(&(*k as u8))
+                && matches!(a, Action::View(_) | Action::MoveToWs(_))
+        }));
+
+        let user = parse_string(
+            r#"
+[general]
+auto_workspace_binds = false
+
+[[keybindings]]
+key = "super+q"
+action = "quit"
+"#,
+        );
+        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
+        assert_eq!(cfg.keybinds.len(), 1, "only the user's own bind may remain");
+        assert!(matches!(cfg.keybinds[0].2, Action::Quit));
+    }
+
+    /// `auto_workspace_binds = false` has to hold on the config the loader
+    /// actually returns. The merge baseline is the compiled keymap, which never
+    /// contained a workspace bind; the fail-safe `default_config` does, so a
+    /// baseline that already carried them would make every generated chord
+    /// unreachable to this flag — and indistinguishable from the user's own once
+    /// merged, so nothing downstream could take them away again.
+    #[test]
+    fn auto_workspace_binds_false_survives_the_loader() {
+        let path = write_temp("[general]\nauto_workspace_binds = false\n");
+        let (cfg, diag) = load_from_path(&path);
+        assert!(
+            diag.is_clean(),
+            "disabling a feature is not a fault: {diag:?}"
+        );
+        assert!(
+            !cfg.keybinds.iter().any(|(_, k, a)| {
+                (b'1'..=b'9').contains(&(*k as u8))
+                    && matches!(a, Action::View(_) | Action::MoveToWs(_))
+            }),
+            "an explicit false must leave no generated workspace binding"
+        );
+        // The compiled keymap is untouched: the flag suppresses generation, it
+        // does not disable the WM.
+        assert_eq!(cfg.keybinds.len(), compiled_config().keybinds.len());
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Generated binds must cover the file's own `n_tags`. A baseline that
+    /// generated them before the file was read would keep chords for workspaces
+    /// the user just removed (`View(8)` on a three-tag WM).
+    #[test]
+    fn generated_workspace_binds_follow_the_files_n_tags() {
+        let path = write_temp("[general]\nn_tags = 3\n");
+        let (cfg, diag) = load_from_path(&path);
+        assert!(diag.is_clean(), "{diag:?}");
+        assert_eq!(cfg.n_tags, 3);
+        let workspaces: Vec<usize> = cfg
+            .keybinds
+            .iter()
+            .filter_map(|(_, k, a)| {
+                let digit = *k as u8;
+                if !(b'1'..=b'9').contains(&digit) {
+                    return None;
+                }
+                match a {
+                    Action::View(ws) | Action::MoveToWs(ws) => Some(*ws),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert_eq!(workspaces.len(), 6, "3 tags = 3 view + 3 move binds");
+        assert!(
+            workspaces.iter().all(|ws| *ws < cfg.n_tags),
+            "a bind for a workspace the file removed: {workspaces:?}"
+        );
         let _ = std::fs::remove_file(path);
     }
 
