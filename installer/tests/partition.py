@@ -62,7 +62,7 @@ def normalize(text, box):
     for form in sorted(pairs, key=len, reverse=True):
         text = text.replace(form, pairs[form])
     text = re.sub(r"/tmp/maverick[-._A-Za-z0-9]*", "<TMP>", text)
-    # Phase timings and the panel's elapsed time.
+    # Step timings and the panel's elapsed time.
     text = re.sub(r"\d+\.\d+s", "<TIME>", text)
     # The distribution name is the host's, not the installer's.
     text = re.sub(r"(?m)^(.*\bdistro\b  ).+$", r"\1<DISTRO>", text)

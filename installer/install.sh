@@ -14,7 +14,7 @@
 #    lib/i18n.sh   message tables, language selection, table audit
 #    lib/ui.sh     everything that draws or asks
 #    lib/setup.sh  platform, toolchain, disk space, X11 probe, PATH
-#  This file keeps only the command line, the process state, the six phases
+#  This file keeps only the command line, the process state, the six steps
 #  and main(). Sourcing the libraries defines things and nothing else; the
 #  init block below is where the environment is actually read.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -277,14 +277,14 @@ confirm_install() {
     exit 0
 }
 
-# ── phases ───────────────────────────────────────────────────────────────────
-# Each phase owns one panel row and the code that fills it. They run in order
+# ── steps ───────────────────────────────────────────────────────────────────
+# Each step owns one panel row and the code that fills it. They run in order
 # from main() and share the panel state (PH_*, OVERALL, *_VALUE) instead of
 # passing it back and forth: that state *is* the report being drawn.
 
-phase_deps() {
-    # ── fase 0 · dependencias ────────────────────────────────────────────────────
-    _phase_begin 0 "$DEPS_DETAIL"
+step_deps() {
+    # ── step 0 · dependencias ────────────────────────────────────────────────────
+    _step_begin 0 "$DEPS_DETAIL"
     if [[ "$NO_BUILD" != true ]]; then
         command -v cargo >/dev/null 2>&1 || die "$(t need_cargo)"
     fi
@@ -295,17 +295,17 @@ phase_deps() {
     fi
     _animate 8 "$DEPS_DETAIL"
     _nap 0.2
-    _phase_end 0 "$DEPS_DETAIL"
+    _step_end 0 "$DEPS_DETAIL"
 }
 
-phase_build() {
-    # ── fase 1 · build ───────────────────────────────────────────────────────────
+step_build() {
+    # ── step 1 · build ───────────────────────────────────────────────────────────
     FINAL_LOG_PATH=""
     if [[ "$NO_BUILD" == true ]]; then
         _animate 64 ""
-        _phase_skip 1
+        _step_skip 1
     else
-        _phase_begin 1 "$(t building_detail)"
+        _step_begin 1 "$(t building_detail)"
         BUILD_LOG="$(mktemp /tmp/maverick-build.XXXXXX)"
 
         # Progress needs a denominator. Count the real dependency tree for the
@@ -404,7 +404,7 @@ phase_build() {
                     compiled="$(grep -c 'Compiling' "$BUILD_LOG" 2>/dev/null || echo 0)"
                     compiled="${compiled//[^0-9]/}"
                     [[ -n "$compiled" ]] || compiled=0
-                    printf '  … %s %s/%s\n' "$(t phase_build)" "$compiled" "$total_crates"
+                    printf '  … %s %s/%s\n' "$(t step_build)" "$compiled" "$total_crates"
                     last_mark=$NOW_MS
                 fi
             done
@@ -430,13 +430,13 @@ phase_build() {
 
         LIVE_ETA=""
         _animate 64 "$(t build_ok)"
-        _phase_end 1 "$(t build_ok)"
+        _step_end 1 "$(t build_ok)"
     fi
 }
 
-phase_install() {
-    # ── fase 2 · binarios ────────────────────────────────────────────────────────
-    _phase_begin 2 ""
+step_install() {
+    # ── step 2 · binarios ────────────────────────────────────────────────────────
+    _step_begin 2 ""
     # Check the complete artifact set before replacing any installed binary.
     for bin in "${RUNTIME_BINS[@]}"; do
         [[ -f "$CARGO_TARGET_DIR/release/$bin" && -x "$CARGO_TARGET_DIR/release/$bin" ]] ||
@@ -482,12 +482,12 @@ phase_install() {
     rm -rf -- "$STAGE_DIR"
     STAGE_DIR=""
     _animate 80 "$n_ok/$RUNTIME_BIN_COUNT"
-    _phase_end 2 "$n_ok/$RUNTIME_BIN_COUNT · $(t installed)"
+    _step_end 2 "$n_ok/$RUNTIME_BIN_COUNT · $(t installed)"
 }
 
-phase_session() {
-    # ── fase 3 · sesión X11 ──────────────────────────────────────────────────────
-    _phase_begin 3 ""
+step_session() {
+    # ── step 3 · sesión X11 ──────────────────────────────────────────────────────
+    _step_begin 3 ""
     SESSION_VALUE=""
     INSTALL_TMP="$(mktemp -d /tmp/maverick-install.XXXXXX)"
     # Desktop Entry Exec quoting is not shell quoting. Escape reserved characters
@@ -525,22 +525,22 @@ phase_session() {
         SESSION_VALUE="$xsessions_abs/maverick.desktop"
     fi
     _animate 84 "$SESSION_VALUE"
-    _phase_end 3 "$SESSION_VALUE"
+    _step_end 3 "$SESSION_VALUE"
 }
 
-phase_config() {
-    # ── fase 4 · configuración ───────────────────────────────────────────────────
-    _phase_begin 4 ""
+step_config() {
+    # ── step 4 · configuración ───────────────────────────────────────────────────
+    _step_begin 4 ""
     CONFIG_VALUE=""
     case "$CONFIG_ACTION" in
         skip)
             _animate 88 "$(t config_skip)"
-            _phase_skip 4 "$(t config_skip)"
+            _step_skip 4 "$(t config_skip)"
             ;;
         keep)
             _animate 88 "$(t config_keep)"
             CONFIG_VALUE="$CFG_FILE"
-            _phase_end 4 "$(t config_keep)"
+            _step_end 4 "$(t config_keep)"
             ;;
         create|overwrite)
             _animate 88 "$CFG_FILE"
@@ -592,12 +592,12 @@ TOML
                 cfg_ok=" ✓"
             fi
             CONFIG_VALUE="$CFG_FILE"
-            _phase_end 4 "${CFG_FILE}${cfg_ok}"
+            _step_end 4 "${CFG_FILE}${cfg_ok}"
             ;;
     esac
 }
 
-# The probe the last phase runs, kept beside them: it answers one question
+# The probe the last step runs, kept beside them: it answers one question
 # — did the binaries we just installed actually run — and dies loudly if not.
 verify_installed() {
     local label="$1"; shift
@@ -607,9 +607,9 @@ verify_installed() {
     VERIFY_CHECKS=$(( VERIFY_CHECKS + 1 ))
 }
 
-phase_verify() {
-    # ── fase 5 · verificación final ──────────────────────────────────────────────
-    _phase_begin 5 ""
+step_verify() {
+    # ── step 5 · verificación final ──────────────────────────────────────────────
+    _step_begin 5 ""
 
     # Execute what was installed, by absolute path, and require each to succeed.
     # An executable-bit check proves only that a file exists: a stub, a truncated
@@ -639,7 +639,7 @@ phase_verify() {
     verify_detail="$(t verify_ok)"
 
     _animate 100 "$(t checks_ok)"
-    _phase_end 5 "$VERIFY_CHECKS ✓ · $verify_detail"
+    _step_end 5 "$VERIFY_CHECKS ✓ · $verify_detail"
     _nap 0.35
 }
 
@@ -693,7 +693,7 @@ main() {
     fi
 
     # ── abrir el bloque vivo ─────────────────────────────────────────────────────
-    _phases_init
+    _steps_init
     echo
     if [[ $HAS_TTY -eq 1 ]]; then
         printf '\e[?25l'
@@ -702,14 +702,14 @@ main() {
     _render ""
     _nap 0.25
 
-    # Every phase, in order. The panel above them is the only thing that
+    # Every step, in order. The panel above them is the only thing that
     # knows they are separate: here they read as one installation.
-    phase_deps
-    phase_build
-    phase_install
-    phase_session
-    phase_config
-    phase_verify
+    step_deps
+    step_build
+    step_install
+    step_session
+    step_config
+    step_verify
 
     # ── cerrar el bloque ─────────────────────────────────────────────────────────
     printf '\n'

@@ -3,7 +3,7 @@
 #  MAVERICK installer — presentation (lib/ui.sh)
 #
 #  Everything that draws or asks lives here: terminal probing, colours, the
-#  banner, the live phase block, the spinners, the celebration effects, the
+#  banner, the live step block, the spinners, the celebration effects, the
 #  summary panel, and the one prompt helper every yes/no question goes
 #  through.
 #
@@ -342,19 +342,19 @@ _spin_pick() {
 }
 
 # ── roadmap + barra viva ─────────────────────────────────────────────────────
-N_PHASES=6
-PH_LABEL=(); PH_STATE=(); PH_DETAIL=(); PH_TIME=(); PH_T0=()
+N_STEPS=6
+ST_LABEL=(); ST_STATE=(); ST_DETAIL=(); ST_TIME=(); ST_T0=()
 OVERALL=0
-PH_FLASH=-1
+ST_FLASH=-1
 LIVE_ETA=""
 
-_phases_init() {
-    PH_LABEL=( "$(t phase_deps)" "$(t phase_build)" "$(t phase_install)" \
-               "$(t phase_session)" "$(t phase_config)" "$(t phase_final)" )
-    PH_STATE=(0 0 0 0 0 0)
-    PH_DETAIL=("" "" "" "" "" "")
-    PH_TIME=("" "" "" "" "" "")
-    PH_T0=(0 0 0 0 0 0)
+_steps_init() {
+    ST_LABEL=( "$(t step_deps)" "$(t step_build)" "$(t step_install)" \
+               "$(t step_session)" "$(t step_config)" "$(t step_final)" )
+    ST_STATE=(0 0 0 0 0 0)
+    ST_DETAIL=("" "" "" "" "" "")
+    ST_TIME=("" "" "" "" "" "")
+    ST_T0=(0 0 0 0 0 0)
     return 0
 }
 
@@ -411,27 +411,27 @@ _render() {
     if (( detail_w < 6 )); then detail_w=6; fi
     local i
     if [[ $BLOCK_OPEN -eq 1 ]]; then
-        printf '\e[%dA\r' "$(( N_PHASES + 1 ))"
+        printf '\e[%dA\r' "$(( N_STEPS + 1 ))"
     fi
     BLOCK_OPEN=1
-    for ((i=0; i<N_PHASES; i++)); do
+    for ((i=0; i<N_STEPS; i++)); do
         local mark="·" mcol="$GREY" lcol="$DIM" dcol="$DIM" tcol="$GREY"
-        local det="${PH_DETAIL[$i]}" lbl="${PH_LABEL[$i]}" tstr=""
-        case "${PH_STATE[$i]}" in
+        local det="${ST_DETAIL[$i]}" lbl="${ST_LABEL[$i]}" tstr=""
+        case "${ST_STATE[$i]}" in
             1)
                 _spin_pick "$i"
                 mark="$SPIN_CHAR"; mcol="$ACCENT"; dcol="$RESET"
                 if [[ -n "$live" ]]; then det="$live"; fi
-                if (( ${PH_T0[$i]} > 0 )); then
-                    local el=$(( now - ${PH_T0[$i]} ))
+                if (( ${ST_T0[$i]} > 0 )); then
+                    local el=$(( now - ${ST_T0[$i]} ))
                     if (( el < 0 )); then el=0; fi
                     tstr="$(_fmt_ms "$el")"
                 fi
                 ;;
-            2) mark="✓"; mcol="$GREEN"; lcol="$RESET"; tstr="${PH_TIME[$i]}" ;;
+            2) mark="✓"; mcol="$GREEN"; lcol="$RESET"; tstr="${ST_TIME[$i]}" ;;
             3) mark="○"; mcol="$GREY" ;;
         esac
-        if [[ $i -eq $PH_FLASH ]]; then mark="⠿"; mcol="$GREEN"; fi
+        if [[ $i -eq $ST_FLASH ]]; then mark="⠿"; mcol="$GREEN"; fi
         if (( ${#lbl} > label_w )); then lbl="${lbl:0:$(( label_w - 1 ))}…"; fi
         if (( ${#det} > detail_w )); then det="${det:0:$(( detail_w - 1 ))}…"; fi
         
@@ -454,41 +454,41 @@ _render() {
     return 0
 }
 
-_phase_begin() {
-    PH_STATE[$1]=1
-    PH_DETAIL[$1]="${2:-}"
+_step_begin() {
+    ST_STATE[$1]=1
+    ST_DETAIL[$1]="${2:-}"
     _now_ms
-    PH_T0[$1]=$NOW_MS
+    ST_T0[$1]=$NOW_MS
     _render "${2:-}"
     return 0
 }
 
-_phase_end() {
+_step_end() {
     local i=$1
-    PH_STATE[$i]=2
-    PH_DETAIL[$i]="${2:-}"
+    ST_STATE[$i]=2
+    ST_DETAIL[$i]="${2:-}"
     _now_ms
-    PH_TIME[$i]="$(_fmt_ms $(( NOW_MS - ${PH_T0[$i]} )))"
+    ST_TIME[$i]="$(_fmt_ms $(( NOW_MS - ${ST_T0[$i]} )))"
     LIVE_ETA=""
     if [[ $HAS_TTY -ne 1 ]]; then
-        printf '  ✓ %s — %s (%s)\n' "${PH_LABEL[$i]}" "${PH_DETAIL[$i]}" "${PH_TIME[$i]}"
+        printf '  ✓ %s — %s (%s)\n' "${ST_LABEL[$i]}" "${ST_DETAIL[$i]}" "${ST_TIME[$i]}"
         return 0
     fi
     if [[ $ANIM -eq 1 ]]; then
-        PH_FLASH=$i
+        ST_FLASH=$i
         _render ""
         sleep 0.05
-        PH_FLASH=-1
+        ST_FLASH=-1
     fi
     _render ""
     return 0
 }
 
-_phase_skip() {
-    PH_STATE[$1]=3
-    PH_DETAIL[$1]="${2:-$(t skipped_word)}"
+_step_skip() {
+    ST_STATE[$1]=3
+    ST_DETAIL[$1]="${2:-$(t skipped_word)}"
     if [[ $HAS_TTY -ne 1 ]]; then
-        printf '  ○ %s — %s\n' "${PH_LABEL[$1]}" "${PH_DETAIL[$1]}"
+        printf '  ○ %s — %s\n' "${ST_LABEL[$1]}" "${ST_DETAIL[$1]}"
         return 0
     fi
     _render ""
