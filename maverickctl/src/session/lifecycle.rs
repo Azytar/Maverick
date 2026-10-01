@@ -153,6 +153,10 @@ pub fn create(name: &SessionName, spec: Spec) -> Result<Session, SessionError> {
         // left behind by a crash must not make `create` refuse a name that is
         // in fact free.
         reap_one(&mut existing);
+        // The reaped state is written so a later command sees a record that
+        // matches reality, but whether that write lands does not decide this
+        // one: the answer below is the same either way, and the record being
+        // unwritable is not something `create` can fix.
         let _ = write_record(&existing);
         if existing.derived_state() == SessionState::Running {
             return Err(SessionError::AlreadyRunning(name.clone()));
@@ -204,13 +208,37 @@ pub fn stop(name: &SessionName) -> Result<Session, SessionError> {
     // Reaping first is what makes a crashed session's orphan X server go away
     // as part of stopping it, rather than only as part of the next command.
     reap_one(&mut session);
+    let mut survived = Vec::new();
     if session.derived_state().is_live() {
-        teardown(&mut session, StopMode::Graceful);
+        survived = teardown(&mut session, StopMode::Graceful);
     }
     session.state = SessionState::Stopped;
     session.exit_reason = "stopped".to_string();
     write_record(&session)?;
+    // Reported after the record is written, so the stopped state is recorded
+    // either way: the components that would not die are still the caller's
+    // problem to clean up, and hiding that would leave a live X server nobody
+    // knows about.
+    survived_not_stopped(name, &survived)?;
     Ok(session)
+}
+
+/// Fail if any component of the session outlived the teardown.
+///
+/// The record is already written as `Stopped` by the time this runs, which is
+/// deliberate: the recorded state describes what the session manager has done,
+/// and a process that ignored `SIGKILL` does not make that record wrong. It
+/// does make the command a failure, because the caller asked for a stopped
+/// session and was not given one.
+fn survived_not_stopped(name: &SessionName, survived: &[&'static str]) -> Result<(), SessionError> {
+    if survived.is_empty() {
+        return Ok(());
+    }
+    Err(SessionError::Io(format!(
+        "session '{name}' is recorded as stopped but its {} {} still running",
+        survived.join(" and "),
+        if survived.len() == 1 { "is" } else { "are" }
+    )))
 }
 
 /// Stop and start again, on the same record.
@@ -242,10 +270,11 @@ impl StopMode {
 /// Kill a session immediately: no `quit`, no grace period.
 pub fn kill(name: &SessionName) -> Result<Session, SessionError> {
     let mut session = read_checked(name)?;
-    teardown(&mut session, StopMode::Hard);
+    let survived = teardown(&mut session, StopMode::Hard);
     session.state = SessionState::Stopped;
     session.exit_reason = "killed".to_string();
     write_record(&session)?;
+    survived_not_stopped(name, &survived)?;
     Ok(session)
 }
 
@@ -386,9 +415,14 @@ fn launch(session: &mut Session) -> Result<(), SessionError> {
                 session.exit_reason = e.to_string();
             }
             // A no-op for a failure that happened before anything was spawned,
-            // which is what makes it safe to call unconditionally.
-            teardown(session, StopMode::Hard);
+            // which is what makes it safe to call unconditionally. Its outcome
+            // is not consulted: the command has already failed with the reason
+            // that caused it, so a second failure about the same attempt adds
+            // nothing the caller can act on differently.
+            let _ = teardown(session, StopMode::Hard);
             session.state = SessionState::Stopped;
+            // Likewise: the record is written so the failure is discoverable
+            // later, but the command's result does not depend on it.
             let _ = write_record(session);
             Err(e)
         }
@@ -628,16 +662,32 @@ fn write_record(session: &Session) -> Result<(), SessionError> {
 }
 
 /// Stop everything a session is running, in the order the mode implies.
-fn teardown(session: &mut Session, mode: StopMode) {
+///
+/// Returns the components that survived, so the caller can tell a finished
+/// teardown from an attempted one. Every step runs whatever the previous one
+/// did — a window manager that ignored `SIGTERM` must not prevent the X server
+/// from being stopped — so the outcome is collected rather than returned at the
+/// first problem. Only the postcondition matters here, not whether each signal
+/// was delivered: a signal that "failed" because the process had already exited
+/// is the outcome that was wanted, and an unkillable one is caught by the final
+/// liveness check below.
+fn teardown(session: &mut Session, mode: StopMode) -> Vec<&'static str> {
+    let mut survived: Vec<&'static str> = Vec::new();
     // The window manager first: while its display exists it can close its
     // clients cooperatively, which is the difference between a clean shutdown
     // and applications killed mid-write.
     if session.wm.is_alive() {
         if mode == StopMode::Graceful {
+            // Best effort by design: `quit` is a request to a program that may
+            // already be gone or wedged, and the escalation below covers both.
             let _ = client::quit(session.name.as_str());
         }
         wait_until(STOP_GRACE, || !session.wm.is_alive());
         if session.wm.is_alive() {
+            // Not consulted either: whether the signal was delivered is not the
+            // question. The postcondition below asks whether the process is
+            // still there, and a signal that "failed" because the process had
+            // already exited is the outcome that was wanted.
             let _ = signal_tree(&session.wm, StopMode::Hard);
         }
         // An unresponsive WM can also hold the whole client tree; the process
@@ -661,6 +711,18 @@ fn teardown(session: &mut Session, mode: StopMode) {
         };
         server.stop(STOP_GRACE);
     }
+    // The postcondition, read before the references are cleared below: `stop`
+    // and `kill` promise the session is no longer running, and the only thing
+    // that can say whether it is true is the recorded process still being
+    // there. Both ids are captured now because the record is about to forget
+    // them, and a component that outlives its record is exactly what a caller
+    // needs to be told about.
+    if session.wm.is_alive() {
+        survived.push("window manager");
+    }
+    if session.xserver.is_some() && session.xserver.is_alive() {
+        survived.push("X server");
+    }
     session.wm = ProcRef::default();
     session.xserver = ProcRef::default();
     // Registered pgids are actionable ownership state, not history: they exist
@@ -675,6 +737,7 @@ fn teardown(session: &mut Session, mode: StopMode) {
     if mode == StopMode::Hard && session.exit_reason.is_empty() {
         session.exit_reason = StopMode::Hard.label().to_string();
     }
+    survived
 }
 
 /// Signal a session's window manager *and everything it started*.
@@ -747,6 +810,59 @@ mod tests {
             resolution: Resolution::new(800, 600).expect("resolution"),
             ..Spec::default()
         }
+    }
+
+    /// A teardown that leaves a process behind is a failure, and the caller has to
+    /// hear which one.
+    ///
+    /// The postcondition is what makes this true: `stop` and `kill` used to
+    /// write `Stopped` and return `Ok` whatever `teardown` managed to do, so a
+    /// window manager that survived `SIGTERM` *and* `SIGKILL` was reported as
+    /// stopped — with a live X server and a record that says otherwise.
+    #[test]
+    fn a_surviving_component_fails_the_teardown() {
+        let name = SessionName::parse("survivor").expect("valid name");
+        // Nothing survived: the promised state was reached.
+        assert!(
+            survived_not_stopped(&name, &[]).is_ok(),
+            "a teardown that stopped everything is a success"
+        );
+        // One component left running.
+        let err = survived_not_stopped(&name, &["window manager"])
+            .expect_err("a surviving window manager must fail");
+        let text = err.to_string();
+        assert!(
+            text.contains("window manager"),
+            "the message must name what survived, got: {text}"
+        );
+        assert!(
+            text.contains("still running"),
+            "the message must say the session is not actually stopped, got: {text}"
+        );
+        // Both: the caller has to be able to tell which component to clean up.
+        let err = survived_not_stopped(&name, &["window manager", "X server"])
+            .expect_err("two survivors must fail");
+        let text = err.to_string();
+        assert!(text.contains("window manager and X server"), "got: {text}");
+        assert!(
+            text.contains("are still running"),
+            "plural components need a plural claim, got: {text}"
+        );
+    }
+
+    /// The record is written before the survival check runs, so a failure to
+    /// stop is reported without losing the recorded state.
+    #[test]
+    fn a_surviving_component_still_leaves_the_record_written() {
+        // `stop` writes, then checks. The order is the contract: a caller that
+        // retries must not find the session still recorded as running, or the
+        // second `stop` would skip the teardown entirely.
+        let name = SessionName::parse("order").expect("valid name");
+        let err = survived_not_stopped(&name, &["window manager"]).expect_err("fails");
+        assert!(
+            matches!(err, SessionError::Io(_)),
+            "the failure reuses the existing error variant rather than adding one: {err:?}"
+        );
     }
 
     /// A relative binary is the common case (`--binary ./target/debug/maverick`)
