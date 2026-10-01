@@ -100,6 +100,14 @@ pub fn state(name: &str) -> std::io::Result<String> {
 
 /// Send a `dispatch <action>` to a running instance (execute an action as if
 /// it were a keybind). Returns the server reply.
+///
+/// `Ok("ok")` is a **receipt**, not a result: the instance acknowledges a
+/// dispatch the moment it is queued, and the action grammar is applied later, on
+/// the window manager's own thread. An action that grammar does not recognise is
+/// refused there in the window manager's log, which this process cannot read —
+/// so the caller learns that the request was accepted and nothing more. What the
+/// transport can refuse — a malformed line, a full command queue — arrives as an
+/// `error …` body inside an `Ok`, and the caller has to classify it.
 pub fn dispatch(name: &str, action: &str) -> std::io::Result<String> {
     if action.contains(['\n', '\r']) {
         return Err(std::io::Error::new(

@@ -13,6 +13,31 @@
 //!   subscribe            -> stream event lines until the client disconnects
 //! ```
 //!
+//! # What an acknowledgement means
+//!
+//! `dispatch`, `quit`, `restart` and `reload` are acknowledged at the moment the
+//! command is **enqueued**, on the socket thread, before the window manager has
+//! looked at it. Their `ok` is therefore a receipt: "this instance took the
+//! request", never "the request happened". The socket thread cannot say more —
+//! the action grammar belongs to the window manager's event loop, which drains
+//! the queue once per iteration, so at ack time nothing about the action has
+//! been examined. A payload the window manager does not recognise is dropped
+//! with a warning in its own log; the wire has no vocabulary to express that,
+//! and duplicating the grammar here would put a second copy of it in the tool
+//! crate that links this one.
+//!
+//! What the wire *can* refuse is everything this thread decides: an over-long
+//! or malformed line, a missing action, a full command queue, an instance that
+//! has begun restarting, a subscriber over the cap. Those arrive as an `error …`
+//! body inside an otherwise successful exchange, and a client that reads only
+//! the socket has no way to tell them from the payload or the receipt beside
+//! them.
+//!
+//! `query` is the one verb that is answered by the window manager's own thread
+//! and not by this one, because its answer is a function of live state. A
+//! client that needs to know whether something *took effect* has to observe
+//! that state — `state`, or `query` — rather than read the receipt.
+//!
 //! # Thread model
 //!
 //! [`ControlServer::spawn`] binds the socket and spawns a **background accept

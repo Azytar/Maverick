@@ -506,7 +506,10 @@ COMMANDS:
     msg <action> [--name <id>] [--session <sid>] Dispatch an action; e.g.
                                 \"focus-left\" or \"view 3\". The vocabulary is
                                 the window manager's: it accepts what a
-                                window manager acts on, and nothing else
+                                window manager acts on, and nothing else.
+                                Exits non-zero only if the instance refuses
+                                the request; an action it queued but cannot
+                                parse is reported in its own log
     command <action>           Alias for msg (dispatch)
     subscribe   [--name <id>] [--session <sid>]  Stream WM events until interrupted
     quit     [--name <id>] [--session <sid>] [--confirm] [--yes]
@@ -683,14 +686,16 @@ fn print_json<E: std::error::Error + 'static>(tool: &str, res: Result<String, E>
         // This is the single home for the check because `query` and the
         // forwarded `query <topic>` both end here; checking at the call sites
         // would have left the other one unclassified.
-        Ok(reply) if reply.starts_with(ERROR_PREFIX) => {
-            eprintln!("{tool}: {}", reply.trim_end());
-            ExitCode::FAILURE
-        }
-        Ok(json) => {
-            println!("{json}");
-            ExitCode::SUCCESS
-        }
+        Ok(reply) => match refusal(&reply) {
+            Some(why) => {
+                eprintln!("{tool}: {why}");
+                ExitCode::FAILURE
+            }
+            None => {
+                println!("{reply}");
+                ExitCode::SUCCESS
+            }
+        },
         Err(e) => {
             eprintln!("{tool}: query failed: {e}");
             ExitCode::FAILURE
@@ -703,6 +708,19 @@ fn print_json<E: std::error::Error + 'static>(tool: &str, res: Result<String, E>
 /// The server writes it first and never after any other byte of a successful
 /// reply, so `starts_with` is the whole test.
 const ERROR_PREFIX: &str = "error ";
+
+/// The reason a reply carries, with the marker stripped, or `None` if it is not
+/// a refusal.
+///
+/// A refused request arrives as a *successful exchange* carrying an `error …`
+/// body, so every command that can be refused has to classify the reply and not
+/// just the socket. Keeping the test in one function is what stops a verb from
+/// quietly dropping it: a window verb that checked only the transport reported a
+/// refusal from the instance as a completed window operation, and printed the
+/// window id as though the action had run.
+pub(crate) fn refusal(reply: &str) -> Option<&str> {
+    reply.strip_prefix(ERROR_PREFIX).map(str::trim_end)
+}
 
 /// `state` → full snapshot; `query <topic>` → a single structured query (or a
 /// bare action line passed through as a dispatcher).
@@ -724,6 +742,14 @@ fn cmd_state(tool: &str, args: &[String], full_snapshot: bool) -> ExitCode {
 }
 
 /// Dispatch an action string (`msg`/`dispatch`/`command`) to the resolved instance.
+///
+/// The exit status answers the question this tool can answer: did the instance
+/// accept the request. A `dispatch` receipt is issued when the action is
+/// *queued*, and the action grammar is the window manager's own — applied after
+/// this command has already returned — so an action it does not recognise is
+/// refused in its log rather than here. Deciding otherwise in the tool would mean
+/// carrying a second copy of a grammar this tool is explicitly not the owner of,
+/// and would go stale the moment a new action was added.
 fn cmd_msg(tool: &str, args: &[String]) -> ExitCode {
     let o = parse_opts_default(args);
     if o.positional.is_empty() {
@@ -736,14 +762,13 @@ fn cmd_msg(tool: &str, args: &[String]) -> ExitCode {
         None => return ExitCode::FAILURE,
     };
     match client::dispatch(&name, &action) {
-        Ok(reply) => {
-            if reply.starts_with("error") {
-                eprintln!("{tool}: {reply}");
+        Ok(reply) => match refusal(&reply) {
+            Some(why) => {
+                eprintln!("{tool}: {why}");
                 ExitCode::FAILURE
-            } else {
-                ExitCode::SUCCESS
             }
-        }
+            None => ExitCode::SUCCESS,
+        },
         Err(e) => {
             eprintln!("{tool}: dispatch failed: {e}");
             ExitCode::FAILURE
@@ -811,14 +836,16 @@ fn cmd_quit(tool: &str, args: &[String]) -> ExitCode {
         None => match discover::quit_by_name(&name) {
             // A refusal is a non-empty reply, so it arrives here as `Ok`. The
             // instance is still running and the command must say so.
-            Ok(reply) if reply.starts_with(ERROR_PREFIX) => {
-                eprintln!("{tool}: quit failed: {}", reply.trim_end());
-                ExitCode::FAILURE
-            }
-            Ok(_) => {
-                println!("{tool}: '{name}' quit");
-                ExitCode::SUCCESS
-            }
+            Ok(reply) => match refusal(&reply) {
+                Some(why) => {
+                    eprintln!("{tool}: quit failed: {why}");
+                    ExitCode::FAILURE
+                }
+                None => {
+                    println!("{tool}: '{name}' quit");
+                    ExitCode::SUCCESS
+                }
+            },
             Err(e) => {
                 eprintln!("{tool}: quit failed: {e}");
                 ExitCode::FAILURE
@@ -842,11 +869,13 @@ fn cmd_quit_all(tool: &str, args: &[String]) -> ExitCode {
     let mut ok = true;
     for (name, res) in results {
         match res {
-            Ok(reply) if reply.starts_with(ERROR_PREFIX) => {
-                eprintln!("{tool}: {name}: FAILED ({})", reply.trim_end());
-                ok = false;
-            }
-            Ok(_) => println!("{tool}: {name}: quit"),
+            Ok(reply) => match refusal(&reply) {
+                Some(why) => {
+                    eprintln!("{tool}: {name}: FAILED ({why})");
+                    ok = false;
+                }
+                None => println!("{tool}: {name}: quit"),
+            },
             Err(e) => {
                 eprintln!("{tool}: {name}: FAILED ({e})");
                 ok = false;
@@ -880,26 +909,28 @@ fn cmd_simple(tool: &str, args: &[String], verb: &str) -> ExitCode {
     // classified here exactly as `print_json` classifies it. Discarding the
     // reply reported the refusal as a completed restart.
     match res {
-        Ok(reply) if reply.starts_with(ERROR_PREFIX) => {
-            eprintln!("{tool}: {verb} failed: {}", reply.trim_end());
-            ExitCode::FAILURE
-        }
-        Ok(_) if verb == "restart" => {
-            if await_restarted(&name) {
-                println!("{tool}: '{name}' {verb}");
-                ExitCode::SUCCESS
-            } else {
-                eprintln!(
-                    "{tool}: {verb} was accepted but '{name}' did not come back; \
-                     it may have exited during the handoff"
-                );
+        Ok(reply) => match refusal(&reply) {
+            Some(why) => {
+                eprintln!("{tool}: {verb} failed: {why}");
                 ExitCode::FAILURE
             }
-        }
-        Ok(_) => {
-            println!("{tool}: '{name}' {verb}");
-            ExitCode::SUCCESS
-        }
+            None if verb == "restart" => {
+                if await_restarted(&name) {
+                    println!("{tool}: '{name}' {verb}");
+                    ExitCode::SUCCESS
+                } else {
+                    eprintln!(
+                        "{tool}: {verb} was accepted but '{name}' did not come back; \
+                         it may have exited during the handoff"
+                    );
+                    ExitCode::FAILURE
+                }
+            }
+            None => {
+                println!("{tool}: '{name}' {verb}");
+                ExitCode::SUCCESS
+            }
+        },
         Err(e) => {
             eprintln!("{tool}: {verb} failed: {e}");
             ExitCode::FAILURE

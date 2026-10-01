@@ -280,11 +280,41 @@ fn candidates(windows: &[&WindowInfo]) -> String {
 fn windows_of(c: &Ctl, args: &[String]) -> Result<(String, Vec<WindowInfo>), String> {
     let name = session_target(c, args)?;
     let view = crate::session::resolve(&name).map_err(|e| e.to_string())?;
-    let tree = client::query(&view.sid, "tree")
+    Ok((view.sid.clone(), tree_of(&name, &view.sid)?))
+}
+
+/// The windows `sid` manages, read from its `tree` query.
+///
+/// A refusal arrives as a successful exchange carrying an `error …` body, so it
+/// is classified before the document is parsed. Letting one reach the parse
+/// reported it as "the window tree was not valid JSON" — telling the user the
+/// instance sent nonsense when it had in fact said no, and discarding the reason
+/// it gave for refusing.
+fn tree_of(name: &str, sid: &str) -> Result<Vec<WindowInfo>, String> {
+    let tree = client::query(sid, "tree")
         .map_err(|e| format!("cannot read the window tree of '{name}': {e}"))?;
+    if let Some(why) = super::refusal(&tree) {
+        return Err(format!("cannot read the window tree of '{name}': {why}"));
+    }
     let tree = maverick_sys::json::parse(&tree)
         .ok_or_else(|| format!("the window tree of '{name}' was not valid JSON"))?;
-    Ok((view.sid, flatten_windows(&tree)))
+    Ok(flatten_windows(&tree))
+}
+
+/// Dispatch `action` to `sid`, reporting a refusal under `context`.
+///
+/// The reply to a `dispatch` is a queue receipt, and the only other thing it can
+/// be is a refusal: an over-long line, a full command queue, an instance that has
+/// begun restarting. Checking only the transport turned those into a completed
+/// window operation — the id printed, `--json` promising an action that was never
+/// applied, and exit status 0 — which is exactly what a caller running the same
+/// command from a script cannot detect.
+fn dispatch(sid: &str, action: &str, context: &str) -> Result<(), String> {
+    let reply = client::dispatch(sid, action).map_err(|e| format!("{context}: {e}"))?;
+    match super::refusal(&reply) {
+        Some(why) => Err(format!("{context}: {why}")),
+        None => Ok(()),
+    }
 }
 
 /// `maverickctl window …`
@@ -514,11 +544,7 @@ pub(crate) fn window_selector(c: &Ctl, args: &[String]) -> Option<String> {
 fn act(c: &Ctl, args: &[String], verb: &str, op: WindowOp) -> Result<(), String> {
     let name = session_target(c, args)?;
     let view = crate::session::resolve(&name).map_err(|e| e.to_string())?;
-    let tree = client::query(&view.sid, "tree")
-        .map_err(|e| format!("cannot read the window tree of '{name}': {e}"))?;
-    let tree = maverick_sys::json::parse(&tree)
-        .ok_or_else(|| format!("the window tree of '{name}' was not valid JSON"))?;
-    let windows = flatten_windows(&tree);
+    let windows = tree_of(&name, &view.sid)?;
 
     // The window selector is the first positional *after* the session, never
     // the session itself: `window focus debug firefox` addresses `firefox`, and
@@ -535,8 +561,11 @@ fn act(c: &Ctl, args: &[String], verb: &str, op: WindowOp) -> Result<(), String>
         resolve_window(&windows, &selector)?
     };
 
-    client::dispatch(&view.sid, &op.action(id))
-        .map_err(|e| format!("{verb} failed for {id:#x}: {e}"))?;
+    dispatch(
+        &view.sid,
+        &op.action(id),
+        &format!("{verb} failed for {id:#x}"),
+    )?;
     if c.json {
         println!(
             "{{\"session\":{},\"window\":{},\"action\":{}}}",
@@ -587,8 +616,11 @@ pub fn camera(c: &Ctl, args: &[String]) -> Result<(), String> {
         "camera needs a direction\n\n  try: maverickctl camera debug right".to_string()
     })?;
     let view = crate::session::resolve(&name).map_err(|e| e.to_string())?;
-    client::dispatch(&view.sid, &format!("focus:{dir}"))
-        .map_err(|e| format!("camera {dir} failed: {e}"))?;
+    dispatch(
+        &view.sid,
+        &format!("focus:{dir}"),
+        &format!("camera {dir} failed"),
+    )?;
     report(c, &name, &format!("camera {dir}"));
     Ok(())
 }
@@ -630,7 +662,7 @@ pub fn resize(c: &Ctl, args: &[String]) -> Result<(), String> {
             "'{amount}' is neither a pixel count nor a percentage\n\n  try: maverickctl resize {name} +10%"
         ));
     };
-    client::dispatch(&view.sid, &action).map_err(|e| format!("resize {amount} failed: {e}"))?;
+    dispatch(&view.sid, &action, &format!("resize {amount} failed"))?;
     report(c, &name, &action);
     Ok(())
 }
@@ -646,8 +678,11 @@ pub fn layout(c: &Ctl, args: &[String]) -> Result<(), String> {
             "layout needs a kind\n\n  try: maverickctl layout debug column".to_string()
         })?;
     let view = crate::session::resolve(&name).map_err(|e| e.to_string())?;
-    client::dispatch(&view.sid, &format!("layout:{kind}"))
-        .map_err(|e| format!("layout {kind} failed: {e}"))?;
+    dispatch(
+        &view.sid,
+        &format!("layout:{kind}"),
+        &format!("layout {kind} failed"),
+    )?;
     report(c, &name, &format!("layout {kind}"));
     Ok(())
 }

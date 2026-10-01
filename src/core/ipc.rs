@@ -513,8 +513,6 @@ mod tests {
         assert_eq!(v.get("windows").expect("windows").num_field("total"), 0);
     }
 
-
-
     /// The state snapshot is what every client polls, so the screen size added
     /// for resolution reporting has to be there for every monitor and survive a
     /// parse — a client reporting a session's resolution reads exactly this.
