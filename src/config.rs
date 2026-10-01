@@ -6,7 +6,7 @@
 //! which owns file I/O, TOML tokenization and diagnostics.
 //!
 //! Boundary: owns no I/O, no X connection, and no atom interning. The
-//! `Cfg` type family (`Cfg`, `AnimationsCfg`, `Rule`) is a
+//! `Cfg` type family (`Cfg`, `Rule`) is a
 //! plain owned value that the
 //! caller clones; the WM owns it for the session.
 //!
