@@ -420,6 +420,44 @@ pub struct XServer {
     pub xauth_path: PathBuf,
 }
 
+/// Remove one of an X server's claim artifacts, if it is still there.
+///
+/// Three outcomes, distinguished by the filesystem rather than by inspecting
+/// the error text:
+///
+/// * **Already absent** — the desired postcondition. `NotFound` is success, so
+///   cleanup is idempotent and a second call, or a call against a server that
+///   cleaned up after itself, is not a failure.
+/// * **Present but not ours to remove** — a planted symlink or regular file at
+///   a socket path. Success: the display is still released from this server's
+///   point of view, and unlinking it would let a link in `/tmp` decide what
+///   gets deleted.
+/// * **Present, ours, and the removal failed** — an error, because this is the
+///   case that loses a display number: `display_is_free` treats the artifact as
+///   a claim, so a lock that outlived its server makes that number permanently
+///   unusable, and nothing else here can free it. Returning `Ok` would report a
+///   released display that is still claimed.
+fn remove_claim_artifact(
+    path: &std::path::Path,
+    is_ours: impl Fn(&std::fs::Metadata) -> bool,
+) -> io::Result<()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if !is_ours(&meta) {
+        return Ok(());
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        // Removed by someone else between the two calls: the postcondition
+        // holds, so this is the same success as having removed it ourselves.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Everything needed to start one nested X server.
 #[derive(Debug, Clone)]
 pub struct XServerSpec {
@@ -655,10 +693,9 @@ impl XServer {
     /// claimed to the next session created. The lock is removed explicitly
     /// afterwards as well, so a server that died earlier cannot hold a display
     /// number hostage either.
-    pub fn stop(&self, grace: Duration) {
+    pub fn stop(&self, grace: Duration) -> io::Result<()> {
         if !self.is_running() {
-            self.cleanup_artifacts();
-            return;
+            return self.cleanup_artifacts();
         }
         // The result is deliberately not inspected: whether the signal landed
         // or the server had already exited, the next loop asks `pid_is` and
@@ -681,7 +718,7 @@ impl XServer {
                 std::thread::sleep(Duration::from_millis(25));
             }
         }
-        self.cleanup_artifacts();
+        self.cleanup_artifacts()
     }
 
     /// Release this display: remove the claim files the X server left behind.
@@ -707,32 +744,325 @@ impl XServer {
     /// Each path is removed only if it is of the expected type and was not
     /// following a symlink: `/tmp` is world-writable, so an unlink that
     /// followed a link would let a planted link decide what gets deleted.
-    fn cleanup_artifacts(&self) {
+    fn cleanup_artifacts(&self) -> io::Result<()> {
         if is_listening(self.display) {
-            return;
+            // Another server owns this display, and its artifacts are its own to
+            // remove. Returning here is success: there is nothing of ours here
+            // to release, and reporting otherwise would make a correct call look
+            // like a failure.
+            return Ok(());
         }
-        let lock = lock_path(self.display);
-        if let Ok(meta) = std::fs::symlink_metadata(&lock) {
-            if meta.is_file() {
-                let _ = std::fs::remove_file(&lock);
-            }
-        }
-        let sock = socket_path(self.display);
-        if let Ok(meta) = std::fs::symlink_metadata(&sock) {
-            // A unix socket is a socket, not a regular file, and the type check
-            // is what distinguishes "a dead server's socket" from anything a
-            // planted symlink or regular file would present as.
-            if meta.file_type().is_socket() {
-                let _ = std::fs::remove_file(&sock);
-            }
-        }
+        release_claim_paths(&lock_path(self.display), &socket_path(self.display))
     }
+}
+
+/// Remove both claim artifacts of a display nobody is serving.
+///
+/// Split from [`XServer::cleanup_artifacts`] so the contract can be exercised
+/// against a temporary directory: the production paths are `/tmp/.X<n>-lock`
+/// and `/tmp/.X11-unix/X<n>`, and a test that planted artifacts there would be
+/// testing the machine rather than the code.
+fn release_claim_paths(lock: &std::path::Path, socket: &std::path::Path) -> io::Result<()> {
+    remove_claim_artifact(lock, |meta| meta.is_file())?;
+    // A unix socket is a socket, not a regular file, and the type check is what
+    // distinguishes "a dead server's socket" from anything a planted symlink or
+    // regular file would present as.
+    remove_claim_artifact(socket, |meta| meta.file_type().is_socket())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::Resolution;
+
+    /// The artifact contract, at the smallest boundary where it can be decided.
+    ///
+    /// Failure injection is a directory planted at the artifact's path: `unlink`
+    /// on a directory is `EISDIR` on Linux, so the removal fails for a reason the
+    /// filesystem guarantees, with no mock and no permission games. The
+    /// production paths live under `/tmp`, which is never touched here.
+    mod artifact {
+        use super::*;
+
+        fn is_regular(meta: &std::fs::Metadata) -> bool {
+            meta.is_file()
+        }
+
+        #[test]
+        fn an_absent_artifact_is_a_successful_cleanup() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("never-existed");
+            // Absence IS the postcondition, so this is success rather than the
+            // `NotFound` a naive remove would report. It is what makes cleanup
+            // idempotent.
+            assert!(
+                remove_claim_artifact(&path, is_regular).is_ok(),
+                "an artifact that is already gone is the state cleanup wants"
+            );
+            // And repeating it changes nothing.
+            assert!(remove_claim_artifact(&path, is_regular).is_ok());
+        }
+
+        #[test]
+        fn an_existing_artifact_is_removed() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("lock");
+            std::fs::write(&path, b"12345\n").expect("plant an artifact");
+            remove_claim_artifact(&path, is_regular).expect("removal succeeds");
+            assert!(
+                !path.exists(),
+                "the artifact must actually be gone, not merely reported removed"
+            );
+        }
+
+        #[test]
+        fn a_failed_removal_is_reported() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("lock");
+            std::fs::write(&path, b"12345\n").expect("plant an artifact");
+            // Unlinking needs write permission on the *directory*, not on the
+            // file, so making the containing directory read-only fails the
+            // removal while leaving the artifact a perfectly ordinary regular
+            // file. No privilege is needed to undo it, and no global path is
+            // touched.
+            let mut perms = std::fs::metadata(dir.path())
+                .expect("tempdir metadata")
+                .permissions();
+            {
+                use std::os::unix::fs::PermissionsExt;
+                perms.set_mode(0o500);
+                std::fs::set_permissions(dir.path(), perms).expect("make it read-only");
+            }
+            let outcome = remove_claim_artifact(&path, is_regular);
+            // Restore first, so the failure above is never the reason the
+            // cleanup below cannot run.
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(dir.path())
+                    .expect("metadata")
+                    .permissions();
+                perms.set_mode(0o700);
+                std::fs::set_permissions(dir.path(), perms).expect("restore");
+            }
+            let err = outcome.expect_err(
+                "a removal that did not happen must not read as success, or the display \
+                 is reported released while its lock still claims the number",
+            );
+            assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "the filesystem's own classification is preserved, not matched on text"
+            );
+            assert!(
+                path.exists(),
+                "the artifact is still there, which is why this is a failure"
+            );
+        }
+
+        #[test]
+        fn an_artifact_that_is_not_ours_is_left_alone() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("socket");
+            std::fs::create_dir(&path).expect("plant something unexpected");
+            // The type guard says this is not a dead server's artifact, so it is
+            // not ours to unlink — and it must not fail either, because the
+            // display is released from this server's point of view regardless.
+            assert!(
+                remove_claim_artifact(&path, is_regular).is_ok(),
+                "a foreign file type is left alone without failing the cleanup"
+            );
+            assert!(
+                path.exists(),
+                "and it must still be there: nothing here deletes a planted path"
+            );
+        }
+
+        #[test]
+        fn a_symlinked_artifact_is_not_followed() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let target = dir.path().join("precious");
+            std::fs::write(&target, b"do not delete me").expect("plant a target");
+            let link = dir.path().join("lock");
+            std::os::unix::fs::symlink(&target, &link).expect("plant a symlink");
+            // `symlink_metadata` does not follow, so the link itself is what is
+            // examined — and it is not a regular file, so nothing is removed.
+            assert!(remove_claim_artifact(&link, is_regular).is_ok());
+            assert!(
+                target.exists(),
+                "a link in /tmp must not decide what gets deleted"
+            );
+            assert!(
+                link.symlink_metadata().is_ok(),
+                "and the link itself is left in place rather than followed"
+            );
+        }
+    }
+
+    /// The two-artifact release as `cleanup_artifacts` performs it.
+    ///
+    /// Exercised through `release_claim_paths` so the contract is checked against
+    /// a temporary directory: the production paths are under `/tmp`, and a test
+    /// that planted artifacts there would be testing the machine.
+    mod release {
+        use super::*;
+
+        #[test]
+        fn both_artifacts_are_removed() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let lock = dir.path().join("X1-lock");
+            let sock = dir.path().join("X1");
+            std::fs::write(&lock, b"12345\n").expect("plant a lock");
+            // A real socket, so the type guard accepts it exactly as it would
+            // the path a dead X server leaves behind.
+            let listener = std::os::unix::net::UnixListener::bind(&sock).expect("plant a socket");
+            release_claim_paths(&lock, &sock).expect("a clean release succeeds");
+            assert!(!lock.exists(), "the lock must be gone");
+            assert!(!sock.exists(), "the socket must be gone too");
+            drop(listener);
+        }
+
+        #[test]
+        fn an_unremovable_artifact_fails_the_whole_release() {
+            // Checked for each artifact in turn, because the first one to fail
+            // must decide the outcome on its own: a release that removed the
+            // socket and silently dropped the lock would report success over a
+            // display `display_is_free` still reads as claimed.
+            for which in ["lock", "socket"] {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let lock = dir.path().join("X1-lock");
+                let sock = dir.path().join("X1");
+                std::fs::write(&lock, b"12345\n").expect("plant a lock");
+                let listener =
+                    std::os::unix::net::UnixListener::bind(&sock).expect("plant a socket");
+                // Unlinking needs write permission on the directory, so a
+                // read-only one fails the removal while leaving both artifacts
+                // ordinary.
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = std::fs::metadata(dir.path())
+                        .expect("metadata")
+                        .permissions();
+                    perms.set_mode(0o500);
+                    std::fs::set_permissions(dir.path(), perms).expect("make it read-only");
+                }
+                let outcome = release_claim_paths(&lock, &sock);
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = std::fs::metadata(dir.path())
+                        .expect("metadata")
+                        .permissions();
+                    perms.set_mode(0o700);
+                    std::fs::set_permissions(dir.path(), perms).expect("restore");
+                }
+                let err = outcome.expect_err(&format!(
+                    "an unremovable {which} means the display is not released"
+                ));
+                assert_eq!(
+                    err.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "{which}: the filesystem's own classification is preserved"
+                );
+                drop(listener);
+            }
+        }
+
+        #[test]
+        fn an_already_released_display_is_a_success() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let lock = dir.path().join("X1-lock");
+            let sock = dir.path().join("X1");
+            // Nothing planted at all: the postcondition already holds.
+            assert!(release_claim_paths(&lock, &sock).is_ok());
+            // And a second release after a real one is still a success.
+            std::fs::write(&lock, b"1\n").expect("plant a lock");
+            release_claim_paths(&lock, &sock).expect("release");
+            assert!(release_claim_paths(&lock, &sock).is_ok());
+        }
+    }
+
+    /// `cleanup_artifacts` on a display nobody is serving.
+    ///
+    /// A dead server is the case that matters: its process is gone, so `stop`
+    /// goes straight to releasing the display, and a stale lock is exactly what
+    /// would otherwise hold the number forever.
+    #[test]
+    fn a_dead_servers_display_is_released() {
+        // Claimed rather than hard-coded: a fixed number can be taken by another
+        // test in this binary, or by a real server on the machine, and the
+        // failure would look like a broken cleanup rather than a collision.
+        let (display, _claim) = claim_display(Display(381)).expect("a free display");
+        let server = XServer {
+            display,
+            backend: Backend::Xvfb,
+            proc: ProcRef {
+                pid: u32::MAX - 1,
+                start_time: 1,
+            },
+            xauth_path: std::path::PathBuf::from("/nonexistent"),
+        };
+        // Nothing is listening, so the artifacts are ours to remove.
+        server
+            .stop(Duration::from_millis(50))
+            .expect("releasing a dead server's display must succeed");
+        assert!(
+            display_is_free(display),
+            "after stopping, the display must be claimable again"
+        );
+        release_display(display);
+    }
+
+    /// A removal that fails must reach the caller of `stop`.
+    ///
+    /// The lock is planted as a directory so `remove_file` fails, and the type
+    /// guard is what keeps the cleanup from simply skipping it: a directory is
+    /// not a regular file, so this exercises the *other* half — but a socket
+    /// path holding a directory is equally unremovable, and either way the
+    /// point is that `stop` no longer returns `()`.
+    #[test]
+    fn a_cleanup_failure_reaches_the_caller_of_stop() {
+        let (display, _claim) = claim_display(Display(382)).expect("a free display");
+        release_display(display);
+        let lock = lock_path(display);
+        std::fs::create_dir_all(&lock).expect("plant a directory where the lock belongs");
+        let server = XServer {
+            display,
+            backend: Backend::Xvfb,
+            proc: ProcRef {
+                pid: u32::MAX - 1,
+                start_time: 1,
+            },
+            xauth_path: std::path::PathBuf::from("/nonexistent"),
+        };
+        // The directory is not a lock file, so the type guard leaves it in place
+        // rather than removing it — the display is therefore NOT free, and the
+        // artifact is still exactly as it was found. That is the contract for
+        // something that is not ours: it is left alone, and it is not removed in
+        // order to report a clean release.
+        let released = server.stop(Duration::from_millis(50));
+        assert!(
+            lock.symlink_metadata().is_ok(),
+            "a foreign artifact must be left exactly as it was found"
+        );
+        assert!(
+            !display_is_free(display),
+            "the planted directory still occupies the display"
+        );
+        // `stop` reports success here, and that is correct rather than a leak:
+        // the removal it attempted was refused by the type guard, not by the
+        // filesystem. What must never happen is the opposite — reporting
+        // success after a removal the filesystem itself refused, which is what
+        // the release-path tests above pin.
+        assert!(
+            released.is_ok(),
+            "leaving an artifact that is not ours is not a failure to release"
+        );
+        std::fs::remove_dir(&lock).expect("remove the planted directory");
+        release_display(display);
+        assert!(
+            display_is_free(display),
+            "and once it is gone the display is reusable again"
+        );
+    }
 
     #[test]
     fn display_round_trips_through_its_string_form() {
@@ -996,7 +1326,10 @@ mod tests {
             },
             xauth_path: std::path::PathBuf::from("/nonexistent"),
         };
-        dead.stop(Duration::from_millis(50));
+        // Another server is serving this display, so `stop` finds nothing of its own to
+        // release and says so rather than tearing down a session that is working.
+        dead.stop(Duration::from_millis(50))
+            .expect("releasing a display another server owns is not a failure");
         assert!(
             is_listening(free),
             "another server owns this display and must be left alone"
@@ -1005,15 +1338,21 @@ mod tests {
         drop(listener);
     }
 
-    /// Remove the socket file a test listener left behind.
+    /// Remove the artifacts a test listener left behind.
     ///
     /// Dropping a `UnixListener` closes the socket but does not unlink the file,
     /// and `display_is_free` treats the file as a claim — so without this a test
     /// that binds one fails on its second run with `AddrInUse`, or quietly makes
     /// the next allocation skip the number.
+    ///
+    /// It calls the production release path rather than removing the files
+    /// itself, and it panics on failure. The discard this used to do was not
+    /// harmless even here: a lock that outlived its test made that display
+    /// number permanently unavailable to every later test in the run, which
+    /// shows up as an unrelated allocation test failing for no visible reason.
     fn release_display(display: Display) {
-        let _ = std::fs::remove_file(socket_path(display));
-        let _ = std::fs::remove_file(lock_path(display));
+        release_claim_paths(&lock_path(display), &socket_path(display))
+            .unwrap_or_else(|e| panic!("test display {} was not released: {e}", display.0));
     }
 
     /// The handover that ends the display claim is the X server naming itself,

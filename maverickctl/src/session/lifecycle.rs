@@ -230,7 +230,7 @@ pub fn stop(name: &SessionName) -> Result<Session, SessionError> {
 /// and a process that ignored `SIGKILL` does not make that record wrong. It
 /// does make the command a failure, because the caller asked for a stopped
 /// session and was not given one.
-fn survived_not_stopped(name: &SessionName, survived: &[&'static str]) -> Result<(), SessionError> {
+fn survived_not_stopped(name: &SessionName, survived: &[String]) -> Result<(), SessionError> {
     if survived.is_empty() {
         return Ok(());
     }
@@ -365,10 +365,22 @@ fn reap_one(session: &mut Session) {
             proc: session.xserver,
             xauth_path: session.xauth_path(),
         };
-        server.stop(STOP_GRACE);
+        // Reaping is best effort by nature — it runs from `create`, from
+        // `stop`, and from a sweep, and none of those can usefully be refused
+        // because a leftover display artifact resisted removal. So the failure
+        // is not returned here; it is recorded, because `exit_reason` is the
+        // field that survives into every later `session status`, and a display
+        // whose lock outlived its server is otherwise invisible: the record
+        // says stopped, with a display number nothing can now claim.
+        let released = server.stop(STOP_GRACE);
         if crashed {
-            session.exit_reason =
-                "the window manager exited; its X server was stopped with it".to_string();
+            session.exit_reason = match &released {
+                Ok(()) => "the window manager exited; its X server was stopped with it".to_string(),
+                Err(e) => format!(
+                    "the window manager exited; its X server is still holding :{}: {e}",
+                    session.display
+                ),
+            };
         }
     } else if crashed {
         session.exit_reason = "the window manager exited on its own".to_string();
@@ -534,9 +546,21 @@ fn await_xserver(
     }) {
         Ok(()) => Ok(()),
         Err(e) => {
-            server.stop(STOP_GRACE);
+            // The original failure is the operation's failure and stays the
+            // headline: it is what the user asked about. A cleanup failure is
+            // appended rather than substituted, because it is a different kind
+            // of problem — the server never came up, and these are the files it
+            // left behind — and replacing the cause would hide the reason the
+            // start failed behind the reason it could not be cleaned up.
+            let cleanup = server.stop(STOP_GRACE);
+            let mut why = e.to_string();
+            if let Err(cleanup_err) = cleanup {
+                why.push_str(&format!(
+                    "; its X server could not be cleaned up either: {cleanup_err}"
+                ));
+            }
             Err(SessionError::Io(format!(
-                "{e}; see {}",
+                "{why}; see {}",
                 session.xserver_log_path().display()
             )))
         }
@@ -671,8 +695,13 @@ fn write_record(session: &Session) -> Result<(), SessionError> {
 /// was delivered: a signal that "failed" because the process had already exited
 /// is the outcome that was wanted, and an unkillable one is caught by the final
 /// liveness check below.
-fn teardown(session: &mut Session, mode: StopMode) -> Vec<&'static str> {
-    let mut survived: Vec<&'static str> = Vec::new();
+fn teardown(session: &mut Session, mode: StopMode) -> Vec<String> {
+    let mut survived: Vec<String> = Vec::new();
+    // Reasons the session was not fully released, kept apart from `survived`
+    // because they are not processes: nothing is still running, but something
+    // still owns a display number. Rendered into the same report so a caller
+    // sees one list of what stopped them from using this session.
+    let mut cleanup_failed: Vec<String> = Vec::new();
     // The window manager first: while its display exists it can close its
     // clients cooperatively, which is the difference between a clean shutdown
     // and applications killed mid-write.
@@ -709,7 +738,15 @@ fn teardown(session: &mut Session, mode: StopMode) -> Vec<&'static str> {
             proc: session.xserver,
             xauth_path: session.xauth_path(),
         };
-        server.stop(STOP_GRACE);
+        // Joined into the same outcome as a surviving process rather than kept
+        // as a parallel result: both mean the session was not released, and the
+        // caller learns about them the same way. A display whose lock outlived
+        // its server is not reusable — `display_is_free` reads the artifact as
+        // a claim — so "stopped" would be false in exactly the same way a live
+        // X server would make it false.
+        if let Err(e) = server.stop(STOP_GRACE) {
+            cleanup_failed.push(e.to_string());
+        }
     }
     // The postcondition, read before the references are cleared below: `stop`
     // and `kill` promise the session is no longer running, and the only thing
@@ -718,10 +755,10 @@ fn teardown(session: &mut Session, mode: StopMode) -> Vec<&'static str> {
     // them, and a component that outlives its record is exactly what a caller
     // needs to be told about.
     if session.wm.is_alive() {
-        survived.push("window manager");
+        survived.push("window manager".to_string());
     }
     if session.xserver.is_some() && session.xserver.is_alive() {
-        survived.push("X server");
+        survived.push("X server".to_string());
     }
     session.wm = ProcRef::default();
     session.xserver = ProcRef::default();
@@ -737,6 +774,15 @@ fn teardown(session: &mut Session, mode: StopMode) -> Vec<&'static str> {
     if mode == StopMode::Hard && session.exit_reason.is_empty() {
         session.exit_reason = StopMode::Hard.label().to_string();
     }
+    // A display that could not be released is rendered into the same list a
+    // surviving process goes into, because that is what it is from the
+    // caller's side: something still holds this session's display number. The
+    // entries are owned so the reason can travel with them.
+    survived.extend(
+        cleanup_failed
+            .iter()
+            .map(|reason| format!("its X server's display was not released: {reason}")),
+    );
     survived
 }
 
@@ -828,7 +874,7 @@ mod tests {
             "a teardown that stopped everything is a success"
         );
         // One component left running.
-        let err = survived_not_stopped(&name, &["window manager"])
+        let err = survived_not_stopped(&name, &["window manager".to_string()])
             .expect_err("a surviving window manager must fail");
         let text = err.to_string();
         assert!(
@@ -840,13 +886,97 @@ mod tests {
             "the message must say the session is not actually stopped, got: {text}"
         );
         // Both: the caller has to be able to tell which component to clean up.
-        let err = survived_not_stopped(&name, &["window manager", "X server"])
-            .expect_err("two survivors must fail");
+        let err = survived_not_stopped(
+            &name,
+            &["window manager".to_string(), "X server".to_string()],
+        )
+        .expect_err("two survivors must fail");
         let text = err.to_string();
         assert!(text.contains("window manager and X server"), "got: {text}");
         assert!(
             text.contains("are still running"),
             "plural components need a plural claim, got: {text}"
+        );
+    }
+
+    /// A display that could not be released is reported the same way a surviving
+    /// process is.
+    ///
+    /// Nothing is running in this case, so the entry cannot claim a process is
+    /// still alive — but from the caller's side the session is equally unusable:
+    /// `display_is_free` reads the leftover lock as a claim, so that number
+    /// cannot be taken by anything, including a new session. Reporting a
+    /// successful `stop` here would be a false success of exactly the kind the
+    /// postcondition exists to prevent.
+    #[test]
+    fn an_unreleased_display_fails_the_teardown_like_a_surviving_process() {
+        let name = SessionName::parse("unreleased").expect("valid name");
+        let err = survived_not_stopped(
+            &name,
+            &["its X server's display was not released: Permission denied".to_string()],
+        )
+        .expect_err("a display that was not released is not a successful stop");
+        let text = err.to_string();
+        assert!(
+            text.contains("display was not released"),
+            "the caller must be able to tell this apart from a live process: {text}"
+        );
+        assert!(
+            text.contains("Permission denied"),
+            "and must be given the reason the filesystem gave: {text}"
+        );
+        assert!(
+            text.contains("still running"),
+            "the wording still tells the caller the session was not released: {text}"
+        );
+    }
+
+    /// A failed teardown and a successful one must not read the same.
+    ///
+    /// The risk this guards is silent: an entry that is *not* in the list is
+    /// indistinguishable from a clean stop, and `stop` returning `Ok` is what a
+    /// caller acts on.
+    #[test]
+    fn a_successful_teardown_is_distinguishable_from_a_failed_one() {
+        let name = SessionName::parse("clean").expect("valid name");
+        assert!(survived_not_stopped(&name, &[]).is_ok());
+    }
+
+    /// The three `XServer::stop` call sites must consume its result.
+    ///
+    /// Read from the source rather than asserted through a live X server,
+    /// because the interesting case is a removal failure on a display that has
+    /// no server at all — which cannot be arranged without planting global
+    /// `/tmp` artifacts. What matters is that no call site can go back to
+    /// discarding the `Result` silently, which is how the failure was lost the
+    /// first time.
+    #[test]
+    fn no_xserver_stop_call_site_discards_its_result() {
+        // Only the production half: this test names `server.stop(` itself, so
+        // scanning the test module would find its own source.
+        let src = include_str!("lifecycle.rs");
+        let production = src.split("#[cfg(test)]").next().expect("a test module");
+        let mut consumed = 0;
+        for (n, line) in production.lines().enumerate() {
+            let t = line.trim();
+            if !t.contains("server.stop(") {
+                continue;
+            }
+            // Consumed in one of the two forms that keep the result: bound to a
+            // name, or matched by `if let`. A bare statement would be the
+            // discard this test exists to prevent.
+            let bound = t.starts_with("let ") || t.contains("= server.stop(");
+            let matched = t.starts_with("if let Err(");
+            assert!(
+                bound || matched,
+                "line {} discards the result of XServer::stop: {t}",
+                n + 1
+            );
+            consumed += 1;
+        }
+        assert_eq!(
+            consumed, 3,
+            "there are three XServer::stop call sites; found {consumed}"
         );
     }
 
@@ -858,7 +988,7 @@ mod tests {
         // retries must not find the session still recorded as running, or the
         // second `stop` would skip the teardown entirely.
         let name = SessionName::parse("order").expect("valid name");
-        let err = survived_not_stopped(&name, &["window manager"]).expect_err("fails");
+        let err = survived_not_stopped(&name, &["window manager".to_string()]).expect_err("fails");
         assert!(
             matches!(err, SessionError::Io(_)),
             "the failure reuses the existing error variant rather than adding one: {err:?}"
