@@ -691,6 +691,9 @@ impl Command for FocusDirection {
         if mi >= state.monitors.len() {
             return CommandReport::new(cmds);
         }
+        // The monitor this command retargets before navigating, which may differ
+        // from `mi` when the focus slot names a window placed on another monitor.
+        let mut retargeted = None;
         let from = state.monitors[mi].focused;
         let ws_i = state.monitors[mi].active_ws;
         // A window mapped behind an overlay can insert a column and move the
@@ -698,7 +701,16 @@ impl Command for FocusDirection {
         // focused window, not that insertion cursor.
         if matches!(self.0, Dir::Left | Dir::Right) {
             if let Some(win) = from {
-                let _ = retarget_focus_to_window(state, cfg, win);
+                // The monitor whose camera this moves is not necessarily the one
+                // this command navigates: the focus slot is a logical pointer, so
+                // it can name a window placed on another monitor (the same
+                // divergence `ToggleFullscreen` documents before resolving its
+                // target's own monitor). That retarget moves a camera without
+                // re-projecting, so `client.geom` on that monitor stays where it
+                // was while the hit-test extents follow the camera — a click then
+                // lands on the neighbour's stale rect. The arrange owed for it is
+                // emitted with the rest, below.
+                retargeted = retarget_focus_to_window(state, cfg, win);
             }
         }
         let target: Option<WindowId> = match self.0 {
@@ -871,6 +883,13 @@ impl Command for FocusDirection {
             // navigated away from.
             state.sync_presented_maximize(mi);
             cmds.push(Effect::ArrangeMonitor(mi));
+            // The camera this command moved before navigating, if it was not this
+            // monitor's, still owes a settled projection. Without it that monitor
+            // keeps its old `client.geom` against the camera the retarget just
+            // moved, and its clicks land on the wrong column.
+            if let Some(other) = retargeted.filter(|&other| other != mi) {
+                cmds.push(Effect::ArrangeMonitor(other));
+            }
             cmds.push(Effect::FocusWindow(Some(w)));
             return CommandReport::with_event(cmds, Event::FocusChanged { from, to: Some(w) });
         }

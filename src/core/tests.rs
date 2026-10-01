@@ -59,6 +59,116 @@ mod unit_tests {
         engine
     }
 
+    /// Horizontal navigation retargets the camera on the monitor the focus slot
+    /// names, which is not always the monitor being navigated.
+    ///
+    /// The focus slot is a logical pointer: it can name a window placed on
+    /// another monitor, and then `retarget_focus_to_window` moves *that*
+    /// monitor's camera. The camera move is not a projection — `client.geom` is
+    /// refreshed only by a settled `arrange` — so the command owes an arrange for
+    /// the monitor it moved. Without it that monitor's hit-test extents follow the
+    /// new camera while its `client.geom` stays behind, and a click lands on the
+    /// neighbour's stale rect.
+    #[test]
+    fn navigation_arranges_the_monitor_whose_camera_it_retargeted() {
+        use crate::core::commands::{Command as _, FocusDirection};
+        use crate::types::Dir;
+
+        let mut engine = setup_engine_multi();
+        let ws0 = engine.state.monitors[0].active_ws;
+        let ws1 = engine.state.monitors[1].active_ws;
+        // Several columns on monitor 0, so its camera has somewhere to move: a
+        // single column has nothing to scroll.
+        for win in 1..=6u32 {
+            engine.state.add_client(Client::new(win, 0, ws0));
+            engine.state.monitors[0].workspaces[ws0].add_tiled(win, 0.6);
+        }
+        engine.state.add_client(Client::new(20, 1, ws1));
+        engine.state.monitors[1].workspaces[ws1].add_tiled(20, 0.6);
+
+        engine.state.sel_mon = 1;
+        // Monitor 1's focus slot names window 6, which lives on monitor 0.
+        engine.state.monitors[1].focused = Some(6);
+
+        let cam_before = engine.state.monitors[0].workspaces[ws0].camera.position;
+        let report = FocusDirection(Dir::Left).execute(&mut engine.state, &mut engine.cfg);
+        let cam_after = engine.state.monitors[0].workspaces[ws0].camera.position;
+
+        assert!(
+            (cam_after - cam_before).abs() > f32::EPSILON,
+            "the retarget must actually move monitor 0's camera ({cam_before} -> \
+             {cam_after}), or this test proves nothing about the arrange owed for it"
+        );
+        let arranged: Vec<usize> = report
+            .effects
+            .iter()
+            .filter_map(|e| match e {
+                crate::core::effect::Effect::ArrangeMonitor(mi) => Some(*mi),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            arranged.contains(&0),
+            "the monitor whose camera moved owes an arrange, got {arranged:?}"
+        );
+        assert!(
+            arranged.contains(&1),
+            "the navigated monitor is still arranged, got {arranged:?}"
+        );
+    }
+
+    /// The ordinary case must be unchanged: one arrange, for the monitor being
+    /// navigated, and nothing extra.
+    #[test]
+    fn navigation_on_the_current_monitor_arranges_it_once() {
+        use crate::core::commands::{Command as _, FocusDirection};
+        use crate::types::Dir;
+
+        let mut engine = setup_engine_multi();
+        let ws1 = engine.state.monitors[1].active_ws;
+        for win in [20u32, 21, 22] {
+            engine.state.add_client(Client::new(win, 1, ws1));
+            engine.state.monitors[1].workspaces[ws1].add_tiled(win, 0.6);
+        }
+        engine.state.sel_mon = 1;
+        engine.state.monitors[1].focused = Some(20);
+
+        let report = FocusDirection(Dir::Left).execute(&mut engine.state, &mut engine.cfg);
+        let arranged: Vec<usize> = report
+            .effects
+            .iter()
+            .filter_map(|e| match e {
+                crate::core::effect::Effect::ArrangeMonitor(mi) => Some(*mi),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            arranged,
+            vec![1],
+            "a same-monitor move arranges that monitor and nothing else"
+        );
+    }
+
+    /// A focus slot naming nothing produces no work at all — the retarget is
+    /// skipped, so there is no monitor to arrange.
+    #[test]
+    fn navigation_from_a_stale_focus_slot_does_nothing() {
+        use crate::core::commands::{Command as _, FocusDirection};
+        use crate::types::Dir;
+
+        let mut engine = setup_engine_multi();
+        engine.state.sel_mon = 1;
+        engine.state.monitors[1].focused = Some(0xdead);
+
+        let report = FocusDirection(Dir::Left).execute(&mut engine.state, &mut engine.cfg);
+        assert!(
+            report.effects.is_empty(),
+            "a stale slot names no window to navigate from, got {:?}",
+            report.effects
+        );
+        assert!(report.event.is_none());
+    }
+
     #[test]
     fn fullscreen_horizontal_navigation_releases_exclusive_overlay() {
         use crate::core::commands::{FocusDirection, ToggleFullscreen};
