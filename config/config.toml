@@ -102,9 +102,13 @@ urgent  = 0xf38ba8        # catppuccin-mocha red
 # There is no `[wallpaper]` table: a window manager arranges windows, and the
 # root window's background is decoration rather than a window to manage. Set one
 # the ordinary X11 way — an external program paints the root pixmap and nothing
-# here needs to know about it:
-#     autostart = [["feh", "--bg-fill", "/path/to/image.png"]]
-# A compositor started the same way will draw over it.
+# here needs to know about it. Autostart takes the command under the
+# `[autostart]` table this file already uses at the end:
+#     [autostart]
+#     commands = [["feh", "--bg-fill", "/path/to/image.png"]]
+# A bare `autostart = [...]` key is not the table: with no section open it lands
+# on no table at all and is dropped without a diagnostic. A compositor started
+# the same way will draw over the background.
 
 # ── Keybindings ──────────────────────────────────────────────────────────────
 # Each entry is one [[keybindings]] table with `key` and `action`.
@@ -189,7 +193,7 @@ action = "grow_col:50"
 key = "Mod4+Control+j"
 action = "collapse_column"
 
-# Layout (currently only Column is available; Grid was removed)
+# Layout — Column is the only layout there is to select.
 [[keybindings]]
 key = "Mod4+t"
 action = "layout:column"
