@@ -31,3 +31,12 @@ __pycache__/
 # existing run out of the way, which otherwise reappears as an untracked
 # directory after every second mutation session.
 /mutants.out*/
+
+# Per-project state written by local coding tools. `.kilo/` holds the editor's
+# own settings and plan store; `.commandcode/` holds a learned-taste file and,
+# once the tool is authenticated here, its `auth.json` and `providers.json`.
+# Neither is read by the build, the installer, CI, or any documentation, so
+# tracking either would put local tool state — and potentially its credentials —
+# into the source tree.
+/.kilo/
+/.commandcode/
