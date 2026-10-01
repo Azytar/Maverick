@@ -243,7 +243,7 @@ already allowed to change something. There is no per-session daemon: a superviso
 would be another long-lived process to know about, kill and account for, and a
 window manager already is one.
 
-Read commands (`list`, `status`, `inspect`) never clean up. An agent that polls
+Read commands (`list`, `status`, `inspect`) never clean up. A caller that polls
 them must not be causing side effects, so they report the *derived* state and
 leave the session alone. `create`, `start`, `stop`, `restart` and `remove` reap
 first; `kill` tears down without reaping first, which reaches the same resources
@@ -258,10 +258,11 @@ X server killed uncleanly, leaving its lock and its socket behind — is release
 too, since `display_is_free` treats either file as a claim and neither the
 `SIGKILL` nor the escalation inside `XServer::stop` reaches the socket.
 
-A creator killed part-way through `create` used to be the worst case, because
-the record was written after the readiness wait and so named no server at all.
-The record is now written as soon as the pid is known, so the session stays
-findable and stoppable whatever kills the creator.
+A creator killed part-way through `create` is covered by where the record is
+written: the record names the X server as soon as its pid is known, before the
+readiness wait (`maverickctl/src/session/lifecycle.rs:427-437`). A session is
+therefore findable and stoppable whatever kills the creator, because the next
+command that touches it already has the pid.
 
 Choosing a display is the one place two creators can collide, because X display
 numbers are a flat machine-wide namespace with no allocator. A candidate number

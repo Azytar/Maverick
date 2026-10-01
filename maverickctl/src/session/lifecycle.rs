@@ -19,7 +19,7 @@
 //! # Read commands do not mutate
 //!
 //! `session list` and `session status` are pure: they report the *derived*
-//! state and never clean anything up. An agent that polls them must not be
+//! state and never clean anything up. A caller that polls them must not be
 //! causing side effects. Every command that is already allowed to change
 //! something — `create`, `start`, `stop`, `restart`, `kill`, `remove` — reaps
 //! first, which is what keeps an orphaned X server from outliving the window
