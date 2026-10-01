@@ -517,6 +517,7 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
         "ignore_initial_state" | "no_initial_state" | "no_maximize" => {
             set_rule_bool(&mut row.ignore_initial_state, key, value, diag);
         }
+        "honor_initial_state" => set_bool(&mut row.honor_initial_state, key, value, diag),
         "deny_fullscreen" | "no_fullscreen" => {
             set_rule_bool(&mut row.deny_fullscreen, key, value, diag);
         }
@@ -1677,5 +1678,50 @@ border_width = 0
         // The keys Maverick does know still applied, so the file was merged
         // rather than discarded along with the tables it does not.
         assert_eq!(cfg.gaps_inner, 17);
+    }
+    #[test]
+    fn rule_honor_initial_state_reaches_the_runtime_policy() {
+        // Both directions, because the rule is an `Option`: `Some(true)` has to
+        // let one window keep its launch state under the global `false`, and
+        // `Some(false)` has to normalize it under a global `true`.
+        for (rule_value, global) in [("true", false), ("false", true)] {
+            let user = parse_string(&format!(
+                "[general]\nhonor_initial_state = {global}\n\n\
+                 [[rules]]\nclass = \"firefox\"\nhonor_initial_state = {rule_value}\n"
+            ));
+            let mut diag = Diagnostics::default();
+            let cfg = merge_config(compiled_config(), user, &mut diag);
+            assert!(diag.is_clean(), "unexpected diagnostics: {diag:?}");
+            assert_eq!(cfg.honor_initial_state, global);
+            assert_eq!(cfg.rules.len(), 1);
+            assert_eq!(
+                cfg.rules[0].honor_initial_state,
+                Some(rule_value == "true"),
+                "'honor_initial_state = {rule_value}' must survive parse and merge"
+            );
+        }
+        // Absent stays `None`, which is what makes the rule defer to the global
+        // policy instead of silently normalizing every other window too.
+        let user = parse_string("[[rules]]\nclass = \"firefox\"\n");
+        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
+        assert_eq!(cfg.rules[0].honor_initial_state, None);
+        assert!(!cfg.honor_initial_state, "global default must normalize");
+        // A wrong-typed value leaves the rule deferring to the global rather
+        // than reading as `false`, which would force normalization.
+        let mut diag = Diagnostics::default();
+        let user = parse_user(
+            "[[rules]]\nclass = \"firefox\"\nhonor_initial_state = \"yes\"\n",
+            &mut diag,
+        )
+        .expect("valid TOML");
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(cfg.rules[0].honor_initial_state, None);
+        assert!(
+            diag.warnings
+                .iter()
+                .any(|w| w.contains("honor_initial_state")),
+            "the bad value must be reported: {:?}",
+            diag.warnings
+        );
     }
 }
