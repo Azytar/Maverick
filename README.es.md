@@ -65,9 +65,9 @@ bloqueo ni lanzador de aplicaciones.
 
 - Solo X11. Cada cambio de estado se escribe al servidor en un solo configure
   en su posición final; no hay bucle de frames ni interpolación.
-- La cámara de scroll es un spring sobre el *viewport* del ribbon, no sobre la
-  geometría de las ventanas.
-- Fondo de imagen pintado sobre el pixmap raíz.
+- La cámara de scroll es un offset simple: el scroll la reescribe y vuelve a
+  proyectar. Ninguna ventana se redimensiona frame a frame, porque no se dibuja
+  ningún frame.
 - `_NET_WM_BYPASS_COMPOSITOR` y `_NET_WM_WINDOW_OPACITY` publicados en las
   ventanas gestionadas, para que un compositor externo (picom, compton) los
   respete.
@@ -227,8 +227,7 @@ Los bindings compilados de lanzamiento usan `alacritty` y `rofi`; instálalos
 o sobreescribe los bindings. El autostart compilado lanza
 `xdg-desktop-portal` y `xdg-desktop-portal-gtk`; usa una lista de autostart
 explícita para cambiarlo o desactivarlo. Esas aplicaciones no las requiere el
-motor de layout. El fondo con imágenes no PNG puede necesitar `ffmpeg` o
-ImageMagick como conversor.
+motor de layout.
 
 ### Compilar
 
@@ -236,13 +235,6 @@ ImageMagick como conversor.
 git clone https://github.com/Azytar/Maverick.git
 cd Maverick
 cargo build --release --workspace
-```
-
-Para un WM sin GL, selecciona los paquetes de runtime explícitamente:
-
-```bash
-cargo build --release --no-default-features \
-  -p maverick -p maverick-sys
 ```
 
 Los binarios de runtime son `maverick` (el gestor de ventanas) y `maverickctl`
@@ -256,7 +248,7 @@ Ejecuta el instalador como tu usuario normal. El valor por defecto es una
 instalación por usuario que no necesita privilegios:
 
 ```bash
-./install.sh
+./installer/install.sh
 ```
 
 Esto compila e instala en `$HOME/.local`. Si ese directorio no está ya en
@@ -283,13 +275,13 @@ Otras formas:
 
 ```bash
 # Instalación en todo el sistema, en /usr/local.
-./install.sh --system
+./installer/install.sh --system
 # Cualquier prefijo explícito.
-./install.sh --prefix /opt/maverick
+./installer/install.sh --prefix /opt/maverick
 # Publicar además el archivo de sesión donde lo lee un display manager.
-./install.sh --system --xsessions-dir /usr/share/xsessions
+./installer/install.sh --system --xsessions-dir /usr/share/xsessions
 # No tocar los ficheros de inicio y recibir la línea export en su lugar.
-./install.sh --no-path
+./installer/install.sh --no-path
 ```
 
 El prefijo es una frontera estricta: el instalador no escribe nada fuera del
@@ -319,7 +311,7 @@ produzcas artefactos para otras máquinas.
 `CARGO_TARGET_DIR` se respeta tal cual, incluso si ya contiene artefactos de
 una compilación anterior. Si no está definido, el directorio de compilación es
 un directorio de caché bajo `$XDG_CACHE_HOME`; el checkout nunca se usa como
-directorio de compilación. Véase `./install.sh --help` para las opciones
+directorio de compilación. Véase `./installer/install.sh --help` para las opciones
 restantes.
 
 Para desinstalar, borra los dos binarios de `$prefix/bin` y el archivo de
@@ -521,15 +513,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 los tests del workspace también ejercitan los crates de soporte. Los tests
 cubren layout e invariantes de estado, transiciones de
 presentación/foco, convergencia de geometría flotante, parseo de
-configuración y acciones, descubrimiento IPC/sesión, decodificación de
-imágenes y helpers del renderer. No constituyen un test de compatibilidad de
-compatibilidad de aplicaciones con drivers reales.
+configuración y acciones, y las superficies de protocolo de control y de
+sesión/descubrimiento. No constituyen un test de compatibilidad de
+aplicaciones con drivers reales.
 
 [CI](.github/workflows/ci.yml) ejecuta tres jobs: los tests del workspace con
 Clippy estricto, las comprobaciones del instalador (`bash -n` más
-`tests/install-smoke.py`), y un job de smoke X11 que compila el perfil
-`--no-default-features` y lanza la regresión de apilado con Xvfb. No ejecuta
-los escenarios Xephyr.
+`tests/install-smoke.py`), y un job de smoke X11 que compila
+`-p maverick -p maverickctl` y lanza la regresión de apilado con Xvfb. No
+ejecuta los escenarios Xephyr.
 
 ### X11 real y tests del instalador
 
@@ -556,8 +548,7 @@ una sesión gráfica desechable, no junto a trabajo que necesites preservar.
 
 El harness de capturas de abajo es separado: es dueño de su servidor y sus
 clientes y nunca usa ese helper de limpieza global. Las capturas demuestran
-estados seleccionados, no compatibilidad total de aplicaciones ni corrección
-de animaciones.
+estados seleccionados, no compatibilidad total de aplicaciones.
 
 ## Desarrollo
 
@@ -584,22 +575,25 @@ sesión real y contra un servidor con un compositor externo en marcha.
 | --- | --- |
 | `src/main.rs` | CLI, selección de configuración, señales, vida útil de instancia/control, arranque del backend |
 | `maverick-core/` | Tipos de dominio sin dependencias |
-| `src/core/` | Motor, acciones/comandos/efectos/eventos, layout, presentación, estado deseado, recuperación de sesión |
+| `src/core/` | Motor, acciones/comandos/efectos/eventos, layout, presentación, estado deseado |
 | `src/backend/x11/` | Manejo de eventos, gestión de clientes, entrada, EWMH, struts, reconciliación |
 | `src/config.rs`, `src/userconfig.rs` | Defaults compilados, fusión de config, validación |
 | `maverick-x11/` | Arranque de conexión Xlib/XCB compartida |
-| `maverick-sys/` | Identidad/descubrimiento de instancias, socket/hub de control, el modelo Maverick Session, `maverickctl` |
+| `maverick-sys/` | Frontera OS/FFI, identidad de instancia, socket/hub de control |
 | `maverick-toml/` | Parser TOML-subset |
+| `maverickctl/` | Binario de control: CLI, cliente IPC por socket, descubrimiento de instancias, ciclo de vida de sesiones |
 | `tests/` | Sondas X11 reales y scripts de integración, smoke tests del instalador |
 | `showcase/` | Harness aislado y reproducible de presentación técnica |
 
 El crate de dominio no es toda la máquina de estados: el `src/core/` del
-ejecutable contiene buena parte de esa lógica. El acceso X11 usa `x11rb` con
+ejecutable contiene buena parte de esa lógica. Las sesiones gráficas no se
+modelan ahí en absoluto — el servidor X, el grafo de procesos y el registro de
+sesión pertenecen a `maverickctl::session`. El acceso X11 usa `x11rb` con
 una conexión FFI XCB; no es una pila de protocolo totalmente pura en Rust. La
 implementación no requiere GUI-toolkit ni runtime asíncrono, pero sigue
 dependiendo de librerías X11 nativas.
 
-## Project Layout
+## Estructura del proyecto
 
 ```text
 .
@@ -607,7 +601,8 @@ dependiendo de librerías X11 nativas.
 ├── maverick-core/       # Estado compartido y tipos centrales
 ├── maverick-x11/        # Integración X11
 ├── maverick-toml/       # Soporte TOML/config
-├── maverick-sys/        # Interfaces IPC/control
+├── maverick-sys/        # Protocolo IPC/control y frontera OS
+├── maverickctl/         # Cliente de control externo y ciclo de vida de sesiones
 ├── config/              # Configuración de ejemplo
 ├── docs/                # Recursos de documentación
 ├── showcase/            # Presentación técnica reproducible
@@ -693,7 +688,7 @@ no aparecen solapamientos y que el contenido real sigue siendo legible.
 
 ![Monitor flotante de Maverick](docs/screenshots/floating.png)
 
-`Maverick Monitor` es una aplicación Tk real que consulta
+`Maverick Monitor` es una pequeña aplicación de terminal real que consulta
 `maverickctl query tree`. Se flota con la acción `toggle_float` y se compara
 antes y después de mover la cámara del mosaico: el float conserva la misma
 geometría de pantalla mientras las ventanas tiled se desplazan debajo.

@@ -59,9 +59,9 @@ maverickctl → IPC → Maverick → Action → DesiredState → Reconciler → 
 `maverickctl` is a control interface, not a second window manager. It has no
 `XMoveWindow` and no `XMapWindow`: `maverickctl window float debug 0x42003`
 becomes the action `float_window 0x42003`, and that action runs the *same*
-command the `Mod4+F` keybinding runs. A tool and a keypress cannot reach
-different code, so there is no second implementation of "float a window" to keep
-in step.
+command the `Mod4+Shift+Space` keybinding runs. A tool and a keypress cannot
+reach different code, so there is no second implementation of "float a window"
+to keep in step.
 
 What the session manager owns is the *lifecycle* — an X server, a process
 graph, a cookie, a display number — and none of that is window state.

@@ -222,7 +222,7 @@ Run the installer as your normal user. The default is a per-user install that
 needs no privileges:
 
 ```bash
-./install.sh
+./installer/install.sh
 ```
 
 That builds and installs into `$HOME/.local`. When that directory is not
@@ -249,13 +249,13 @@ Other forms:
 
 ```bash
 # System-wide install into /usr/local.
-./install.sh --system
+./installer/install.sh --system
 # Any explicit prefix.
-./install.sh --prefix /opt/maverick
+./installer/install.sh --prefix /opt/maverick
 # Additionally publish the session file where a display manager reads it.
-./install.sh --system --xsessions-dir /usr/share/xsessions
+./installer/install.sh --system --xsessions-dir /usr/share/xsessions
 # Leave shell startup files alone and get the export line printed instead.
-./install.sh --no-path
+./installer/install.sh --no-path
 ```
 
 The prefix is a hard boundary: the installer writes nothing outside the prefix
@@ -283,7 +283,7 @@ other machines.
 `CARGO_TARGET_DIR` is honoured as given, including when it already holds
 artifacts from an earlier build. When unset, the build directory is a cache
 directory under `$XDG_CACHE_HOME`; the checkout is never used as a build
-directory. See `./install.sh --help` for the remaining options.
+directory. See `./installer/install.sh --help` for the remaining options.
 
 To remove an installation, delete the two binaries from `$prefix/bin` and the
 session file from `$prefix/share/xsessions`. Nothing else is installed into the
@@ -518,20 +518,21 @@ cargo clippy --workspace --all-targets -- -D warnings
 `cargo check` checks the default package/build configuration; workspace tests also
 exercise the supporting crates. Tests cover layout and state invariants,
 presentation/focus transitions, floating geometry convergence, configuration and
-action parsing, IPC/session discovery, image decoding, and renderer helpers.
+action parsing, and the control-protocol and session/discovery surfaces.
 They do not constitute an application compatibility test against real drivers.
 
 [CI](.github/workflows/ci.yml) runs three jobs: workspace tests with strict
-Clippy, installer checks (`bash -n` plus `tests/install-smoke.py`), and an
+Clippy, installer checks (`bash -n` plus `installer/tests/partition.py`, which
+runs every `tests/install-smoke.py` suite and the partition-only ones), and an
 X11 smoke job that runs the Xvfb stacking regression. It does not run the Xephyr
 scenarios.
 
 ### Real X11 and installer tests
 
 ```bash
-cargo build -p maverick -p maverick-sys
+cargo build -p maverick -p maverickctl
 python3 tests/xvfb-stacking.py
-python3 tests/install-smoke.py
+python3 installer/tests/partition.py
 ```
 
 The Xvfb stacking regression compiles an Xlib probe and checks real X window order
@@ -575,17 +576,20 @@ real session and against a server with an external compositor running.
 | --- | --- |
 | `src/main.rs` | CLI, configuration selection, signals, instance/control lifetime, backend startup |
 | `maverick-core/` | Dependency-free domain types |
-| `src/core/` | Engine, actions/commands/effects/events, layout, presentation, desired state, session recovery |
+| `src/core/` | Engine, actions/commands/effects/events, layout, presentation, desired state |
 | `src/backend/x11/` | Event handling, client management, input, EWMH, struts, reconciliation |
 | `src/config.rs`, `src/userconfig.rs` | Compiled defaults, config merging, validation |
 | `maverick-x11/` | Shared Xlib/XCB connection bootstrap |
-| `maverick-sys/` | Instance identity/discovery, control socket/hub, the Maverick Session model, `maverickctl` |
+| `maverick-sys/` | OS/FFI boundary, instance identity, control socket/hub |
 | `maverick-toml/` | TOML-subset parser |
+| `maverickctl/` | Control client binary: CLI, control-socket IPC client, instance discovery, session lifecycle |
 | `tests/` | Real-X11 probes and integration scripts, installer smoke tests |
 | `showcase/` | Isolated, reproducible technical presentation harness |
 
 The domain crate is not the entire state machine: the executable's `src/core/`
-contains much of that logic. X11 access uses `x11rb` with an XCB FFI connection;
+contains much of that logic. Graphical sessions are not modelled there at all —
+the X server, the process graph and the session record belong to
+`maverickctl::session`. X11 access uses `x11rb` with an XCB FFI connection;
 this is not a wholly pure-Rust protocol stack. The implementation has no GUI-toolkit
 or async-runtime requirement, but still depends on native X11 libraries.
 
@@ -597,7 +601,8 @@ or async-runtime requirement, but still depends on native X11 libraries.
 ├── maverick-core/       # Shared state and core types
 ├── maverick-x11/        # X11 integration
 ├── maverick-toml/       # TOML/config support
-├── maverick-sys/        # IPC/control interfaces, Maverick Sessions
+├── maverick-sys/        # IPC/control protocol and OS boundary
+├── maverickctl/         # External control client and session lifecycle
 ├── config/              # Example configuration
 ├── docs/                # Documentation (see sessions.md) and assets
 ├── showcase/            # Reproducible technical presentation

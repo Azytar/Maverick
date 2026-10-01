@@ -17,23 +17,28 @@ here has a `file:line` behind it.
       ┌─────────────┴──────────────┐
       │                            │
   maverick-core               maverick-x11
-  pure State, layout,          Xlib/XCB bootstrap:
-  camera, commands,            one shared connection
-  IPC document shapes          (XInitThreads, open_display,
-      │                        XGetXCBConnection handoff)
+  pure domain types:          Xlib/XCB bootstrap:
+  State, Column, Camera,      one shared connection
+  Client, Rect                (XInitThreads, open_x,
+      │                       XGetXCBConnection handoff)
       │                            │
       └─────────────┬──────────────┘
                     │
                    X11
 ```
 
-Three supporting crates sit alongside, not inside, the correctness path:
+Two supporting crates sit alongside, not inside, the correctness path:
 
 - **`maverick-toml`** — a zero-dependency TOML-subset parser. Configuration is
   read at startup and on `reload`; it never influences a frame.
 - **`maverick-sys`** — the OS boundary: signals, `poll`, uid/gid, process-tree
-  signalling, instance identity, the Unix-socket control protocol, and the
-  `maverickctl` CLI engine (a second shipped binary).
+  signalling, instance identity, and the Unix-socket control protocol.
+
+The sixth workspace crate, **`maverickctl`**, is separate from the correctness
+path and ships the control client binary: CLI parsing, the control-socket
+client, instance discovery and session orchestration. It links `maverick-sys`
+for the shared protocol surface and never links the window manager.
+
 Configuration is data. It is validated, normalised, and reported on at load
 time (`src/userconfig.rs`), and it is never consulted to decide what a window's
 geometry is.
@@ -47,9 +52,9 @@ maverick → maverick-core, maverick-x11, maverick-toml,
            maverick-sys, libc, x11rb
 ```
 
-`maverick-core`, `maverick-x11` and `maverick-toml` have **zero** dependencies.
-That is the property that keeps the layout and command logic testable without an
-X server, a GPU, or a config file.
+`maverick-core` and `maverick-toml` have **zero** dependencies, and
+`maverick-x11`'s only one is `x11rb`. That is the property that keeps the layout
+and command logic testable without an X server, a GPU, or a config file.
 
 ---
 
@@ -75,11 +80,12 @@ compositor and the window manager found:
   setting `monitors[i].layout_dirty`, a cache-invalidation flag) and **exactly
   one** changed what X11 requests the WM issued. **Zero** changed geometry,
   focus, stacking, or window-lifecycle outcomes.
-- `Phase::Live` — the animated projection — never reached `ConfigureWindow`.
-  `arrange_full` arranges at `Phase::Settled`; the only production caller of the
-  live projection was the compositor's own `live_placements`. Removing the
-  compositor therefore does not make the geometry approximate: it makes the
-  integer `ConfigureWindow` rect *the* final rect.
+- The animated projection — the one the compositor drew from — never reached
+  `ConfigureWindow`. `arrange_full` arranged only the settled projection; the
+  only production caller of the animated one was the compositor's own
+  `live_placements`. Removing the compositor therefore does not make the
+  geometry approximate: it makes the integer `ConfigureWindow` rect *the*
+  final rect.
 
 ### It masked a divergence it created
 
@@ -89,8 +95,8 @@ bug. X11 was configured **once, at the destination**, and the compositor then
 drew the window from the source over 44 frames. Peak divergence: **1487 px**.
 
 Worse, it manufactured a permanent second source of truth. X11 geometry is
-`round()`ed at `src/core/layout.rs:649`; the compositor drew from a *separate,
-unrounded* projection (`column_screen_extents_into`, `layout.rs:750`) held in
+`round()`ed at `src/core/layout.rs:502`; the compositor drew from a *separate,
+unrounded* projection (`column_screen_extents_into`, `layout.rs:585`) held in
 its own cache. The two disagreed by up to 0.5 px forever, with nothing
 reconciling them, because the fractional value had no authority: hit-testing,
 `client.geom`, the pointer warp and the client's own `ConfigureNotify` all read
@@ -152,9 +158,10 @@ rustix does not implement `sigaction` — verified at
 
 **Configuration is data, not control flow.** A section that configures a
 subsystem Maverick does not have — `[compositor]`, `[animations]` — is not
-parsed. Its keys take the same path as any other unknown key: skipped, with the
-rest of the file still merged. A config carried over from an older Maverick
-keeps working, and keeps the keys it still means.
+parsed, and it is skipped without a diagnostic so a config carried over from an
+older Maverick keeps working. A key inside a table Maverick *does* know is the
+opposite case: it is reported as unknown, because a silently ignored key is a
+setting the user believes is in force and is not.
 
 ---
 
@@ -168,7 +175,7 @@ Two spaces, and the boundary between them is a single `round()`:
 | screen / X11 | `i32` | `render::emit_geometry` |
 
 World coordinates stay fractional through the whole layout pass. The conversion
-happens once, at the X11 boundary, at `src/core/layout.rs:649`:
+happens once, at the X11 boundary, at `src/core/layout.rs:502`:
 
 ```rust
 let screen_col_x = (wa.x as f32 + (world_x - cam) * alpha + cx).round() as i32;
@@ -176,7 +183,7 @@ let screen_col_x = (wa.x as f32 + (world_x - cam) * alpha + cx).round() as i32;
 
 `Camera` holds a plain `f32` that is rounded exactly once, here, so
 quantisation cannot accumulate in the camera. The one running `f32` sum is
-the per-column `x += w + gap_f` (`layout.rs:485`); it measures 0.028 px at 50
+the per-column `x += w + gap_f` (`layout.rs:350`); it measures 0.028 px at 50
 columns, 0.41 px at 200 and 0.93 px at 500, and it is the only accumulation in
 the pipeline.
 
@@ -206,7 +213,7 @@ rectangle in X11 is the only rectangle.**
 
 ```bash
 cargo build                              # the only configuration
-cargo test --workspace                   # 862 tests, no display required
+cargo test --workspace                   # the whole suite, no display required
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
