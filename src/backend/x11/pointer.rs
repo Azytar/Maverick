@@ -93,11 +93,17 @@ impl Drop for SyncGrabGuard {
                 let _ = self.conn.ungrab_pointer(x11rb::CURRENT_TIME);
             }
         }
-        // Only reached when the handler returned before releasing the grab, so
-        // the freeze is already undone — log it unconditionally to surface the
-        // early return.
-        eprintln!(
-            "[INPUT-TRACE] FREEZE-RISK: {} exited WITHOUT releasing the SYNC pointer grab — auto-released on drop (pointer was about to freeze)",
+        // Reached only when the handler returned through `?` before releasing
+        // the grab, so this is a dispatch fault rather than a trace event, and it
+        // is the one place a bug would strand the pointer for every client on the
+        // server. It therefore reports at `error`, which the logger prints at
+        // every level the WM ships (`info` included) and which `MAVERICK_LOG=off`
+        // is the documented way to silence. It must not wear an `input-trace`
+        // label: that feature gates per-event tracing, and a mandatory
+        // diagnostic filed under it is indistinguishable from the noise it
+        // silences, so a reader cannot tell a real fault from a trace line.
+        log::error!(
+            "FREEZE-RISK: {} exited WITHOUT releasing the SYNC pointer grab — auto-released on drop (pointer was about to freeze)",
             self.tag
         );
     }

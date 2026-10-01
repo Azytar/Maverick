@@ -434,3 +434,57 @@ fn the_backend_never_matches_on_a_windows_identity() {
         }
     }
 }
+
+/// The grab drop guard's diagnostic is a dispatch fault, not a trace event.
+///
+/// `SyncGrabGuard::drop` runs when a pointer handler returned through `?` before
+/// releasing the SYNC grab, so the message reports a bug that would otherwise
+/// strand the pointer for every client on the server. It reached a normal build
+/// only by accident of labelling: it was a bare `eprintln!` carrying the
+/// `[INPUT-TRACE]` prefix, which is the label of the feature-gated per-event
+/// macros. Filing a mandatory diagnostic under an opt-in trace feature makes it
+/// indistinguishable from the noise that feature silences, so neither a reader
+/// nor a grep can tell a real fault from a trace line.
+///
+/// Constrained on the source because the branch needs a handler that fails
+/// mid-dispatch, which no test here can provoke without a live X server and an
+/// X error timed to the right instruction.
+#[test]
+fn the_grab_drop_fault_is_reported_through_the_logger_and_not_as_a_trace() {
+    let pointer = production_source("backend/x11/pointer.rs");
+    let drop = fn_body(pointer, "drop");
+
+    // A `cfg` on this line would make the diagnostic vanish from a build that
+    // has the fault, which is the opposite of what it is for.
+    assert!(
+        !drop.contains("cfg("),
+        "the grab-drop diagnostic is behind a `cfg`, so a build without that \
+         feature would swallow a real dispatch fault:\n{drop}"
+    );
+
+    // It must go through the level-filtered logger, which prints at every level
+    // the WM ships and which `MAVERICK_LOG=off` is the documented way to silence.
+    assert!(
+        code_lines_containing(&drop, "log::error!").len() == 1,
+        "the grab-drop fault must be reported with `log::error!` so the project's \
+         level control governs it:\n{drop}"
+    );
+
+    // A bare `eprintln!` here would bypass that control entirely.
+    assert!(
+        code_lines_containing(&drop, "eprintln!").is_empty(),
+        "the grab-drop fault uses a bare `eprintln!`, which no log level can \
+         govern:\n{drop}"
+    );
+
+    // The trace labels belong to the per-event macros. Reusing one puts this
+    // fault in the same stream as the events a trace build deliberately prints,
+    // and re-introduces the exact ambiguity this line is being corrected for.
+    for label in ["[INPUT-TRACE]", "[WINDOW-TRACE]"] {
+        assert!(
+            !drop.contains(label),
+            "the grab-drop fault wears the trace label `{label}`, which is \
+             reserved for the feature-gated per-event macros:\n{drop}"
+        );
+    }
+}
