@@ -9,6 +9,7 @@ is exactly the supported set, that a broken binary is caught rather than
 reported as a successful install, and that a repeated install converges.
 """
 import os
+import re
 from pathlib import Path
 import pty
 import select
@@ -89,6 +90,12 @@ case "$1" in
     # of its own choosing.
     [[ -n "${{CARGO_TARGET_DIR:-}}" ]]
     printf 'cargo target %s\\n' "$CARGO_TARGET_DIR" >> "{log}"
+    # Optional stall so a caller can keep the build alive long enough for the
+    # installer's live progress loop to run at least one iteration.
+    if [[ -n "${{MAVERICK_TEST_BUILD_DELAY:-}}" ]]; then
+      printf 'Compiling stub v0.0.0\\nCompiling stub v0.0.0\\n'
+      sleep "$MAVERICK_TEST_BUILD_DELAY"
+    fi
     for b in maverick maverickctl; do
       cp "{stub_dir}/$b" "$CARGO_TARGET_DIR/release/$b"
       chmod 755 "$CARGO_TARGET_DIR/release/$b"
@@ -553,6 +560,65 @@ def suite_builds_from_source():
         print("PASS: build path produces and installs the release set")
 
 
+def suite_interactive_build_progress():
+    """The live progress loop must run to completion on a terminal.
+
+    This is the only path that both has a tty and actually builds, and the two
+    existing suites cover neither combination: `interactive_install` answers
+    prompts on a pty but passes --no-build, and `Sandbox.install` builds but
+    pipes its output, so the progress branch is never taken. Everything in that
+    loop therefore ran untested, which is how a reference to a variable that
+    was never assigned survived `set -u` and aborted every interactive install.
+    """
+    with tempfile.TemporaryDirectory(prefix="maverick-install-test-") as d:
+        box = Sandbox(Path(d))
+        master, slave = pty.openpty()
+        # ui_init() only sets HAS_TTY when NO_COLOR is unset and TERM is not
+        # dumb, so the sandbox default of NO_COLOR=1 has to be cleared here:
+        # without it the progress loop below is never entered and this suite
+        # would pass without covering anything.
+        env = box.env(SHELL="/bin/bash", TERM="xterm-256color", NO_COLOR="",
+                      MAVERICK_TEST_BUILD_DELAY="3")
+        command = ["bash", str(box.repo / "installer/install.sh"), "--yes",
+                   "--no-anim", "--no-path", "--lang", "en",
+                   "--prefix", str(box.prefix)]
+        proc = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
+                                env=env, close_fds=True)
+        os.close(slave)
+        out = bytearray()
+        deadline = time.time() + 120
+        while time.time() < deadline and proc.poll() is None:
+            ready, _, _ = select.select([master], [], [], 0.2)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        proc.wait(timeout=30)
+        text = out.decode("utf-8", "replace")
+        plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+        assert proc.returncode == 0, plain[-2000:]
+        # A variable read before assignment under `set -u` aborts the script
+        # with exactly this wording, in the C locale or the Spanish one.
+        for fatal in ("unbound variable", "variable sin asignar"):
+            assert fatal not in plain, plain[-2000:]
+        # The live remaining-time estimate is rendered only from `elapsed_s`,
+        # and `elapsed_s` is computed only on the line that used to abort. So
+        # seeing one proves the loop body actually executed, rather than
+        # inferring it from some other number on the screen.
+        assert re.search(r"≈\s*\d+\s*s", plain), plain[-2000:]
+        for binary in BINS:
+            assert (box.prefix / "bin" / binary).exists(), f"{binary} was not installed"
+        calls = box.log.read_text() if box.log.exists() else ""
+        assert "cargo build" in calls, calls
+        assert "cargo uid=0" not in calls, "cargo ran as root"
+        print("PASS: the interactive build progress loop runs without aborting")
+
+
 def suite_obsolete_artifacts_absent():
     """The build must not produce an obsolete binary, and must not install one."""
     with tempfile.TemporaryDirectory(prefix="maverick-install-test-") as d:
@@ -642,6 +708,7 @@ def main():
         suite_no_partial_install,
         suite_repeat_and_overwrite,
         suite_builds_from_source,
+        suite_interactive_build_progress,
         suite_prefix_with_spaces,
         suite_obsolete_artifacts_absent,
         suite_cli_contract,

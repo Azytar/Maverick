@@ -332,6 +332,13 @@ step_build() {
 
         max_seen_crates=0
 
+        # Wall-clock start of the build. The live progress loop needs it for the
+        # two estimates that are only available before any crate has finished
+        # compiling: the moving floor, and the remaining-time estimate. Captured
+        # unconditionally so the loop never depends on a value set inside it.
+        _now_ms
+        BUILD_T0=$NOW_MS
+
         if [[ $HAS_TTY -eq 1 ]]; then
             while kill -0 "$BUILD_PID" 2>/dev/null; do
                 compiled="$(grep -c 'Compiling' "$BUILD_LOG" 2>/dev/null || echo 0)"
@@ -346,7 +353,7 @@ step_build() {
                 fi
 
                 _now_ms
-                elapsed_s=$(( ( NOW_MS - ${PH_T0[1]} ) / 1000 ))
+                elapsed_s=$(( ( NOW_MS - BUILD_T0 ) / 1000 ))
 
                 if grep -q 'Finished' "$BUILD_LOG" 2>/dev/null; then
                     sub=97
