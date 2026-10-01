@@ -527,9 +527,16 @@ pub fn exec(c: &Ctl, args: &[String]) -> Result<(), String> {
     // it is read back from `/proc` rather than assumed: the registration is
     // what makes the program part of the session, and a wrong id would put it
     // in some other session's tree or none.
-    if let Some(info) = proc::read(pid) {
-        register_pgrp(&call.session, info.pgid)?;
-    }
+    //
+    // An unreadable `/proc` entry is not an absent program — the child was just
+    // spawned by this process, so it exists — so this is bookkeeping this tool
+    // could not complete, not a program that failed to start. It used to be
+    // skipped and the pid printed anyway: a live program the session cannot see,
+    // invisible to `process list` and to `session stop`, which is the exact
+    // hazard the surrounding comment describes.
+    let pgid =
+        pgid_of_started_child(pid, &call.session, proc::read(pid)).map_err(|e| e.to_string())?;
+    register_pgrp(&call.session, pgid)?;
     if c.json {
         println!(
             "{{\"session\":{},\"pid\":{pid}}}",
@@ -555,6 +562,30 @@ pub fn exec(c: &Ctl, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The process group of a child that has just been spawned.
+///
+/// Split out so the distinction it draws is testable without having to make a
+/// real `/proc` entry unreadable: spawning succeeded and tracking failed are two
+/// different outcomes, and only the second is this tool's to fix. A child that
+/// cannot be read is still running — it was forked a moment ago — so this is
+/// never a "the program failed to start" answer, and the caller is told the pid
+/// so the process is not left behind unowned.
+pub fn pgid_of_started_child(
+    pid: u32,
+    session: &str,
+    read: Option<proc::ProcInfo>,
+) -> Result<u32, String> {
+    match read {
+        Some(info) => Ok(info.pgid),
+        None => Err(format!(
+            "started {pid} but could not read it from /proc, so it is not registered \
+             with session '{session}'.\n  \
+             it is running, but `process list` and `session stop` will not see it; \
+             kill {pid} yourself"
+        )),
+    }
+}
+
 /// Add a process group to a session's registry.
 ///
 /// The record is read, updated and written back atomically by
@@ -565,13 +596,15 @@ fn register_pgrp(name: &str, pgid: u32) -> Result<(), String> {
     if pgid == 0 {
         return Ok(());
     }
-    let parsed = SessionName::parse(name).map_err(|e| e.to_string())?;
+    // No `SessionName::parse` here: it would validate the name a second time and
+    // the result would be unused, because `live_record` is what actually reads
+    // the record and it parses the same name through the same rule. So the
+    // validation is not discarded — it is performed once, where it is needed.
     let mut record = live_record(name).ok_or_else(|| format!("session '{name}' is gone"))?;
     if !record.pgrps.contains(&pgid) {
         record.pgrps.push(pgid);
         session::write(&record).map_err(|e| e.to_string())?;
     }
-    let _ = parsed;
     Ok(())
 }
 
