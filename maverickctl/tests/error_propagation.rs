@@ -6,22 +6,15 @@
 //! discarding it cannot change what the caller is told.
 
 use maverickctl::session::SessionName;
+use std::path::PathBuf;
 use std::process::Command;
 
-fn runtime_dir() -> std::path::PathBuf {
-    use std::sync::{Mutex, OnceLock};
-    static DIR: OnceLock<Mutex<std::path::PathBuf>> = OnceLock::new();
-    let cell = DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "maverick-cli-errprop-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        std::env::set_var("XDG_RUNTIME_DIR", &dir);
-        Mutex::new(dir)
-    });
-    cell.lock().expect("runtime dir lock").clone()
+mod runtime_dir;
+
+/// This binary's private runtime directory, so no live instance can be
+/// discovered and one test's session record cannot satisfy another's.
+fn runtime_dir() -> PathBuf {
+    runtime_dir::isolate("maverick-cli-errprop")
 }
 
 /// Write a session record so a session-scoped verb resolves it.

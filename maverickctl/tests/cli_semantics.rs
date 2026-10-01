@@ -11,7 +11,8 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Mutex, OnceLock};
+
+mod runtime_dir;
 
 /// One runtime directory for the whole binary, set once.
 ///
@@ -21,18 +22,7 @@ use std::sync::{Mutex, OnceLock};
 /// the record written for it can end up in different places. Tests that need to
 /// be sure of what the context resolves to use an explicit `--session`.
 fn runtime_dir() -> PathBuf {
-    static DIR: OnceLock<Mutex<PathBuf>> = OnceLock::new();
-    let cell = DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "maverick-cli-sem-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        std::env::set_var("XDG_RUNTIME_DIR", &dir);
-        Mutex::new(dir)
-    });
-    cell.lock().expect("runtime dir lock").clone()
+    runtime_dir::isolate("maverick-cli-sem")
 }
 
 #[derive(Debug)]

@@ -6,10 +6,25 @@
 //! ever guesses at an instance it was not pointed at.
 
 mod common;
+mod runtime_dir;
 
 use maverickctl::ctl::main_with_args;
 use proptest::prelude::*;
 use std::process::ExitCode;
+
+/// Point `XDG_RUNTIME_DIR` at an empty throwaway directory for this test binary.
+///
+/// The CLI entry point resolves its target by reading the runtime directory, and
+/// an unknown word is *forwarded* to whatever instance that resolves to. Without
+/// isolation the properties here would depend on whether the machine running
+/// them happens to have a live window manager — and, worse, `list` and `prune`
+/// would read and delete the developer's real sessions.
+///
+/// The value is set once and to the same path for every test in the binary, so
+/// two tests racing to set it cannot disagree.
+fn isolate_runtime_dir() {
+    runtime_dir::isolate("maverick-ctl-props");
+}
 
 /// Every word `maverickctl` handles itself, and every word it would forward to
 /// an instance.
@@ -100,7 +115,7 @@ proptest! {
 /// so it lives here, where success is only reachable by having handled the word.
 #[test]
 fn every_command_group_handles_its_own_help() {
-    common::isolate_runtime_dir();
+    isolate_runtime_dir();
     for group in GROUPS {
         assert_eq!(
             main_with_args("maverickctl", vec![group.to_string(), "--help".to_string()]),
@@ -125,7 +140,7 @@ fn every_command_group_handles_its_own_help() {
 /// "this session has no windows" except by parsing nothing at all.
 #[test]
 fn a_listing_of_a_session_that_does_not_exist_fails() {
-    common::isolate_runtime_dir();
+    isolate_runtime_dir();
     for (group, verb) in [("window", "list"), ("process", "list")] {
         for extra in [vec![], vec!["--json".to_string()]] {
             let mut argv = vec![group.to_string(), verb.to_string()];
@@ -154,7 +169,7 @@ fn a_listing_of_a_session_that_does_not_exist_fails() {
 /// '--session'" while exiting non-zero — a refusal, not a silent success.
 #[test]
 fn a_global_option_before_the_verb_is_not_read_as_the_verb() {
-    common::isolate_runtime_dir();
+    isolate_runtime_dir();
     // None of these sessions exist, so the handler must get far enough to
     // *resolve* them and then report the session, not reject the command word.
     for group in ["window", "process"] {
@@ -191,7 +206,7 @@ fn a_global_option_before_the_verb_is_not_read_as_the_verb() {
 /// The same for the session group, which is the one users reach first.
 #[test]
 fn a_global_before_a_session_verb_reaches_the_verb() {
-    common::isolate_runtime_dir();
+    isolate_runtime_dir();
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_maverickctl"))
         .args(["--json", "session", "list"])
         .output()

@@ -12,17 +12,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Mutex, OnceLock};
 
+mod runtime_dir;
+
+/// This binary's private runtime directory, so the tool under test resolves a
+/// session this binary published rather than whatever is live on the machine.
 fn runtime_dir() -> PathBuf {
-    static DIR: OnceLock<Mutex<PathBuf>> = OnceLock::new();
-    let cell = DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("maverick-cli-options-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        std::env::set_var("XDG_RUNTIME_DIR", &dir);
-        Mutex::new(dir)
-    });
-    cell.lock().expect("runtime dir lock").clone()
+    runtime_dir::isolate("maverick-cli-options")
 }
 
 /// An instance that records every request line and answers `ok`.

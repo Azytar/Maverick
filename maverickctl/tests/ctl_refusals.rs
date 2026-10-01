@@ -20,19 +20,12 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// A private runtime directory, so nothing here is visible to another test
-/// binary's fixtures and no live instance can be discovered.
+mod runtime_dir;
+
+/// This binary's private runtime directory, so no fixture here is visible to
+/// another test binary's and no live instance can be discovered.
 fn runtime_dir() -> PathBuf {
-    use std::sync::{Mutex, OnceLock};
-    static DIR: OnceLock<Mutex<PathBuf>> = OnceLock::new();
-    let cell = DIR.get_or_init(|| {
-        let dir =
-            std::env::temp_dir().join(format!("maverick-ctl-refusals-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        std::env::set_var("XDG_RUNTIME_DIR", &dir);
-        Mutex::new(dir)
-    });
-    cell.lock().expect("runtime dir lock").clone()
+    runtime_dir::isolate("maverick-ctl-refusals")
 }
 
 /// A `tree` document, captured from a running session rather than written to

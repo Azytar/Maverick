@@ -16,16 +16,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::process::ExitCode;
 
+mod runtime_dir;
+
 /// A private runtime directory, so nothing here is visible to another test
 /// binary's fixtures and no live instance can be discovered.
 fn isolate_runtime_dir() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let dir = std::env::temp_dir().join(format!("maverick-ctl-replies-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        std::env::set_var("XDG_RUNTIME_DIR", &dir);
-    });
+    runtime_dir::isolate("maverick-ctl-replies");
 }
 
 /// A refusal that arrives as a successful transport is still a failure.

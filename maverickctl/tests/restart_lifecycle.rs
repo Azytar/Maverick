@@ -22,16 +22,12 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+mod runtime_dir;
+
 /// A private runtime directory, so no fixture here is visible to another test
 /// binary's fixtures and no live instance can be discovered.
 fn isolate_runtime_dir() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let dir = std::env::temp_dir().join(format!("maverick-restart-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        std::env::set_var("XDG_RUNTIME_DIR", &dir);
-    });
+    runtime_dir::isolate("maverick-restart");
 }
 
 /// A stand-in instance speaking the real line protocol.
