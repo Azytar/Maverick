@@ -47,7 +47,14 @@ pub fn run(c: &mut Ctl, args: &[String]) -> Result<bool, String> {
         print_usage(super::Usage::Sessions);
         return Ok(true);
     };
-    let rest = &args[1..];
+    // Everything *after the verb*, not `args[1..]`. A global option lifted by
+    // `run_group` sits at index 0, so for `maverickctl --json session list` the
+    // verb is not at index 1 — and for a verb that reads a session out of its
+    // arguments (`status`, `stop`, …) the slice could hand it the verb itself as
+    // the session name. `session_target` reads positionals against `raw`, so
+    // the offset is recorded as well.
+    c.set_rest_start(c.positionals[0] + 1);
+    let rest = &args[c.positionals[0] + 1..];
     match verb {
         "list" | "ls" => {
             list(c);
@@ -365,8 +372,8 @@ fn created_json(s: &Session) -> String {
 // ── session status / start / stop / … ────────────────────────────────────────
 
 /// `maverickctl session status <name>`
-fn status(c: &Ctl, args: &[String]) -> Result<(), String> {
-    let name = session_target(c, args)?;
+fn status(c: &Ctl, _args: &[String]) -> Result<(), String> {
+    let name = session_target(c)?;
     let view = session::resolve(&name).map_err(|e| e.to_string())?;
     if c.json {
         println!("{}", view_json(&view));
@@ -410,7 +417,7 @@ fn status(c: &Ctl, args: &[String]) -> Result<(), String> {
 
 /// Run one of the lifecycle verbs that all take a name and nothing else.
 fn change(c: &Ctl, args: &[String], verb: &str) -> Result<(), String> {
-    let name = session_target(c, args)?;
+    let name = session_target(c)?;
     let parsed = SessionName::parse(&name).map_err(|e| e.to_string())?;
     let force = args.iter().any(|a| a == "--force" || a == "-f");
     let result = match verb {
@@ -878,11 +885,11 @@ fn role_of(p: &proc::ProcInfo, session: &Session) -> &'static str {
     }
 }
 
-fn process_list(c: &Ctl, args: &[String]) -> Result<bool, String> {
+fn process_list(c: &Ctl, _args: &[String]) -> Result<bool, String> {
     // The resolution error is the answer, not a missing name. Defaulting it to
     // "" reported "session '' does not exist" in an ambiguous context, where
     // the useful message is the one `window list` gives: name one of these.
-    let name = session_target(c, args)?;
+    let name = session_target(c)?;
     let record = live_record(&name).ok_or_else(|| {
         format!(
             "session '{name}' does not exist\n\n{}",
@@ -1041,7 +1048,7 @@ fn is_in_session(p: &proc::ProcInfo, session: &Session) -> bool {
 
 /// `maverickctl logs <session>` — the tail of a session's own log.
 pub fn logs(c: &Ctl, args: &[String]) -> Result<(), String> {
-    let name = session_target(c, args)?;
+    let name = session_target(c)?;
     let record = live_record(&name).ok_or_else(|| {
         format!(
             "session '{name}' does not exist\n\n{}",
@@ -1098,7 +1105,7 @@ pub fn logs(c: &Ctl, args: &[String]) -> Result<(), String> {
 /// are filtered by `--window`, so an investigation can be scoped to one window
 /// without reading everything.
 pub fn debug(c: &Ctl, args: &[String]) -> Result<(), String> {
-    let name = session_target(c, args)?;
+    let name = session_target(c)?;
     let record = live_record(&name).ok_or_else(|| {
         format!(
             "session '{name}' does not exist\n\n{}",
@@ -1140,8 +1147,8 @@ pub fn debug(c: &Ctl, args: &[String]) -> Result<(), String> {
 
 /// `maverickctl inspect <session>` — what the session manager and the window
 /// manager each know, together.
-pub fn inspect(c: &Ctl, args: &[String]) -> Result<(), String> {
-    let name = session_target(c, args)?;
+pub fn inspect(c: &Ctl, _args: &[String]) -> Result<(), String> {
+    let name = session_target(c)?;
     let view = session::resolve(&name).map_err(|e| e.to_string())?;
     let record = live_record(&view.name);
     let procs = record.as_ref().map(processes).unwrap_or_default();
@@ -1397,7 +1404,7 @@ mod tests {
             "--json".to_string(),
             "--wait".to_string(),
         ];
-        let c = Ctl::parse("maverickctl", &args, &[]);
+        let c = Ctl::parse("maverickctl", &args, &[], &[]);
         let call = split_call(&c, &args).expect("a call");
         assert_eq!(call.session, "debug");
         assert_eq!(
@@ -1417,7 +1424,7 @@ mod tests {
             "firefox".to_string(),
             "--new-window".to_string(),
         ];
-        let c = Ctl::parse("maverickctl", &args, &[]);
+        let c = Ctl::parse("maverickctl", &args, &[], &[]);
         let call = split_call(&c, &args).expect("a call");
         assert_eq!(call.session, "agent");
         assert_eq!(call.argv, vec!["firefox", "--new-window"]);
@@ -1433,7 +1440,7 @@ mod tests {
             "--weird".to_string(),
             "-x".to_string(),
         ];
-        let c = Ctl::parse("maverickctl", &args, &[]);
+        let c = Ctl::parse("maverickctl", &args, &[], &[]);
         let call = split_call(&c, &args).expect("a call");
         assert_eq!(call.session, "debug");
         assert_eq!(call.argv, vec!["--weird", "-x"]);
@@ -1444,7 +1451,7 @@ mod tests {
     #[test]
     fn a_session_with_no_command_yields_no_command() {
         let args = vec!["debug".to_string()];
-        let c = Ctl::parse("maverickctl", &args, &[]);
+        let c = Ctl::parse("maverickctl", &args, &[], &[]);
         let call = split_call(&c, &args).expect("a call");
         assert_eq!(call.session, "debug");
         assert!(call.argv.is_empty());
@@ -1455,7 +1462,7 @@ mod tests {
     /// session name.
     #[test]
     fn a_window_selector_is_never_the_session_name() {
-        let c = Ctl::parse("maverickctl", &[], &[]);
+        let c = Ctl::parse("maverickctl", &[], &[], &[]);
         let args = vec!["debug".to_string(), "firefox".to_string()];
         assert_eq!(window_selector(&c, &args), Some("firefox".to_string()));
         // No selector at all: the caller falls back to the focused window.

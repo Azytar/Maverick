@@ -277,8 +277,8 @@ fn candidates(windows: &[&WindowInfo]) -> String {
 }
 
 /// The session's windows, or an error naming the session.
-fn windows_of(c: &Ctl, args: &[String]) -> Result<(String, Vec<WindowInfo>), String> {
-    let name = session_target(c, args)?;
+fn windows_of(c: &Ctl, _args: &[String]) -> Result<(String, Vec<WindowInfo>), String> {
+    let name = session_target(c)?;
     let view = crate::session::resolve(&name).map_err(|e| e.to_string())?;
     Ok((view.sid.clone(), tree_of(&name, &view.sid)?))
 }
@@ -326,7 +326,21 @@ pub fn run(c: &mut Ctl, args: &[String]) -> Result<bool, String> {
         .first()
         .map(|&i| args[i].as_str())
         .unwrap_or("list");
-    let rest = if args.is_empty() { &[][..] } else { &args[1..] };
+    // Everything *after the verb*, not `args[1..]`. A global option lifted by
+    // `run_group` sits at index 0, so for `maverickctl --json window list debug`
+    // the slice from index 1 still began with the verb — and `session_target`
+    // then resolved the *verb* as the session name. `session_target` reads
+    // positionals against `raw`, so the offset is recorded as well.
+    let rest = match c.positionals.first() {
+        Some(&i) => {
+            c.set_rest_start(i + 1);
+            &args[i + 1..]
+        }
+        None => {
+            c.set_rest_start(args.len());
+            &args[args.len()..]
+        }
+    };
     match verb {
         "list" | "ls" => {
             window_list(c, rest)?;
@@ -542,7 +556,7 @@ pub(crate) fn window_selector(c: &Ctl, args: &[String]) -> Option<String> {
 
 /// Resolve the window, then dispatch the action.
 fn act(c: &Ctl, args: &[String], verb: &str, op: WindowOp) -> Result<(), String> {
-    let name = session_target(c, args)?;
+    let name = session_target(c)?;
     let view = crate::session::resolve(&name).map_err(|e| e.to_string())?;
     let windows = tree_of(&name, &view.sid)?;
 
@@ -611,7 +625,7 @@ fn yes_no(b: bool) -> &'static str {
 /// is `focus:<dir>` on the wire, and it is deliberately not a second layout
 /// engine in a tool.
 pub fn camera(c: &Ctl, args: &[String]) -> Result<(), String> {
-    let name = session_target(c, args)?;
+    let name = session_target(c)?;
     let dir = args.iter().find(|a| is_dir(a)).cloned().ok_or_else(|| {
         "camera needs a direction\n\n  try: maverickctl camera debug right".to_string()
     })?;
@@ -631,7 +645,7 @@ pub fn camera(c: &Ctl, args: &[String]) -> Result<(), String> {
 /// knowledge of the workarea; a plain number is pixels, for a caller that
 /// knows better. Both end up as one action on the wire.
 pub fn resize(c: &Ctl, args: &[String]) -> Result<(), String> {
-    let name = session_target(c, args)?;
+    let name = session_target(c)?;
     // The amount is the first positional *after* the session: a signed
     // percentage starts with `-` and must not be mistaken for one of this
     // tool's own flags.
@@ -669,7 +683,7 @@ pub fn resize(c: &Ctl, args: &[String]) -> Result<(), String> {
 
 /// `maverickctl layout <session> <column>`
 pub fn layout(c: &Ctl, args: &[String]) -> Result<(), String> {
-    let name = session_target(c, args)?;
+    let name = session_target(c)?;
     let kind = args
         .iter()
         .find(|a| a.eq_ignore_ascii_case("column"))

@@ -191,6 +191,14 @@ pub struct Ctl {
     /// filter has to know that `--json` came *after* the command word, not just
     /// that it starts with a dash.
     pub positionals: Vec<usize>,
+    /// Index in `raw` at which this group's own arguments begin — just past the
+    /// verb, where there is one.
+    ///
+    /// The group verbs (`session`, `window`) read their arguments from after the
+    /// verb, and `positionals` is indexed against `raw`. Without the offset a
+    /// positional that *is* the verb (`window list debug` → `list` at 0) would be
+    /// resolved as a session name. Zero for every command with no verb.
+    rest_start: usize,
     /// The tool's own name, for messages.
     tool: String,
 }
@@ -218,7 +226,11 @@ impl Ctl {
     /// `keep` lists flags the subcommand claims for itself, so they are neither
     /// consumed as a global nor mistaken for a positional argument — `logs -n`
     /// and `debug --window` both need this.
-    pub fn parse(tool: &str, args: &[String], keep: &[&str]) -> Self {
+    ///
+    /// `keep_value` lists the subset that carries a value. Without it the value
+    /// of `logs`' `-n` (`logs -n 5`) is a positional, and `session_target`
+    /// resolves the *line count* as the session name.
+    pub fn parse(tool: &str, args: &[String], keep: &[&str], keep_value: &[&str]) -> Self {
         let mut c = Ctl {
             raw: args.to_vec(),
             json: false,
@@ -226,13 +238,21 @@ impl Ctl {
             session: None,
             name: None,
             positionals: Vec::new(),
+            rest_start: 0,
             tool: tool.to_string(),
         };
         let mut i = 0;
         while i < args.len() {
             let arg = args[i].as_str();
             if keep.contains(&arg) {
-                i += 1;
+                // A kept flag the subcommand claims is skipped — but so is its
+                // *value*, when it takes one. Skipping only the flag left `5`
+                // from `logs -n 5` in `positionals`, where `session_target`
+                // read it as a session name: the value of a line count was
+                // resolved as an instance. `keep_value` names the claimed flags
+                // that carry a value; the rest (`-f`, `--xserver`, `--follow`,
+                // `--force`) are booleans.
+                i += if keep_value.contains(&arg) { 2 } else { 1 };
                 continue;
             }
             match arg {
@@ -277,6 +297,11 @@ impl Ctl {
         self.session.as_deref().or(self.name.as_deref())
     }
 
+    /// Record where this group's own arguments begin, once the verb is known.
+    pub fn set_rest_start(&mut self, index: usize) {
+        self.rest_start = index;
+    }
+
     /// Whether stderr is a terminal, which is what makes a banner welcome
     /// rather than noise in a script's log.
     pub fn stderr_is_tty(&self) -> bool {
@@ -298,6 +323,9 @@ fn run_group(
     handler: impl FnOnce(&mut Ctl, &[String]) -> Result<bool, String>,
 ) -> ExitCode {
     // A leading `--help` anywhere before the verb is the subcommand's own help.
+    // `keep_value` names which of the claimed flags take a value, so the value
+    // is not mistaken for a positional: `logs -n 5` means five lines, not a
+    // session called "5".
     let keep: &[&str] = match group {
         "logs" => &["-n", "--xserver", "-x", "-f", "--follow"],
         "debug" => &["--window", "-f", "--follow"],
@@ -305,7 +333,12 @@ fn run_group(
         "session" => &["--force", "-f"],
         _ => &[],
     };
-    let mut c = Ctl::parse(tool, args, keep);
+    let keep_value: &[&str] = match group {
+        "logs" => &["-n"],
+        "debug" => &["--window"],
+        _ => &[],
+    };
+    let mut c = Ctl::parse(tool, args, keep, keep_value);
     if args.first().is_some_and(|a| a == "--help") {
         print_usage(usage_for(group));
         return ExitCode::SUCCESS;
@@ -456,12 +489,24 @@ maverickctl process — what is running inside a session
 /// positional, then the caller's own session, then the sole running one. So
 /// `maverickctl window list` inside a session just works, and
 /// `maverickctl window list debug` says which one it meant.
-pub fn session_target(c: &Ctl, args: &[String]) -> Result<String, String> {
+pub fn session_target(c: &Ctl) -> Result<String, String> {
     if let Some(explicit) = c.explicit_session() {
         return Ok(explicit.to_string());
     }
-    if let Some(positional) = args.iter().find(|a| !a.starts_with('-')) {
-        return Ok(positional.clone());
+    // The session is the first *positional* at or after this group's verb, taken
+    // from `c.positionals` rather than by scanning the arguments for the first
+    // word without a dash. That scan cannot tell a value from a name: `logs -n 5`
+    // has `-n` (a line count) with `5` as its value, and the scan resolved the
+    // session to `"5"` — an error about the wrong session, for a request that
+    // named none. The same held for `debug --window 0x123`.
+    //
+    // The word comes from `c.raw`, which is the whole line, so the index needs
+    // no rebasing by the caller. `rest_start` is what excludes the verb itself
+    // (`window list debug` → `list` at 0).
+    if let Some(&i) = c.positionals.iter().find(|&&i| i >= c.rest_start) {
+        if let Some(name) = c.raw.get(i) {
+            return Ok(name.clone());
+        }
     }
     crate::session::resolve_target(None)
         .map(|v| v.name)
@@ -522,10 +567,30 @@ COMMANDS:
     `maverickctl <group> --help` documents one group in full: `session`,
     `window`, `process`.
 
+GLOBAL OPTIONS:
+    These belong to this tool and may appear anywhere on the line, before or
+    after the command. They are never passed to the instance as part of an
+    action — `msg focus-left --json` dispatches `focus-left`, not a literal
+    action reading `focus-left --json`.
+
+    --json, -j     Ask for machine-readable output where a command produces a
+                   document (`window`/`process`/`session` listings, `inspect`,
+                   `status`). Commands that print nothing on success, such as
+                   `msg`, accept it and ignore it.
+    --yes, -y      Skip a confirmation prompt.
+    --session, -s  See INSTANCE SELECTION below.
+    --name, -n     See INSTANCE SELECTION below.
+
 INSTANCE SELECTION:
     --session <sid>  explicit session id (from `list`)
     --name <id>      human label (or session id); else $MAVERICK_INSTANCE;
-                     else the sole instance on this DISPLAY/TTY."
+                     else the sole instance on this DISPLAY/TTY.
+
+    A session-scoped command also takes the session as its first argument, so
+    `maverickctl window list debug` and `maverickctl window list --session debug`
+    mean the same thing. The argument is a session name, never the value of
+    another option: `logs -n 5` asks for five lines of the session this command
+    resolves, and does not look for a session named `5`."
     );
     if to_stderr {
         eprint!("{page}");
@@ -571,6 +636,17 @@ fn parse_opts(args: &[String], keep_flags: &[&str]) -> Opts {
             "--session" | "-s" => o.session = it.next().cloned(),
             "--confirm" => o.confirm = true,
             "--yes" | "-y" => o.yes = true,
+            // A formatting option of *this* tool, never action text. It was
+            // falling through to the positional arm, and `cmd_msg`/`cmd_forward`
+            // join the positionals into the action line — so
+            // `maverickctl msg focus-left --json` dispatched the literal action
+            // `focus-left --json`, which the window manager refuses. The three
+            // session-aware parsers already consumed it; these did not.
+            //
+            // `msg` produces no JSON document either way, so the flag is
+            // accepted and dropped rather than rejected: it means "do not print
+            // anything but the result", which is what `msg` already does.
+            "--json" | "-j" => {}
             other => {
                 if !keep_flags.contains(&other) {
                     o.positional.push(other.to_string());
@@ -1028,15 +1104,16 @@ fn cmd_forward(tool: &str, line: &str) -> ExitCode {
         Some(n) => n,
         None => return ExitCode::FAILURE,
     };
-    // What is left after removing the options is the payload. Reassembled with
-    // single spaces: the protocol is line-based and whitespace-separated, and
-    // rejoining is what makes `query  tree` and `query tree` the same request.
-    let payload = args
-        .iter()
-        .zip(o.positional.iter())
-        .map(|(_, word)| word.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
+    // What is left after removing the options is the payload — `o.positional`
+    // already *is* that list, so it is joined directly. It used to be built by
+    // zipping `args` against `positional` and taking each pair's second half,
+    // which only produced the right answer when no option had been removed:
+    // `maverickctl --session dbg focus-left` has two positionals (`focus-left`
+    // and nothing else) against three args, so the zip truncated to the shorter
+    // side and silently dropped words. Reassembled with single spaces: the
+    // protocol is line-based and whitespace-separated, and rejoining is what
+    // makes `query  tree` and `query tree` the same request.
+    let payload = o.positional.join(" ");
     use maverick_sys::identity::{DISPATCH_CMD, IDENTIFY_CMD, PING_CMD, QUERY_CMD};
     // Require a whitespace delimiter after `query`/`dispatch`, mirroring the
     // server (`control::dispatch_line`): `queryfoo` must fall through to
@@ -1170,15 +1247,20 @@ mod opts_props {
     const KEEP: &[&str] = &["-j", "--json", "-b", "--bare"];
 
     /// A word that is never one of the recognised flags, so a parser that
-    /// treated it as one would be caught. Near misses such as `--json` and a
-    /// bare `-` are included on purpose: they are not flags, so they have to
-    /// survive as positionals.
+    /// treated it as one would be caught. Near misses such as a bare `-` are
+    /// included on purpose: they are not flags, so they have to survive as
+    /// positionals.
+    ///
+    /// `-j`/`--json` used to be listed here as a word that "is not a flag" —
+    /// which asserted the bug this suite now covers. They are a recognised
+    /// global, so they are modelled by `Item::Json` instead, and appear in this
+    /// list only as the *value* of a flag, where they are taken verbatim.
     fn loose_word() -> impl Strategy<Value = String> {
         prop_oneof![
             3 => "[A-Za-z0-9_.:=]{0,12}",
             1 => prop::sample::select(vec![
-                "", "-", "--", "-x", "-j", "--json", "-b", "--bare", "focus-left", "view 3",
-                "query state", "focus-left --session",
+                "", "-", "--", "-x", "-b", "--bare", "focus-left", "view 3", "query state",
+                "focus-left --session",
             ])
             .prop_map(String::from),
         ]
@@ -1203,6 +1285,10 @@ mod opts_props {
         Session(Option<String>),
         Confirm,
         Yes,
+        /// `--json`/`-j`: this tool's own formatting option. Accepted and
+        /// consumed — never a positional, because a positional here is action
+        /// text destined for the window manager.
+        Json,
         /// A compatibility flag: accepted, and not forwarded.
         Kept(String),
     }
@@ -1214,6 +1300,7 @@ mod opts_props {
             2 => prop::option::of(flag_value()).prop_map(Item::Session),
             1 => Just(Item::Confirm),
             1 => Just(Item::Yes),
+            1 => Just(Item::Json),
             1 => loose_word().prop_map(Item::Kept),
         ]
     }
@@ -1273,6 +1360,9 @@ mod opts_props {
                         args.push("--yes".to_string());
                         want_yes = true;
                     }
+                    // A formatting flag: it appears in argv and in neither the
+                    // positionals nor the instance selection.
+                    Item::Json => args.push("--json".to_string()),
                 }
             }
 
