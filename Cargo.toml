@@ -8,18 +8,8 @@ members = [
 ]
 resolver = "2"
 
-# Centralised versions for shared dev-dependencies. Every entry here must be
-# referenced by at least one `[dev-dependencies]` block below, otherwise cargo
-# will not record it and the declaration is dead weight.
 [workspace.dependencies]
-# Property-based testing for the pure deterministic core: layout geometry,
-# state transitions, configuration normalization and control-socket replies. A
-# member crate opts in with `proptest.workspace = true` in its own manifest.
 proptest = "1"
-# Filesystem-isolated config loading tests. `UserConfig::load_from_path` reads a
-# real file, so the reload/parse-fallback tests need a private directory rather
-# than a hand-rolled name built from pid+nanos, which collides under parallel
-# test execution and leaks the file when a test panics.
 tempfile = "3"
 
 [package]
@@ -43,17 +33,10 @@ maverick-core = { path = "maverick-core" }
 maverick-sys = { path = "maverick-sys" }
 maverick-toml = { path = "maverick-toml" }
 libc = "0.2"
-# The X11 connection bootstrap lives in `maverick-x11` and is the WM's only
-# windowing-system dependency. There is no renderer backend: Maverick draws
-# through X11 alone, so the WM needs nothing else to be correct.
 maverick-x11 = { path = "maverick-x11" }
-# `xkb` is used only to *subscribe* to keyboard-map changes (XkbMapNotify /
-# XkbNewKeyboardNotify), which core `MappingNotify` does not always deliver —
-# the keymap itself is still read with core `GetKeyboardMapping`.
-# `allow-unsafe-code` is deliberately absent: it exists for
-# `x11rb::xcb_ffi::XCBConnection`, which only `maverick-x11` names, and cargo
-# unifies the feature across the graph, so the enabling stays where it is
-# justified.
+# `xkb` subscribes to keyboard-map changes core `MappingNotify` can miss.
+# `allow-unsafe-code` is set in `maverick-x11`, the only crate that names
+# `xcb_ffi`; cargo unifies the feature across the graph.
 x11rb = { version = "0.13", default-features = false, features = [
     "randr", "shape", "xkb",
 ] }
@@ -62,16 +45,9 @@ x11rb = { version = "0.13", default-features = false, features = [
 proptest.workspace = true
 
 [features]
-# There is no `default` feature: the window manager has no optional subsystems.
-# The features that remain are diagnostic builds with no runtime cost and no
-# extra dependencies.
-# Emits a structured "INPUT-TRACE" log on every input/focus decision so the
-# fullscreen+pointer-loss root cause can be confirmed live in Xephyr. Enabled
-# with `cargo build --features input-trace`.
+# Both emit `[INPUT-TRACE]` / `[WINDOW-TRACE]` on stderr
+# (`cargo build --features input-trace,window-trace`); neither is on by default.
 input-trace = []
-# Emits a structured "WINDOW-TRACE" log on every reconcile/focus boundary so
-# the desired→applied→real→x11_focus pipeline can be confirmed live in Xephyr
-# against a real client. Enabled with `cargo build --features window-trace`.
 window-trace = []
 
 [profile.release]

@@ -11,12 +11,7 @@ categories = ["command-line-utilities"]
 keywords = ["window-manager", "ipc", "cli"]
 
 [dependencies]
-# The only Maverick crate this tool links: the shared control-protocol surface
-# (socket paths, peer-credential authorization, line framing, JSON helpers).
-# Session orchestration, discovery and the IPC client live in this crate.
 maverick-sys = { path = "../maverick-sys" }
-# Same revisions as the workspace lockfile already pins for maverick-sys: no
-# new dependency, the tool just declares what its moved code already used.
 libc = "0.2"
 rustix = { version = "1", default-features = false, features = [
     "std",

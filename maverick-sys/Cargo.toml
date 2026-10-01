@@ -11,22 +11,9 @@ categories = ["os::unix-apis"]
 keywords = ["window-manager", "ipc", "ffi"]
 
 [dependencies]
-# `libc` stays, and the reason is specific rather than historical: signal
-# disposition has no safe alternative here. rustix does not implement `sigaction`
-# — its `src/not_implemented.rs` carries a literal `not_implemented!(sigaction)`
-# — so `SA_NOCLDWAIT`, `SA_RESTART` and the `extern "C"` trampolines are
-# irreducible regardless of what else migrates. What rustix covers is everything
-# around them: the peer-credential read, the signal sends and the uid/gid reads.
+# rustix has no `sigaction` (`src/not_implemented.rs`), so signal disposition
+# needs `libc`; everything else here goes through rustix.
 libc = "0.2"
-# Process, descriptor and entropy operations go through a maintained syscall
-# layer rather than hand-written FFI in this crate, so the `pollfd` layout and
-# the credential reads are not ours to get right.
-#
-# This adds no package: `x11rb` already depends on rustix, and the lockfile
-# already pins it. `process` and `net` are likewise cfg-gated modules inside the
-# same crate rather than new dependencies, and `default-features = false` keeps
-# the `pty`/`mm`/`mount`/`shm` surface out of a crate whose only consumer is a
-# window manager.
 rustix = { version = "1", default-features = false, features = [
     "std",
     "event",
@@ -36,5 +23,4 @@ rustix = { version = "1", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-# Property-based coverage for this crate's pure deterministic logic.
 proptest.workspace = true
