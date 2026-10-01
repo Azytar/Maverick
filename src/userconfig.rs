@@ -1321,7 +1321,6 @@ action = "kill"
         let _ = std::fs::remove_file(path);
     }
 
-
     #[test]
     fn n_tags_limits_generated_workspace_binds() {
         let user = parse_string(
