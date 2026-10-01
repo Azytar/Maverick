@@ -12,10 +12,11 @@
 //!
 //! # Invariants
 //!
-//! Every key here describes something the WM does. A section that configures a
-//! subsystem Maverick does not have (a compositor, an animation) is not parsed
-//! and not honoured — it falls through to the unknown-key path and is dropped
-//! with a diagnostic, rather than being accepted and silently ignored.
+//! Every key here describes something the WM does. A key inside a table Maverick
+//! knows that it does not implement is reported as unknown, so a stale option is
+//! never silently dropped. A whole *table* for a subsystem Maverick does not
+//! have (a compositor, an animation) is skipped without a diagnostic, so a
+//! config carried over from an older Maverick still loads.
 
 use std::path::Path;
 
