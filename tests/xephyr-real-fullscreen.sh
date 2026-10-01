@@ -52,7 +52,7 @@ start_xephyr() {
 start_maverick() {
   local cfg="$1" trace="$2"
   rm -f "$trace"
-  MAV_FORENSIC_TRACE_XID=1 MAVERICK_TRACE=1 MAVERICK_COMPOSITION_TRACE=1 MAV_COMP_TRACE=1 \
+  MAVERICK_TRACE=1 \
     "$MAVERICK_BIN" --config "$cfg" >>"$trace" 2>&1 &
   MAV_PID=$!
   for _ in $(seq 1 120); do
