@@ -142,10 +142,14 @@ impl Rect {
 ///
 /// # Invariants
 ///
-/// - Bits 0-3 and 5-8 are in use; bit 4 and bits >= 9 are reserved. The gap
-///   is deliberate: a reserved bit keeps every remaining constant on the
-///   value its protocol names, so `_NET_WM_STATE` and ICCCM correspondence
-///   is not disturbed by a removal.
+/// - Bits 0-2 and 5-8 are in use; bits 3-4 and bits >= 9 are reserved. The
+///   gaps are deliberate: a reserved bit keeps every remaining constant on
+///   the value its protocol names, so `_NET_WM_STATE` and ICCCM correspondence
+///   is not disturbed by a removal. Bit 3 held the `WM_HINTS` input hint,
+///   which is not a presentation policy but the client's own declaration
+///   (`Client::wants_input`, the single authority for focus eligibility) and
+///   so is not a flag; it joins bit 4 as reserved rather than shifting the
+///   constants above it.
 /// - `MAXIMIZED` is the union `MAXIMIZED_V | MAXIMIZED_H`, and `has()` tests
 ///   bit *overlap*, so `has(MAXIMIZED)` is already true when a single axis is
 ///   set. Callers must test both axes (`is_maximized_v() && is_maximized_h()`).
@@ -161,8 +165,6 @@ impl WinFlags {
     pub const FULLSCREEN: u16 = 1 << 1;
     /// Urgent hint — visual border indicator that attention is needed.
     pub const URGENT: u16 = 1 << 2;
-    /// Window does not want input (`WM_HINTS` `InputHint` false).
-    pub const NO_FOCUS: u16 = 1 << 3;
     /// Maximized *vertically* — `_NET_WM_STATE_MAXIMIZED_VERT`. The window's
     /// height (and y) come from the workarea; its width and x stay whatever the
     /// layout gave it. Kept as an axis of its own because EWMH treats the two as
@@ -760,7 +762,30 @@ pub struct Client {
     /// back via `ConfigureNotify` (X11 Real). Written by the events convergence
     /// path; NEVER read for layout, focus, or overlay decisions.
     pub last_reported: Option<Rect>,
-    /// True when the client wants input focus (`WM_HINTS` input).
+    /// True when the client wants input focus — the ICCCM `WM_HINTS` `input`
+    /// field (ICCCM 4.1.2.4), re-read on every rewrite of that property.
+    ///
+    /// This is the single authority on focus eligibility: a cached mirror of
+    /// it cannot be kept honest, because ICCCM 4.1.2 requires the WM to
+    /// "retain no memory of the old value" of a client property, while a
+    /// flag word can only be OR-ed in and never taken back out.
+    ///
+    /// `false` is the client's request that the WM not set the X input focus
+    /// on its top-level window — the *No Input* and *Globally Active* models
+    /// of ICCCM 4.1.7. Maverick honours it by not offering such a window the
+    /// focus at all, which ICCCM permits: it constrains the *X input focus*,
+    /// and leaves "the method by which the user commands the window manager to
+    /// set the focus to a window" to the window manager. Where a window is
+    /// already the focus target when it makes the request — a client that
+    /// rewrites the property under the focus it holds — the reconcile path
+    /// applies the other half of the rule and points the X input focus at
+    /// `PointerRoot` while still offering `WM_TAKE_FOCUS`.
+    ///
+    /// `true` is also the documented WM default for a client that sends no
+    /// `WM_HINTS` at all, or sends one with `InputHint` clear (ICCCM 4.1.2.4:
+    /// "Window managers are free to assume convenient values for all fields
+    /// of the `WM_HINTS` property if a window is mapped without one"), so it
+    /// is a statement about what the WM will do, not proof the client asked.
     pub wants_input: bool,
     /// True when the WM has hidden the window (offscreen/minimized).
     pub wm_hidden: bool,
@@ -872,11 +897,6 @@ impl Client {
     #[inline]
     pub fn is_maximized_h(&self) -> bool {
         self.flags.has(WinFlags::MAXIMIZED_H)
-    }
-    /// True when the window does not want focus (`WinFlags::NO_FOCUS`).
-    #[inline]
-    pub fn no_focus(&self) -> bool {
-        self.flags.has(WinFlags::NO_FOCUS)
     }
     /// True when the window is sticky (visible on every workspace of its monitor).
     #[inline]
@@ -1939,7 +1959,11 @@ impl State {
             }
             // 2. Cameras carry no NaN / infinity: a poisoned camera would write
             //    a NaN rect straight into a ConfigureWindow.
-            if !mon.workspaces.iter().all(|ws| ws.camera.position.is_finite()) {
+            if !mon
+                .workspaces
+                .iter()
+                .all(|ws| ws.camera.position.is_finite())
+            {
                 v.push(format!("monitor {mi}: camera has NaN/inf position"));
             }
             for (ws_i, ws) in mon.workspaces.iter().enumerate() {
@@ -2190,7 +2214,6 @@ impl Default for State {
         Self::new()
     }
 }
-
 
 #[cfg(test)]
 mod reservation_tests {

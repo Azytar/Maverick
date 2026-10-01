@@ -54,11 +54,11 @@
 //!
 //! # Focus
 //!
-//! `focus` validates the window, handles `NO_FOCUS`, unfocuses
-//! the previous window, sets `sel_mon`, calls `set_input_focus`
-//! (PARENT if `wants_input` else `POINTER_ROOT`) with
-//! `last_event_time`, writes `WM_TAKE_FOCUS`, updates the
-//! focus stack *before* `reconcile_focus` (return-to-workspace
+//! `focus` validates the window, refuses one whose `WM_HINTS.input`
+//! is false, unfocuses the previous window, sets `sel_mon`, calls
+//! `set_input_focus` (PARENT — the only direction left once that
+//! gate has passed) with `last_event_time`, writes `WM_TAKE_FOCUS`,
+//! updates the focus stack *before* `reconcile_focus` (return-to-workspace
 //! bug fix), and calls `stack_overlay`.
 //!
 //! # Safety
@@ -1138,20 +1138,23 @@ impl WindowManager {
         if let Some(w) = valid_win {
             // One scoped lookup: ends the immutable borrow of `clients` before
             // the mutations below re-borrow the map.
-            let (mon_i, geom, wants, urgent) = {
+            let (mon_i, geom, urgent) = {
                 let c = match self.engine.state.clients.get(&w) {
                     Some(c) => c,
                     None => return self.focus(None),
                 };
-                if c.no_focus() {
+                // Focus eligibility, read from the client's *current*
+                // `WM_HINTS.input` declaration (ICCCM 4.1.2.4): a window that
+                // declared `input = False` is not offered the focus at all, so
+                // clicking it, naming it from a tool, or reaching it with
+                // `focus-left` leaves the keyboard where it is. Reading the
+                // field and not a latch of it is the whole point — a client
+                // that rewrites the property back to `input = True` regains
+                // eligibility in the `PropertyNotify` that reports the rewrite.
+                if !c.wants_input {
                     return Ok(());
                 }
-                (
-                    c.monitor,
-                    c.geom,
-                    c.wants_input,
-                    c.flags.has(WinFlags::URGENT),
-                )
+                (c.monitor, c.geom, c.flags.has(WinFlags::URGENT))
             };
 
             // Guard against stale client.monitor after hotplug
@@ -1170,26 +1173,23 @@ impl WindowManager {
 
             self.engine.state.sel_mon = mon_i;
 
-            // set X11 input focus. Use the real last-input timestamp, not
+            // Set the X11 input focus. Use the real last-input timestamp, not
             // `CURRENT_TIME`: a `CurrentTime` focus request is silently ignored
             // by the server when a newer focus change has occurred, which is
             // exactly what desyncs logical vs real focus (the red-border bug).
-            // ICCCM 4.1.7: a window with `input == False` (`wants_input ==
-            // false`, but not `NO_FOCUS`) must NOT receive the X input focus —
-            // focus the root instead and offer `WM_TAKE_FOCUS` below. Focusing
-            // the window itself sends the keyboard to a client that declared
-            // it never wants it.
-            if wants {
-                let _ = self
-                    .conn
-                    .set_input_focus(InputFocus::PARENT, w, self.last_event_time);
-            } else {
-                let _ = self.conn.set_input_focus(
-                    InputFocus::POINTER_ROOT,
-                    self.root,
-                    self.last_event_time,
-                );
-            }
+            //
+            // The window is known to want input — the eligibility gate above
+            // returned for anything that declared `WM_HINTS.input == False` —
+            // so this is the only direction the request can take. The ICCCM
+            // 4.1.7 counterpart for a window that declared the opposite (the X
+            // focus goes to `PointerRoot`, and `WM_TAKE_FOCUS` is still offered
+            // so a *Globally Active* client can take the focus itself) is
+            // applied in `reconcile_focus`, the one site that can still see
+            // such a window as the focus target: a window focused while it
+            // wanted input and which then rewrote the property.
+            let _ = self
+                .conn
+                .set_input_focus(InputFocus::PARENT, w, self.last_event_time);
             if self.has_protocol(w, self.atoms.wm_take_focus)? {
                 self.send_proto(w, self.atoms.wm_take_focus, self.last_event_time)?;
             }
@@ -1464,23 +1464,17 @@ impl WindowManager {
             return Ok(());
         }
 
-        // ICCCM counterpart of `focus()`: a logical window with
-        // `wants_input == false` intentionally leaves the X focus on the
-        // root (real == None). That divergence is by design — re-asserting
-        // the focus onto the window would undo it on every focus event.
-        if real.is_none() {
-            if let Some(w) = logical {
-                let input_false = self
-                    .engine
-                    .state
-                    .clients
-                    .get(&w)
-                    .is_some_and(|c| !c.wants_input && !c.no_focus());
-                if input_false {
-                    return Ok(());
-                }
-            }
-        }
+        // ICCCM 4.1.7 counterpart of `focus()` needs no guard of its own any
+        // more. `focus()` refuses a window whose `WM_HINTS.input` is false, and
+        // the repair below re-asserts `PointerRoot` rather than the window, so
+        // the outcome this used to prevent — the X input focus landing on a
+        // client that declared it never wants it — cannot be reached through
+        // either path. A second predicate here would have to distinguish a state
+        // the window is no longer in: with `wants_input` the only record of the
+        // input model (a `WinFlags` mirror of it could only ever be stale, ICCCM
+        // 4.1.2 having the WM "retain no memory of the old value" of a property
+        // the client may rewrite at any time), "declares false" and "has been
+        // focused" are the same field read twice.
 
         // Presentation-aware guard: after `manage()` records a `pending_focus`
         // behind the live overlay while a fullscreen/maximized overlay keeps the
@@ -3725,7 +3719,122 @@ mod tests {
             );
         }
     }
+
+    // --- focus eligibility: the `WM_HINTS` input model -------------------------
+
+    /// One `WM_HINTS` body, as the server serializes `XWMHints` into CARD32s:
+    /// `flags, input, initial_state, icon_pixmap, icon_window, icon_x, icon_y,
+    /// icon_mask, window_group`. `parse_wm_hints` reads only the first two.
+    fn hints_body(flags: u32, input: u32) -> Vec<u32> {
+        vec![flags, input, 1, 0, 0, 0, 0, 0, 0]
+    }
+
+    /// A client that declares `WM_HINTS.input` explicitly is read exactly, in both
+    /// directions. The two values are the whole ICCCM 4.1.7 input model: `True` for
+    /// the Passive/Locally Active models, `False` for No Input and Globally Active.
+    #[test]
+    fn a_declared_input_model_is_read_in_both_directions() {
+        assert_eq!(
+            parse_wm_hints(&hints_body(1, 1)),
+            Some((true, false)),
+            "input = True (Passive / Locally Active)"
+        );
+        assert_eq!(
+            parse_wm_hints(&hints_body(1, 0)),
+            Some((false, false)),
+            "input = False (No Input / Globally Active)"
+        );
+    }
+
+    /// `input` is only meaningful under `InputHint` (flags bit 0), and ICCCM
+    /// 4.1.2.4 lets the WM "assume convenient values for all fields of the
+    /// `WM_HINTS` property if a window is mapped without one". So a body that carries
+    /// the word but not the bit — and a body too short to carry the word at all —
+    /// are both the WM default (`wants input`), never `input = False`. Reading the
+    /// bare word instead would make every client that writes a flags word without
+    /// `InputHint` — a shape the protocol explicitly allows — unfocusable.
+    #[test]
+    fn an_unset_input_hint_is_the_documented_window_manager_default() {
+        assert_eq!(
+            parse_wm_hints(&hints_body(0, 0)),
+            Some((true, false)),
+            "InputHint clear: the input word is not the client's declaration"
+        );
+        assert_eq!(
+            parse_wm_hints(&hints_body(0, 1)),
+            Some((true, false)),
+            "InputHint clear with a non-zero input word is still the default"
+        );
+        assert_eq!(
+            parse_wm_hints(&[2]),
+            Some((true, false)),
+            "a flags word too short to carry `input` is the default, not input = False"
+        );
+        assert_eq!(
+            parse_wm_hints(&[]),
+            None,
+            "an empty body is nothing to read"
+        );
+    }
+
+    /// `UrgencyHint` (flags bit 8) is independent of the input model, so reading
+    /// one must never disturb the other.
+    #[test]
+    fn the_urgency_hint_is_read_independently_of_the_input_model() {
+        assert_eq!(
+            parse_wm_hints(&hints_body(1 | 256, 0)),
+            Some((false, true)),
+            "input = False together with Urgent"
+        );
+        assert_eq!(
+            parse_wm_hints(&hints_body(1 | 256, 1)),
+            Some((true, true)),
+            "input = True together with Urgent"
+        );
+    }
+
+    /// The production invariant this whole module exists for: a client that
+    /// rewrites `WM_HINTS` is re-read whole, so a window that declared
+    /// `input = False` and then re-declared `input = True` ends up in exactly the
+    /// state a window that had declared `True` all along is in — and `focus()`,
+    /// whose only eligibility test is that field, takes the request.
+    ///
+    /// This is what a cached flag beside the field could not express. ICCCM 4.1.2
+    /// requires the WM to retain "no memory of the old value" of a client property,
+    /// so the value must be re-assigned on every rewrite; a bit that is only ever
+    /// set survives the rewrite and refuses every later focus request for that
+    /// window, forever. The mirror of the assignment `refresh_hints` performs is
+    /// spelled out here so the property under test is the real one.
+    #[test]
+    fn re_declaring_input_true_restores_focus_eligibility() {
+        use crate::types::Client;
+
+        fn refresh(client: &mut Client, body: &[u32]) {
+            let (wants_input, urgent) = parse_wm_hints(body).expect("a WM_HINTS body");
+            client.wants_input = wants_input;
+            assert!(!urgent, "these bodies carry no Urgent hint");
+        }
+
+        let mut declared_true = Client::new(1, 0, 0);
+        declared_true.wants_input = true;
+        let mut flipped = Client::new(2, 0, 0);
+        refresh(&mut flipped, &hints_body(1, 0));
+        assert!(!flipped.wants_input, "input = False must be recorded");
+        refresh(&mut flipped, &hints_body(1, 1));
+        assert_eq!(
+            flipped.wants_input, declared_true.wants_input,
+            "a window that re-declared input = True must be focus-eligible again"
+        );
+        // …and the rewrite back to False is honoured too, so the field is a
+        // replacement rather than a one-way latch in the other direction.
+        refresh(&mut flipped, &hints_body(1, 0));
+        assert!(
+            !flipped.wants_input,
+            "a client withdrawing the input request must be recorded"
+        );
+    }
 }
+
 /// Contract, reduced to a deterministic set: every row of a rounded mask
 /// leaves the same inset on the left as on the right, for every radius a
 /// caller can pass — including the radius boundary `2 * r == w`.

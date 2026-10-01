@@ -547,10 +547,7 @@ impl WindowManager {
             },
         );
         if let Some(error) = &local.trace.error {
-            log::warn!(
-                "trace dump {}: {error}",
-                local.trace.path.display()
-            );
+            log::warn!("trace dump {}: {error}", local.trace.path.display());
         } else if local.trace.written {
             log::info!(
                 "trace: {} records written to {}",
@@ -1802,9 +1799,48 @@ fn read_title_value(
     Ok(None)
 }
 
-type WmHints = (bool, bool, bool); // no_focus, wants_input, urgent
+/// What the WM keeps from a `WM_HINTS` property: (`wants_input`, `urgent`).
+///
+/// The input model is a single `bool`, not a bit beside it: `!wants_input` and
+/// "the window refuses the X input focus" are the same statement, and a
+/// separate copy of it could only ever disagree with the authoritative one.
+type WmHints = (bool, bool);
 
-/// Read `WM_HINTS` flags without needing a mutable Client reference.
+/// Decode a `WM_HINTS` property body (ICCCM 4.1.2.4) into the two facts this WM
+/// keeps: the client's input model and its urgency flag.
+///
+/// ```text
+/// 0 flags (InputHint 1, StateHint 2, …, UrgencyHint 256)   1 input   2 initial_state
+/// ```
+///
+/// `input` is only meaningful when `InputHint` is set; ICCCM 4.1.2.4 lets the WM
+/// "assume convenient values … if a window is mapped without one", so a body
+/// with no `InputHint` (or one too short to carry the field) is read as
+/// `wants_input = true` — the same default a client with no `WM_HINTS` at all
+/// gets.
+///
+/// Pure over the wire words so map-time parsing and the `PropertyNotify`
+/// refresh share one interpretation. The input model is a *replacement*, never
+/// a delta: ICCCM 4.1.2 requires the WM to "retain no memory of the old value"
+/// of a client property, so a caller must assign the returned value rather
+/// than set a bit from it. What to do with the urgency flag is the caller's
+/// call, because unlike the input model it is an alarm the WM latches until the
+/// window is focused.
+fn parse_wm_hints(v: &[u32]) -> Option<WmHints> {
+    let flags = v.first()?;
+    let has_input = flags & 1 != 0;
+    let wants_input = if has_input {
+        v.get(1).is_some_and(|i| *i != 0)
+    } else {
+        true
+    };
+    let urgent = flags & 256 != 0;
+    Some((wants_input, urgent))
+}
+
+/// Read `WM_HINTS` without needing a mutable Client reference. `None` when the
+/// property is absent, of another type, or malformed — the caller then keeps
+/// the previous values rather than guessing at a truncated one.
 fn read_wm_hints_value(
     conn: &XConn,
     win: Window,
@@ -1813,15 +1849,8 @@ fn read_wm_hints_value(
         if let Ok(ref prop) = c.reply() {
             if let Some(vals) = prop.value32() {
                 let v: Vec<u32> = vals.collect();
-                if !v.is_empty() {
-                    let no_focus = v[0] & 1 != 0 && v.len() > 1 && v[1] == 0;
-                    let wants_input = if v[0] & 1 != 0 && v.len() > 1 {
-                        v[1] != 0
-                    } else {
-                        true
-                    };
-                    let urgent = v[0] & 256 != 0;
-                    return Ok(Some((no_focus, wants_input, urgent)));
+                if let Some(hints) = parse_wm_hints(&v) {
+                    return Ok(Some(hints));
                 }
             }
         }

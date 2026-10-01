@@ -220,7 +220,13 @@ fn assert_no_blocking_reply(src: &str, func: &str, why: &str) {
     } else {
         src.to_string()
     };
-    for needle in [".reply()", ".check()", ".sync()", "get_input_focus", "get_property"] {
+    for needle in [
+        ".reply()",
+        ".check()",
+        ".sync()",
+        "get_input_focus",
+        "get_property",
+    ] {
         let hits = code_lines_containing(&body, needle);
         assert!(
             hits.is_empty(),

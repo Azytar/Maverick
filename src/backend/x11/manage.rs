@@ -308,19 +308,18 @@ impl WindowManager {
                 }
             }
 
+            // `WM_HINTS` goes through the same pure parser as the
+            // `PropertyNotify` refresh, for the same reason the size hints do
+            // below: a client that rewrites the property mid-life must be read
+            // exactly as it would have been had it rewritten it before mapping,
+            // and two hand-written copies of the same decode are where the
+            // input model silently goes stale.
             if let Ok(ref prop) = c_hints.reply() {
                 if let Some(vals) = prop.value32() {
                     let v: Vec<u32> = vals.collect();
-                    if !v.is_empty() {
-                        if v[0] & 1 != 0 && v.len() > 1 {
-                            if v[1] == 0 {
-                                client.flags.set(WinFlags::NO_FOCUS);
-                                client.wants_input = false;
-                            } else {
-                                client.wants_input = true;
-                            }
-                        }
-                        if v[0] & 256 != 0 {
+                    if let Some((wants_input, urgent)) = parse_wm_hints(&v) {
+                        client.wants_input = wants_input;
+                        if urgent {
                             client.flags.set(WinFlags::URGENT);
                         }
                     }
@@ -1132,13 +1131,22 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Re-read `WM_HINTS` for `win` after the client rewrote it.
+    ///
+    /// Both facts are assigned, never OR-ed in: the input model is the client's
+    /// current declaration, and ICCCM 4.1.2 requires a rewrite to carry the
+    /// whole property with "no memory of the old value" kept by the WM. A
+    /// window that declared `input = False` and then declares `input = True`
+    /// must therefore be focus-eligible again the moment this returns.
+    ///
+    /// The urgency flag is deliberately *not* cleared here: unlike the input
+    /// model it is a latched alarm the WM raises attention on and consumes when
+    /// the window is focused, so a client clearing `UrgencyHint` does not
+    /// retract an alert already shown.
     pub(super) fn refresh_hints(&mut self, win: Window) -> Result<(), Box<dyn std::error::Error>> {
         let hints = read_wm_hints_value(&self.conn, win)?;
-        if let Some((no_focus, wants_input, urgent)) = hints {
+        if let Some((wants_input, urgent)) = hints {
             if let Some(c) = self.engine.state.clients.get_mut(&win) {
-                if no_focus {
-                    c.flags.set(WinFlags::NO_FOCUS);
-                }
                 c.wants_input = wants_input;
                 if urgent {
                     c.flags.set(WinFlags::URGENT);

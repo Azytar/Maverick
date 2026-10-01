@@ -2,9 +2,9 @@
 #[allow(clippy::if_same_then_else)]
 mod unit_tests {
     use crate::config::Cfg;
+    use crate::core::commands::Command as CommandTrait;
     use crate::core::desired::DesiredState;
     use crate::core::layout::{FsCtx, RibbonScratch};
-    use crate::core::commands::Command as CommandTrait;
     use crate::core::Engine;
     use crate::types::{
         Action, Client, FullscreenPolicy, LayoutKind, Monitor, Rect, State, WinFlags, WindowId,
@@ -178,7 +178,6 @@ mod unit_tests {
         }
     }
 
-
     #[test]
     fn test_cycle_layout_wraps_around() {
         let mut engine = setup_engine();
@@ -345,10 +344,7 @@ mod unit_tests {
             ViewportMode::Normal,
             "overview must exit viewport zoom"
         );
-        assert_eq!(
-            ws.page_zoom, 1.0,
-            "overview must reset page_zoom"
-        );
+        assert_eq!(ws.page_zoom, 1.0, "overview must reset page_zoom");
     }
 
     #[allow(clippy::float_cmp)]
@@ -363,10 +359,7 @@ mod unit_tests {
         let ws = &engine.state.monitors[0].workspaces[0];
         assert_eq!(ws.viewport_mode, ViewportMode::Zoomed);
         assert!(!ws.overview, "viewport zoom must clear overview (bug B1)");
-        assert_eq!(
-            ws.zoom, 1.0,
-            "viewport zoom must reset the overview zoom"
-        );
+        assert_eq!(ws.zoom, 1.0, "viewport zoom must reset the overview zoom");
     }
 
     #[allow(clippy::float_cmp)]
@@ -1922,13 +1915,7 @@ mod unit_tests {
         // And it must project to the full inner width.
         let mut out = crate::core::layout::Placements::new();
         let mut scratch = crate::core::layout::RibbonScratch::default();
-        crate::core::layout::arrange(
-            &engine.state,
-            mi,
-            &engine.cfg,
-            &mut out,
-            &mut scratch,
-        );
+        crate::core::layout::arrange(&engine.state, mi, &engine.cfg, &mut out, &mut scratch);
         let bw = engine.cfg.border_w;
         let win2 = out.iter().find(|(id, _, _)| *id == 2).unwrap();
         assert_eq!(
@@ -2741,13 +2728,13 @@ mod unit_tests {
         engine.dispatch(Action::ViewportZoom(0.2));
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
         assert_eq!(ws.viewport_mode, ViewportMode::Zoomed);
-        assert!(
-            ws.page_zoom > 1.0,
-            "page_zoom target must grow past 1.0"
-        );
+        assert!(ws.page_zoom > 1.0, "page_zoom target must grow past 1.0");
 
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
-        assert!(ws.page_zoom > 1.0, "the viewport zoom must enlarge past 1.0");
+        assert!(
+            ws.page_zoom > 1.0,
+            "the viewport zoom must enlarge past 1.0"
+        );
 
         // `ribbon_geom` must feed the viewport factor into `alpha` so columns
         // are enlarged (alpha > 1), independent of the Overview zoom.
@@ -3040,20 +3027,8 @@ mod unit_tests {
                 let mut p2 = Placements::new();
                 let mut r1 = RibbonScratch::default();
                 let mut r2 = RibbonScratch::default();
-                arrange(
-                    &engine.state,
-                    mi,
-                    &engine.cfg,
-                    &mut p1,
-                    &mut r1,
-                );
-                arrange(
-                    &engine.state,
-                    mi,
-                    &engine.cfg,
-                    &mut p2,
-                    &mut r2,
-                );
+                arrange(&engine.state, mi, &engine.cfg, &mut p1, &mut r1);
+                arrange(&engine.state, mi, &engine.cfg, &mut p2, &mut r2);
                 let mut v1: Vec<(WindowId, Rect, u32)> =
                     p1.iter().map(|(w, r, b)| (*w, *r, *b)).collect();
                 let mut v2: Vec<(WindowId, Rect, u32)> =
@@ -4509,7 +4484,9 @@ mod unit_tests {
 
         let in_floats = |engine: &Engine, ws_i: usize, win: u32| {
             let mi = engine.state.sel_mon;
-            engine.state.monitors[mi].workspaces[ws_i].floats.contains(&win)
+            engine.state.monitors[mi].workspaces[ws_i]
+                .floats
+                .contains(&win)
         };
         let in_ribbon = |engine: &Engine, ws_i: usize, win: u32| {
             let mi = engine.state.sel_mon;
@@ -4720,7 +4697,7 @@ mod unit_tests {
         }
         // Pre-toggle state as in production: `arrange` has already written the
         // projected tile into `client.geom` (typically off-grid w.r.t. hints).
-            let pre = pipeline_desired(&engine, mi);
+        let pre = pipeline_desired(&engine, mi);
         let tile = pre
             .windows
             .iter()
@@ -8545,18 +8522,17 @@ mod unit_tests {
             apply_fullscreen_geom_restore, apply_fullscreen_topology, apply_maximize,
             decide_manage_focus, focus_logical_on, reconcile_pending_focus_after_transition,
             CollapseColumn, Command, FocusDirection, FocusMonitor, FocusWindow, GrowColumn,
-            KillWindow, ManageFocusIntent, MoveResize, MoveToWorkspace,
-            MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav, PageSnap, Quit,
-            Restart, SetLayout, Spawn, ToggleFloat,
-            ToggleFullscreen, ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
+            KillWindow, ManageFocusIntent, MoveResize, MoveToWorkspace, MoveWindow,
+            MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav, PageSnap, Quit, Restart,
+            SetLayout, Spawn, ToggleFloat, ToggleFullscreen, ToggleMaximize, ToggleOverview,
+            ViewWorkspace, ViewportZoom,
         };
         use crate::core::effect::Effect;
         use crate::core::event::CommandReport;
         use crate::core::ipc::{query_json, state_json};
         use crate::core::Engine;
         use crate::types::{
-            Action, Client, Dir, LayoutKind, PendingFocus, Rect, State, WinFlags,
-            WindowId,
+            Action, Client, Dir, LayoutKind, PendingFocus, Rect, State, WinFlags, WindowId,
         };
         use proptest::prelude::*;
         use std::fmt::Write as _;
@@ -9012,7 +8988,7 @@ mod unit_tests {
                 let c = &s.clients[&win];
                 let _ = writeln!(
                     d,
-                    "client{win} mon={} ws={} geom={:?} saved={:?} bw={}/{} dirty={} policy={:?} snap={:?} parent={:?} name={:?} class={:?} inst={:?} flags[fs={} maxv={} maxh={} sticky={} fswas={} urgent={} nofocus={}] des={:?} rep={:?}",
+                    "client{win} mon={} ws={} geom={:?} saved={:?} bw={}/{} dirty={} policy={:?} snap={:?} parent={:?} name={:?} class={:?} inst={:?} flags[fs={} maxv={} maxh={} sticky={} fswas={} urgent={}] wants_input={} des={:?} rep={:?}",
                     c.monitor,
                     c.workspace,
                     c.geom,
@@ -9032,7 +9008,7 @@ mod unit_tests {
                     c.is_sticky(),
                     c.flags.has(WinFlags::FS_WAS_FLOAT),
                     c.flags.has(WinFlags::URGENT),
-                    c.no_focus(),
+                    c.wants_input,
                     c.last_desired,
                     c.last_reported
                 );
@@ -10207,8 +10183,6 @@ mod unit_tests {
                 }
             }
         }
-
-
 
         /// The canonical wire spelling of an action: its `name()` plus the
         /// argument shape the `ACTIONS` table declares for that verb.

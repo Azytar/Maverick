@@ -20,7 +20,8 @@
 //!
 //! # Focus-on-click
 //!
-//! Clicking a window focuses it (unless `NO_FOCUS`).
+//! Clicking a window focuses it, unless it declared `WM_HINTS.input` false —
+//! the same eligibility rule `focus()` applies to every other route.
 //! Focus-follows-mouse is guarded by `pointer_guard_until`
 //! (50 ms after a keypress to avoid conflicting with
 //! keyboard focus).

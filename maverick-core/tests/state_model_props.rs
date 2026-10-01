@@ -580,7 +580,8 @@ proptest! {
 // The layout, the projection and the window rules all branch on these
 // predicates, so one that answered from a neighbouring bit would make a
 // single-axis maximize read as a full one, or an ordinary tile read as a float.
-// Bits 4 and 9 and up are documented as reserved, so a random word exercises them too.
+// Bits 3, 4 and 9 and up are documented as reserved, so a random word
+// exercises them too.
 proptest! {
     #[test]
     fn every_flag_predicate_reads_only_its_documented_bit(
@@ -594,12 +595,16 @@ proptest! {
         let has = |bit: u16| word & bit != 0;
         prop_assert_eq!(c.is_float(), has(WinFlags::FLOAT), "is_float read the wrong bit");
         prop_assert_eq!(c.is_fullscreen(), has(WinFlags::FULLSCREEN), "is_fullscreen read the wrong bit");
-        prop_assert_eq!(c.no_focus(), has(WinFlags::NO_FOCUS), "no_focus read the wrong bit");
         prop_assert_eq!(c.is_sticky(), has(WinFlags::STICKY), "is_sticky read the wrong bit");
         prop_assert_eq!(c.is_maximized_v(), has(WinFlags::MAXIMIZED_V), "is_maximized_v read the wrong bit");
         prop_assert_eq!(c.is_maximized_h(), has(WinFlags::MAXIMIZED_H), "is_maximized_h read the wrong bit");
         prop_assert_eq!(c.flags.has(WinFlags::URGENT), has(WinFlags::URGENT), "URGENT is not readable");
         prop_assert_eq!(c.flags.has(WinFlags::FS_WAS_FLOAT), has(WinFlags::FS_WAS_FLOAT), "FS_WAS_FLOAT is not readable");
+        // The client's input model (`WM_HINTS.input`) decides focus eligibility
+        // and is deliberately NOT one of these bits: a client may rewrite the
+        // property at any time and ICCCM 4.1.2 requires the WM to retain no
+        // memory of the old value, which a set-only flag word cannot express.
+        // The bit-layout test below is where that is pinned down.
         // Documented: only both axes together mean "maximized", because EWMH
         // treats them as independent states and clients request one of them.
         prop_assert_eq!(
@@ -627,7 +632,7 @@ proptest! {
 //
 // So this table is stated as literals, not in terms of the constants. It also
 // pins the two structural facts the rest of the WM relies on and that no other
-// test asserts: the used bits are exactly 0..=3 and 5..=8, and no two constants share a
+// test asserts: the used bits are exactly 0..=2 and 5..=8, and no two constants share a
 // bit. `MAXIMIZED_H` is deliberately *not* adjacent to `MAXIMIZED_V` — the two
 // EWMH axes are independent states, and nothing else in the tree would notice
 // if the pair collapsed onto neighbouring bits and a single-axis maximize began
@@ -637,7 +642,6 @@ fn the_ewmh_and_icccm_bit_layout_is_the_one_the_protocol_defines() {
     assert_eq!(WinFlags::FLOAT, 1 << 0, "_NET_WM_STATE_FLOAT");
     assert_eq!(WinFlags::FULLSCREEN, 1 << 1, "_NET_WM_STATE_FULLSCREEN");
     assert_eq!(WinFlags::URGENT, 1 << 2, "_NET_WM_STATE_DEMANDS_ATTENTION");
-    assert_eq!(WinFlags::NO_FOCUS, 1 << 3, "ICCCM 4.1.7 InputHint false");
     assert_eq!(
         WinFlags::MAXIMIZED_V,
         1 << 5,
@@ -666,12 +670,11 @@ fn the_ewmh_and_icccm_bit_layout_is_the_one_the_protocol_defines() {
     assert_eq!(SizeHints::P_BASE_SIZE, 1 << 8, "XPBaseSize");
     assert_eq!(SizeHints::P_WIN_GRAVITY, 1 << 9, "XPWinGravity");
 
-    // Every bit is distinct, and the used range is exactly 0..=3 and 5..=8.
+    // Every bit is distinct, and the used range is exactly 0..=2 and 5..=8.
     let used = [
         WinFlags::FLOAT,
         WinFlags::FULLSCREEN,
         WinFlags::URGENT,
-        WinFlags::NO_FOCUS,
         WinFlags::MAXIMIZED_V,
         WinFlags::STICKY,
         WinFlags::FS_WAS_FLOAT,
@@ -691,10 +694,59 @@ fn the_ewmh_and_icccm_bit_layout_is_the_one_the_protocol_defines() {
         );
         all |= f;
     }
+    // 0x01E7, not the 0x01EF this used to assert: bit 3 held the `WM_HINTS`
+    // input model, which is the client's own declaration rather than a
+    // presentation policy the WM decides, and a set-only flag bit could not
+    // track it — ICCCM 4.1.2 requires the WM to honour a rewrite of the
+    // property with no memory of the old value, which means the bit had to be
+    // clearable, and every other bit here is deliberately one-way. So the input
+    // model lives in `Client::wants_input` alone and bit 3 is reserved, which is
+    // exactly what the layout's own rule prescribes for a vacated bit: leave the
+    // gap so `MAXIMIZED_V` and the rest keep the values their protocols name.
     assert_eq!(
-        all, 0x01EF,
-        "bits 0..=3 and 5..=8 are in use; 4 and 9..=15 are reserved"
+        all, 0x01E7,
+        "bits 0..=2 and 5..=8 are in use; 3, 4 and 9..=15 are reserved"
     );
+}
+
+// The input model has exactly one home. This is the state a focus decision is
+// made from, and it is reached by assignment on every `WM_HINTS` rewrite, so a
+// window that declares `input = False` and then re-declares `input = True`
+// must land in precisely the state a window that had declared `True` all along
+// is in — the invariant the removed input bit could not hold, because it was
+// only ever set: the flip left the bit asserting "no input" beside a field
+// asserting "wants input", and every later focus request was refused.
+#[test]
+fn the_input_model_is_a_field_no_flag_bit_can_shadow() {
+    const USED: [u16; 7] = [
+        WinFlags::FLOAT,
+        WinFlags::FULLSCREEN,
+        WinFlags::URGENT,
+        WinFlags::MAXIMIZED_V,
+        WinFlags::STICKY,
+        WinFlags::FS_WAS_FLOAT,
+        WinFlags::MAXIMIZED_H,
+    ];
+    let mut c = Client::new(7, 0, 0);
+    assert!(c.wants_input, "a client that declared nothing wants input");
+    c.wants_input = false;
+    for f in USED {
+        assert!(
+            !c.flags.has(f),
+            "declaring input=false set flag {f:#06x}: the input model is not a presentation policy"
+        );
+    }
+    c.wants_input = true;
+    assert!(
+        c.wants_input,
+        "re-declaring input=true did not restore eligibility"
+    );
+    for f in USED {
+        assert!(
+            !c.flags.has(f),
+            "re-declaring input=true set flag {f:#06x}: the input model is not a presentation policy"
+        );
+    }
 }
 
 // A column added and then removed again must leave the workspace exactly as it
