@@ -8,6 +8,8 @@ sin compositor, sin renderer de GPU, sin dependencia de GL ni Vulkan.
 [Panorámica](#panorámica) · [Diseño](#diseño) · [Instalación](#instalación) ·
 [Configuración](#configuración) · [Pruebas](#pruebas) · [Capturas](#capturas)
 
+Léelo en inglés: [README.md](README.md).
+
 ## Panorámica
 
 Maverick explora una alternativa espacial a encajar todas las ventanas en una
@@ -484,13 +486,25 @@ maverickctl quit --name desktop --confirm
 ```
 
 `maverickctl` también reenvía líneas de acción, por ejemplo
-`maverickctl view 3`. Cada instancia tiene
+`maverickctl view 3`; una palabra que no reconoce como comando se le pasa al
+gestor de ventanas, que es lo único que puede distinguir una acción de un tema
+de consulta de un error tipográfico. Cada instancia tiene
 un directorio de runtime privado y un socket Unix bajo
 `$XDG_RUNTIME_DIR/maverick/<session-id>/`. El descubrimiento comprueba
 identidad de proceso y actividad del socket. La selección prefiere
 `--session`, luego `--name`, luego el `MAVERICK_INSTANCE` heredado, luego el
 contexto de display/TTY; también se puede seleccionar un singleton global.
 Usa targeting explícito al probar junto a una sesión en vivo.
+
+No hay un segundo binario de control: la capacidad de `maverick-msg` es la de
+`maverickctl`.
+
+La sesión del propio usuario es `main` y se direcciona igual. Cada listado tiene
+una forma `--json`, y la propiedad es por uid: el directorio de runtime es
+`0700`, el socket `0600` y se comprueba con `SO_PEERCRED`, y cada display tiene
+su propia X cookie. Consulta **[`docs/sessions.md`](docs/sessions.md)** para el
+modelo, la comparación de backends de servidor X anidado, el ciclo de vida y las
+limitaciones.
 
 **Quit cierra las aplicaciones gestionadas de la sesión**, no solo el WM. El
 apagado pregunta a los clientes vía `WM_DELETE_WINDOW` y luego fuerza el
@@ -519,16 +533,17 @@ aplicaciones con drivers reales.
 
 [CI](.github/workflows/ci.yml) ejecuta tres jobs: los tests del workspace con
 Clippy estricto, las comprobaciones del instalador (`bash -n` más
-`tests/install-smoke.py`), y un job de smoke X11 que compila
-`-p maverick -p maverickctl` y lanza la regresión de apilado con Xvfb. No
-ejecuta los escenarios Xephyr.
+`installer/tests/partition.py`, que ejecuta todas las suites de
+`tests/install-smoke.py` y las suyas propias de partición), y un job de smoke X11
+que compila `-p maverick -p maverickctl` y lanza la regresión de apilado con
+Xvfb. No ejecuta los escenarios Xephyr.
 
 ### X11 real y tests del instalador
 
 ```bash
-cargo build -p maverick -p maverick-sys
+cargo build -p maverick -p maverickctl
 python3 tests/xvfb-stacking.py
-python3 tests/install-smoke.py
+python3 installer/tests/partition.py
 ```
 
 La regresión de apilado Xvfb compila una sonda Xlib y comprueba el orden real
@@ -604,17 +619,18 @@ dependiendo de librerías X11 nativas.
 ├── maverick-sys/        # Protocolo IPC/control y frontera OS
 ├── maverickctl/         # Cliente de control externo y ciclo de vida de sesiones
 ├── config/              # Configuración de ejemplo
-├── docs/                # Recursos de documentación
+├── docs/                # Documentación (véase sessions.md) y recursos
 ├── showcase/            # Presentación técnica reproducible
 └── tests/               # Tests de integración y X11
 ```
 
 ## Estado actual
 
-Maverick está en desarrollo activo y no se declara listo para producción. La
-ruta X11 pura implementa el modelo actual de tiling, navegación, floating,
-fullscreen y workspaces; la suite de regresión existe para endurecer esas
-interacciones.
+Maverick está en **preview** y aún no se declara listo para producción. La ruta
+X11 implementa el modelo actual de tiling, navegación, floating, fullscreen y
+workspaces; la suite de regresión existe para endurecer esas interacciones. CI y
+los scripts de integración son comprobaciones de regresión, no una certificación
+de compatibilidad amplia con aplicaciones ni de fiabilidad prolongada.
 
 - **Alcance:** solo Linux/X11; sin backend Wayland, compositor, animación,
   shell de escritorio integrado, blur ni sombras.
@@ -633,6 +649,18 @@ interacciones.
 - **Interfaces:** configuración, APIs internas y política de presentación
   pueden cambiar. El parser TOML del árbol soporta un subconjunto, no toda la
   especificación TOML.
+
+### Lista de comprobación previa al uso
+
+Antes de usar Maverick como único gestor de ventanas en trabajo importante,
+valida una sesión X11 desechable en la máquina destino. Confirma el inicio de
+sesión y la salida limpia, el lanzamiento y cierre de aplicaciones, el foco y la
+entrada, el fullscreen, los diálogos flotantes/transitorios, el cambio de
+workspace, la suspensión y reanudación de la pantalla, y los cambios de monitor.
+Deja siempre una forma de volver a la sesión anterior y preserva el trabajo del
+usuario antes de probar el apagado. No trates como objetivos de release
+soportados todavía el hotplug arbitrario de monitores ni distribuciones de Linux
+no listadas.
 
 ## Hoja de ruta
 
