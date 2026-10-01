@@ -303,3 +303,33 @@ fn no_test_moves_the_shared_runtime_directory() {
         }
     }
 }
+
+/// Every way of publishing an instance is used by some test.
+///
+/// A fixture shape nothing reaches is one nobody decided it wanted. Each shape
+/// fails somewhere different — at resolution, at the connect, or nowhere — so a
+/// shape that is only "for completeness" is indistinguishable, from the outside,
+/// from one that is covering a real path.
+#[test]
+fn every_published_shape_is_used_by_some_test() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut sources = String::new();
+    for entry in std::fs::read_dir(&dir).expect("the tests directory") {
+        let path = entry.expect("a readable directory entry").path();
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        sources.push_str(&std::fs::read_to_string(&path).expect("a readable test source"));
+    }
+    for shape in [
+        "Published::Instance",
+        "Published::SocketOnly",
+        "Published::RecordOnly",
+    ] {
+        assert!(
+            sources.contains(shape),
+            "no test publishes `{shape}`, so that fixture shape exercises \
+             nothing: remove it, or add the test that needs it"
+        );
+    }
+}

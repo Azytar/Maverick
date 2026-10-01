@@ -10,13 +10,13 @@
 //! instance is present. Sharing a runtime directory between the two made that
 //! assertion depend on whether a fixture happened to be up.
 
-use maverick_sys::identity::InstanceInfo;
 use maverickctl::ctl::main_with_args;
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::process::ExitCode;
 
+mod instance;
 mod runtime_dir;
+
+use instance::{Instance, Published};
 
 /// A private runtime directory, so nothing here is visible to another test
 /// binary's fixtures and no live instance can be discovered.
@@ -39,64 +39,24 @@ fn isolate_runtime_dir() {
 ///
 /// One `sid` per test — the tests run concurrently and would otherwise race
 /// for the same socket and ficha.
-fn serve(sid: &str, reply: &'static [u8]) -> std::thread::JoinHandle<()> {
-    let path = maverick_sys::identity::sock_path(sid);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("create fixture session dir");
-    }
-    let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).expect("bind fixture socket");
-    maverick_sys::identity::write_meta(&InstanceInfo {
-        name: sid.to_string(),
-        session_id: sid.to_string(),
-        pid: std::process::id(),
-        display: String::new(),
-        tty_nr: 0,
-        x_server_identity: String::new(),
-        start_time: 0,
-        exe: String::new(),
-        started_at: 0,
-        alive: true,
-    })
-    .expect("write fixture ficha");
-    std::thread::spawn(move || {
-        // A generous budget, not exactly one or two. Every test shares one
-        // runtime directory, so resolving any one fixture makes the client
-        // ping *all* of them before it queries its own. A fixture that ran
-        // out of replies would fail with "connection refused" and pass for
-        // the wrong reason, so this answers far more than it needs.
-        for _ in 0..64 {
-            let Ok((stream, _)) = listener.accept() else {
-                break;
-            };
-            let mut reader = BufReader::new(&stream);
-            let mut request = String::new();
-            let _ = reader.read_line(&mut request);
-            let mut stream = stream;
-            let _ = stream.write_all(reply);
-            let _ = stream.flush();
-        }
+///
+/// The reply budget is a generous 64, not one or two. Every test shares one
+/// runtime directory, so resolving any one fixture makes the client ping *all*
+/// of them before it queries its own. A fixture that ran out of replies would
+/// fail with "connection refused" and pass for the wrong reason, so this answers
+/// far more than it needs.
+fn serve(sid: &str, reply: &'static str) -> Instance {
+    Instance::serve(sid, Published::Instance, Some(64), move |_| {
+        Some(reply.to_string())
     })
 }
 
-/// A fixture that accepts and then closes without writing.
-fn serve_silent(sid: &str) -> std::thread::JoinHandle<()> {
-    let path = maverick_sys::identity::sock_path(sid);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("create fixture session dir");
-    }
-    let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).expect("bind fixture socket");
-    std::thread::spawn(move || {
-        for _ in 0..64 {
-            let Ok((stream, _)) = listener.accept() else {
-                break;
-            };
-            let mut reader = BufReader::new(&stream);
-            let mut request = String::new();
-            let _ = reader.read_line(&mut request);
-        }
-    })
+/// A fixture that accepts and then closes without writing, publishing no record.
+///
+/// No record, so the tool fails at resolution rather than at the protocol. See
+/// the test that uses it.
+fn serve_silent(sid: &str) -> Instance {
+    Instance::serve(sid, Published::SocketOnly, Some(64), |_| None)
 }
 
 fn query(sid: &str) -> ExitCode {
@@ -114,20 +74,28 @@ fn query(sid: &str) -> ExitCode {
 #[test]
 fn an_error_reply_is_a_failed_command() {
     isolate_runtime_dir();
-    let _server = serve("errreply", b"error unknown-query: state\n");
+    let _server = serve("errreply", "error unknown-query: state\n");
     assert_eq!(query("errreply"), ExitCode::FAILURE);
 }
 
 #[test]
 fn a_json_reply_is_a_successful_command() {
     isolate_runtime_dir();
-    let _server = serve("jsonreply", b"{\"sel_mon\":0}\n");
+    let _server = serve("jsonreply", "{\"sel_mon\":0}\n");
     assert_eq!(query("jsonreply"), ExitCode::SUCCESS);
 }
 
+/// A peer that cannot be addressed as an instance is a failed command.
+///
 /// The protocol owes exactly one line per request, so a peer that closes
-/// without writing has failed to answer. Reporting that as success gave a
+/// without writing has failed to answer, and reporting that as success gave a
 /// bare newline on stdout, nothing on stderr, and exit 0.
+///
+/// What this fixture actually exercises is the step *before* the protocol: it
+/// publishes a socket and no record, so the tool never resolves an instance to
+/// ask. The silent-peer branch of the protocol — reachable, but answering
+/// nothing — is not covered here, and `a_refused_socket_is_a_failed_command`
+/// covers the mirror case of a record with no socket.
 #[test]
 fn a_silent_peer_is_a_failed_command() {
     isolate_runtime_dir();
@@ -138,24 +106,8 @@ fn a_silent_peer_is_a_failed_command() {
 #[test]
 fn a_refused_socket_is_a_failed_command() {
     isolate_runtime_dir();
-    let path = maverick_sys::identity::sock_path("refusedsock");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("create fixture session dir");
-    }
-    let _ = std::fs::remove_file(&path);
-    maverick_sys::identity::write_meta(&InstanceInfo {
-        name: "refusedsock".to_string(),
-        session_id: "refusedsock".to_string(),
-        pid: std::process::id(),
-        display: String::new(),
-        tty_nr: 0,
-        x_server_identity: String::new(),
-        start_time: 0,
-        exe: String::new(),
-        started_at: 0,
-        alive: true,
-    })
-    .expect("write fixture ficha");
-    // No listener at all: connect fails.
+    // A record and no listener: discovery resolves the instance and the connect
+    // is refused. A socket with no record would fail earlier, at resolution.
+    let _server = Instance::serve("refusedsock", Published::RecordOnly, None, |_| None);
     assert_eq!(query("refusedsock"), ExitCode::FAILURE);
 }

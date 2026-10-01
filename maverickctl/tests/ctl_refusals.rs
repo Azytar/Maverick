@@ -13,14 +13,14 @@
 //! different claim: that one says an `error` body is not data, this one says no
 //! verb may swallow one.
 
-use maverick_sys::identity::InstanceInfo;
 use maverickctl::ctl::main_with_args;
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod instance;
 mod runtime_dir;
+
+use instance::{Instance, Published};
 
 /// This binary's private runtime directory, so no fixture here is visible to
 /// another test binary's and no live instance can be discovered.
@@ -39,60 +39,28 @@ const TREE: &str = r#"{"sel_mon":0,"monitors":[{"index":0,"active_ws":0,"focused
 /// `error restarting` for a read once the instance has begun its handoff. A test
 /// chooses between them by asking for the receipt `ok` instead, so the two
 /// shapes the wire has — receipt and refusal — are both reachable.
-fn serve(
-    sid: &str,
-    tree_reply: &'static str,
-    dispatch_reply: &'static str,
-) -> std::thread::JoinHandle<()> {
-    let sid = sid.to_string();
-    let path = maverick_sys::identity::sock_path(&sid);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("create fixture session dir");
-    }
-    let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).expect("bind fixture socket");
-    maverick_sys::identity::write_meta(&InstanceInfo {
-        name: sid.to_string(),
-        session_id: sid.to_string(),
-        pid: std::process::id(),
-        display: String::new(),
-        tty_nr: 0,
-        x_server_identity: String::new(),
-        start_time: 0,
-        exe: String::new(),
-        started_at: 0,
-        alive: true,
-    })
-    .expect("write fixture ficha");
-    std::thread::spawn(move || {
-        // Unbounded, and for the life of the test binary: several tests share
-        // this thread-per-connection loop pattern, and a fixture that ran out of
-        // replies would fail as "connection refused" — passing a verb that is
-        // not really being exercised for the wrong reason.
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let reply = {
-                let mut reader = BufReader::new(&stream);
-                let mut request = String::new();
-                if reader.read_line(&mut request).is_err() {
-                    continue;
-                }
-                let request = request.trim().to_string();
-                if request == "ping" {
-                    format!("pong {sid}\n")
-                } else if request == "query tree" {
-                    format!("{tree_reply}\n")
-                } else if request.starts_with("query ") {
-                    "{}\n".to_string()
-                } else if request.starts_with("dispatch") {
-                    format!("{dispatch_reply}\n")
-                } else {
-                    "error unknown-command: fixture\n".to_string()
-                }
-            };
-            let _ = stream.write_all(reply.as_bytes());
-            let _ = stream.flush();
-        }
+///
+/// Unbounded, and for as long as the test holds the handle: a fixture that ran
+/// out of replies would fail as "connection refused", passing a verb that is not
+/// really being exercised for the wrong reason.
+fn serve(sid: &str, tree_reply: &'static str, dispatch_reply: &'static str) -> Instance {
+    // The worker outlives this call, so it owns its copy of everything it
+    // answers with rather than borrowing the caller's strings.
+    let owned_sid = sid.to_string();
+    let tree_reply = tree_reply.to_string();
+    let dispatch_reply = dispatch_reply.to_string();
+    Instance::serve(sid, Published::Instance, None, move |request| {
+        Some(if request == "ping" {
+            format!("pong {owned_sid}\n")
+        } else if request == "query tree" {
+            format!("{tree_reply}\n")
+        } else if request.starts_with("query ") {
+            "{}\n".to_string()
+        } else if request.starts_with("dispatch") {
+            format!("{dispatch_reply}\n")
+        } else {
+            "error unknown-command: fixture\n".to_string()
+        })
     })
 }
 
@@ -267,4 +235,69 @@ fn a_refused_dispatch_fails_and_a_receipt_does_not() {
     }
     drop(refused);
     drop(accepted);
+}
+
+/// A dropped fixture takes its socket, its record and its worker with it.
+///
+/// The handle is what makes this a fixture rather than a side effect. Without
+/// it the listener keeps answering and the record keeps reading `alive` for the
+/// rest of the binary, so the next test that stands up an instance is doing so
+/// beside one it did not ask for — and nothing reports it, because a leftover
+/// instance is only visible to whatever resolves it afterwards.
+#[test]
+fn a_dropped_refusal_fixture_leaves_nothing_discoverable() {
+    runtime_dir();
+    let sid = "refusaldrop";
+    let sock = maverick_sys::identity::sock_path(sid);
+    assert!(
+        maverickctl::discover::find_by_name(sid).is_none(),
+        "the fixture's namespace must start empty, or this proves nothing"
+    );
+    {
+        let server = serve(sid, TREE, "error busy: command queue full");
+        assert!(sock.exists(), "the fixture must publish a socket");
+        assert!(
+            maverickctl::client::ping(sid).is_ok(),
+            "the fixture must answer while it is held"
+        );
+        assert!(
+            maverickctl::discover::find_by_name(sid).is_some(),
+            "the fixture must be discoverable while it is held"
+        );
+        drop(server);
+    }
+    assert!(!sock.exists(), "the socket outlived its owner: {sock:?}");
+    assert!(
+        maverickctl::discover::find_by_name(sid).is_none(),
+        "the instance is still discoverable after its owner was dropped"
+    );
+    assert!(
+        maverickctl::client::ping(sid).is_err(),
+        "something is still answering on a socket its owner withdrew"
+    );
+}
+
+/// A teardown must not reach past its own session.
+///
+/// Every fixture in this binary shares one runtime directory, so a cleanup that
+/// named a different session would delete a neighbour's socket and its record —
+/// which is how a test starts failing because another one tidied up.
+#[test]
+fn a_dropped_refusal_fixture_spares_the_others() {
+    runtime_dir();
+    let (mine, theirs) = ("refusalspare-mine", "refusalspare-theirs");
+    let other = serve(theirs, TREE, "ok");
+    let sock = maverick_sys::identity::sock_path(theirs);
+    {
+        let _own = serve(mine, TREE, "ok");
+    }
+    assert!(
+        sock.exists(),
+        "dropping one fixture removed a session it never created: {sock:?}"
+    );
+    assert!(
+        maverickctl::discover::find_by_name(theirs).is_some(),
+        "dropping one fixture removed another session's record"
+    );
+    drop(other);
 }
