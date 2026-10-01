@@ -416,10 +416,29 @@ fn status(c: &Ctl, _args: &[String]) -> Result<(), String> {
 }
 
 /// Run one of the lifecycle verbs that all take a name and nothing else.
+///
+/// `--force` means one thing across this group: skip the "is it still running?"
+/// check that `remove` makes, so a live session's record can be deleted. It is
+/// read for every verb because the flag is recognised before the verb is
+/// dispatched, but it only *means* anything for `remove` — so for the other
+/// verbs it is refused rather than accepted and dropped.
+///
+/// Silently ignoring it was the wrong answer in both directions: `session stop
+/// <name> --force` printed `stopped` and exited 0 as though the force had been
+/// applied, and `session start <name> --force` reported the same for a request
+/// that never had a force to apply.
 fn change(c: &Ctl, args: &[String], verb: &str) -> Result<(), String> {
     let name = session_target(c)?;
     let parsed = SessionName::parse(&name).map_err(|e| e.to_string())?;
     let force = args.iter().any(|a| a == "--force" || a == "-f");
+    if force && verb != "remove" {
+        return Err(format!(
+            "`session {verb}` takes no --force.\n  \
+             --force belongs to `session remove`, where it removes a session that \
+             is still running instead of refusing.\n  \
+             try: maverickctl session remove {name}"
+        ));
+    }
     let result = match verb {
         "start" => lifecycle::start(&parsed).map(|_| ()),
         "stop" => lifecycle::stop(&parsed).map(|_| ()),
@@ -983,6 +1002,16 @@ fn process_inspect(c: &Ctl, args: &[String]) -> Result<(), String> {
 }
 
 fn process_kill(c: &Ctl, args: &[String]) -> Result<(), String> {
+    // `-f` is the one spelling a reader would expect to mean force, and this
+    // verb is the one place it used to be accepted and dropped: it was not in
+    // the group `keep` list and not in `KNOWN_FLAGS`, so it fell through every
+    // filter, never set `force`, and the process received SIGTERM — a caller
+    // asking for an unconditional kill was told `signalled: true`.
+    if args.iter().any(|a| a == "-f") {
+        return Err("process kill does not take -f.\n  \
+             use --force (or -9) for SIGKILL instead of SIGTERM"
+            .to_string());
+    }
     let (name, rest) = split_session_and_rest(c, args)
         .ok_or_else(|| "process kill needs a session and a pid".to_string())?;
     let record = live_record(&name).ok_or_else(|| {
