@@ -63,6 +63,9 @@ mod tests;
 #[cfg(test)]
 mod invariants;
 
+#[cfg(test)]
+mod focus_dir_tests;
+
 /// Test-only heap-allocation counter used to prove the per-arrange projection
 /// stays allocation-free. Compiled out of the shipped binary.
 #[cfg(test)]

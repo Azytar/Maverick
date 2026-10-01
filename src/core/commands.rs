@@ -851,6 +851,16 @@ impl Command for FocusDirection {
                 cmds.push(Effect::Unfocus(f));
             }
             state.monitors[mi].focused = Some(w);
+            // The maximize overlay is presented exactly while its window holds the
+            // focus, so the owner has to follow this write. Every direction
+            // funnels through here, including `Next`/`Prev` (whose own write
+            // above lands on the same value before any reader runs), so one call
+            // covers them all. Without it the state handed to `Engine::execute`
+            // still names the previously focused window, and `core::present`,
+            // `render::stack_overlay` and `presented_overlay_owner` (hence
+            // `best_focus`) keep presenting and stacking a window the user just
+            // navigated away from.
+            state.sync_presented_maximize(mi);
             cmds.push(Effect::ArrangeMonitor(mi));
             cmds.push(Effect::FocusWindow(Some(w)));
             return CommandReport::with_event(cmds, Event::FocusChanged { from, to: Some(w) });
