@@ -12,6 +12,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 
 mod runtime_dir;
 
@@ -26,7 +27,51 @@ fn runtime_dir() -> PathBuf {
 /// The recorded line is the contract under test: it is what the window manager
 /// would execute. Answering `ok` (rather than a refusal) keeps the exit status
 /// out of it, so a failure here can only mean the wrong bytes were sent.
-fn serve_recording(sid: &str) -> Receiver<String> {
+///
+/// The returned handle owns the listener, its thread and the identity record it
+/// published, and takes all three back when dropped. That is what makes the
+/// fixture a fixture: without it, the socket stays bound by a thread nothing
+/// can reach, the record stays on disk reading `alive`, and a sibling test that
+/// resolves a session by context finds this instance instead of none — which
+/// answers with an error about *this* session rather than about the one the
+/// command asked for.
+struct Recording {
+    sid: String,
+    stop: Option<mpsc::Sender<()>>,
+    worker: Option<JoinHandle<()>>,
+    recorded: Receiver<String>,
+}
+
+impl Recording {
+    /// The next request line the instance received, or `None` if none arrives
+    /// within `timeout`.
+    fn next_line(&self, timeout: std::time::Duration) -> Option<String> {
+        self.recorded.recv_timeout(timeout).ok()
+    }
+}
+
+impl Drop for Recording {
+    fn drop(&mut self) {
+        // The signal is a channel, not a connection to the fixture's own
+        // socket: waking a thread blocked in `accept` by connecting to it works
+        // only while the socket file is there, and a fixture whose teardown runs
+        // after something else has unlinked it would then join a thread that can
+        // never be woken.
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        // Joining before the unlink is what makes the cleanup deterministic
+        // rather than a race with a thread that is on its way out.
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        // Only this session's own socket and record. `cleanup_meta` unlinks by
+        // type, so it cannot follow a path that is not the fixture's.
+        maverick_sys::identity::cleanup_meta(&self.sid);
+    }
+}
+
+fn serve_recording(sid: &str) -> Recording {
     let sid = sid.to_string();
     let path = maverick_sys::identity::sock_path(&sid);
     if let Some(parent) = path.parent() {
@@ -48,27 +93,53 @@ fn serve_recording(sid: &str) -> Receiver<String> {
     })
     .expect("write fixture ficha");
 
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            let mut reader = BufReader::new(&stream);
-            let mut request = String::new();
-            if reader.read_line(&mut request).is_err() {
-                continue;
+    let (tx, recorded) = mpsc::channel();
+    let (stop, stopped) = mpsc::channel::<()>();
+    let name = sid.clone();
+    // Non-blocking accept, waiting on the stop channel in between: `accept` has
+    // no timeout, so without this the thread could only be woken by a
+    // connection, and a fixture nobody connects to could never be joined.
+    listener
+        .set_nonblocking(true)
+        .expect("make the fixture listener cancellable");
+    let worker = std::thread::spawn(move || loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let mut reader = BufReader::new(&stream);
+                let mut request = String::new();
+                if reader.read_line(&mut request).is_err() {
+                    continue;
+                }
+                let request = request.trim_end().to_string();
+                let _ = tx.send(request.clone());
+                let reply = if request == "ping" {
+                    format!("pong {name}\n")
+                } else {
+                    "ok\n".to_string()
+                };
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
             }
-            let request = request.trim_end().to_string();
-            let _ = tx.send(request.clone());
-            let reply = if request == "ping" {
-                format!("pong {sid}\n")
-            } else {
-                "ok\n".to_string()
-            };
-            let _ = stream.write_all(reply.as_bytes());
-            let _ = stream.flush();
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Nothing to serve. This wait is what makes teardown possible;
+                // its length bounds how long a drop takes, not what any test
+                // observes.
+                if stopped
+                    .recv_timeout(std::time::Duration::from_millis(1))
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     });
-    rx
+    Recording {
+        sid,
+        stop: Some(stop),
+        worker: Some(worker),
+        recorded,
+    }
 }
 
 /// Run `maverickctl` and return the action line the instance received.
@@ -81,7 +152,10 @@ fn serve_recording(sid: &str) -> Receiver<String> {
 fn dispatched(args: &[&str]) -> String {
     runtime_dir();
     let sid = "clioptions";
-    let rx = serve_recording(sid);
+    // Held until the line is read: the instance has to be listening while the
+    // command runs, and dropped with it so the next command starts against a
+    // clean namespace rather than one this fixture is still occupying.
+    let server = serve_recording(sid);
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_maverickctl"));
     cmd.args(args).arg("--session").arg(sid);
     let out = cmd.output().expect("run maverickctl");
@@ -92,7 +166,7 @@ fn dispatched(args: &[&str]) -> String {
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
-        let Ok(line) = rx.recv_timeout(deadline - std::time::Instant::now()) else {
+        let Some(line) = server.next_line(deadline - std::time::Instant::now()) else {
             break;
         };
         if line.starts_with("dispatch") {
@@ -100,6 +174,117 @@ fn dispatched(args: &[&str]) -> String {
         }
     }
     panic!("`maverickctl {args:?}` put no dispatch on the wire")
+}
+
+/// A dropped recording server takes its socket, its record and its thread with
+/// it, and leaves nothing behind a sibling could resolve.
+///
+/// The alternative is invisible from the test that made the fixture: the socket
+/// stays bound by a thread nothing can reach and the record stays on disk
+/// reading `alive`, so `maverickctl` invoked without a session resolves *this*
+/// instance and reports an error about it. The tests that expect a command to
+/// fail for want of a named session would then be asserting against the wrong
+/// error.
+#[test]
+fn a_dropped_recording_server_leaves_nothing_discoverable() {
+    runtime_dir();
+    let sid = "clileak";
+    let sock = maverick_sys::identity::sock_path(sid);
+    let meta = maverick_sys::identity::try_meta_path(sid).expect("a valid session id");
+    assert!(
+        maverick_sys::identity::read_meta(sid).is_none(),
+        "the fixture's namespace must start empty, or this proves nothing"
+    );
+
+    {
+        let server = serve_recording(sid);
+        assert!(
+            sock.exists(),
+            "the fixture must publish a socket to be leaked"
+        );
+        assert!(
+            maverick_sys::identity::read_meta(sid).is_some(),
+            "the fixture must publish a record to be leaked"
+        );
+        // It has to be reachable while alive, or the drop could "clean up" a
+        // server that never worked.
+        assert!(
+            std::os::unix::net::UnixStream::connect(&sock).is_ok(),
+            "the fixture must accept a connection while it is held"
+        );
+        drop(server);
+    }
+
+    assert!(!sock.exists(), "the socket outlived its owner: {sock:?}");
+    assert!(
+        !meta.exists(),
+        "the identity record outlived its owner: {meta:?}"
+    );
+    assert!(
+        maverick_sys::identity::read_meta(sid).is_none(),
+        "the session is still resolvable after the fixture was dropped"
+    );
+}
+
+/// A teardown must not reach past its own session.
+///
+/// The fixture publishes under one session id, and the tests in this binary
+/// share a runtime directory. `cleanup_meta` unlinks by type under the session
+/// directory it is given, so a fixture that called it with a different id would
+/// delete a neighbour's socket — which is how one test ends up failing because
+/// another one tidied up.
+#[test]
+fn a_dropped_recording_server_spares_the_others() {
+    runtime_dir();
+    let (mine, theirs) = ("clispare-mine", "clispare-theirs");
+
+    let other = serve_recording(theirs);
+    let sock = maverick_sys::identity::sock_path(theirs);
+    assert!(sock.exists(), "the neighbour must be up to be spared");
+
+    {
+        let _own = serve_recording(mine);
+        // `_own` drops here, while `other` is still held.
+    }
+
+    assert!(
+        sock.exists(),
+        "dropping one fixture removed a session it never created: {sock:?}"
+    );
+    assert!(
+        maverick_sys::identity::read_meta(theirs).is_some(),
+        "dropping one fixture removed another session's record"
+    );
+    drop(other);
+}
+
+/// Repeated creation and teardown is what the option tests do, and each round has
+/// to end clean or the next one starts against a leftover.
+#[test]
+fn a_recording_server_can_be_created_and_dropped_repeatedly() {
+    runtime_dir();
+    let sid = "clicycle";
+    for round in 0..3 {
+        let server = serve_recording(sid);
+        let sock = maverick_sys::identity::sock_path(sid);
+        assert!(
+            sock.exists(),
+            "round {round}: the fixture must publish a socket"
+        );
+        assert!(
+            std::os::unix::net::UnixStream::connect(&sock).is_ok(),
+            "round {round}: the fixture must accept while held"
+        );
+        drop(server);
+        assert!(
+            !sock.exists(),
+            "round {round}: the socket outlived its owner"
+        );
+        assert!(
+            maverick_sys::identity::read_meta(sid).is_none(),
+            "round {round}: the record outlived its owner"
+        );
+    }
 }
 
 /// A formatting option is this tool's, so it must not become action text.
@@ -143,9 +328,9 @@ fn a_formatting_option_never_reaches_the_action_line() {
 fn json_output_stays_a_single_document_on_stdout() {
     runtime_dir();
     let sid = "clijson";
-    let rx = serve_recording(sid);
-    // `state` asks the instance for the snapshot; answer with a document.
-    let _ = rx;
+    // Held for the command: `state` asks the instance for the snapshot, and the
+    // fixture answers `ok`, which is what the assertions below read.
+    let _server = serve_recording(sid);
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_maverickctl"))
         .args(["state", "--json"])
         .arg("--session")
