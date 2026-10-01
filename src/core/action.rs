@@ -145,6 +145,19 @@ fn dir_and_window(arg: &str) -> Option<(Dir, WindowId)> {
     Some((dir_from(dir)?, parse_window_id(id)?))
 }
 
+/// Parse a finite float, rejecting the values `f32::from_str` admits but a
+/// geometry argument must never carry.
+///
+/// `parse::<f32>` accepts `NaN`, `inf` and any decimal that overflows to it, so
+/// without this guard a spelling like `grow_col_pct:NaN` becomes a live action.
+/// Every consumer of these numbers divides or scales them into a rect, and a
+/// non-finite one either saturates to a meaningless `0`/`i32::MAX` cast or
+/// poisons a stored weight. Rejecting here is the contract that a parsed
+/// action's argument is a number a projection can use.
+fn parse_finite_f32(s: &str) -> Option<f32> {
+    s.parse::<f32>().ok().filter(|v| v.is_finite())
+}
+
 /// Parse a signed percentage, with or without the sign character a user types.
 ///
 /// `+10%`, `10`, `-5%` and `-5` all mean the same three things respectively;
@@ -152,7 +165,7 @@ fn dir_and_window(arg: &str) -> Option<(Dir, WindowId)> {
 /// that already rendered the number as a percentage should not have to
 /// reproduce the decoration.
 fn parse_percent(s: &str) -> Option<f32> {
-    s.trim().trim_end_matches('%').trim().parse::<f32>().ok()
+    parse_finite_f32(s.trim().trim_end_matches('%').trim())
 }
 
 fn layout_from(s: &str) -> Option<LayoutKind> {
@@ -306,11 +319,7 @@ pub fn parse(input: &str) -> Option<Action> {
             .map(Action::OverviewNav),
         "overview_enter" => none_if_arg(has_arg, Action::OverviewEnter),
         "viewport_zoom" => {
-            let delta = if has_arg {
-                arg.parse::<f32>().ok()?
-            } else {
-                0.2
-            };
+            let delta = if has_arg { parse_finite_f32(arg)? } else { 0.2 };
             Some(Action::ViewportZoom(delta))
         }
         "page_snap" => has_arg
@@ -561,5 +570,49 @@ mod tests {
         assert!(parse("view 0").is_none());
         assert!(parse("grow_col:abc").is_none());
         assert!(parse("spawn:").is_none());
+    }
+
+    /// `f32::from_str` admits `NaN`, `inf` and overflowing decimals. Every
+    /// consumer of these arguments scales or divides them into a rect, so a
+    /// non-finite value must never become a live action — the request is
+    /// malformed, not a request to change nothing.
+    #[test]
+    fn a_non_finite_float_argument_is_rejected() {
+        for s in [
+            "viewport_zoom:NaN",
+            "viewport_zoom:nan",
+            "viewport_zoom:inf",
+            "viewport_zoom:-inf",
+            "viewport_zoom:Infinity",
+            "viewport_zoom:1e400",
+            "viewport_zoom:-1e400",
+            "grow_col_pct:NaN",
+            "grow_col_pct:inf",
+            "grow_col_pct:-inf",
+            "grow_col_pct:1e400",
+            "grow_col_pct:nan%",
+        ] {
+            assert!(
+                parse(s).is_none(),
+                "{s:?} must be rejected, not parsed into an action"
+            );
+        }
+    }
+
+    /// The guard above must not reject magnitudes an X11 wire can carry: the
+    /// rejection is about finiteness, not about size.
+    #[test]
+    fn a_large_but_finite_float_argument_is_still_accepted() {
+        assert_eq!(
+            parse("viewport_zoom:1000"),
+            Some(Action::ViewportZoom(1000.0)),
+            "a finite magnitude is a real request; range is the command's business"
+        );
+        assert_eq!(parse("grow_col_pct:1000"), Some(Action::GrowColPct(1000.0)));
+        assert_eq!(parse("viewport_zoom:0.2"), Some(Action::ViewportZoom(0.2)));
+        assert_eq!(
+            parse("viewport_zoom:-1.5"),
+            Some(Action::ViewportZoom(-1.5))
+        );
     }
 }

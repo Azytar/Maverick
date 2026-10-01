@@ -536,13 +536,17 @@ impl Command for ViewportZoom {
         let fs = fs_of(state, mi, ws_i);
         let ws = &mut state.monitors[mi].workspaces[ws_i];
 
-        // Sanitize IPC/config input: `parse::<f32>` accepts NaN/inf, and
-        // `NaN.clamp()` returns NaN, which would persist `page_zoom=NaN`
-        // and poison every later `ribbon_geom` division.
-        let delta = if self.0.is_finite() { self.0 } else { 0.0 };
-        if !delta.is_finite() || delta.abs() > 10.0 {
+        // `core::action` refuses a non-finite delta, but this command is also
+        // reachable directly (`Engine::dispatch` takes a typed `Action`, and a
+        // caller can build one), so the rejection is made here too. It must be
+        // a rejection rather than a substitution: silently reading a non-finite
+        // request as "no zoom change" would still fall through to the branch
+        // below that clears Overview and reports a layout change, turning
+        // malformed input into an apparently successful operation.
+        if !self.0.is_finite() || self.0.abs() > 10.0 {
             return CommandReport::new(cmds);
         }
+        let delta = self.0;
         let factor = 1.0 + delta;
         let new = (ws.page_zoom * factor).clamp(VIEWPORT_ZOOM_MIN, VIEWPORT_ZOOM_MAX);
         // `clamp` still yields NaN if the stored factor was already NaN (a

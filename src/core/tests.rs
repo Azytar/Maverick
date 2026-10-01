@@ -2747,6 +2747,80 @@ mod unit_tests {
         );
     }
 
+    /// A non-finite zoom delta is malformed input, not a request to change
+    /// nothing. Reading it as "no zoom change" used to fall through to the
+    /// branch that leaves `Normal` viewport mode — which clears Overview, resets
+    /// the zoom and publishes a layout change, so a garbage argument produced an
+    /// apparently successful operation with a real visible effect.
+    #[test]
+    fn a_non_finite_viewport_zoom_is_refused_without_touching_the_workspace() {
+        use crate::types::{Action, ViewportMode};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+
+        // Start in Overview: the branch a rejected request must not reach.
+        engine.state.monitors[mi].workspaces[ws_i].overview = true;
+        engine.state.monitors[mi].workspaces[ws_i].zoom = 0.4;
+
+        let snapshot = |e: &Engine| {
+            let ws = &e.state.monitors[mi].workspaces[ws_i];
+            format!(
+                "overview={} zoom={} page_zoom={} mode={:?} cam={}",
+                ws.overview, ws.zoom, ws.page_zoom, ws.viewport_mode, ws.camera.position
+            )
+        };
+        let before = snapshot(&engine);
+
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let effects = engine.dispatch(Action::ViewportZoom(bad));
+            assert_eq!(
+                snapshot(&engine),
+                before,
+                "a non-finite delta ({bad}) must leave the workspace untouched"
+            );
+            assert!(
+                !effects
+                    .iter()
+                    .any(|e| matches!(e, crate::core::effect::Effect::ArrangeMonitor(_))),
+                "a refused request must not ask for an arrange (delta {bad})"
+            );
+            assert!(
+                engine.state.monitors[mi].workspaces[ws_i].viewport_mode == ViewportMode::Normal,
+                "the workspace is untouched, so the mode is unchanged"
+            );
+        }
+    }
+
+    /// The same rejection must hold for a magnitude outside the documented
+    /// range, so the range guard is reached rather than dead code.
+    #[test]
+    fn an_out_of_range_viewport_zoom_is_refused_without_touching_the_workspace() {
+        use crate::types::Action;
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        engine.state.monitors[mi].workspaces[ws_i].overview = true;
+
+        let before = {
+            let ws = &engine.state.monitors[mi].workspaces[ws_i];
+            (ws.overview, ws.zoom, ws.page_zoom)
+        };
+        let effects = engine.dispatch(Action::ViewportZoom(1e30));
+        let ws = &engine.state.monitors[mi].workspaces[ws_i];
+        assert_eq!(
+            (ws.overview, ws.zoom, ws.page_zoom),
+            before,
+            "an out-of-range delta must leave the workspace untouched"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, crate::core::effect::Effect::ArrangeMonitor(_))),
+            "a refused request must not ask for an arrange"
+        );
+    }
+
     #[test]
     fn viewport_zoom_out_returns_to_normal() {
         use crate::types::{Action, ViewportMode};
@@ -10229,14 +10303,14 @@ mod unit_tests {
             #[test]
             fn prop_action_vocabulary_round_trips(a in arb_action()) {
                 // `arb_action` draws `ViewportZoom` from raw bit patterns so the
-                // state-machine properties meet NaN and subnormals. NaN is not
-                // equal to itself, so the spelling of a non-finite zoom can never
-                // compare equal to what it parsed back to — that is a limit of
-                // the comparison, not of the grammar, so it is excluded here
-                // rather than allowed to masquerade as a parse failure.
+                // state-machine properties meet NaN and subnormals. A non-finite
+                // zoom is refused by the parser (see `parse_finite_f32`), so it
+                // has no spelling that parses back at all — it is not a value
+                // the vocabulary can carry, which is a stronger statement than
+                // "NaN does not compare equal to itself".
                 prop_assume!(
                     !matches!(a, Action::ViewportZoom(z) if !z.is_finite()),
-                    "a non-finite zoom cannot round-trip through equality"
+                    "a non-finite zoom is rejected by the parser, so it cannot round-trip"
                 );
                 let text = canonical(&a).expect("every action has a canonical spelling");
                 let parsed = parse_action(&text);
