@@ -23,7 +23,6 @@ use crate::core::layout::Placements;
 use crate::types::{Monitor, Rect, State};
 
 #[cfg(test)]
-#[cfg(test)]
 use crate::core::layout::RibbonScratch;
 
 /// Rewrite `placements` in place, applying the presentation overlay for `mon`.
@@ -135,13 +134,7 @@ mod tests {
 
         let mut p = Placements::new();
 
-        crate::core::layout::arrange(
-            &state,
-            0,
-            &cfg,
-            &mut p,
-            &mut RibbonScratch::default(),
-        );
+        crate::core::layout::arrange(&state, 0, &cfg, &mut p, &mut RibbonScratch::default());
         present(&state, &state.monitors[0], &mut p);
 
         let (_, rect, bw) = p.iter().find(|e| e.0 == 1).copied().unwrap();
@@ -166,13 +159,7 @@ mod tests {
 
         let mut p = Placements::new();
 
-        crate::core::layout::arrange(
-            &state,
-            0,
-            &cfg,
-            &mut p,
-            &mut RibbonScratch::default(),
-        );
+        crate::core::layout::arrange(&state, 0, &cfg, &mut p, &mut RibbonScratch::default());
         present(&state, &state.monitors[0], &mut p);
 
         let (_, rect, bw) = p.iter().find(|e| e.0 == 1).copied().unwrap();
@@ -201,13 +188,7 @@ mod tests {
 
         let mut p = Placements::new();
 
-        crate::core::layout::arrange(
-            &state,
-            0,
-            &cfg,
-            &mut p,
-            &mut RibbonScratch::default(),
-        );
+        crate::core::layout::arrange(&state, 0, &cfg, &mut p, &mut RibbonScratch::default());
         present(&state, &state.monitors[0], &mut p);
 
         let (_, rect, bw) = p.iter().find(|e| e.0 == 1).copied().unwrap();
@@ -235,13 +216,7 @@ mod tests {
 
         let mut p = Placements::new();
 
-        crate::core::layout::arrange(
-            &state,
-            0,
-            &cfg,
-            &mut p,
-            &mut RibbonScratch::default(),
-        );
+        crate::core::layout::arrange(&state, 0, &cfg, &mut p, &mut RibbonScratch::default());
         present(&state, &state.monitors[0], &mut p);
 
         let (_, rect, _) = p.iter().find(|e| e.0 == 1).copied().unwrap();
@@ -269,13 +244,7 @@ mod tests {
 
         let mut p = Placements::new();
 
-        crate::core::layout::arrange(
-            &state,
-            0,
-            &cfg,
-            &mut p,
-            &mut RibbonScratch::default(),
-        );
+        crate::core::layout::arrange(&state, 0, &cfg, &mut p, &mut RibbonScratch::default());
         present(&state, &state.monitors[0], &mut p);
 
         let (_, rect, bw) = p.iter().find(|e| e.0 == 1).copied().unwrap();
@@ -305,13 +274,7 @@ mod tests {
 
         let mut p = Placements::new();
 
-        crate::core::layout::arrange(
-            &state,
-            0,
-            &cfg,
-            &mut p,
-            &mut RibbonScratch::default(),
-        );
+        crate::core::layout::arrange(&state, 0, &cfg, &mut p, &mut RibbonScratch::default());
         let tile = p.iter().find(|e| e.0 == 1).copied().unwrap().1;
         present(&state, &state.monitors[0], &mut p);
         let presented = p.iter().find(|e| e.0 == 1).copied().unwrap().1;
@@ -367,13 +330,7 @@ mod tests {
 
         let mut p = Placements::new();
 
-        crate::core::layout::arrange(
-            &state,
-            0,
-            &cfg,
-            &mut p,
-            &mut RibbonScratch::default(),
-        );
+        crate::core::layout::arrange(&state, 0, &cfg, &mut p, &mut RibbonScratch::default());
         let snapshot = p.clone();
         present(&state, &state.monitors[0], &mut p);
 
@@ -660,13 +617,7 @@ mod proptests {
     /// presented ones so a test can tell which entries the overlay rewrote.
     fn project(state: &State, cfg: &Cfg) -> (Placements, Placements) {
         let mut out = Placements::new();
-        arrange(
-            state,
-            0,
-            cfg,
-            &mut out,
-            &mut RibbonScratch::default(),
-        );
+        arrange(state, 0, cfg, &mut out, &mut RibbonScratch::default());
         let tiles = out.clone();
         present_into(state, &state.monitors[0], &mut out);
         (tiles, out)
