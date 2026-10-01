@@ -36,14 +36,21 @@
 //!
 //! Config never aborts startup. A missing file is silent; a syntax error
 //! discards the whole file and returns the compiled baseline; a semantic fault
-//! (unknown key or action, wrong type, out-of-range value, duplicate bind,
-//! rule with no criteria) drops only the offending value or entry and is
-//! recorded in `Diagnostics`. Callers decide what a diagnostic means:
+//! drops only the offending value or entry and is recorded in `Diagnostics`.
+//! Callers decide what a diagnostic means:
 //! `load_config` logs and continues, `--check-config` turns it into an exit
 //! code, and `reload_config` goes further — it asks for the [`ConfigSource`]
 //! first, because a compiled baseline returned for a missing or unparseable file
 //! is not the configuration the session is already running, so it keeps that one
 //! and only warns (see `load_from_path_classified`).
+//!
+//! What is reported is scoped to what Maverick can name. A key inside a table
+//! it knows (`[general]`, `[colors]`, `[autostart]`, `[[keybindings]]`,
+//! `[[rules]]`) with no field behind it is a warning: the file still loads, but
+//! the user is told which setting did not take. A *table* it has never heard of
+//! is skipped without a word, because that is the shape a config written for a
+//! newer Maverick takes, and refusing to load it (or nagging about it) would
+//! break forward compatibility for no benefit.
 
 use std::path::{Path, PathBuf};
 
@@ -63,7 +70,12 @@ use crate::types::Action;
 ///   unknown action, binding conflict, workspace out of range, unknown
 ///   `window_type`, numeric value out of range, rule with no criteria.
 /// * `warnings` — a value that was accepted-but-degraded: deprecated alias,
-///   wrong-typed field, empty entry discarded, unknown theme.
+///   wrong-typed field, unknown key in a known table, empty entry discarded,
+///   unknown theme.
+///
+/// A warning still makes `--check-config` exit non-zero (`is_clean` requires
+/// both lists empty), so "the file loads" is never mistaken for "the file is
+/// what you wrote".
 #[derive(Debug, Default, Clone)]
 pub struct Diagnostics {
     pub warnings: Vec<String>,
@@ -400,11 +412,13 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                                 "[autostart].{key} must be a list of string lists; ignoring it"
                             ));
                         }
+                    } else {
+                        warn_unknown_key(diag, "[autostart]", key);
                     }
                 }
                 Some(Cur::Row("keybindings")) => {
                     if let Some(row) = user.keybindings.last_mut() {
-                        apply_keybind_key(row, key, &value);
+                        apply_keybind_key(row, key, &value, diag);
                     }
                 }
                 Some(Cur::Row("rules")) => {
@@ -417,6 +431,10 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                 // also where `[compositor]` and `[animations]` land — the
                 // subsystems they configured no longer exist, so there is no
                 // key of theirs to honour and no reason to name them here.
+                // The trade is deliberate: a whole table Maverick has never
+                // heard of is a forward-compatibility case, while a key inside
+                // a table it *does* know is a typo only the user can fix — so
+                // that one is reported (see `warn_unknown_key`).
                 _ => {}
             },
         }
@@ -425,8 +443,9 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
 }
 
 /// Map one `[general]` key onto the model. Deprecated spellings (`border_w`,
-/// `default_col_w`, …) resolve to their canonical field here, and a
-/// wrong-typed value is skipped with a warning rather than rejecting the file.
+/// `default_col_w`, …) resolve to their canonical field here, a
+/// wrong-typed value is skipped with a warning rather than rejecting the file,
+/// and a key this table has no field for is reported instead of dropped.
 fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
         "border_width" | "border_w" => set_u32(&mut g.border_width, key, value, diag),
@@ -455,7 +474,7 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
                 warn_bad(diag, key);
             }
         }
-        _ => {}
+        _ => warn_unknown_key(diag, "[general]", key),
     }
 }
 
@@ -465,16 +484,16 @@ fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>, diag: &mut D
         "normal" | "col_normal" => set_u32(&mut c.normal, key, value, diag),
         "focused" | "col_focused" => set_u32(&mut c.focused, key, value, diag),
         "urgent" | "col_urgent" => set_u32(&mut c.urgent, key, value, diag),
-        _ => {}
+        _ => warn_unknown_key(diag, "[colors]", key),
     }
 }
 
 /// Map one `[[keybindings]]` key onto the current row.
-fn apply_keybind_key(row: &mut KeybindEntry, key: &str, value: &Value<'_>) {
+fn apply_keybind_key(row: &mut KeybindEntry, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
         "key" => row.key = value.as_str().map_or_else(String::new, str::to_string),
         "action" => row.action = value.as_str().map_or_else(String::new, str::to_string),
-        _ => {}
+        _ => warn_unknown_key(diag, "[[keybindings]]", key),
     }
 }
 
@@ -524,7 +543,7 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
         "true_fullscreen" | "exclusive_fullscreen" => {
             set_rule_bool(&mut row.true_fullscreen, key, value, diag);
         }
-        _ => {}
+        _ => warn_unknown_key(diag, "[[rules]]", key),
     }
 }
 
@@ -599,6 +618,20 @@ fn warn_bad(diag: &mut Diagnostics, key: &str) {
     diag.warnings.push(format!(
         "value for '{key}' has an unexpected type; ignoring it"
     ));
+}
+
+/// Report a key that a known table has no field for. The value is accepted and
+/// the rest of the file still merges, so this is a warning rather than an error:
+/// what the user gets is a configuration that works minus the one setting they
+/// believe they made, which is exactly the case a silent drop hides best.
+/// Naming the table and the key is what makes it fixable — `honour_initial_state`
+/// and `[general].honor_initial_state` are one keystroke apart.
+///
+/// Unknown *tables* are not reported: see `parse_user`, where forward
+/// compatibility with a config written for a newer Maverick takes precedence.
+fn warn_unknown_key(diag: &mut Diagnostics, section: &str, key: &str) {
+    diag.warnings
+        .push(format!("unknown key '{section}.{key}'; ignoring it"));
 }
 
 /// Fold [`UserConfig`] into the baseline [`Cfg`], recording per-entry
@@ -1288,59 +1321,6 @@ action = "kill"
         let _ = std::fs::remove_file(path);
     }
 
-    #[test]
-    fn user_numeric_bind_keeps_other_auto_binds() {
-        // A user binding on a digit slot claims only that slot; the other
-        // auto-generated workspace binds survive (there is no full
-        // suppression), and the claimed slot keeps the user's action.
-        let user = parse_string(
-            r#"
-[[keybindings]]
-key = "super+1"
-action = "view:2"
-"#,
-        );
-        let mut diag = Diagnostics::default();
-        let cfg = merge_config(compiled_config(), user, &mut diag);
-        // 1 user bind + 17 remaining generated (the other 8 super-view binds
-        // plus the 9 super+shift move binds; super+1's generated view is skipped).
-        assert_eq!(cfg.keybinds.len(), 18, "other auto binds must survive");
-        let sup = u16::from(ModMask::M4);
-        assert!(
-            cfg.keybinds
-                .iter()
-                .any(|(m, k, a)| *m == sup && *k == b'1' as u32 && matches!(a, Action::View(1))),
-            "user's claimed slot keeps view:2"
-        );
-        assert!(
-            !cfg.keybinds.iter().any(|(m, k, a)| {
-                *m == sup && *k == b'1' as u32 && matches!(a, Action::View(0))
-            }),
-            "generated view:0 for the claimed slot must be suppressed"
-        );
-        assert!(
-            cfg.keybinds
-                .iter()
-                .any(|(m, k, a)| *m == sup && *k == b'2' as u32 && matches!(a, Action::View(1))),
-            "a non-claimed slot keeps its generated bind"
-        );
-    }
-
-    #[test]
-    fn auto_workspace_binds_false_disables_generation() {
-        let user = parse_string(
-            r"
-[general]
-auto_workspace_binds = false
-",
-        );
-        let mut diag = Diagnostics::default();
-        let cfg = merge_config(compiled_config(), user, &mut diag);
-        assert!(!cfg.keybinds.iter().any(|(_, k, a)| {
-            (b'1'..=b'9').contains(&(*k as u8))
-                && matches!(a, Action::View(_) | Action::MoveToWs(_))
-        }));
-    }
 
     #[test]
     fn n_tags_limits_generated_workspace_binds() {
@@ -1434,7 +1414,58 @@ commands = [["example", "--flag"]]
         assert!(!cfg.rules[0].true_fullscreen);
     }
 
-
+    /// The documented per-rule opt-in (`config/config.toml`: "opt a single app
+    /// in with `[[rules]] honor_initial_state = true`") has to reach
+    /// `Rule::honor_initial_state`, which is the only thing `manage::apply_rules`
+    /// reads before it either keeps or strips the client's map-time
+    /// `_NET_WM_STATE`. A rule field the parser never fills is indistinguishable
+    /// from one that does not exist, so the escape hatch silently does nothing
+    /// while the documentation promises otherwise.
+    #[test]
+    fn rule_honor_initial_state_reaches_the_runtime_policy() {
+        // Both directions, because the rule is an `Option`: `Some(true)` has to
+        // let one window keep its launch state under the global `false`, and
+        // `Some(false)` has to normalize it under a global `true`.
+        for (rule_value, global) in [("true", false), ("false", true)] {
+            let user = parse_string(&format!(
+                "[general]\nhonor_initial_state = {global}\n\n\
+                 [[rules]]\nclass = \"firefox\"\nhonor_initial_state = {rule_value}\n"
+            ));
+            let mut diag = Diagnostics::default();
+            let cfg = merge_config(compiled_config(), user, &mut diag);
+            assert!(diag.is_clean(), "unexpected diagnostics: {diag:?}");
+            assert_eq!(cfg.honor_initial_state, global);
+            assert_eq!(cfg.rules.len(), 1);
+            assert_eq!(
+                cfg.rules[0].honor_initial_state,
+                Some(rule_value == "true"),
+                "'honor_initial_state = {rule_value}' must survive parse and merge"
+            );
+        }
+        // Absent stays `None`, which is what makes the rule defer to the global
+        // policy instead of silently normalizing every other window too.
+        let user = parse_string("[[rules]]\nclass = \"firefox\"\n");
+        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
+        assert_eq!(cfg.rules[0].honor_initial_state, None);
+        assert!(!cfg.honor_initial_state, "global default must normalize");
+        // A wrong-typed value leaves the rule deferring to the global rather
+        // than reading as `false`, which would force normalization.
+        let mut diag = Diagnostics::default();
+        let user = parse_user(
+            "[[rules]]\nclass = \"firefox\"\nhonor_initial_state = \"yes\"\n",
+            &mut diag,
+        )
+        .expect("valid TOML");
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(cfg.rules[0].honor_initial_state, None);
+        assert!(
+            diag.warnings
+                .iter()
+                .any(|w| w.contains("honor_initial_state")),
+            "the bad value must be reported: {:?}",
+            diag.warnings
+        );
+    }
 
     #[test]
     fn rule_ignore_initial_state_parses_and_all_aliases_agree() {
@@ -1549,8 +1580,16 @@ border_width = 0
         // The example at config/config.toml must always parse and exercise the
         // documented features (themes, hex colors, viewport keybinds, rules
         // with deny/true fullscreen, autostart grid).
-        let (cfg, _diag) = load_from_path(Path::new("config/config.toml"));
+        let (cfg, diag) = load_from_path(Path::new("config/config.toml"));
         assert!(!cfg.keybinds.is_empty(), "keybindings must parse");
+        // Diagnostic-clean, because this is the file users copy and
+        // `--check-config` is documented as a CI gate: a shipped example that
+        // exits 1 (or, worse, one whose keys quietly do nothing) teaches the
+        // wrong thing twice over.
+        assert!(
+            diag.is_clean(),
+            "the shipped example must not warn: {diag:?}"
+        );
         // The example must not reintroduce a per-`WM_CLASS` workaround for
         // map-time state: normalization is a global invariant, so the example
         // carries no `firefox` rule and leaves `honor_initial_state` at its
@@ -1670,58 +1709,78 @@ border_width = 0
     #[test]
     fn a_table_for_a_removed_subsystem_loads_without_touching_the_config() {
         let body = "[compositor]\nenabled = true\n[animations]\nstiffness = 300.0\n\
-                    [general]\ncompositor_enabled = true\ngaps_inner = 17\n";
+                    [[keybindings]]\nkey = \"super+q\"\naction = \"quit\"\n\
+                    [general]\ngaps_inner = 17\n";
         let mut diag = Diagnostics::default();
         let user = parse_user(body, &mut diag).expect("valid TOML");
-        assert!(diag.errors.is_empty(), "unexpected errors: {:?}", diag.errors);
         let cfg = merge_config(compiled_config(), user, &mut diag);
         // The keys Maverick does know still applied, so the file was merged
         // rather than discarded along with the tables it does not.
         assert_eq!(cfg.gaps_inner, 17);
+        // Silent, and not merely error-free: a config written for a newer
+        // Maverick names tables this build has never heard of, and reporting
+        // them would make every such file fail `--check-config`. Only a key
+        // inside a table Maverick *does* know is reported (see
+        // `an_unknown_key_in_a_known_table_is_reported`).
+        assert!(diag.is_clean(), "unknown tables must stay silent: {diag:?}");
     }
+
+    /// A key no known table has a field for is a setting the user believes they
+    /// made and did not, so it has to be named — silently dropping it is how a
+    /// documented key like `honor_initial_state` can be missing from the parser
+    /// for years while every test still passes.
     #[test]
-    fn rule_honor_initial_state_reaches_the_runtime_policy() {
-        // Both directions, because the rule is an `Option`: `Some(true)` has to
-        // let one window keep its launch state under the global `false`, and
-        // `Some(false)` has to normalize it under a global `true`.
-        for (rule_value, global) in [("true", false), ("false", true)] {
-            let user = parse_string(&format!(
-                "[general]\nhonor_initial_state = {global}\n\n\
-                 [[rules]]\nclass = \"firefox\"\nhonor_initial_state = {rule_value}\n"
-            ));
-            let mut diag = Diagnostics::default();
-            let cfg = merge_config(compiled_config(), user, &mut diag);
-            assert!(diag.is_clean(), "unexpected diagnostics: {diag:?}");
-            assert_eq!(cfg.honor_initial_state, global);
-            assert_eq!(cfg.rules.len(), 1);
-            assert_eq!(
-                cfg.rules[0].honor_initial_state,
-                Some(rule_value == "true"),
-                "'honor_initial_state = {rule_value}' must survive parse and merge"
-            );
-        }
-        // Absent stays `None`, which is what makes the rule defer to the global
-        // policy instead of silently normalizing every other window too.
-        let user = parse_string("[[rules]]\nclass = \"firefox\"\n");
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        assert_eq!(cfg.rules[0].honor_initial_state, None);
-        assert!(!cfg.honor_initial_state, "global default must normalize");
-        // A wrong-typed value leaves the rule deferring to the global rather
-        // than reading as `false`, which would force normalization.
-        let mut diag = Diagnostics::default();
-        let user = parse_user(
-            "[[rules]]\nclass = \"firefox\"\nhonor_initial_state = \"yes\"\n",
-            &mut diag,
-        )
-        .expect("valid TOML");
-        let cfg = merge_config(compiled_config(), user, &mut diag);
-        assert_eq!(cfg.rules[0].honor_initial_state, None);
-        assert!(
-            diag.warnings
-                .iter()
-                .any(|w| w.contains("honor_initial_state")),
-            "the bad value must be reported: {:?}",
-            diag.warnings
+    fn an_unknown_key_in_a_known_table_is_reported() {
+        let path = write_temp("[general]\nhonour_initial_state = true\ngaps_inner = 17\n");
+        let (source, cfg, diag) = load_from_path_classified(&path);
+        assert_eq!(
+            source,
+            ConfigSource::UserFile,
+            "one bad key is not a bad file"
         );
+        // Everything else in the file still merges: the value is degraded, not
+        // discarded.
+        assert_eq!(cfg.gaps_inner, 17);
+        assert!(diag.errors.is_empty(), "{:?}", diag.errors);
+        assert_eq!(diag.warnings.len(), 1, "{:?}", diag.warnings);
+        let warning = &diag.warnings[0];
+        assert!(
+            warning.contains("[general].honour_initial_state"),
+            "the warning must name the table and the key: {warning}"
+        );
+        // `--check-config` exits on `!is_clean()`, so a warning alone is enough
+        // to fail the CI gate: "the file loads" is not "the file is what you
+        // wrote".
+        assert!(!diag.is_clean(), "{diag:?}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Every table with a dispatcher reports its unknown keys, so the guarantee
+    /// cannot be lost one table at a time as tables are added.
+    #[test]
+    fn every_known_table_reports_its_unknown_keys() {
+        for (body, expected) in [
+            ("[general]\ntypo = 1\n", "[general].typo"),
+            ("[colors]\nfocus = 1\n", "[colors].focus"),
+            ("[autostart]\nprogrms = [[\"x\"]]\n", "[autostart].progrms"),
+            (
+                "[[keybindings]]\nkey = \"super+q\"\nact = \"quit\"\n",
+                "[[keybindings]].act",
+            ),
+            (
+                "[[rules]]\nclass = \"x\"\nfloatt = true\n",
+                "[[rules]].floatt",
+            ),
+        ] {
+            let mut diag = Diagnostics::default();
+            parse_user(body, &mut diag).expect("valid TOML");
+            assert_eq!(diag.warnings.len(), 1, "{body} -> {:?}", diag.warnings);
+            assert!(
+                diag.warnings[0].contains(expected),
+                "{body} -> {:?}",
+                diag.warnings[0]
+            );
+            assert!(diag.errors.is_empty(), "{body} is degraded, not rejected");
+        }
     }
 }

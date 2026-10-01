@@ -7,6 +7,11 @@
 # fields you set); if you define [[keybindings]] or [[rules]] they REPLACE the
 # compiled lists entirely.
 #
+# A key Maverick does not know inside one of these tables is reported by
+# `--check-config` (which exits non-zero on any warning) and ignored — the rest
+# of the file still loads. A whole table it does not know (one written for a
+# newer Maverick) is skipped silently, so an older build still reads the file.
+#
 # Numeric workspace binds (Super+1..9 → view, Super+Shift+1..9 → move) are
 # generated automatically unless `auto_workspace_binds = false`. If you define a
 # `[[keybindings]]` entry on a digit key, that slot is claimed by your binding
