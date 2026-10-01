@@ -1,0 +1,44 @@
+
+
+  MAVERICK
+  columnar tiling window manager
+  ────────────────────────────────────────────────────────────────────────
+  ⠆  language detected  en
+  ⠆  system detected  Linux
+  ⠆  distro  <DISTRO>
+  ⠆  prefix  <HOME>/.local/bin
+  ────────────────────────────────────────────────────────────────────────
+
+
+  ✓ Checking dependencies — cargo 1.98.1 (<TIME>)
+  ○ Building — skipped
+  ✓ Installing binaries — 2/2 · installed (<TIME>)
+  ✓ X11 session — <HOME>/.local/share/xsessions/maverick.desktop (<TIME>)
+  ✓ Configuration — <HOME>/.config/maverick/config.toml ✓ (<TIME>)
+  ✓ Final verification — 3 ✓ · binary functional (<TIME>)
+
+
+  ────────────────────────────────────────────────────────────────────────
+
+  Done — Maverick installed
+
+  ╭────────────────────────────────────────────────╮
+  │  ✓  Done — Maverick installed                  │
+  ├────────────────────────────────────────────────┤
+  │  binaries       <TMP>…│
+  │  PATH           ~/.profile · ~/.bashrc         │
+  │  session        <TMP>…│
+  │  config         <TMP>…│
+  │  time           <TIME>                           │
+  ╰────────────────────────────────────────────────╯
+
+  Select 'maverick' in your display manager, or run:
+  ⠤  <HOME>/.local/bin/maverick
+
+  ⠤  PATH added to: ~/.profile · ~/.bashrc
+    open a new terminal for it to take effect
+
+  tip: maverick --check-config validates your config without starting the WM
+  ────────────────────────────────────────────────────────────────────────
+
+  ⣦⠞  Maverick — cleared for takeoff

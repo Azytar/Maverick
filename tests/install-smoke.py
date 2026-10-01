@@ -18,7 +18,12 @@ import sys
 import tempfile
 import time
 
-ROOT = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parent.parent
+# The installer is `installer/install.sh`, and it refuses to run unless its
+# `lib/` sits beside it, so the harness copies the whole directory into the
+# sandbox rather than the entry point alone.
+INSTALLER_DIR = REPO / "installer"
+ENTRY = INSTALLER_DIR / "install.sh"
 BINS = ("maverick", "maverickctl")
 # Obsolete artifacts that must never reappear in an install.
 OBSOLETE = ("maverick-setup", "maverick-msg")
@@ -118,7 +123,7 @@ class Sandbox:
         for path in (self.repo / "config", self.home, self.tools,
                      self.repo / "target/release", self.target / "release"):
             path.mkdir(parents=True)
-        shutil.copy2(ROOT / "install.sh", self.repo / "install.sh")
+        shutil.copytree(INSTALLER_DIR, self.repo / "installer")
         (self.repo / "config/config.toml").write_text("[general]\nn_tags = 4\n")
         self.stubs = base / "stubs"
         self.stubs.mkdir()
@@ -145,7 +150,7 @@ class Sandbox:
         return env
 
     def install(self, *args, env=None, timeout=60):
-        command = ["bash", str(self.repo / "install.sh"), "--yes", "--no-anim", "--lang", "en"]
+        command = ["bash", str(self.repo / "installer/install.sh"), "--yes", "--no-anim", "--lang", "en"]
         command += list(args)
         result = subprocess.run(command, env=env or self.env(), capture_output=True,
                                 text=True, timeout=timeout)
@@ -167,7 +172,7 @@ def interactive_install(box, keys, args=()):
     """
     master, slave = pty.openpty()
     env = box.env(SHELL="/bin/bash", TERM="xterm-256color")
-    command = ["bash", str(box.repo / "install.sh"), "--no-build", "--lang", "en"]
+    command = ["bash", str(box.repo / "installer/install.sh"), "--no-build", "--lang", "en"]
     command += list(args)
     proc = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
                             env=env, close_fds=True)
@@ -558,7 +563,7 @@ def suite_obsolete_artifacts_absent():
             assert not (box.prefix / "bin" / stale).exists(), f"{stale} was installed"
         built = subprocess.run(
             ["cargo", "metadata", "--offline", "--no-deps", "--format-version", "1"],
-            cwd=ROOT, capture_output=True, text=True,
+            cwd=REPO, capture_output=True, text=True,
             env={**os.environ, "CARGO_TARGET_DIR": "/tmp/maverick-target"})
         assert built.returncode == 0, built.stderr
         for stale in OBSOLETE:
@@ -600,13 +605,13 @@ def suite_prefix_with_spaces():
 
 def suite_cli_contract():
     for option in ("--prefix", "--lang", "--xsessions-dir"):
-        result = subprocess.run(["bash", str(ROOT / "install.sh"), option],
+        result = subprocess.run(["bash", str(ENTRY), option],
                                 capture_output=True, text=True)
         assert result.returncode == 2, (option, result.returncode)
-    unknown = subprocess.run(["bash", str(ROOT / "install.sh"), "--nope"],
+    unknown = subprocess.run(["bash", str(ENTRY), "--nope"],
                              capture_output=True, text=True)
     assert unknown.returncode == 2
-    helped = subprocess.run(["bash", str(ROOT / "install.sh"), "--help"],
+    helped = subprocess.run(["bash", str(ENTRY), "--help"],
                             capture_output=True, text=True)
     assert helped.returncode == 0
     assert "$HOME/.local" in helped.stdout
@@ -615,7 +620,7 @@ def suite_cli_contract():
     assert "--no-path" in helped.stdout
     # An option that takes no value must reject one rather than swallow it.
     for option in ("--add-path", "--no-path"):
-        result = subprocess.run(["bash", str(ROOT / "install.sh"), option, "--nope"],
+        result = subprocess.run(["bash", str(ENTRY), option, "--nope"],
                                 capture_output=True, text=True)
         assert result.returncode == 2, (option, result.returncode)
     print("PASS: CLI argument contract")

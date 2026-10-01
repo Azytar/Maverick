@@ -1,0 +1,44 @@
+
+
+  MAVERICK
+  gestor de ventanas columnar · tiling WM
+  ────────────────────────────────────────────────────────────────────────
+  ⠆  idioma detectado  es
+  ⠆  sistema detectado  Linux
+  ⠆  distro  <DISTRO>
+  ⠆  destino  <HOME>/.local/bin
+  ────────────────────────────────────────────────────────────────────────
+
+
+  ✓ Verificando dependencias — cargo 1.98.1 (<TIME>)
+  ○ Compilando — omitido
+  ✓ Instalando binarios — 2/2 · instalado (<TIME>)
+  ✓ Sesión X11 — <HOME>/.local/share/xsessions/maverick.desktop (<TIME>)
+  ✓ Configuración — <HOME>/.config/maverick/config.toml ✓ (<TIME>)
+  ✓ Verificación final — 3 ✓ · binario funcional (<TIME>)
+
+
+  ────────────────────────────────────────────────────────────────────────
+
+  ¡Listo! Maverick instalado
+
+  ╭────────────────────────────────────────────────╮
+  │  ✓  ¡Listo! Maverick instalado                 │
+  ├────────────────────────────────────────────────┤
+  │  binarios       <TMP>…│
+  │  PATH           ~/.profile · ~/.bashrc         │
+  │  sesión         <TMP>…│
+  │  config         <TMP>…│
+  │  tiempo         <TIME>                           │
+  ╰────────────────────────────────────────────────╯
+
+  Selecciona «maverick» en tu gestor de sesión, o ejecuta:
+  ⠤  <HOME>/.local/bin/maverick
+
+  ⠤  PATH añadido a: ~/.profile · ~/.bashrc
+    abre una nueva terminal para que surta efecto
+
+  consejo: maverick --check-config valida tu config sin iniciar el WM
+  ────────────────────────────────────────────────────────────────────────
+
+  ⣦⠞  Maverick — listo para el despegue

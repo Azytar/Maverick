@@ -30,16 +30,19 @@ jobs:
         # the release binary ships.
         run: cargo test --workspace
 
-  # install.sh is plain bash — check its syntax so it cannot silently bitrot.
+  # The installer is plain bash — check its syntax so it cannot silently bitrot.
+  # `installer/tests/partition.py` runs every smoke suite from
+  # `tests/install-smoke.py` plus the partition-only ones, so it is the whole
+  # installer check; the smoke module stays runnable on its own.
   install-script:
-    name: install.sh (bash syntax)
+    name: installer (bash syntax)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: bash -n
-        run: bash -n install.sh
-      - name: Installer smoke test
-        run: python3 tests/install-smoke.py
+        run: bash -n installer/install.sh installer/lib/*.sh
+      - name: Installer test suite
+        run: python3 installer/tests/partition.py
 
   x11-smoke:
     name: X11 smoke
