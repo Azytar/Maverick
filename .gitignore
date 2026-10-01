@@ -21,6 +21,11 @@
 /tests/*.log
 __pycache__/
 
+# `tests/xephyr-real-fullscreen.sh` `mkdir -p logs` at the repository root and
+# writes the run summary there. Nothing reads it back, so a run must not leave the
+# tree dirty.
+/logs/
+
 # `cargo mutants` working directory: generated output, never source. The
 # trailing wildcard covers the `.old` suffix the tool appends when it rotates an
 # existing run out of the way, which otherwise reappears as an untracked
