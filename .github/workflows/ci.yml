@@ -52,11 +52,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install isolated Xvfb test dependencies
-        run: sudo apt-get update && sudo apt-get install -y xvfb x11-utils libx11-dev libxcb1-dev
+        # `tests/xvfb-stacking.py` drives the window manager through `xdotool`,
+        # which is its own Debian package rather than a member of x11-utils.
+        run: sudo apt-get update && sudo apt-get install -y \
+          xvfb x11-utils xdotool libx11-dev libxcb1-dev
       - name: Build release profile
-        # There is no `default` feature and no compositor to leave out, so this
-        # is the profile the WM ships. `--no-default-features` used to mean
-        # "the pure X11 WM" here; that build is now the only build.
+        # There is no `default` feature and no compositor to leave out, so the
+        # release profile is the only build there is: one command, no feature
+        # flags, and the two binaries the installer installs.
         run: cargo build --release -p maverick -p maverickctl
       - name: Xvfb stacking regression
         run: python3 tests/xvfb-stacking.py
