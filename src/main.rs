@@ -32,51 +32,6 @@
 //! The original argv is captured verbatim (minus `argv[0]`) because `restart`
 //! re-execs with exactly those arguments, so a `--config` override can never be
 //! silently downgraded to the XDG default.
-// Opt into clippy's pedantic lint set for higher code quality, then allow the
-// handful of categories that are inherent to an X11 window manager and would
-// only add noise if "fixed":
-//   * X11 protocol coordinates freely mix i16/u16/u32/i32 (window geometry,
-//     event fields, CARDINAL props). Wrapping every conversion in From/try_into
-//     or asserting ranges buys nothing here — the casts are protocol-correct.
-//   * `module_name_repetitions` / `wildcard_imports`: the backend uses
-//     `use super::*;` re-exports and x11rb's flat type names by design.
-//   * `missing_errors_doc`: internal fns return boxed errors that are logged,
-//     not part of a documented public API surface.
-//   * `must_use_candidate`: most getters are used immediately; annotating all
-//     is churn without safety value.
-#![warn(clippy::pedantic)]
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
-    clippy::cast_lossless,
-    clippy::module_name_repetitions,
-    clippy::wildcard_imports,
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    clippy::must_use_candidate,
-    clippy::too_many_lines,
-    clippy::similar_names,
-    // Hex colour literals (0x1a1b26) and X11 bit masks read better without
-    // digit-group separators.
-    clippy::unreadable_literal,
-    // Stylistic pedantic lints where the current form is intentional and, in
-    // this codebase, at least as clear as the suggested rewrite. Event handlers
-    // uniformly return `Result<(), Box<dyn Error>>` for a consistent dispatch
-    // signature (hence unit/Result "unnecessary" returns and unused-self on a
-    // few); the early-`match`/`return` style is deliberate for readability.
-    clippy::manual_let_else,
-    clippy::semicolon_if_nothing_returned,
-    clippy::items_after_statements,
-    clippy::unused_self,
-    clippy::unnecessary_wraps,
-    clippy::struct_excessive_bools,
-    clippy::many_single_char_names,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::needless_pass_by_value
-)]
-
 mod backend;
 mod config;
 pub mod core;
