@@ -659,7 +659,12 @@ impl Command for FocusWindow {
         let before = state.sel_mon;
         let from = state.monitors.get(before).and_then(|m| m.focused);
         if let Some(win) = self.0 {
-            if before < state.monitors.len() {
+            // The named window must be managed: `Event::FocusChanged` reports
+            // where focus moved, and the backend's `focus` sink treats a window
+            // that is not a client as `None` — i.e. it would clear the focus it
+            // was asked to move. Announcing `to: Some(win)` for an unmanaged id
+            // published a transition the sink never performed.
+            if before < state.monitors.len() && state.clients.contains_key(&win) {
                 // The sink applies this focus, i.e. after `Engine::execute` ran
                 // its deferral safety net; see the helper.
                 drop_deferral_yielded_by_focus_move(state, Some(win));
@@ -910,15 +915,30 @@ impl Command for MoveWindow {
     }
 }
 
+/// Ask a managed window to close.
+///
+/// The target must be a client. Every other window-targeting command resolves
+/// its target through `state.clients` and absorbs when it is not there
+/// (`MoveWindow`, `ToggleFloat`, `MoveResize`, `MoveWindowToMonitor`), and a
+/// window the WM does not manage is not this command's to close: the backend's
+/// `kill` would send `WM_DELETE_WINDOW`, or `XKillClient` on a client that
+/// advertises no protocol, to an arbitrary X11 window — including one owned by
+/// another client.
+///
+/// `Event::WindowUnmapped` says a window *left the managed set*. A window that
+/// was never in it has not left it, so the event was false as well as the
+/// effect.
 #[derive(Debug, Clone, Copy)]
 pub struct KillWindow(pub WindowId);
 
 impl Command for KillWindow {
-    fn execute(&mut self, _state: &mut State, _cfg: &mut Cfg) -> CommandReport {
-        CommandReport::with_event(
-            vec![Effect::KillWindow(self.0)],
-            Event::WindowUnmapped(self.0),
-        )
+    fn execute(&mut self, state: &mut State, _cfg: &mut Cfg) -> CommandReport {
+        let mut cmds = Vec::new();
+        if !state.clients.contains_key(&self.0) {
+            return CommandReport::new(cmds);
+        }
+        cmds.push(Effect::KillWindow(self.0));
+        CommandReport::with_event(cmds, Event::WindowUnmapped(self.0))
     }
 }
 
@@ -1176,10 +1196,20 @@ impl Command for ToggleMaximize {
             return CommandReport::new(cmds);
         }
         if let Some(win) = self.0.or(state.monitors.get(mi).and_then(|m| m.focused)) {
-            let on = state
-                .clients
-                .get(&win)
-                .is_some_and(crate::types::Client::is_maximized);
+            // The target must be a live client, for the same reason
+            // `ToggleFloat` checks twice: a focus slot can still name a window
+            // that is not a client (teardown purges the bookkeeping of the
+            // monitor the window was *placed* on, leaving a slot elsewhere
+            // naming it). `is_maximized` reads `false` for a window that is
+            // not there, so the toggle resolved to "maximize it", and the
+            // command then announced `MaximizeToggled { on: true }` and asked
+            // the backend to set a maximized state on a window that does not
+            // exist. `apply_maximize` mutates nothing in that case, so the
+            // report claimed a transition that never happened.
+            let on = match state.clients.get(&win) {
+                Some(c) => c.is_maximized(),
+                None => return CommandReport::new(cmds),
+            };
             apply_maximize(state, win, Some(!on), Some(!on));
             cmds.push(Effect::MarkRestack(mi));
             cmds.push(Effect::ArrangeMonitor(mi));

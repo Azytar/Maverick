@@ -8397,6 +8397,206 @@ mod unit_tests {
         }
     }
 
+    /// The fingerprint test above proves an unknown id changes no *state*. That
+    /// is not the whole contract: a command can leave the state untouched and
+    /// still emit an effect the backend executes and publish an event that
+    /// claims a transition. Both are asserted here, because a kill for an
+    /// unmanaged id reaches X11 as `WM_DELETE_WINDOW` (or `XKillClient`) aimed
+    /// at a window this WM does not own.
+    #[test]
+    fn a_window_id_that_names_nothing_emits_no_effect_and_no_event() {
+        use crate::core::commands::{Command as _, FocusWindow, KillWindow, ToggleMaximize};
+        use crate::core::effect::Effect;
+        use crate::types::Action;
+        use crate::types::Dir;
+
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        engine.state.add_client(Client::new(1, mi, ws_i));
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, 1.0);
+        engine.state.monitors[mi].focused = Some(1);
+
+        // 0xdead is not a client. The commands are exercised directly so the
+        // report's `event` is observable: `dispatch` returns effects only.
+        for (name, report) in [
+            (
+                "KillWindow(0xdead)",
+                KillWindow(0xdead).execute(&mut engine.state, &mut engine.cfg),
+            ),
+            (
+                "FocusWindow(Some(0xdead))",
+                FocusWindow(Some(0xdead)).execute(&mut engine.state, &mut engine.cfg),
+            ),
+            (
+                "ToggleMaximize(Some(0xdead))",
+                ToggleMaximize(Some(0xdead)).execute(&mut engine.state, &mut engine.cfg),
+            ),
+        ] {
+            assert!(
+                report.effects.is_empty(),
+                "{name} emitted {:?} for an unmanaged window",
+                report.effects
+            );
+            assert!(
+                report.event.is_none(),
+                "{name} published {:?} for an unmanaged window",
+                report.event
+            );
+        }
+
+        // `dispatch` is the wire path and returns the effect list directly.
+        for (name, action) in [
+            ("CloseWindow", Action::CloseWindow(0xdead)),
+            ("FocusWindow", Action::FocusWindow(0xdead)),
+            // `Action::ToggleMaximize` is absent here: it names no window, so it resolves
+            // through the focus slot, which the setup above points at the *valid*
+            // client 1. The stale-slot case is covered separately below.
+            ("ToggleFloatWindow", Action::ToggleFloatWindow(0xdead)),
+            (
+                "ToggleFullscreenWindow",
+                Action::ToggleFullscreenWindow(0xdead),
+            ),
+            ("MoveWindow", Action::MoveWindow(Dir::Left, 0xdead)),
+        ] {
+            let effects = engine.dispatch(action.clone());
+            assert!(
+                effects.is_empty(),
+                "dispatch {name} emitted {effects:?} for an unmanaged window"
+            );
+            let named: Vec<_> = effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::KillWindow(w)
+                    | Effect::FocusWindow(Some(w))
+                    | Effect::SetMaximized { win: w, .. }
+                    | Effect::SyncWindowPrefs(w) => Some(*w),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                named.is_empty(),
+                "dispatch {name} named {named:?} in an effect for an unmanaged window"
+            );
+        }
+    }
+
+    /// The flip side: a real managed window must keep working. `KillWindow` is
+    /// the only command that ignores `State` entirely, so it is the one whose
+    /// fix could have broken the live path.
+    #[test]
+    fn killing_a_managed_window_still_emits_the_kill_and_the_unmap() {
+        use crate::core::commands::{Command as _, KillWindow};
+        use crate::core::effect::Effect;
+        use crate::core::event::Event;
+
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        engine.state.add_client(Client::new(0x42, mi, ws_i));
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(0x42, 1.0);
+
+        let report = KillWindow(0x42).execute(&mut engine.state, &mut engine.cfg);
+        assert_eq!(
+            report.effects.len(),
+            1,
+            "a managed window must still be asked to close: {:?}",
+            report.effects
+        );
+        assert!(
+            matches!(report.effects[0], Effect::KillWindow(0x42)),
+            "the effect must be the kill for that window, got {:?}",
+            report.effects[0]
+        );
+        assert_eq!(
+            report.event,
+            Some(Event::WindowUnmapped(0x42)),
+            "leaving the managed set must still be announced"
+        );
+    }
+
+    /// A stale focus slot — one naming a window that is no longer a client, as
+    /// the teardown path leaves behind when the slot is on a monitor other than
+    /// the one the window was placed on — must not be read as "not maximized,
+    /// so maximize it".
+    #[test]
+    fn a_stale_focus_slot_cannot_claim_a_maximize_transition() {
+        use crate::core::commands::{Command as _, ToggleMaximize};
+        use crate::core::event::Event;
+
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        engine.state.add_client(Client::new(1, mi, ws_i));
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, 1.0);
+        // The slot names a window that was never a client.
+        engine.state.monitors[mi].focused = Some(0xdead);
+
+        let report = ToggleMaximize(None).execute(&mut engine.state, &mut engine.cfg);
+        assert!(
+            report.effects.is_empty(),
+            "a stale slot must emit no effects, got {:?}",
+            report.effects
+        );
+        assert!(
+            report.event.is_none(),
+            "a stale slot must not announce MaximizeToggled, got {:?}",
+            report.event
+        );
+        assert_ne!(
+            report.event,
+            Some(Event::MaximizeToggled {
+                win: 0xdead,
+                on: true
+            }),
+            "the reported transition is exactly the one that never happened"
+        );
+    }
+
+    /// The valid-focus path must keep working: toggling maximize on a real
+    /// focused window flips its flags and announces the transition.
+    #[test]
+    fn toggling_maximize_on_the_focused_window_still_works() {
+        use crate::core::commands::{Command as _, ToggleMaximize};
+        use crate::core::event::Event;
+        use crate::types::Client;
+
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_ws;
+        engine.state.add_client(Client::new(7, mi, ws_i));
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(7, 1.0);
+        engine.state.monitors[mi].focused = Some(7);
+        assert!(!engine.state.clients[&7].is_maximized());
+
+        let report = ToggleMaximize(None).execute(&mut engine.state, &mut engine.cfg);
+        assert!(
+            engine.state.clients[&7].is_maximized(),
+            "the valid path must still set the flags"
+        );
+        assert_eq!(
+            report.event,
+            Some(Event::MaximizeToggled { win: 7, on: true }),
+            "the valid path must still announce the transition"
+        );
+        assert!(
+            report
+                .effects
+                .iter()
+                .any(|e| matches!(e, crate::core::effect::Effect::SetMaximized { win: 7, .. })),
+            "the valid path must still ask the backend to set the state: {:?}",
+            report.effects
+        );
+
+        // Idempotent in the other direction: a second toggle turns it back off.
+        let report = ToggleMaximize(None).execute(&mut engine.state, &mut engine.cfg);
+        assert!(!engine.state.clients[&7].is_maximized());
+        assert_eq!(
+            report.event,
+            Some(Event::MaximizeToggled { win: 7, on: false })
+        );
+    }
+
     /// A percentage resize is a statement about the *workarea*, resolved where
     /// the layout lives. The test pins the direction, not the exact weight: the
     /// weight is then redistributed among the siblings, which is what makes a
