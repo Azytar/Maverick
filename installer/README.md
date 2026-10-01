@@ -1,8 +1,7 @@
 # The Maverick installer
 
-`installer/install.sh` **is** the installer. There is no other one: the
-monolithic `install.sh` that used to sit at the repository root has been
-deleted, and `installer/` is what you run.
+`installer/install.sh` **is** the installer, and it is the only entry point:
+`installer/` is what you run.
 
 ```bash
 ./installer/install.sh            # install maverick + maverickctl into $HOME/.local
@@ -33,10 +32,11 @@ over its control socket. It is a separate binary by design, not a mode of
 Maverick is not a desktop environment. There is no compositor, no renderer,
 no wallpaper or animation subsystem, no panel, launcher, notification daemon
 or session manager, and the installer offers no switch for any of them: the
-`--with-compositor` / `--without-compositor` / `--no-default-features` flags
-are rejected with a message, because there is nothing to select. The `maverick`
-package has exactly two features, `input-trace` and `window-trace`, both
-diagnostic and both off by default; the installer never passes `--features`.
+`--with-compositor` / `--without-compositor` / `--no-compositor` /
+`--no-default-features` flags are rejected with a message and exit status 2,
+because there is nothing to select. The `maverick` package has exactly two
+features, `input-trace` and `window-trace`, both diagnostic and both off by
+default; the installer never passes `--features`.
 
 ## Where it writes
 
@@ -67,13 +67,13 @@ decision, and the installer prints the session file's path instead.
 
 | file | lines | functions | responsibility |
 |---|---:|---:|---|
-| `install.sh` | 780 | 11 | command line, process state, the six phases, `main()` |
+| `install.sh` | 780 | 11 | command line, process state, the six steps, `main()` |
 | `lib/i18n.sh` | 246 | 4 | language selection, the two message tables, the table audit |
 | `lib/ui.sh` | 610 | 32 | everything that draws or asks |
 | `lib/setup.sh` | 421 | 13 | platform, toolchain, disk space, X11 probe, PATH |
-| **total** | **2057** | **60** | was 1865 lines, 47 functions, in one file |
+| **total** | **2057** | **60** | four files, one entry point |
 
-Around them: `tests/partition.py` (337 lines) proves the behaviour,
+Around them: `tests/partition.py` (307 lines) proves the behaviour,
 `lint.sh` (42) checks it statically, and `golden/` (2 × 44) freezes what it
 says.
 
@@ -109,7 +109,7 @@ command line        (flags, --help, exit 2 contract)
 environment         (root, $HOME, prefix, dirs, cleanups, one trap block)
 init                i18n_init · ui_init · os_detect
 confirm_install
-phase_deps phase_build phase_install phase_session phase_config phase_verify
+step_deps step_build step_install step_session step_config step_verify
 main "$@"
 ```
 
@@ -150,14 +150,17 @@ single file could not: library inertness, i18n parity, the missing-`lib/`
 error path, syntax and shellcheck, the build command naming both packages and
 no features, and the golden output in both languages.
 
-`golden/` exists because there is no longer a monolith to diff against: it is
-the record of what the installer says. A wording change regenerates it with
-`MAVERICK_UPDATE_GOLDEN=1` and shows up as a reviewable diff.
+`golden/` is the record of what the installer says: `install.sh` is a
+composed entry point, so its output is the contract rather than a diff against
+a predecessor. A wording change regenerates it with `MAVERICK_UPDATE_GOLDEN=1`
+and shows up as a reviewable diff.
 
-## Provenance
+## What guards the tree
 
-The tree was carved out of the old monolith by a one-time extractor whose
-assertions were all line ranges into a file that no longer exists. That
-extractor was deleted with the monolith; git history is where the cut is
-recorded, and the `golden/` snapshots plus `tests/partition.py` are what guard
-it now.
+`tests/partition.py` and `installer/golden/` are what enforce this layout.
+`suite_libraries_are_inert` sources all three libraries under `set -euo pipefail`
+with `$HOME` removed, so a probe that leaks into a library is a failing test
+rather than a surprise at install time. `suite_missing_library_is_reported`
+deletes `lib/` and requires the failure at the top of the entry point. And
+`golden/install.{en,es}.txt` freeze the plain output in both languages, so a
+change to any line the installer prints is a deliberate, reviewable edit.
