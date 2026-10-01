@@ -17,9 +17,12 @@
 //   * Features — do NOT enable everything (`cargo.allFeatures`, or
 //     `cargo.features: ["all"]`): `input-trace` and `window-trace` are
 //     diagnostic-only builds, so that would analyse a configuration nobody
-//     develops against. CI agrees —
-//     `.github/workflows/ci.yml` runs plain `cargo clippy --workspace
-//     --all-targets` and `cargo test --workspace`, without `--all-features`.
+//     develops against. The editor therefore deliberately analyses a narrower
+//     configuration than CI does. CI gates the union instead —
+//     `.github/workflows/ci.yml:24,26` run clippy and test with
+//     `--all-features`, and `:31` repeats the test with default features — so
+//     a diagnostic here is not proof that CI is clean, and CI being clean is
+//     not proof this view is complete.
 //
 //   * Check command — rust-analyzer's default is `cargo check --workspace
 //     --all-targets` with default features, so cargo stays the authority.
