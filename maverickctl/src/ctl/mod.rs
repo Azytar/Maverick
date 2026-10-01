@@ -25,6 +25,25 @@
 //! 5. Singleton — if exactly one live instance exists globally, that one.
 //! 6. Otherwise the tool lists candidates and returns `None` (refuses to guess).
 //!
+//! # Session-selection precedence
+//!
+//! [`session_target`] resolves a *session* — the X server, the window manager
+//! and the programs inside them — which is a different object from the instance
+//! [`resolve_target`] addresses, and has a different precedence:
+//!
+//! 1. `--session`/`--name`, if given.
+//! 2. The first positional, for `maverickctl window list debug`.
+//! 3. [`crate::session::resolve_target`]: `$MAVERICK_SESSION`, then the session
+//!    on the caller's display, then the only running one.
+//! 4. Otherwise the resolution error, which is printed rather than guessed at.
+//!
+//! The two differ deliberately, so they are not interchangeable: an instance is
+//! named by `--session <sid>` and validated with `read_meta`, while a session is
+//! named by a bare positional and validated with [`crate::session::SessionName`]
+//! — the same rule that keeps a name inside the runtime directory.
+//! `$MAVERICK_SESSION` belongs to this chain because it holds a session name;
+//! `$MAVERICK_INSTANCE` belongs to the other because it holds a session *id*.
+
 //! # Ownership
 //!
 //! Stateless CLI dispatch; no handles are retained across invocations. Confirmation
@@ -329,6 +348,10 @@ fn run_group(
     let keep: &[&str] = match group {
         "logs" => &["-n", "--xserver", "-x", "-f", "--follow"],
         "debug" => &["--window", "-f", "--follow"],
+        // `-f` is deliberately not here: it means force for `session remove` and follow
+        // for `logs`/`debug`, so it is claimed per group and never globally. A
+        // group that does not claim it rejects it — see `process kill`, where
+        // `-f` used to be silently dropped and the process got SIGTERM.
         "process" => &["--force", "-9"],
         "session" => &["--force", "-f"],
         _ => &[],
@@ -395,6 +418,9 @@ SESSIONS
     session create <name> [options]     Create and start a session
     session status <name> [--json]      One session in detail
     session start|stop|restart|kill|remove <name>
+                                         (remove takes --force to remove a
+                                         session that is still running; the
+                                         other verbs refuse the option)
 
     session create options
         --resolution <WxH>     Screen size (default 1280x720)
@@ -416,10 +442,14 @@ RUNNING THINGS IN A SESSION
     process list <session> [--json]     Every process in the session
     process inspect <session> <pid>     One process in detail
     process kill <session> <pid>        Signal a process in the session
+    [--force|-9]                     SIGKILL instead of SIGTERM
 
 LOOKING INSIDE
     inspect <session> [--json]          Session, windows, layout
     logs <session> [-n N] [-f] [--xserver]  Tail a session's own log
+                                         (-f here means follow; it means force
+                                         for `session remove` and is refused
+                                         by `process kill`)
     debug <session> [--window <id>]     Live event stream + recent debug log
 
 A SESSION'S ENVIRONMENT

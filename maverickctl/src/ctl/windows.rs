@@ -458,9 +458,24 @@ fn window_inspect(c: &Ctl, args: &[String]) -> Result<(), String> {
 
     // The window manager's own view of the same window, so the two are
     // reported together: what the tool sees and what the WM believes.
-    let live = client::query(&sid, "inspect")
-        .ok()
-        .and_then(|j| maverick_sys::json::parse(&j));
+    //
+    // A refusal arrives as a successful exchange carrying an `error …` body, and
+    // `.ok()` dropped it exactly as it dropped a genuine "not running" — so a
+    // refusal printed a window block missing the manager's half and exited 0.
+    // The sibling `window list` classifies the same reply as a failure.
+    let live = match client::query(&sid, "inspect") {
+        Ok(reply) => match super::refusal(&reply) {
+            Some(why) => {
+                return Err(format!(
+                    "the window manager refused the inspect query: {why}"
+                ));
+            }
+            None => maverick_sys::json::parse(&reply),
+        },
+        // Not running: the window list above still answered, so this half is
+        // legitimately absent rather than refused.
+        Err(_) => None,
+    };
     if c.json {
         let doc = window_json(w);
         let mut fields = match maverick_sys::json::parse(&doc) {

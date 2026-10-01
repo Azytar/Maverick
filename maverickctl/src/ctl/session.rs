@@ -512,8 +512,14 @@ pub fn exec(c: &Ctl, args: &[String]) -> Result<(), String> {
     if call.argv.is_empty() {
         return Err("exec needs a program to run".to_string());
     }
-    let wait = c.flag(&["--wait", "-w"]);
-    let inherit = c.flag(&["--inherit", "-i"]);
+    // Read from *before* the command word, not from every argument. `split_call`
+    // already gives the program everything from that point on, and reading the
+    // options from the whole line meant `exec debug app --wait` both handed
+    // `--wait` to `app` and made this tool wait for it — so a program with an
+    // option of the same name was unrunnable, and the tool blocked on something
+    // it had been asked to launch and return from.
+    let wait = call.flag_before_command(&["--wait", "-w"]);
+    let inherit = call.flag_before_command(&["--inherit", "-i"]);
 
     let child = launch_in_session(&record, &call.argv, inherit).map_err(|e| e.to_string())?;
     let pid = child.id();
@@ -716,12 +722,34 @@ fn is_flag(arg: &str, c: &Ctl) -> bool {
     c.is_own_flag(name) || KNOWN_FLAGS.contains(&name)
 }
 
-/// A `maverickctl <verb> <session> <command…>` call, with the command split off.
 pub struct Call {
     /// The session the command runs in.
     pub session: String,
     /// The command and its arguments, verbatim.
     pub argv: Vec<String>,
+    /// Every argument as given, so an option can be told apart from an argument
+    /// of the program by where it sits rather than by what it is spelled.
+    raw: Vec<String>,
+    /// Index in `raw` where the command word begins — where this tool stops
+    /// parsing and the program starts.
+    ///
+    /// `split_call` already draws that line for the *command*; the options that
+    /// follow (`--wait`, `--inherit`) were still read from every argument
+    /// instead, so `exec debug app --wait` both passed `--wait` to `app` and
+    /// made this tool block on it. Reading them from before this index is what
+    /// makes "everything after the command word belongs to the command" true of
+    /// the options as well as the arguments.
+    command_at: usize,
+}
+
+impl Call {
+    /// True if one of `names` appears *before* the command word, i.e. as an
+    /// option of this tool rather than an argument of the program.
+    pub fn flag_before_command(&self, names: &[&str]) -> bool {
+        self.raw
+            .get(..self.command_at)
+            .is_some_and(|head| head.iter().any(|a| names.contains(&a.as_str())))
+    }
 }
 
 /// Split a call into its session and its command.
@@ -752,6 +780,11 @@ pub fn split_call(c: &Ctl, args: &[String]) -> Option<Call> {
         return Some(Call {
             session,
             argv: args[at + 1..].to_vec(),
+            raw: args.to_vec(),
+            // The `--` itself, not the end of the line: an option written after
+            // it belongs to the program, so it must not be inside the head this
+            // tool reads its own options from.
+            command_at: at,
         });
     }
     let (session, command_at) = match c.explicit_session() {
@@ -772,6 +805,10 @@ pub fn split_call(c: &Ctl, args: &[String]) -> Option<Call> {
     Some(Call {
         session,
         argv: command_at.map_or_else(Vec::new, |at| args[at..].to_vec()),
+        raw: args.to_vec(),
+        // With no command word there is nothing after it, so every argument is
+        // this tool's — which is what `shell <session>` relies on.
+        command_at: command_at.unwrap_or(args.len()),
     })
 }
 
@@ -1184,14 +1221,36 @@ pub fn inspect(c: &Ctl, _args: &[String]) -> Result<(), String> {
     // The window manager's own answer, when it is up. Absent for a stopped
     // session, which is reported as such rather than as a session with no
     // windows.
-    let live = client::query(&view.sid, "inspect")
-        .ok()
-        .and_then(|j| maverick_sys::json::parse(&j));
-    let tree = live
-        .as_ref()
-        .and_then(|_| client::query(&view.sid, "tree").ok())
-        .and_then(|j| maverick_sys::json::parse(&j));
-    let windows = tree.as_ref().map(flatten_windows).unwrap_or_default();
+    //
+    // Two different absences were being collapsed into one by `.ok()`: a
+    // transport failure, which is a stopped or restarting window manager, and a
+    // *refusal*, which arrives as a successful exchange carrying an `error …`
+    // body. `.ok()` dropped both, so `inspect` answered "the window manager is
+    // not answering; no live layout to report" — and exited 0 — for an instance
+    // that was up and had declined. `window list` classifies the same reply as
+    // a failure, so the two verbs disagreed about one event.
+    //
+    // `required` is the difference: a refusal always fails, while a transport
+    // error is only an error when the instance was already answering.
+    let query = |topic: &str, required: bool| -> Result<Option<maverick_sys::json::Json>, String> {
+        match client::query(&view.sid, topic) {
+            Ok(reply) => match super::refusal(&reply) {
+                Some(why) => Err(format!(
+                    "the window manager refused the {topic} query: {why}"
+                )),
+                None => Ok(maverick_sys::json::parse(&reply)),
+            },
+            Err(e) if required => Err(format!("cannot read the {topic} of '{}': {e}", view.name)),
+            Err(_) => Ok(None),
+        }
+    };
+    let live = query("inspect", false)?;
+    let windows = match query("tree", live.is_some())? {
+        Some(j) => flatten_windows(&j),
+        // No tree document. Absent only when nothing is running; the transport
+        // error above already reported anything else.
+        None => Vec::new(),
+    };
 
     if c.json {
         let mut parts = vec![view_json(&view)];
