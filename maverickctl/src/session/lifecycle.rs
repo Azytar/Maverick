@@ -96,20 +96,24 @@ pub fn resolve_binary(binary: &str) -> Result<Binary, SessionError> {
 /// path has to be resolved against the directory the user typed it in, once,
 /// here — resolving it later would silently mean a different file.
 ///
-/// `canonicalize` is tried first because it also resolves a symlink, which is
+/// The join against `cwd` happens *first*, so the base is always this function's
+/// argument: canonicalising `found` on its own would resolve it against whatever
+/// directory the process happens to be in, which is a different answer whenever
+/// the caller names a base other than its own.
+///
+/// `canonicalize` is then tried because it also resolves a symlink, which is
 /// what makes the recorded binary the actual executable rather than a link that
 /// may be repointed later. It fails for a path that does not exist or is not
 /// readable through a directory the user may not traverse, and in that case the
-/// join against `cwd` is still correct — the file's existence is the caller's
-/// problem to report, not something to answer here.
+/// join is still correct — the file's existence is the caller's problem to
+/// report, not something to answer here. `Path::join` already yields `found`
+/// unchanged when `found` is absolute, so an absolute path needs no branch.
 fn absolutize(found: &Path, cwd: &Path) -> PathBuf {
-    if let Ok(canonical) = std::fs::canonicalize(found) {
+    let joined = cwd.join(found);
+    if let Ok(canonical) = std::fs::canonicalize(&joined) {
         return canonical;
     }
-    if found.is_absolute() {
-        return found.to_path_buf();
-    }
-    cwd.join(found)
+    joined
 }
 
 /// The first executable named `name` on `PATH`.
@@ -1000,10 +1004,16 @@ mod tests {
     /// working directory, or the child would resolve it against that one.
     #[test]
     fn a_relative_binary_is_made_absolute() {
-        let cwd = Path::new("/home/u/project");
+        // The base is a fixture directory, not a hard-coded path: with a literal
+        // one the answer silently depended on whether some directory in this
+        // checkout happened to contain the relative path being resolved, so the
+        // same assertion held or broke according to the working directory the
+        // test was launched from.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cwd = dir.path();
         assert_eq!(
             absolutize(Path::new("./target/debug/maverick"), cwd),
-            PathBuf::from("/home/u/project/./target/debug/maverick"),
+            cwd.join("./target/debug/maverick"),
             "a relative path must be anchored to the directory it was typed in"
         );
         // An absolute path is already anchored; it is not re-joined.
@@ -1013,12 +1023,37 @@ mod tests {
         );
         // A real file resolves through its symlinks, so the recorded binary is
         // the executable rather than a link that may be repointed later.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let target = dir.path().join("maverick");
+        let target = cwd.join("real-maverick");
         std::fs::write(&target, "#!/bin/sh\n").expect("write");
-        let link = dir.path().join("link");
+        let link = cwd.join("link");
         std::os::unix::fs::symlink(&target, &link).expect("link");
         assert_eq!(absolutize(&link, Path::new("/")), target);
+    }
+
+    /// The base is the one the caller named, not wherever the process is.
+    ///
+    /// A relative path that resolves only by falling back to the join proves
+    /// nothing about which base was used, because both answers are identical
+    /// when the path does not exist. So this case needs a relative path that
+    /// *does* resolve — `.` exists from every directory — with a base that is
+    /// deliberately not the process working directory. Canonicalising the
+    /// relative path on its own would answer with the process directory, which
+    /// is wrong yet entirely plausible, so this is the assertion that separates
+    /// the two.
+    #[test]
+    fn a_relative_path_is_resolved_against_the_named_base_not_the_process_cwd() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = std::fs::canonicalize(dir.path()).expect("canonical base");
+        let here = std::fs::canonicalize(".").expect("canonical cwd");
+        assert_ne!(
+            base, here,
+            "the fixture base must differ from the process directory for this to mean anything"
+        );
+        assert_eq!(
+            absolutize(Path::new("."), &base),
+            base,
+            "a relative path is anchored to the base it was given, not to the process directory"
+        );
     }
 
     /// A bare name is a `PATH` lookup, which is what makes `--binary maverick`
