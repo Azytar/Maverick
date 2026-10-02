@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# F4 — client death during fullscreen / focus / layout / animation (CRITICAL).
+# F4 — client death during fullscreen / focus / layout / rapid navigation (CRITICAL).
 #
 # For each variant: open managed windows, drive the WM into the target state,
 # SIGKILL a client mid-state, then assert the WM did NOT crash:
@@ -100,13 +100,15 @@ DISPLAY="$DISP" "$MAVERICK_CTL" msg view 1 >/dev/null 2>&1
 sleep 1
 assert_survives "layout-death"
 
-# ── variant 4: death DURING animation (rapid focus changes) ──────────────────
-echo "=== F4.4 client death during ANIMATION ==="
+# ── variant 4: death during rapid navigation ────────────────────────────────
+echo "=== F4.4 client death during rapid focus navigation ==="
 P7="$(open_win WIN7)"; PID_WIN7="$P7"
 P8="$(open_win WIN8)"; PID_WIN8="$P8"
 P9="$(open_win WIN9)"; PID_WIN9="$P9"
 sleep 1
-# hammer focus changes to keep animations live, kill a client mid-stream
+# hammer focus changes so the camera is rewritten repeatedly, kill a client
+# mid-stream. There is no animation subsystem to interrupt: the point is that a
+# client dying between two projections leaves the WM consistent.
 for i in 1 2 3 4 5; do
     DISPLAY="$DISP" "$MAVERICK_CTL" msg focus-left >/dev/null 2>&1
     DISPLAY="$DISP" "$MAVERICK_CTL" msg focus-right >/dev/null 2>&1
@@ -115,7 +117,7 @@ for i in 1 2 3 4 5; do
     sleep 0.15
 done
 sleep 1
-assert_survives "animation-death"
+assert_survives "navigation-death"
 
 echo "────────────────────────────────────"
 echo "F4 client-death: PASS=$PASS FAIL=$FAIL"

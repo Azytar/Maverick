@@ -18,9 +18,10 @@ here has a `file:line` behind it.
       │                            │
   maverick-core               maverick-x11
   pure domain types:          Xlib/XCB bootstrap:
-  State, Column, Camera,      one shared connection
-  Client, Rect                (XInitThreads, open_x,
-      │                       XGetXCBConnection handoff)
+  State, Monitor,             one shared connection
+  Workspace (a View),          (XInitThreads, open_x,
+  ViewId, Carousel,            XGetXCBConnection handoff)
+  Column, Client, Rect
       │                            │
       └─────────────┬──────────────┘
                     │
@@ -79,20 +80,20 @@ Every state change therefore reaches the server as one configure at its final
 position. The properties that govern *presentation* are the window manager's
 protocol surface, not a drawing layer:
 
-- `render::emit_geometry` (`src/backend/x11/render.rs:937`) is the single X11
+- `render::emit_geometry` (`src/backend/x11/render.rs:924`) is the single X11
   geometry sink, and `reconciler::wire_geometry`
-  (`src/backend/x11/reconciler.rs:105`) is the single clamping function. No other
+  (`src/backend/x11/reconciler.rs:100`) is the single clamping function. No other
   code positions a window.
 - The camera is a plain `f32` scroll offset (`maverick-core/src/types.rs:367-370`)
   and `Workspace::zoom` / `Workspace::page_zoom` are plain `f32` values
-  (`maverick-core/src/types.rs:437,447`) that a command assigns outright
-  (`src/core/commands.rs:547`). Nothing eases toward a target, so there is no
-  second projection for a window's size to differ between.
+  (`maverick-core/src/types.rs:709,718`) that a mutator assigns outright
+  (`maverick-core/src/types.rs:383,392`). Nothing eases toward a target, so there
+  is no second projection for a window's size to differ between.
 - `Column` carries `windows`, `weight` and `focused` and nothing else
   (`maverick-core/src/types.rs:300-307`); a column's focus status is read off
   those fields rather than tracked as a separate boost.
 - Corner radius is an X11 `Shape` mask applied by `render::sync_rounded_frame`
-  (`src/backend/x11/render.rs:1033`) — server-side window geometry, not a drawn
+  (`src/backend/x11/render.rs:1020`) — server-side window geometry, not a drawn
   effect, and it is dropped for fullscreen because there is no desktop behind
   the window to reveal.
 - The event loop blocks on X11 plus the control self-pipe with no frame
@@ -104,14 +105,15 @@ over the wire. Maverick publishes the two EWMH properties that let it:
 
 - `_NET_WM_BYPASS_COMPOSITOR` is interned at `src/backend/atoms.rs:130` and set
   to `2` while a window holds a true exclusive fullscreen, then deleted when it
-  leaves (`src/backend/x11/manage.rs:1216-1232`). `ToggleFullscreen` promotes
-  the window's policy to `FullscreenPolicy::True` before it emits the effect
-  (`src/core/commands.rs:1136-1141,1156`), so the bypass is never published for
-  a window that is not really exclusive. The comment there names the consumer:
-  an external compositor such as picom skips its effect pass for that window.
+  leaves (`src/backend/x11/manage.rs:1266-1273`). `ToggleFullscreen`
+  (`src/core/commands.rs:1137`) promotes the window's policy to
+  `FullscreenPolicy::True` before it emits the effect, so the bypass is never
+  published for a window that is not really exclusive. The comment there names
+  the consumer: an external compositor such as picom skips its effect pass for
+  that window.
 - `_NET_WM_WINDOW_OPACITY` is interned at `src/backend/atoms.rs:127` and written
   per window at manage time from a rule's `opacity`
-  (`src/backend/x11/manage.rs:392`).
+  (`src/backend/x11/manage.rs:390-396`).
 
 Both are addressed at compositors running *outside* Maverick. Nothing in the
 tree draws pixels of its own, so there is no such consumer for them here.
@@ -123,12 +125,44 @@ tree draws pixels of its own, so there is no such consumer for them here.
 These are the rules the code is arranged around. Each is stated with the thing
 that would break if it were violated.
 
+**A View is a logical container, and its identity is not its position.**
+`Workspace` *is* a View (`maverick-core/src/types.rs:693`); it owns no window,
+requests no pixmap and needs no rendering surface to exist. Its `id` is a
+`ViewId` (`maverick-core/src/types.rs:431`) — monotonic, per-monitor, and never
+reused, which is what makes a stale `Client::workspace` detectable instead of
+silently re-pointing at whichever View inherited the old position. Existence and
+order belong to `Monitor::workspaces`
+(`maverick-core/src/types.rs:1330-1351`); a `ViewId` survives a reorder, and a
+removal shifts every later position without invalidating any reference.
+
+**The Carousel owns selection, and nothing else.** `Carousel`
+(`maverick-core/src/types.rs:483`) holds `current`, `origin` and the id counter,
+and it is handed the monitor's list on every call rather than keeping a second
+copy of it. It has no `match layout` and no `LayoutKind` in it
+(`maverick-core/src/types.rs:461-464`): navigation must answer the same question
+whichever layout is installed. Both pointers are repaired by `attach`/`detach`
+(`maverick-core/src/types.rs:559,580`), so `return_to_origin` is total.
+
+**Scroll does not own View navigation.** `arrange`
+(`src/core/layout.rs:210-236`) is the layout's only entry point, consumes
+exactly one View — the active one, resolved through `mon.carousel.current()` —
+and returns geometry. It never creates, removes, selects or re-orders a View, and
+it never mutates View membership. Adding a second layout therefore has nothing
+to negotiate with the Carousel.
+
+**Floating clients are outside the layout.** A floating client lives in
+`Workspace::floats`, not in `Workspace::columns`
+(`maverick-core/src/types.rs:698,705`), which is exactly why the layout's input
+excludes it; `present_into` projects it from `Client::geom` instead. A client is
+referenced from exactly one of the two lists, on exactly one monitor (invariant
+A in `maverick-core/src/lib.rs:30-33`).
+
 **One geometry sink.** Every `ConfigureWindow` for a client is issued by
 `render::emit_geometry`, driven by the `Reconciler` diffing `DesiredState`
 against `AppliedState`. No other code positions a window.
 
 **One projection, and it is the geometry.** `arrange` takes a state, a monitor
-index, a config and an output buffer (`src/core/layout.rs:193-199`) — no frame
+index, a config and an output buffer (`src/core/layout.rs:210-216`) — no frame
 delta and no interpolation target. The camera is a number the layout reads, not
 a value easing toward another. The integer rect the reconciler writes is
 therefore the only rect there is, with no second geometry model to disagree
@@ -140,8 +174,8 @@ deadline. There is no heartbeat and no frame timer: an idle session costs no
 CPU.
 
 **`maverick-core` is pure.** No X11, no clock, no filesystem, no environment.
-`State`, `Camera`, layout and the command layer are deterministic functions of
-their inputs, which is why most of the test suite needs no display.
+`State`, `Carousel`, `Camera`, layout and the command layer are deterministic
+functions of their inputs, which is why most of the test suite needs no display.
 
 **`maverick-sys` owns the OS boundary and nothing above it.** Signal
 disposition, `poll`, credentials and process-group signalling live in
@@ -160,10 +194,10 @@ itself — `rustix-1.1.4/src/not_implemented.rs:72` is
 — `[compositor]`, `[animations]` — is not parsed, and it is skipped without a
 diagnostic, because that is the shape a config written for a different Maverick
 takes and refusing it would break loading for no gain
-(`src/userconfig.rs:437-446`). A key inside a table Maverick *does* know is the
+(`src/userconfig.rs:445-455`). A key inside a table Maverick *does* know is the
 opposite case: it is reported as unknown, because a silently ignored key is a
 setting the user believes is in force and is not
-(`src/userconfig.rs:485`).
+(`src/userconfig.rs:493,648-651`).
 
 ---
 
@@ -177,7 +211,7 @@ Two spaces, and the boundary between them is a single `round()`:
 | screen / X11 | `i32` | `render::emit_geometry` |
 
 World coordinates stay fractional through the whole layout pass. The conversion
-happens once, at the X11 boundary, at `src/core/layout.rs:502`:
+happens once, at the X11 boundary, at `src/core/layout.rs:532`:
 
 ```rust
 let screen_col_x = (wa.x as f32 + (world_x - cam) * alpha + cx).round() as i32;
@@ -185,7 +219,7 @@ let screen_col_x = (wa.x as f32 + (world_x - cam) * alpha + cx).round() as i32;
 
 `Camera` holds a plain `f32` that is rounded exactly once, here, so
 quantisation cannot accumulate in the camera. The one running `f32` sum is
-the per-column `x += w + gap_f` (`src/core/layout.rs:350`); it measures 0.028 px
+the per-column `x += w + gap_f` (`src/core/layout.rs:369`); it measures 0.028 px
 at 50 columns, 0.41 px at 200 and 0.93 px at 500, and it is the only
 accumulation in the pipeline.
 
@@ -206,6 +240,11 @@ The consequence: **the integer rectangle in X11 is the only rectangle.**
   directory in the tree, and not named by any manifest. There is no
   `compositor-vulkan` feature to select: `[features]` in `Cargo.toml:47-51` holds
   exactly the two diagnostic trace features.
+- **No second layout.** `LayoutKind` (`maverick-core/src/types.rs:1584-1587`) has
+  exactly one variant, `Column`, and `layout_from`
+  (`src/core/action.rs:181-188`) accepts no other name. There is no Mosaic layout
+  in this tree; the Carousel already answers navigation independently of
+  `LayoutKind`, so adding one would not touch it.
 - **No feature that selects a backend.** A build has one shape. `cargo build`
   and `cargo build --no-default-features` compile the same code, and the
   installer's `--no-default-features` and `--with-compositor` spellings are
@@ -217,8 +256,10 @@ The consequence: **the integer rectangle in X11 is the only rectangle.**
 ## Checking these claims
 
 ```bash
-cargo build                              # the only configuration
-cargo test --workspace                   # the whole suite, no display required
+cargo fmt --all -- --check                            # read-only formatting gate
+cargo build                                            # the only configuration
+cargo check --workspace --all-targets                  # includes #[cfg(test)] code
+cargo test --workspace                                 # the whole suite, no display required
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
