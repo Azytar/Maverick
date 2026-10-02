@@ -10,7 +10,7 @@
 mod common;
 
 use common::{arb_coord, arb_edge, arb_region, arb_regions, arb_screen};
-use maverick_core::types::{Edge, Monitor, Rect, ReservedArea, ReservedRegion, State};
+use maverick_core::types::{Edge, Monitor, Rect, ReservedArea, ReservedRegion, State, ViewId};
 use proptest::prelude::*;
 
 // Per-edge totals only ever add: a reservation can never be undone by adding
@@ -213,62 +213,154 @@ proptest! {
     }
 }
 
-// Workspace slots stay a non-empty, in-range, consecutively tagged list, and
-// growing or shrinking keeps the slots that survive.
+// Views stay a non-empty list, growing and shrinking through the carousel, and
+// growing or shrinking keeps the Views that survive *by identity*.
+//
+// The point of keying on `ViewId` rather than on list position: a shrink must
+// drop exactly the Views that went away and re-point nothing. A survivor keeps
+// its id and its payload, which is what lets `Client::workspace` stay valid
+// across a `n_tags` change.
 proptest! {
     #[test]
-    fn reconcile_workspaces_bounds_the_slots_and_keeps_the_survivors(
+    fn reconcile_workspaces_bounds_the_views_and_keeps_the_survivors(
         screen in arb_screen(),
         initial in 1usize..=5,
         target in 0usize..=9,
-        stale in 0usize..=40,
     ) {
         let mut m = Monitor::new(screen, initial);
-        // Give every slot a distinct payload so a scrambled or dropped slot is
+        // Give every View a distinct payload so a scrambled or dropped View is
         // visible, and record what the surviving ones must keep.
         for (i, ws) in m.workspaces.iter_mut().enumerate() {
             ws.floats.push(0x8000 + i as u32);
         }
-        let before: Vec<(u32, Vec<u32>)> = m
+        let before: Vec<(ViewId, Vec<u32>)> = m
             .workspaces
             .iter()
-            .map(|ws| (ws.tag, ws.floats.clone()))
+            .map(|ws| (ws.id, ws.floats.clone()))
             .collect();
-        m.active_ws = stale;
+        // Put the carousel on the *last* View, so a shrink that drops it has to
+        // repair `current`, and `origin` (still the first View) has to survive.
+        let picked = m.workspaces[m.workspaces.len() - 1].id;
+        m.goto_view(picked);
 
         m.reconcile_workspaces(target);
 
         let expected = target.max(1);
-        prop_assert_eq!(m.workspaces.len(), expected, "wrong number of workspace slots");
-        prop_assert!(m.active_ws < m.workspaces.len(), "active_ws {} is out of range", m.active_ws);
-        for (i, ws) in m.workspaces.iter().enumerate() {
-            prop_assert_eq!(ws.tag as usize, i, "slot {} is tagged {}", i, ws.tag);
+        prop_assert_eq!(m.workspaces.len(), expected, "wrong number of Views");
+        // Ids are unique — the property that makes a dangling `Client::workspace`
+        // detectable rather than silently re-pointed at an unrelated View.
+        let mut ids: Vec<ViewId> = m.workspaces.iter().map(|w| w.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        prop_assert_eq!(ids.len(), m.workspaces.len(), "a View id was reused");
+        // A survivor is the *same View*: same id, same payload. Growing mints new
+        // ids (never reusing a dropped one), so that is checked separately.
+        for (i, (id, floats)) in before.iter().enumerate().take(expected.min(before.len())) {
+            prop_assert_eq!(m.workspaces[i].id, *id, "View {} was re-identified", i);
+            prop_assert_eq!(&m.workspaces[i].floats, floats, "View {} lost its state", i);
         }
-        for (i, (tag, floats)) in before.iter().enumerate().take(expected.min(before.len())) {
-            prop_assert_eq!(m.workspaces[i].tag, *tag, "slot {} was re-tagged", i);
-            prop_assert_eq!(&m.workspaces[i].floats, floats, "slot {} lost its state", i);
+        if expected > before.len() {
+            let old_max = before.iter().map(|(id, _)| id.get()).max().unwrap_or(0);
+            for ws in &m.workspaces[before.len()..] {
+                prop_assert!(
+                    ws.id.get() > old_max,
+                    "a grown View reused an id from before the reconcile"
+                );
+            }
         }
+        // Every pointer names an existing View.
+        prop_assert!(
+            m.carousel.current().is_some_and(|c| m.view_index(c).is_some()),
+            "current {:?} names no existing View", m.carousel.current()
+        );
+        prop_assert!(
+            m.carousel.origin().is_some_and(|o| m.view_index(o).is_some()),
+            "origin {:?} names no existing View", m.carousel.origin()
+        );
     }
 }
 
-// A stale `active_ws` reads as the last workspace instead of panicking.
+// Circular navigation is closed: from any View, `next` and `previous` both
+// succeed and `next` then `previous` returns to where it started. A pointer that
+// names no View is refused rather than papered over.
 //
-// Hotplug and session restore can leave the pointer out of range for one frame;
-// the documented contract is to clamp for that frame and let the caller repair
-// it, never to take the whole window manager down.
+// The refusal half is the campaign invariant: `next`/`previous`/`goto`/
+// `return_to_origin` must never *install* a View that does not exist, so a
+// dangling id can never become the one the layout arranges.
 proptest! {
     #[test]
-    fn a_stale_active_workspace_is_clamped_rather_than_fatal(
-        tags in 1usize..=4,
-        stale in 0usize..=1000,
+    fn circular_navigation_is_closed_and_refuses_a_dead_id(
+        screen in arb_screen(),
+        tags in 1usize..=6,
+        steps in 0usize..=12,
+        stale_raw in any::<u32>(),
     ) {
-        let mut m = Monitor::new(Rect::new(0, 0, 1920, 1080), tags);
-        m.active_ws = stale;
-        let expected = stale.min(tags - 1);
-        prop_assert_eq!(m.ws().tag, expected as u32, "ws() did not clamp a stale active_ws");
-        prop_assert_eq!(m.ws_mut().tag, expected as u32, "ws_mut() did not clamp a stale active_ws");
-        prop_assert_eq!(m.try_ws().is_some(), stale < tags, "try_ws() invented a workspace for a stale index");
-        prop_assert_eq!(m.try_ws_mut().is_some(), stale < tags, "try_ws_mut() invented a workspace");
+        let mut m = Monitor::new(screen, tags);
+        let live: Vec<ViewId> = m.workspaces.iter().map(|w| w.id).collect();
+
+        // A fresh monitor's origin is its first View, so `return_to_origin` has
+        // something real to return to and is *expected* to succeed here.
+        prop_assert_eq!(m.carousel.origin(), Some(live[0]), "origin is not the first View");
+
+        // A full lap returns to the starting View: `next` is a permutation of the
+        // cycle, so `tags` steps are the identity.
+        let start = live[0];
+        for _ in 0..tags {
+            prop_assert!(m.next_view(), "next() refused on a non-empty carousel");
+        }
+        prop_assert_eq!(m.ws().id, start, "a full lap of next() did not return");
+
+        // Each direction is a true inverse of the other, so a matched pair
+        // returns to the starting View whatever the ring size — including a
+        // two-View ring, where `next` and `previous` are the same single step.
+        for _ in 0..steps {
+            prop_assert!(m.previous_view(), "previous() refused");
+            prop_assert!(m.next_view(), "next() refused");
+            prop_assert_eq!(m.carousel.current(), Some(start), "previous+next did not cancel");
+            prop_assert!(m.next_view(), "next() refused");
+            prop_assert!(m.previous_view(), "previous() refused");
+            prop_assert_eq!(m.carousel.current(), Some(start), "next+previous did not cancel");
+        }
+
+        // An id this monitor never minted cannot be navigated to, and the
+        // refusal leaves the carousel exactly where it was.
+        let max_live = live.iter().map(|v| v.get()).max().unwrap_or(0);
+        let stale = ViewId::new(stale_raw.max(max_live) + 1);
+        prop_assert!(m.view_index(stale).is_none(), "fixture id is not actually stale");
+        prop_assert!(!m.goto_view(stale), "goto() installed a stale id");
+        prop_assert_eq!(m.carousel.current(), Some(start), "a refused goto moved current");
+        // `origin` is a live View here, so returning is legal and must succeed —
+        // and must land on the origin, not on whatever the pointer used to be.
+        prop_assert!(m.return_to_origin(), "return_to_origin refused a live origin");
+        prop_assert_eq!(
+            m.carousel.current(),
+            m.carousel.origin(),
+            "return_to_origin did not land on the origin"
+        );
+        prop_assert!(m.view_index(m.carousel.current().unwrap()).is_some());
+        prop_assert!(m.view_index(m.carousel.origin().unwrap()).is_some());
+
+        // With the origin *deleted*, it must not still name the dead View.
+        // Removing it is the only public route to that state, and `detach` is what
+        // re-points it. A single-View monitor would go empty instead, which is the
+        // one documented case where both pointers are legitimately `None`.
+        let origin = m.carousel.origin().unwrap();
+        let origin_pos = m.view_index(origin).unwrap();
+        m.remove_view_at(origin_pos);
+        if m.workspaces.is_empty() {
+            prop_assert!(m.carousel.is_empty(), "an emptied monitor kept a pointer");
+            prop_assert_eq!(m.carousel.current(), None);
+            prop_assert_eq!(m.carousel.origin(), None);
+            prop_assert!(!m.return_to_origin(), "return selected a View in the empty state");
+            prop_assert!(!m.next_view(), "next navigated in the empty state");
+            prop_assert!(!m.previous_view(), "previous navigated in the empty state");
+        } else {
+            let repaired = m.carousel.origin().unwrap();
+            prop_assert!(m.view_index(repaired).is_some(), "origin dangles after a delete");
+            prop_assert_ne!(repaired, origin, "origin still names the deleted View");
+            prop_assert!(m.return_to_origin(), "return refused the repaired origin");
+            prop_assert_eq!(m.carousel.current(), Some(repaired));
+        }
     }
 }
 

@@ -16,9 +16,28 @@
 
 use maverick_core::types::{
     Client, Dir, Edge, FullscreenPolicy, Monitor, PendingFocus, Rect, ReservedRegion, State,
-    WinFlags, WindowId,
+    ViewId, WinFlags, WindowId,
 };
 use proptest::prelude::*;
+
+/// The `ViewId` of carousel position `pos` on monitor `mi`.
+///
+/// Fixtures address Views by *position* because that is what a test means by
+/// "the second View", and membership is keyed by identity — so every position
+/// used to build a client is translated through the monitor's own list here
+/// rather than being turned into an id by hand.
+pub fn view_id(st: &State, mi: usize, pos: usize) -> ViewId {
+    st.monitors[mi].workspaces[pos].id
+}
+
+/// The carousel position of `view` on its own monitor. Panics on an id that
+/// names no View, which a fixture must never construct.
+pub fn view_index(st: &State, view: &ViewId) -> usize {
+    st.monitors
+        .iter()
+        .find_map(|m| m.view_index(*view))
+        .expect("fixture addressed a View that does not exist")
+}
 
 // ---------------------------------------------------------------------------
 // Primitive strategies
@@ -188,7 +207,7 @@ pub fn build(spec: &Spec) -> Built {
         next_id += 1;
         let mi = k % n_mon;
         let ws_i = (k / n_mon) % n_tags;
-        let mut c = Client::new(win, mi, ws_i);
+        let mut c = Client::new(win, mi, view_id(&st, mi, ws_i));
         c.name = format!("tiled-{k}");
         c.class = "prop".into();
         c.geom = Rect::new(64 * (k as i32 % 8), 32, 320, 240);
@@ -206,7 +225,7 @@ pub fn build(spec: &Spec) -> Built {
         next_id += 1;
         let mi = (k + 1) % n_mon;
         let ws_i = (k / 2) % n_tags;
-        let mut c = Client::new(win, mi, ws_i);
+        let mut c = Client::new(win, mi, view_id(&st, mi, ws_i));
         c.name = format!("float-{k}");
         // A float's geometry is WM-authoritative and may sit off-screen, which
         // is why the checker does not constrain it.
@@ -223,7 +242,8 @@ pub fn build(spec: &Spec) -> Built {
     // the backend, which removes the source placement before dropping.
     for k in 0..spec.merges {
         let Some(&win) = tiled.get(k + 1) else { break };
-        let (mi, ws_i) = (st.clients[&win].monitor, st.clients[&win].workspace);
+        let mi = st.clients[&win].monitor;
+        let ws_i = view_index(&st, &st.clients[&win].workspace);
         let ws = &mut st.monitors[mi].workspaces[ws_i];
         if ws.columns.len() < 2 {
             break;
@@ -236,7 +256,7 @@ pub fn build(spec: &Spec) -> Built {
     if spec.features & F_ORPHAN != 0 {
         // Mid-manage orphan: known to the core, not yet placed in the tree.
         let win = next_id;
-        let mut c = Client::new(win, 0, 0);
+        let mut c = Client::new(win, 0, view_id(&st, 0, 0));
         c.name = "orphan".into();
         st.add_client(c);
         wins.push(win);
@@ -269,7 +289,7 @@ pub fn build(spec: &Spec) -> Built {
             // has to as well: a state where they disagree is only ever produced
             // by hand, and `apply_move_dir` reads one while the layout reads the
             // other.
-            let active = st.monitors[mi].active_ws;
+            let active = st.monitors[mi].active_index();
             let tiled_focus = st.monitors[mi].workspaces[active].focused_win();
             let float_focus = st.monitors[mi].workspaces[active].floats.last().copied();
             if let Some(w) = tiled_focus.or(float_focus) {
@@ -288,10 +308,11 @@ pub fn build(spec: &Spec) -> Built {
     let mut maximize_win = None;
     if spec.features & F_MAXIMIZE != 0 {
         if let Some(&win) = tiled.first() {
-            let (mi, ws_i) = (st.clients[&win].monitor, st.clients[&win].workspace);
+            let mi = st.clients[&win].monitor;
+            let view = st.clients[&win].workspace;
             let c = st.clients.get_mut(&win).expect("tiled window is managed");
             c.flags.set(WinFlags::MAXIMIZED);
-            st.monitors[mi].active_ws = ws_i;
+            st.monitors[mi].goto_view(view);
             focus_logically(&mut st, mi, win);
             st.sync_presented_maximize(mi);
             maximize_win = Some(win);
@@ -336,7 +357,7 @@ pub fn build(spec: &Spec) -> Built {
     if spec.features & F_LEGACY_MAX != 0 && n_mon >= 2 && n_tags >= 2 {
         if let Some(win) = maximize_win {
             let mi = st.clients[&win].monitor;
-            let ws_i = st.clients[&win].workspace;
+            let ws_i = view_index(&st, &st.clients[&win].workspace);
             let other = (mi + 1) % n_mon;
             if ws_i != 0 {
                 st.monitors[other].workspaces[0].presented_maximize = Some(win);

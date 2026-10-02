@@ -28,10 +28,15 @@
 //! runs after every `Engine::execute` / `execute_batch` in debug builds:
 //!
 //! A. Every window is referenced from exactly one place — a column's window
-//!    list (`Workspace::columns`) or a workspace's float list
-//!    (`Workspace::floats`) — and never from two monitors or workspaces.
-//! B. `Monitor::active_ws`, `Client::monitor`, and `Client::workspace` agree:
-//!    a client's `(monitor, workspace)` is the workspace it is placed in.
+//!    list (`Workspace::columns`) or a View's float list
+//!    (`Workspace::floats`) — and never from two monitors or Views.
+//! B. `Client::monitor` and `Client::workspace` agree with the placement tree:
+//!    a client's `(monitor, ViewId)` names the View that actually references it.
+//!    `ViewId`s are never reused, so a dangling reference is detectable.
+//! B2. `Carousel::current` and `Carousel::origin` both name an existing View
+//!    whenever the monitor has at least one View (and are both `None` only when
+//!    it has none). View identity is independent of carousel position and of any
+//!    X11 window id, and navigation is independent of `LayoutKind`.
 //! C. The scroll camera is an *input* to the projection, not a source of
 //!    truth: `arrange_columns` derives each column's x from `camera.position`,
 //!    so the layout is a pure function of the state. `position` is checked
@@ -50,7 +55,7 @@
 pub mod types;
 
 pub use types::{
-    Action, Camera, Client, Column, Dir, Edge, Focus, FullscreenPolicy, FullscreenSnapshot,
-    LayoutKind, Monitor, PendingFocus, Rect, ReservedArea, ReservedRegion, SizeHints, State,
-    ViewportMode, WinFlags, WindowId, WindowMode,
+    Action, Camera, Carousel, Client, Column, Dir, Edge, Focus, FullscreenPolicy,
+    FullscreenSnapshot, LayoutKind, Monitor, PendingFocus, Rect, ReservedArea, ReservedRegion,
+    SizeHints, State, ViewId, ViewportMode, WinFlags, WindowId, WindowMode,
 };

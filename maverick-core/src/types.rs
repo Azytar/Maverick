@@ -401,41 +401,313 @@ pub struct Focus {
     pub column_idx: usize,
 }
 
-/// One virtual desktop on a monitor. Holds both tiled columns and floating
-/// windows, plus the per-workspace view state (camera, overview zoom, viewport).
+/// Stable logical identity of a **View**.
+///
+/// # Contract
+///
+/// A `ViewId` names a View and nothing else. It is deliberately *not*:
+///
+/// - a carousel position — View 7 may sit at position 0, 3 or 7, and moving it
+///   does not change its id;
+/// - an X11 window id — a View owns no window and creates none, so a `ViewId`
+///   never reaches the wire as an XID and no XID is ever a `ViewId`;
+/// - a layout tag — it survives `LayoutKind` changes untouched.
+///
+/// # Invariants
+///
+/// - **Monotonic and never reused.** [`Carousel::mint`] hands out strictly
+///   increasing values for the lifetime of a monitor and never repeats one, so a
+///   deleted View's id can never name a later View. This is why membership can
+///   be keyed by id: a stale `Client::workspace` is *detectable* instead of
+///   silently re-pointing at whichever View inherited the old position.
+/// - **Per-monitor scope.** Each monitor owns a [`Carousel`] and therefore its
+///   own id space, exactly as each monitor owns its own `Vec<Workspace>`. The
+///   composite `(monitor, ViewId)` is a client's placement coordinate, the direct
+///   analogue of the positional `(monitor, workspace index)` pair it replaces.
+/// - **Callers mint through the carousel only.** [`ViewId::new`] exists so tests
+///   and the bootstrap paths can state an id; nothing else may invent one, or
+///   monotonicity (and therefore membership safety) stops holding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ViewId(u32);
+
+impl ViewId {
+    /// Wrap a raw id. Only for tests and bootstrap; see [`Self`].
+    pub const fn new(raw: u32) -> Self {
+        ViewId(raw)
+    }
+    /// The raw value. Only for diagnostics, tests and the config/IPC boundary.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ViewId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "view#{}", self.0)
+    }
+}
+
+/// Logical carousel over a monitor's Views: which View is **current**, which is
+/// the **origin**, and how to move between them.
+///
+/// # Contract
+///
+/// The Carousel is *state*, not a rendering abstraction. Every operation is
+/// instantaneous and logical: it writes a [`ViewId`] and returns. There is no
+/// animation state, no transition state, no interpolation, no timer, no frame
+/// scheduling, no compositor dependency and no X11 call — a View is a logical
+/// container of clients, not a window, a pixmap or a slot.
+///
+/// It deliberately knows **nothing** about `LayoutKind`. There is no
+/// `match layout { .. }` here and none may be added: navigation must produce
+/// the same answer whichever layout is installed, and the layout must never be
+/// consulted to decide *which* View is current.
+///
+/// # Invariants
+///
+/// - `current` and `origin` are `Some` **exactly when at least one View
+///   exists**, and then both name an existing View. This is what makes
+///   [`Self::return_to_origin`] total: it can never select a deleted View.
+/// - Both pointers are repaired on every lifecycle change ([`Self::attach`] /
+///   [`Self::detach`]), so no operation below can leave a dangling identifier.
+/// - Navigation refuses (`false`) when `views` is empty rather than inventing a
+///   fallback; invalid state is surfaced by `State::check_invariants`, not
+///   papered over here.
+///
+/// # Ownership
+///
+/// Existence and order of Views belong to `Monitor::workspaces`. The Carousel is
+/// handed that list and never stores a second copy — the position it navigates
+/// over is derived on the call, so there is exactly one membership truth.
+#[derive(Debug, Clone)]
+pub struct Carousel {
+    /// The currently selected View.
+    current: Option<ViewId>,
+    /// The explicit return point, pinned when the carousel was first populated.
+    origin: Option<ViewId>,
+    /// Next never-reused id. Monotonic; only [`Self::mint`] advances it.
+    next_id: u32,
+}
+
+impl Default for Carousel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The View that inherits carousel position `pos` once the View that used to sit
+/// there is gone: the successor if there is one, otherwise the new tail.
+///
+/// # Why
+///
+/// Removing a View shifts every later View down by one, so "keep the same
+/// position" is not a stable choice — it would silently jump the user to
+/// whichever View happens to land there. The successor keeps the user where they
+/// were looking, and the tail fallback is what makes removing the *last* View a
+/// well-defined step backwards rather than a special case.
+fn successor(views: &[Workspace], pos: usize) -> Option<ViewId> {
+    views.get(pos).or_else(|| views.last()).map(|w| w.id)
+}
+
+impl Carousel {
+    /// A carousel with no Views: no current, no origin, next id 0.
+    pub const fn new() -> Self {
+        Carousel {
+            current: None,
+            origin: None,
+            next_id: 0,
+        }
+    }
+
+    /// The currently selected View, or `None` when no View exists.
+    pub const fn current(&self) -> Option<ViewId> {
+        self.current
+    }
+
+    /// The return point. `Some` exactly when at least one View exists.
+    pub const fn origin(&self) -> Option<ViewId> {
+        self.origin
+    }
+
+    /// True when no View exists, i.e. `current`/`origin` are both `None`.
+    pub const fn is_empty(&self) -> bool {
+        self.current.is_none() && self.origin.is_none()
+    }
+
+    /// Mint the id of a newly created View: strictly increasing for the lifetime
+    /// of this monitor and never reused.
+    ///
+    /// Minting only allocates the *identity*; it does not register a View. The
+    /// caller pushes the View and then calls [`Self::attach`] so the pointers are
+    /// repaired in one place.
+    pub fn mint(&mut self) -> ViewId {
+        let id = ViewId(self.next_id);
+        // `saturating_add` rather than `+`: a wrapped id would repeat an earlier
+        // one and silently re-point stale `Client::workspace` values. Saturating
+        // keeps them distinct instead, and 4 billion Views on one monitor is not
+        // reachable in practice.
+        self.next_id = self.next_id.saturating_add(1);
+        id
+    }
+
+    /// Register `id` as an existing View after it was pushed onto `views`.
+    ///
+    /// A newly created View only takes over `current`/`origin` when it is the
+    /// *first* one — that is the empty → non-empty transition. Creating a View
+    /// while others exist must not move the user away from what they were looking
+    /// at; membership changes and navigation are separate concerns.
+    pub fn attach(&mut self, id: ViewId) {
+        if self.current.is_none() {
+            self.current = Some(id);
+        }
+        if self.origin.is_none() {
+            self.origin = Some(id);
+        }
+    }
+
+    /// Repair both pointers after the View that used to sit at carousel position
+    /// `pos` was removed, where `removed` is its id and `views` is the list
+    /// **after** removal.
+    ///
+    /// A pointer naming the removed View adopts [`successor`]; any other pointer
+    /// is left alone (it still names an existing View, and its *position* simply
+    /// shifted, which is why membership is keyed by id and not by index). Removing
+    /// the last View defines the empty state explicitly: both pointers become
+    /// `None` rather than dangling.
+    ///
+    /// `current` and `origin` are repaired independently, so removing the origin
+    /// while sitting on a different View moves only the origin.
+    pub fn detach(&mut self, views: &[Workspace], removed: ViewId, pos: usize) {
+        if views.is_empty() {
+            self.current = None;
+            self.origin = None;
+            return;
+        }
+        let fallback = successor(views, pos);
+        if self.current == Some(removed) {
+            self.current = fallback;
+        }
+        if self.origin == Some(removed) {
+            self.origin = fallback;
+        }
+    }
+
+    /// Carousel position of the current View.
+    pub fn current_index(&self, views: &[Workspace]) -> Option<usize> {
+        views.iter().position(|w| Some(w.id) == self.current)
+    }
+
+    /// Carousel position of `id`.
+    pub fn index_of(&self, views: &[Workspace], id: ViewId) -> Option<usize> {
+        views.iter().position(|w| w.id == id)
+    }
+
+    /// Select `id`. Returns `false` (leaving the carousel untouched) when `id`
+    /// names no existing View, so a stale id can never become current.
+    pub fn goto(&mut self, views: &[Workspace], id: ViewId) -> bool {
+        if self.index_of(views, id).is_none() {
+            return false;
+        }
+        self.current = Some(id);
+        true
+    }
+
+    /// Advance one step around a circular carousel, so `next` of the last View is
+    /// the first. Instantaneous: one pointer write, no transition state.
+    ///
+    /// Returns `false` when there is no View to move to (empty carousel, or a
+    /// `current` that names no existing View — a broken invariant the caller is
+    /// expected to have repaired).
+    pub fn next(&mut self, views: &[Workspace]) -> bool {
+        self.step(views, 1)
+    }
+
+    /// Step one View backwards around a circular carousel, so `previous` of the
+    /// first View is the last. Same contract as [`Self::next`].
+    pub fn previous(&mut self, views: &[Workspace]) -> bool {
+        self.step(views, -1)
+    }
+
+    fn step(&mut self, views: &[Workspace], delta: isize) -> bool {
+        let n = views.len();
+        if n == 0 {
+            return false;
+        }
+        let Some(i) = self.current_index(views) else {
+            return false;
+        };
+        // Wrapping arithmetic in `isize` keeps a single expression for both
+        // directions: `(i + 1) % n` and `(i + n - 1) % n` would each need their
+        // own guard, and only the latter overflows `usize` when `i == 0`.
+        let j = (i as isize + delta).rem_euclid(n as isize) as usize;
+        self.current = Some(views[j].id);
+        true
+    }
+
+    /// Select the origin.
+    ///
+    /// The containment check is the contract, not a defensive nicety: `origin` is
+    /// repaired on every detach, so an origin that names no View is a broken
+    /// invariant — and returning `false` here is what keeps
+    /// `return_to_origin()` from ever selecting a deleted View.
+    pub fn return_to_origin(&mut self, views: &[Workspace]) -> bool {
+        let Some(origin) = self.origin else {
+            return false;
+        };
+        if self.index_of(views, origin).is_none() {
+            return false;
+        }
+        self.current = Some(origin);
+        true
+    }
+}
+
+/// One logical View on a monitor: the set of clients that belong together, plus
+/// the presentation state that belongs to that set. Holds both tiled columns and
+/// floating windows.
+///
+/// A View is *not* an X11 window: it owns no window, requests no pixmap, and
+/// needs no compositor, rendering surface or slot window to exist. Creating one
+/// is a pure logical transition.
 ///
 /// # Ownership
 ///
 /// Owned by `Monitor::workspaces`; every `WindowId` in `columns` or `floats`
-/// also lives in `State::clients`. `presented_maximize` is derived state kept
-/// in sync by `State::sync_presented_maximize`.
+/// also lives in `State::clients`, and `Client::workspace` must name this View's
+/// `id`. `presented_maximize` is derived state kept in sync by
+/// `State::sync_presented_maximize`.
 ///
 /// # Invariants
 ///
+/// - `id` is unique within the owning monitor and was minted by that monitor's
+///   [`Carousel`] (see [`ViewId`]).
 /// - `focus.column_idx < columns.len()` when non-empty, and every
 ///   `Column::focused` is in range.
 /// - `camera` is not the source of truth for geometry; arrangement derives
 ///   positions from it.
 /// - `presented_maximize` (when `Some`) names a maximized client on this
-///   workspace, and on the monitor's `focused` window while it is the active
-///   workspace.
+///   View, and on the monitor's `focused` window while this is the active View.
+/// - Membership is a property of this View alone: changing `layout` (or any
+///   other field) never moves a client in or out of it.
 #[derive(Debug, Clone)]
 pub struct Workspace {
-    /// Workspace tag (0-based index as configured).
-    pub tag: u32,
-    /// Tiled columns (scrolling ribbon).
+    /// Stable logical identity of this View. Never reused, never a position.
+    pub id: ViewId,
+    /// Tiled columns (scrolling ribbon). Floats are deliberately absent: they are
+    /// excluded from tiled layout input by living here instead of in `columns`.
     pub columns: Vec<Column>,
     /// Focused column pointer.
     pub focus: Focus,
     /// Scroll camera (only meaningful in `LayoutKind::Column` / ribbon mode).
     pub camera: Camera,
-    /// Floating windows on this workspace (excluded from column layout; `Client::geom` authoritative).
+    /// Floating windows on this View (excluded from column layout; `Client::geom`
+    /// authoritative).
     pub floats: Vec<WindowId>,
-    /// Layout mode for this specific workspace — independent of every other workspace.
+    /// Layout mode for this specific View — independent of every other View.
     pub layout: LayoutKind,
     /// Semantic-zoom factor for the Overview film-strip (1.0 = normal, <1 = zoomed out).
     pub zoom: f32,
-    /// Overview (film-strip zoom-out) mode active for this workspace.
+    /// Overview (film-strip zoom-out) mode active for this View.
     pub overview: bool,
     /// Viewport display mode (normal vs zoomed-in inspection). Orthogonal to
     /// `overview` and to window fullscreen.
@@ -446,7 +718,7 @@ pub struct Workspace {
     /// value > 1 enlarges instead of shrinking.
     pub page_zoom: f32,
     /// The window currently presented as the **maximize** overlay on this
-    /// workspace (`None` when no maximized window owns it). Explicitly stored
+    /// View (`None` when no maximized window owns it). Explicitly stored
     /// rather than re-derived from `Monitor::focused` at every read site; kept
     /// in sync with the focused window's maximize flags by
     /// `State::sync_presented_maximize`. `Monitor::focused` itself stays purely
@@ -455,10 +727,10 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Create an empty workspace with `tag`.
-    pub fn new(tag: u32) -> Self {
+    /// Create an empty View carrying `id`.
+    pub fn new(id: ViewId) -> Self {
         Self {
-            tag,
+            id,
             columns: Vec::new(),
             focus: Focus { column_idx: 0 },
             camera: Camera::new(0.0),
@@ -745,8 +1017,18 @@ pub struct Client {
     pub hints: SizeHints,
     /// Index of the monitor this window lives on.
     pub monitor: usize,
-    /// Index into `Monitor::workspaces` this window is placed in.
-    pub workspace: usize,
+    /// The **View** this window belongs to, by stable logical identity.
+    ///
+    /// This is the authoritative membership field: `(monitor, workspace)` is the
+    /// composite placement coordinate, and it must agree with the View that
+    /// actually references `window` in its `columns`/`floats` (checked by
+    /// `State::check_invariants`).
+    ///
+    /// It is a [`ViewId`], not a carousel position, so removing a View cannot
+    /// silently re-point a client at whichever View inherited its slot. It is
+    /// orthogonal to `flags`' `FLOAT` bit and to `geom`: floating and geometry are
+    /// client properties that a View change must preserve, not touch.
+    pub workspace: ViewId,
     /// The window this one is transient for (`WM_TRANSIENT_FOR`), when it was a
     /// known client at manage time. Used by the renderer to keep popups/dialogs
     /// of a fullscreen or maximized window above the presentation overlay.
@@ -839,8 +1121,9 @@ pub struct Client {
 }
 
 impl Client {
-    /// Create a client for `win` placed on `(mon, ws)` with default geometry/flags.
-    pub fn new(win: WindowId, mon: usize, ws: usize) -> Self {
+    /// Create a client for `win` placed on `(mon, view)` with default
+    /// geometry/flags.
+    pub fn new(win: WindowId, mon: usize, view: ViewId) -> Self {
         Self {
             window: win,
             name: String::new(),
@@ -854,7 +1137,7 @@ impl Client {
             flags: WinFlags::default(),
             hints: SizeHints::default(),
             monitor: mon,
-            workspace: ws,
+            workspace: view,
             transient_parent: None,
             window_types: Vec::new(),
             last_desired: None,
@@ -1004,8 +1287,11 @@ impl ReservedArea {
 ///
 /// - `workarea` is derived from `screen` and `reserved`; never set directly
 ///   except via `recalc_geometry`.
-/// - `active_ws < workspaces.len()`; `focus_stack` contains no duplicates and
-///   only known clients.
+/// - `carousel.current` and `carousel.origin` both name an existing View in
+///   `workspaces` whenever `workspaces` is non-empty (guaranteed by
+///   `Carousel::attach`/`detach` on every lifecycle change, and re-checked by
+///   `State::check_invariants`). `ViewId`s are unique within this monitor.
+/// - `focus_stack` contains no duplicates and only known clients.
 #[derive(Debug, Clone)]
 pub struct Monitor {
     /// Full screen rect from the backend (RandR/Xinerama).
@@ -1016,10 +1302,11 @@ pub struct Monitor {
     pub reserved_regions: Vec<ReservedRegion>,
     /// Collapsed per-edge totals, derived from `reserved_regions`.
     pub reserved: ReservedArea,
-    /// Workspace slots on this monitor.
+    /// This monitor's Views, in carousel order. Existence and order live here;
+    /// the [`Carousel`] only names which of them is current and which is origin.
     pub workspaces: Vec<Workspace>,
-    /// Index of the active workspace in `workspaces`.
-    pub active_ws: usize,
+    /// Navigation state: which View is current, which is the origin.
+    pub carousel: Carousel,
     /// Logically focused window on this monitor (WM intent; may be `None`).
     pub focused: Option<WindowId>,
     /// MRU focus stack for this monitor (most-recent last).
@@ -1027,18 +1314,27 @@ pub struct Monitor {
 }
 
 impl Monitor {
-    /// Create a monitor with `screen` geometry and `n_tags` empty workspaces.
+    /// Create a monitor with `screen` geometry and `n_tags` empty Views.
     ///
     /// `n_tags` is clamped to at least one, the same floor
-    /// [`Self::reconcile_workspaces`] applies: a monitor with no workspace slot
-    /// has no active workspace for [`Self::ws`] / [`Self::ws_mut`] to return, so
-    /// the count cannot be honoured verbatim without making every later command
-    /// path fail on a monitor the backend built correctly from a legal argument.
-    /// The backend's RandR/Xinerama detection and session restore both reach this
+    /// [`Self::reconcile_workspaces`] applies: a monitor with no View has no
+    /// active View for [`Self::ws`] / [`Self::ws_mut`] to return, so the count
+    /// cannot be honoured verbatim without making every later command path fail
+    /// on a monitor the backend built correctly from a legal argument. The
+    /// backend's RandR/Xinerama detection and session restore both reach this
     /// constructor, so the floor belongs here rather than at each call site.
+    ///
+    /// The first View minted becomes both the current and the origin View: the
+    /// origin is the explicit return point, pinned where the session started on
+    /// this monitor.
     pub fn new(screen: Rect, n_tags: usize) -> Self {
+        let mut carousel = Carousel::new();
         let workspaces = (0..n_tags.max(1))
-            .map(|i| Workspace::new(i as u32))
+            .map(|_| {
+                let id = carousel.mint();
+                carousel.attach(id);
+                Workspace::new(id)
+            })
             .collect();
         let mut m = Self {
             screen,
@@ -1046,7 +1342,7 @@ impl Monitor {
             reserved_regions: Vec::new(),
             reserved: ReservedArea::default(),
             workspaces,
-            active_ws: 0,
+            carousel,
             focused: None,
             focus_stack: Vec::with_capacity(16),
         };
@@ -1054,36 +1350,113 @@ impl Monitor {
         m
     }
 
-    /// Active workspace (immutable). Clamps a stale `active_ws` to the
-    /// last workspace instead of panicking (hotplug / session restore can
-    /// leave it out of range for one frame; callers repair it right after).
-    /// Panics only if there are zero workspaces, which violates the
+    /// Carousel position of the active View.
+    ///
+    /// Clamps rather than panicking when the carousel points at nothing (hotplug
+    /// / session restore can leave the list empty for one frame; callers repair it
+    /// right after). Returns 0 for an empty list, which every caller pairs with a
+    /// non-empty check.
+    pub fn active_index(&self) -> usize {
+        self.carousel
+            .current_index(&self.workspaces)
+            .unwrap_or(0)
+            .min(self.workspaces.len().saturating_sub(1))
+    }
+
+    /// Active View (immutable). Clamps a stale pointer to the last View instead of
+    /// panicking; panics only if there are zero Views, which violates the
     /// `reconcile_workspaces(max(1))` invariant.
     pub fn ws(&self) -> &Workspace {
         assert!(
             !self.workspaces.is_empty(),
             "Monitor::ws with zero workspaces (reconcile invariant broken)"
         );
-        let i = self.active_ws.min(self.workspaces.len() - 1);
-        &self.workspaces[i]
+        &self.workspaces[self.active_index()]
     }
-    /// Active workspace (mutable). Same clamping contract as [`Self::ws`].
+    /// Active View (mutable). Same clamping contract as [`Self::ws`].
     pub fn ws_mut(&mut self) -> &mut Workspace {
         assert!(
             !self.workspaces.is_empty(),
             "Monitor::ws_mut with zero workspaces (reconcile invariant broken)"
         );
-        let i = self.active_ws.min(self.workspaces.len() - 1);
+        let i = self.active_index();
         &mut self.workspaces[i]
     }
     /// Fallible accessors for callers that must handle an out-of-range
-    /// `active_ws` explicitly instead of relying on the clamp in `ws()`.
+    /// pointer explicitly instead of relying on the clamp in `ws()`.
     pub fn try_ws(&self) -> Option<&Workspace> {
-        self.workspaces.get(self.active_ws)
+        self.workspaces.get(self.active_index())
     }
     pub fn try_ws_mut(&mut self) -> Option<&mut Workspace> {
-        let i = self.active_ws;
+        let i = self.active_index();
         self.workspaces.get_mut(i)
+    }
+
+    /// Carousel position of `id`, or `None` when no such View exists.
+    pub fn view_index(&self, id: ViewId) -> Option<usize> {
+        self.carousel.index_of(&self.workspaces, id)
+    }
+
+    /// `ViewId` at carousel position `pos`.
+    pub fn view_id(&self, pos: usize) -> Option<ViewId> {
+        self.workspaces.get(pos).map(|w| w.id)
+    }
+
+    /// Select `id` as the active View. Returns `false` (leaving the monitor
+    /// untouched) when `id` names no existing View, so a stale id can never be
+    /// installed as current.
+    pub fn goto_view(&mut self, id: ViewId) -> bool {
+        self.carousel.goto(&self.workspaces, id)
+    }
+
+    /// Advance one step around the circular carousel. Purely logical and
+    /// instantaneous — see [`Carousel::next`].
+    pub fn next_view(&mut self) -> bool {
+        self.carousel.next(&self.workspaces)
+    }
+
+    /// Step one View backwards around the circular carousel — see
+    /// [`Carousel::previous`].
+    pub fn previous_view(&mut self) -> bool {
+        self.carousel.previous(&self.workspaces)
+    }
+
+    /// Select the origin View — see [`Carousel::return_to_origin`].
+    pub fn return_to_origin(&mut self) -> bool {
+        self.carousel.return_to_origin(&self.workspaces)
+    }
+
+    /// Append a new empty View and return its id.
+    ///
+    /// The View is a pure logical container: no X11 window, pixmap or slot is
+    /// created, and the current/origin View are left alone unless this is the
+    /// first View (see [`Carousel::attach`]).
+    pub fn create_view(&mut self) -> ViewId {
+        let id = self.carousel.mint();
+        self.workspaces.push(Workspace::new(id));
+        self.carousel.attach(id);
+        id
+    }
+
+    /// Drop the View at carousel position `pos`, repairing `current`/`origin`.
+    ///
+    /// `pos` is the position **before** removal. Returns the removed View's id.
+    ///
+    /// This is the single place a View is destroyed, so `detach` is guaranteed to
+    /// run and no deletion path can leave `current` or `origin` dangling.
+    ///
+    /// The View's *clients* are not touched here — a `Monitor` has no access to
+    /// `State::clients`, and re-homing them needs both halves. Removal that
+    /// actually destroys a populated View therefore goes through
+    /// [`State::remove_view`], which does the whole job.
+    pub fn remove_view_at(&mut self, pos: usize) -> Option<ViewId> {
+        if pos >= self.workspaces.len() {
+            return None;
+        }
+        let removed = self.workspaces[pos].id;
+        self.workspaces.remove(pos);
+        self.carousel.detach(&self.workspaces, removed, pos);
+        Some(removed)
     }
 
     // Reservation mutations all go through these helpers so `reserved` and
@@ -1165,23 +1538,23 @@ impl Monitor {
         self.workarea = Rect::new(x, y, w, h);
     }
 
-    /// Grow or shrink the workspace slots to match `n_tags`, preserving window
-    /// state for indices that survive. Growing appends fresh empty workspaces;
-    /// shrinking drops trailing slots (windows still assigned there are clamped
-    /// to the last surviving workspace by the caller). Keeps `active_ws` in range.
-    /// `n_tags == 0` is clamped to 1: zero workspaces would make every
-    /// subsequent `ws()` panic.
+    /// Grow or shrink the View list to match `n_tags`, preserving View state for
+    /// the Views that survive. Growing appends fresh empty Views with newly minted
+    /// ids; shrinking drops trailing Views (windows still assigned there are
+    /// clamped to the last surviving View by the caller). `n_tags == 0` is
+    /// clamped to 1: zero Views would make every subsequent `ws()` panic.
+    ///
+    /// Shrinking goes through [`Carousel::detach`], so a `current` or `origin`
+    /// pointing at a dropped View is repaired by the same deterministic rule as an
+    /// explicit removal instead of the old bare clamp.
     pub fn reconcile_workspaces(&mut self, n_tags: usize) {
         let n_tags = n_tags.max(1);
         while self.workspaces.len() < n_tags {
-            self.workspaces
-                .push(Workspace::new(self.workspaces.len() as u32));
+            self.create_view();
         }
-        if self.workspaces.len() > n_tags {
-            self.workspaces.truncate(n_tags);
-        }
-        if self.active_ws >= self.workspaces.len() {
-            self.active_ws = self.workspaces.len().saturating_sub(1);
+        while self.workspaces.len() > n_tags {
+            let pos = self.workspaces.len() - 1;
+            self.remove_view_at(pos);
         }
     }
 }
@@ -1281,7 +1654,21 @@ pub enum Action {
     /// Merge the focused column into the previous one.
     CollapseColumn,
     /// Switch to workspace `n`.
+    ///
+    /// 0-based here, 1-based on the wire (`ArgKind::Ws`). Addresses a carousel
+    /// *position*, which is what every existing consumer means by "workspace n";
+    /// the mapping to the View's identity happens once, in the command.
     View(usize),
+    /// Select the next View on the circular carousel (wraps to the first).
+    ViewNext,
+    /// Select the previous View on the circular carousel (wraps to the last).
+    ViewPrev,
+    /// Select the origin View — the explicit return point.
+    ViewReturn,
+    /// Append a new empty View on the selected monitor.
+    ViewCreate,
+    /// Drop View `n` from the selected monitor. Refused while it holds clients.
+    ViewRemove(usize),
     /// Move focused window to workspace `n`.
     MoveToWs(usize),
     /// Focus monitor in `Dir`.
@@ -1326,8 +1713,9 @@ pub struct PendingFocus {
     pub owner: WindowId,
     /// The monitor the deferral is bound to.
     pub monitor: usize,
-    /// The workspace the deferral is bound to.
-    pub workspace: usize,
+    /// The View the deferral is bound to, by stable identity so the
+    /// presentation context cannot drift when carousel positions shift.
+    pub workspace: ViewId,
 }
 
 /// Global WM state — the single source of truth for placement, focus, and
@@ -1418,29 +1806,23 @@ impl State {
         if mon_idx >= self.monitors.len() {
             return;
         }
-        let (ws_idx, owner) = {
-            let mon = &self.monitors[mon_idx];
-            let ws_idx = mon.active_ws;
-            let owner = mon.focused.filter(|&w| {
-                self.clients.get(&w).is_some_and(|c| {
-                    c.workspace == ws_idx && (c.is_maximized_v() || c.is_maximized_h())
-                })
-            });
-            (ws_idx, owner)
-        };
-        if ws_idx < self.monitors[mon_idx].workspaces.len() {
-            self.monitors[mon_idx].workspaces[ws_idx].presented_maximize = owner;
-        }
-        // A maximize overlay is only ever presented on the ACTIVE workspace (see
+        // Compared by `ViewId`, so the resolve is exact even if the carousel
+        // moved between reading `current` and using it — and a client on a
+        // removed View can never match.
+        let active = self.monitors[mon_idx].carousel.current();
+        let owner = self.monitors[mon_idx].focused.filter(|&w| {
+            self.clients.get(&w).is_some_and(|c| {
+                Some(c.workspace) == active && (c.is_maximized_v() || c.is_maximized_h())
+            })
+        });
+        // A maximize overlay is only ever presented on the ACTIVE View (see
         // `core::present` and `presented_overlay_owner`, which only read the
-        // active workspace). Clear any stale `presented_maximize` entry on the
-        // OTHER workspaces of this monitor, so a window un-maximized on a
-        // non-active workspace cannot leave a dangling maximize-overlay owner
-        // that trips invariant #9 when that workspace is later activated.
-        for (i, ws) in self.monitors[mon_idx].workspaces.iter_mut().enumerate() {
-            if i != ws_idx {
-                ws.presented_maximize = None;
-            }
+        // active View). Clear any stale `presented_maximize` entry on the OTHER
+        // Views of this monitor, so a window un-maximized on a non-active View
+        // cannot leave a dangling maximize-overlay owner that trips invariant #9
+        // when that View is later activated.
+        for ws in self.monitors[mon_idx].workspaces.iter_mut() {
+            ws.presented_maximize = if Some(ws.id) == active { owner } else { None };
         }
     }
 
@@ -1470,16 +1852,13 @@ impl State {
             return Some(o);
         }
         let mon = self.monitors.get(mon_idx)?;
-        let ws_idx = mon.active_ws;
-        if ws_idx >= mon.workspaces.len() {
-            return None;
-        }
-        let col_win = mon.workspaces[ws_idx].focused_win();
+        let ws = mon.ws();
+        let col_win = ws.focused_win();
         let from_stack = mon
             .focus_stack
             .iter()
             .rev()
-            .find(|&&w| self.clients.get(&w).is_some_and(|c| c.workspace == ws_idx))
+            .find(|&&w| self.clients.get(&w).is_some_and(|c| c.workspace == ws.id))
             .copied();
         col_win.or(from_stack)
     }
@@ -1505,11 +1884,11 @@ impl State {
     /// `Client::is_fullscreen()` for either: it is true for both concepts and
     /// would silently merge them.
     pub fn presented_overlay_owner(&self, mon_idx: usize) -> Option<WindowId> {
-        let ws_idx = self.monitors.get(mon_idx)?.active_ws;
-        self.presented_overlay_owner_in(mon_idx, ws_idx)
+        let view = self.monitors.get(mon_idx)?.carousel.current()?;
+        self.presented_overlay_owner_in(mon_idx, view)
     }
 
-    /// The canonical overlay *owner* on an EXPLICIT workspace `ws_idx` of
+    /// The canonical overlay *owner* on an EXPLICIT View `view` of
     /// `mon_idx`. Shared by [`State::presented_overlay_owner`] (which passes the
     /// monitor's active workspace) and the core EWMH `_NET_ACTIVE_WINDOW` policy
     /// (which must test the *requesting* window's own (monitor, workspace), not
@@ -1529,9 +1908,9 @@ impl State {
     /// fullscreen window that is not the monitor's most recent focus is still
     /// presented by `core::present` but does not own focus or stacking. The two
     /// questions differ, so the two predicates differ.
-    pub fn presented_overlay_owner_in(&self, mon_idx: usize, ws_idx: usize) -> Option<WindowId> {
+    pub fn presented_overlay_owner_in(&self, mon_idx: usize, view: ViewId) -> Option<WindowId> {
         let mon = self.monitors.get(mon_idx)?;
-        let ws = mon.workspaces.get(ws_idx)?;
+        let ws = mon.workspaces.iter().find(|w| w.id == view)?;
         // A window that is *both* fullscreen and maximized is owned exclusively
         // through the maximize branch below (so it agrees with
         // `presented_maximize`); the fullscreen branch only matches a *purely*
@@ -1543,7 +1922,7 @@ impl State {
         // focus/stacking decisions.
         let fs_overlay = mon.focus_stack.iter().rev().find(|&&w| {
             self.clients.get(&w).is_some_and(|c| {
-                c.workspace == ws_idx
+                c.workspace == view
                     && c.is_fullscreen()
                     && !c.is_maximized()
                     && c.is_true_fullscreen()
@@ -1553,9 +1932,11 @@ impl State {
             return Some(w);
         }
         if let Some(w) = ws.presented_maximize {
-            if self.clients.get(&w).is_some_and(|c| {
-                c.workspace == ws_idx && (c.is_maximized_v() || c.is_maximized_h())
-            }) {
+            if self
+                .clients
+                .get(&w)
+                .is_some_and(|c| c.workspace == view && (c.is_maximized_v() || c.is_maximized_h()))
+            {
                 return Some(w);
             }
         }
@@ -1595,17 +1976,19 @@ impl State {
     /// test) and by `decide_manage_focus` (the only creator of a deferral), so
     /// a deferral can never be born behind an overlay that its own lifetime test
     /// already rejects.
-    pub fn overlay_presented_in(&self, mon_idx: usize, ws_idx: usize, win: WindowId) -> bool {
-        // Stale indices (a `n_tags` shrink, or a monitor disappearing on hotplug)
-        // leave nothing to be presented: the context is gone for good.
+    pub fn overlay_presented_in(&self, mon_idx: usize, view: ViewId, win: WindowId) -> bool {
+        // A View that no longer exists (removed, or a monitor gone on hotplug)
+        // leaves nothing to be presented: the context is gone for good. Keyed on
+        // `ViewId`, so a later View that inherits the old carousel *position*
+        // does not silently adopt this deferral's context.
         let focused = self.monitors.get(mon_idx).and_then(|m| m.focused);
         self.monitors
             .get(mon_idx)
-            .and_then(|m| m.workspaces.get(ws_idx))
+            .and_then(|m| m.workspaces.iter().find(|w| w.id == view))
             .is_some_and(|_ws| {
                 self.clients.get(&win).is_some_and(|c| {
                     c.monitor == mon_idx
-                        && c.workspace == ws_idx
+                        && c.workspace == view
                         && (c.is_fullscreen_overlay()
                             || ((c.is_maximized_v() || c.is_maximized_h()) && focused == Some(win)))
                 })
@@ -1650,6 +2033,98 @@ impl State {
     pub fn add_client(&mut self, c: Client) {
         let win = c.window;
         self.clients.insert(win, c);
+    }
+
+    /// Re-home every client on `mi`'s View `from` onto View `to`, keeping each
+    /// window's tiled/floating distinction and its floating geometry intact.
+    ///
+    /// Returns the windows that moved. Used when a View is destroyed by a
+    /// `n_tags` shrink (`reconcile_workspaces`) — which drops trailing Views and
+    /// therefore drops the placements inside them, leaving the clients known but
+    /// unplaced. Rewriting only `Client::workspace` would make a client name a
+    /// View that never references it, which is the exact desync invariant #5
+    /// exists to reject.
+    ///
+    /// A float stays a float and keeps `Client::geom` verbatim: a View change is a
+    /// membership change, and floating state and geometry are client properties
+    /// that must survive it.
+    pub fn rehome_clients(&mut self, mi: usize, from: ViewId, to: ViewId) -> Vec<WindowId> {
+        let Some(from_i) = self.monitors.get(mi).and_then(|m| m.view_index(from)) else {
+            return Vec::new();
+        };
+        let Some(to_i) = self.monitors.get(mi).and_then(|m| m.view_index(to)) else {
+            return Vec::new();
+        };
+        if from_i == to_i {
+            return Vec::new();
+        }
+        // Snapshot first: the destination insert and the source removal both borrow
+        // the monitor, so the clients have to be enumerated before either mutates.
+        let moving: Vec<(WindowId, bool)> = self.monitors[mi].workspaces[from_i]
+            .columns
+            .iter()
+            .flat_map(|c| c.windows.iter().copied())
+            .map(|w| (w, false))
+            .chain(
+                self.monitors[mi].workspaces[from_i]
+                    .floats
+                    .iter()
+                    .copied()
+                    .map(|w| (w, true)),
+            )
+            .collect();
+        let mut moved = Vec::with_capacity(moving.len());
+        for (win, is_float) in moving {
+            self.monitors[mi].workspaces[from_i].remove_window(win);
+            if is_float {
+                self.monitors[mi].workspaces[to_i].floats.push(win);
+            } else {
+                self.monitors[mi].workspaces[to_i].add_tiled(win, 1.0);
+            }
+            if let Some(c) = self.clients.get_mut(&win) {
+                c.workspace = to;
+            }
+            moved.push(win);
+        }
+        // The source just lost columns; drop the ones that emptied so no View is
+        // left holding an empty column (which would project a zero-width column).
+        self.monitors[mi].workspaces[from_i].cleanup_empty_columns();
+        moved
+    }
+
+    /// Remove the View at `pos` on monitor `mi`, re-homing its clients onto
+    /// `fallback` (or onto whichever View `Carousel::detach` selects) first.
+    ///
+    /// This is the *safe* removal: it is the only path that may destroy a
+    /// populated View, and it guarantees the surviving state is internally
+    /// consistent — `current`/`origin` name existing Views and every client is
+    /// still placed exactly once. `Monitor::remove_view_at` remains available for
+    /// the empty case.
+    ///
+    /// Returns the removed View's id, or `None` when `pos` names no View.
+    pub fn remove_view(&mut self, mi: usize, pos: usize) -> Option<ViewId> {
+        let removed = self
+            .monitors
+            .get(mi)
+            .and_then(|m| m.workspaces.get(pos))
+            .map(|w| w.id)?;
+        // The successor the carousel will land on: same position after removal if
+        // there is one, else the new tail. Computed *before* the removal so the
+        // re-home target is already valid when it runs.
+        let fallback = self.monitors[mi]
+            .workspaces
+            .get(pos + 1)
+            .or_else(|| {
+                pos.checked_sub(1)
+                    .and_then(|_| self.monitors[mi].workspaces.last())
+            })
+            .map(|w| w.id);
+        if let Some(to) = fallback {
+            if to != removed {
+                self.rehome_clients(mi, removed, to);
+            }
+        }
+        self.monitors[mi].remove_view_at(pos)
     }
 
     /// Remove `win` from `clients` and all placement/overlay/focus structures.
@@ -1734,8 +2209,10 @@ impl State {
         // Clamp to avoid panic index out-of-bounds.
         let mon_i = c.monitor.min(self.monitors.len().saturating_sub(1));
         let mon = &mut self.monitors[mon_i];
-        if c.workspace < mon.workspaces.len() {
-            let ws_i = c.workspace;
+        // Located by the client's own `ViewId`. A stale `c.workspace` (a View
+        // removed by a shrink) resolves to `None` and the tree is left alone
+        // rather than indexed by a dead id.
+        if let Some(ws_i) = mon.view_index(c.workspace) {
             mon.workspaces[ws_i].remove_window(win);
             // Keep the workspace focus pointer (column + row) in lock-step with
             // the logical focus (`mon.focused`). `remove_window` only shifts and
@@ -1766,7 +2243,7 @@ impl State {
         }
         let mi = self.sel_mon.min(self.monitors.len().saturating_sub(1));
         let ws_i = match self.monitors.get(mi) {
-            Some(m) => m.active_ws,
+            Some(m) => m.active_index(),
             None => return false,
         };
         let focused = match self.monitors[mi].focused {
@@ -1792,10 +2269,18 @@ impl State {
         if client.is_float() {
             return false;
         }
-        let (mi, ws_i) = (client.monitor, client.workspace);
-        if mi >= self.monitors.len() || ws_i >= self.monitors[mi].workspaces.len() {
+        let mi = client.monitor;
+        // Resolved through the *client's own* `ViewId`, never through
+        // `active_ws`: the focused slot is written on the monitor the user is
+        // looking at and can name a window placed elsewhere, so addressing a
+        // View by position would move the window against the wrong tree.
+        let Some(ws_i) = self
+            .monitors
+            .get(mi)
+            .and_then(|m| m.view_index(client.workspace))
+        else {
             return false;
-        }
+        };
         // A float is not in the column tree, so it has no column to move
         // between; `apply_move_dir_in` refuses it too, but checking here keeps
         // the reason in the one place that knows what the tree looks like.
@@ -1948,14 +2433,40 @@ impl State {
     pub fn check_invariants(&self) -> Result<(), Vec<String>> {
         let mut v = Vec::new();
 
-        // 1. Monitor / workspace indices valid.
+        // 1. Carousel pointers are valid, and `ViewId`s are unique per monitor.
+        //
+        //    `current`/`origin` must name an existing View whenever any View
+        //    exists — that is what makes `return_to_origin()` total and stops a
+        //    removed View's id from silently resolving to nothing. The empty state
+        //    is the one legal `None` pair.
         for (mi, mon) in self.monitors.iter().enumerate() {
-            if mon.active_ws >= mon.workspaces.len() {
-                v.push(format!(
-                    "monitor {mi}: active_ws {} out of range ({} workspaces)",
-                    mon.active_ws,
-                    mon.workspaces.len()
-                ));
+            let n = mon.workspaces.len();
+            match (mon.carousel.current(), mon.carousel.origin()) {
+                (None, None) if n == 0 => {}
+                (None, None) => v.push(format!(
+                    "monitor {mi}: carousel has no current/origin View but {n} exist"
+                )),
+                (c, o) => {
+                    if let Some(c) = c.filter(|id| mon.view_index(*id).is_none()) {
+                        v.push(format!(
+                            "monitor {mi}: carousel current {c} names no existing View"
+                        ));
+                    }
+                    if let Some(o) = o.filter(|id| mon.view_index(*id).is_none()) {
+                        v.push(format!(
+                            "monitor {mi}: carousel origin {o} names no existing View"
+                        ));
+                    }
+                }
+            }
+            // 1b. View identity is unique within the monitor. Two Views sharing an
+            //     id would make `Client::workspace` ambiguous, so this is what
+            //     keeps "one client, one View" decidable.
+            let mut ids = std::collections::HashSet::new();
+            for ws in &mon.workspaces {
+                if !ids.insert(ws.id) {
+                    v.push(format!("monitor {mi}: duplicate View id {}", ws.id));
+                }
             }
             // 2. Cameras carry no NaN / infinity: a poisoned camera would write
             //    a NaN rect straight into a ConfigureWindow.
@@ -2032,17 +2543,20 @@ impl State {
                 continue;
             }
             let mon = &self.monitors[c.monitor];
-            if c.workspace >= mon.workspaces.len() {
+            // Membership is by `ViewId`, so the check is "does this View exist on
+            // this monitor", not "is the index in range" — a removed View's id is
+            // detectable precisely because ids are never reused.
+            let Some(ws_i) = mon.view_index(c.workspace) else {
                 v.push(format!(
-                    "client {win}: workspace {} out of range on monitor {} ({} workspaces)",
+                    "client {win}: view {} does not exist on monitor {} ({} views)",
                     c.workspace,
                     c.monitor,
                     mon.workspaces.len()
                 ));
                 continue;
-            }
+            };
             if let Some((pm, pw)) = seen.get(&win).copied() {
-                if (pm, pw) != (c.monitor, c.workspace) {
+                if (pm, pw) != (c.monitor, ws_i) {
                     v.push(format!(
                         "client {win}: stored at ({}, {}) but tiled at ({}, {})",
                         c.monitor, c.workspace, pm, pw
@@ -2108,11 +2622,7 @@ impl State {
             // 9b. overlay owner (maximize branch) matches presented_maximize.
             if let Some(w) = self.presented_overlay_owner(mi) {
                 if self.clients.get(&w).is_some_and(Client::is_maximized)
-                    && mon
-                        .workspaces
-                        .get(mon.active_ws)
-                        .and_then(|ws| ws.presented_maximize)
-                        != Some(w)
+                    && mon.ws().presented_maximize != Some(w)
                 {
                     v.push(format!(
                         "monitor {mi}: overlay owner / presented_maximize mismatch"
@@ -2135,10 +2645,8 @@ impl State {
             //    X11 sink deliberately does not promote one to the other — so
             //    checking both axes here rejected states the rest of the model
             //    produces on purpose.
-            let pm = mon
-                .workspaces
-                .get(mon.active_ws)
-                .and_then(|ws| ws.presented_maximize);
+            let active = mon.carousel.current();
+            let pm = mon.ws().presented_maximize;
             if let Some(w) = pm {
                 match self.clients.get(&w) {
                     None => v.push(format!(
@@ -2147,8 +2655,8 @@ impl State {
                     Some(c) if !(c.is_maximized_v() || c.is_maximized_h()) => v.push(format!(
                         "monitor {mi}: presented_maximize {w} is not maximized"
                     )),
-                    Some(c) if c.workspace != mon.active_ws => v.push(format!(
-                        "monitor {mi}: presented_maximize {w} on wrong workspace"
+                    Some(c) if Some(c.workspace) != active => v.push(format!(
+                        "monitor {mi}: presented_maximize {w} on wrong view"
                     )),
                     _ => {}
                 }

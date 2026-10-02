@@ -12,8 +12,8 @@ mod common;
 
 use common::{arb_dir, arb_screen, arb_spec, build, focus_logically, Built};
 use maverick_core::types::{
-    Client, Column, Dir, FullscreenPolicy, Monitor, PendingFocus, Rect, SizeHints, State, WinFlags,
-    WindowId, Workspace,
+    Client, Column, Dir, FullscreenPolicy, Monitor, PendingFocus, Rect, SizeHints, State, ViewId,
+    WinFlags, WindowId, Workspace,
 };
 use proptest::prelude::*;
 
@@ -41,9 +41,17 @@ proptest! {
             !st.monitors[0].workspaces.is_empty(),
             "a monitor built for {n_tags} tags has no workspace to work on"
         );
-        let tag = st.monitors[0].ws_mut().tag;
-        prop_assert_eq!(st.monitors[0].ws().tag, tag);
-        prop_assert_eq!(st.monitors[0].active_ws, 0);
+        // The first View minted is both the current and the origin View, so a
+        // fresh session can always `return_to_origin()`.
+        let first = st.monitors[0].workspaces[0].id;
+        prop_assert_eq!(st.monitors[0].ws().id, first);
+        prop_assert_eq!(st.monitors[0].active_index(), 0);
+        prop_assert_eq!(st.monitors[0].carousel.current(), Some(first));
+        prop_assert_eq!(st.monitors[0].carousel.origin(), Some(first));
+        // Ids are unique and dense from zero, and every pointer resolves.
+        let ids: Vec<u32> = st.monitors[0].workspaces.iter().map(|w| w.id.get()).collect();
+        let n = ids.len() as u32;
+        prop_assert_eq!(ids, (0..n).collect::<Vec<_>>());
 
         prop_assert!(
             st.check_invariants().is_ok(),
@@ -333,7 +341,7 @@ proptest! {
         gaps in proptest::collection::vec(0usize..=6, 1..6),
     ) {
         let target = (windows - 1) / 2;
-        let mut ws = Workspace::new(0);
+        let mut ws = Workspace::new(ViewId::new(0));
         for i in 0..windows {
             ws.add_tiled(0x100 + i as u32, 0.5);
         }
@@ -379,7 +387,7 @@ proptest! {
         width in prop_oneof![any::<f32>(), 0.0f32..=1.5, Just(0.0), Just(-1.0), Just(f32::NAN), Just(f32::INFINITY)],
         more in proptest::collection::vec(prop_oneof![any::<f32>(), 0.0f32..=1.5], 0..6),
     ) {
-        let mut ws = Workspace::new(0);
+        let mut ws = Workspace::new(ViewId::new(0));
         ws.add_tiled(0x1, width);
         for w in more {
             ws.add_tiled(0x2 + (w.to_bits() % 1000), w);
@@ -409,7 +417,7 @@ proptest! {
             1..8,
         ),
     ) {
-        let mut ws = Workspace::new(0);
+        let mut ws = Workspace::new(ViewId::new(0));
         for (i, w) in weights.iter().enumerate() {
             ws.add_tiled(0x200 + i as u32, 1.0);
             ws.columns.last_mut().expect("just added").weight = *w;
@@ -515,7 +523,7 @@ proptest! {
         // Only a workspace with a tiled focus can move; floats and empty
         // workspaces are documented no-ops.
         let mi = state.sel_mon;
-        let ws_i = state.monitors[mi].active_ws;
+        let ws_i = state.monitors[mi].active_index();
         // `apply_move_dir` rearranges the window the *monitor's* logical focus
         // names, and leaves that window focused afterwards.
         let Some(focused) = state.monitors[mi].focused else { return Ok(()) };
@@ -588,7 +596,7 @@ proptest! {
         word in any::<u16>(),
         policy in arb_fullscreen_policy(),
     ) {
-        let mut c = Client::new(1, 0, 0);
+        let mut c = Client::new(1, 0, ViewId::new(0));
         c.flags = flags_of(word);
         c.fullscreen_policy = policy;
 
@@ -727,7 +735,7 @@ fn the_input_model_is_a_field_no_flag_bit_can_shadow() {
         WinFlags::FS_WAS_FLOAT,
         WinFlags::MAXIMIZED_H,
     ];
-    let mut c = Client::new(7, 0, 0);
+    let mut c = Client::new(7, 0, ViewId::new(0));
     assert!(c.wants_input, "a client that declared nothing wants input");
     c.wants_input = false;
     for f in USED {
@@ -765,7 +773,7 @@ fn the_input_model_is_a_field_no_flag_bit_can_shadow() {
 fn adding_a_column_and_removing_it_again_restores_the_workspace() {
     for n in 1..=5usize {
         for active in 0..n {
-            let mut ws = Workspace::new(0);
+            let mut ws = Workspace::new(ViewId::new(0));
             for i in 0..n {
                 ws.add_tiled(1000 + i as u32, 0.5);
             }
@@ -936,7 +944,7 @@ fn single_monitor_state() -> State {
 /// maximized, which would make it a presentation overlay and change what the
 /// fixtures are testing.
 fn add_plain_client(state: &mut State, win: WindowId) {
-    let mut c = Client::new(win, 0, 0);
+    let mut c = Client::new(win, 0, ViewId::new(0));
     c.flags.clear(WinFlags::MAXIMIZED);
     state.add_client(c);
 }
@@ -1013,6 +1021,180 @@ fn arb_workspace_op() -> impl Strategy<Value = Vec<WorkspaceOp>> {
     )
 }
 
+// --- carousel properties -----------------------------------------------------
+
+/// One lifecycle operation on a monitor's carousel.
+#[derive(Debug, Clone, Copy)]
+enum CarouselOp {
+    Next,
+    Prev,
+    GotoFirst,
+    ReturnToOrigin,
+    /// Append a fresh View.
+    Create,
+    /// Remove the View at a generated position.
+    Remove(usize),
+}
+
+/// One operation, weighted so navigation (the common case) dominates while
+/// creation and removal stay frequent enough to hit the lifecycle contracts.
+fn arb_carousel_op() -> BoxedStrategy<CarouselOp> {
+    // `prop_oneof!` cannot express the remove arm (it carries a payload), so the
+    // navigation/lifecycle branches and the positional-removal branch are unioned
+    // as strategies instead.
+    let simple = prop_oneof![
+        4 => Just(CarouselOp::Next),
+        4 => Just(CarouselOp::Prev),
+        2 => Just(CarouselOp::GotoFirst),
+        2 => Just(CarouselOp::ReturnToOrigin),
+        2 => Just(CarouselOp::Create),
+    ]
+    .boxed();
+    let remove = any::<usize>().prop_map(CarouselOp::Remove).boxed();
+    simple.prop_union(remove).boxed()
+}
+
+/// A ring of operations over one monitor's Views, so the circular and lifecycle
+/// contracts are exercised as sequences rather than one step at a time.
+fn arb_carousel_ops() -> impl Strategy<Value = Vec<CarouselOp>> {
+    prop::collection::vec(arb_carousel_op(), 1..24)
+}
+
+// Navigation is a permutation of the cycle, so `current` always names an
+// existing View and the pointer is stable under an arbitrary op sequence.
+//
+// This is the property that makes the *circular* part meaningful over many
+// cycles rather than only at the boundary: `next` is checked against an
+// independently computed ring, so an implementation that wrapped at the wrong
+// end, or clamped instead of wrapping, fails here even though every
+// single-step boundary test passes.
+proptest! {
+    #[test]
+    fn circular_navigation_matches_an_independent_ring_model(
+        screen in arb_screen(),
+        tags in 1usize..=8,
+        ops in arb_carousel_ops(),
+    ) {
+        let mut m = Monitor::new(screen, tags);
+        // The oracle: a plain `Vec` of the live ids, walked the same way the
+        // contract describes. Deliberately not derived from the implementation.
+        let mut ring: Vec<ViewId> = m.workspaces.iter().map(|w| w.id).collect();
+
+        for op in ops {
+            match op {
+                CarouselOp::Next => {
+                    if ring.is_empty() {
+                        prop_assert!(!m.next_view(), "next navigated with no Views");
+                        continue;
+                    }
+                    let before = m.carousel.current();
+                    let want = ring.iter().position(|id| Some(*id) == before);
+                    prop_assert!(m.next_view(), "next refused on a non-empty carousel");
+                    // After a successful step the current View is exactly one
+                    // position further around the ring — wrapping included.
+                    let cur = m.carousel.current().unwrap();
+                    let i = ring.iter().position(|id| *id == cur).unwrap();
+                    match want {
+                        Some(w) => prop_assert_eq!(i, (w + 1) % ring.len(), "next did not advance one place"),
+                        None => prop_assert_eq!(i, 0),
+                    }
+                }
+                CarouselOp::Prev => {
+                    if ring.is_empty() {
+                        prop_assert!(!m.previous_view(), "previous navigated with no Views");
+                        continue;
+                    }
+                    let before = m.carousel.current();
+                    let want = ring.iter().position(|id| Some(*id) == before);
+                    prop_assert!(m.previous_view(), "previous refused on a non-empty carousel");
+                    let cur = m.carousel.current().unwrap();
+                    let i = ring.iter().position(|id| *id == cur).unwrap();
+                    match want {
+                        Some(w) => prop_assert_eq!(i, (w + ring.len() - 1) % ring.len(), "previous did not step back one place"),
+                        None => prop_assert_eq!(i, 0),
+                    }
+                }
+                CarouselOp::GotoFirst => {
+                    if ring.is_empty() {
+                        prop_assert!(!m.goto_view(ViewId::new(0)), "goto invented a View");
+                        continue;
+                    }
+                    prop_assert!(m.goto_view(ring[0]), "goto of a live View refused");
+                    prop_assert_eq!(m.carousel.current(), Some(ring[0]));
+                }
+                CarouselOp::ReturnToOrigin => {
+                    let origin = m.carousel.origin();
+                    // The contract: `return_to_origin` can only ever succeed onto
+                    // an *existing* View, and that View is the one origin names.
+                    let moved = m.return_to_origin();
+                    match origin {
+                        Some(o) => {
+                            prop_assert!(m.view_index(o).is_some(), "origin names a dead View");
+                            prop_assert!(moved, "return refused a valid origin");
+                            prop_assert_eq!(m.carousel.current(), Some(o), "return landed off the origin");
+                        }
+                        None => prop_assert!(!moved, "return selected a View in the empty state"),
+                    }
+                }
+                CarouselOp::Create => {
+                    let id = m.create_view();
+                    prop_assert!(m.view_index(id).is_some(), "created View is not in the list");
+                    prop_assert!(
+                        !ring.contains(&id),
+                        "CreateView reused an id, so membership could silently re-point"
+                    );
+                    ring.push(id);
+                }
+                CarouselOp::Remove(pos) => {
+                    // An emptied carousel is the documented terminal state: there
+                    // is nothing left to remove, and `CreateView` above is what
+                    // brings it back. Asserting that here is the "final View
+                    // removed" case of the lifecycle contract.
+                    if m.workspaces.is_empty() {
+                        prop_assert!(m.carousel.is_empty(), "an emptied carousel kept a pointer");
+                        prop_assert_eq!(m.remove_view_at(0), None, "remove invented a View");
+                        prop_assert!(!m.return_to_origin());
+                        prop_assert!(!m.next_view());
+                        prop_assert!(!m.previous_view());
+                        continue;
+                    }
+                    let pos = pos % m.workspaces.len();
+                    let victim = ring[pos];
+                    let removed = m.remove_view_at(pos);
+                    prop_assert_eq!(removed, Some(victim), "remove returned the wrong View");
+                    ring.remove(pos);
+                    // The load-bearing invariant: after ANY removal both pointers
+                    // still name existing Views (or both are None in the empty
+                    // state), and the surviving Views keep their ids.
+                    match (m.carousel.current(), m.carousel.origin()) {
+                        (None, None) => prop_assert_eq!(ring.len(), 0, "pointers cleared while Views remain"),
+                        (c, o) => {
+                            prop_assert!(c.is_some(), "current is None while Views exist");
+                            prop_assert!(o.is_some(), "origin is None while Views exist");
+                            prop_assert!(
+                                c.is_some_and(|id| m.view_index(id).is_some()),
+                                "current {:?} names no existing View", c
+                            );
+                            prop_assert!(
+                                o.is_some_and(|id| m.view_index(id).is_some()),
+                                "origin {:?} names no existing View", o
+                            );
+                            // Navigation must still work from the repaired pointer.
+                            if !ring.is_empty() {
+                                prop_assert!(m.next_view(), "navigation refused after a removal");
+                            }
+                        }
+                    }
+                }
+            }
+            // Ids are unique and the ring stays the same set, in the same order,
+            // as the oracle's.
+            let live: Vec<ViewId> = m.workspaces.iter().map(|w| w.id).collect();
+            prop_assert_eq!(&live, &ring, "the View list diverged from the model");
+        }
+    }
+}
+
 // --- invariant injections ---------------------------------------------------
 
 /// One way to corrupt a single field of an otherwise valid state.
@@ -1074,14 +1256,22 @@ impl Violation {
                 "out of range"
             }
             Self::ClientWorkspaceOutOfRange => {
+                // Point a client at an id no View holds. Minting it from this
+                // monitor's own carousel guarantees it is above every live id, so
+                // it can never be silently satisfied by an existing View — which is
+                // the property that makes a stale membership detectable.
                 let win = any_client(st);
                 let mi = st.clients[&win].monitor as usize;
-                let n = st.monitors[mi].workspaces.len() + 3;
+                let n = st.monitors[mi].carousel.mint();
+                assert!(
+                    st.monitors[mi].view_index(n).is_none(),
+                    "minted id collided with a live View"
+                );
                 st.clients
                     .get_mut(&win)
                     .expect("a managed client")
                     .workspace = n;
-                "out of range"
+                "does not exist on monitor"
             }
             Self::ColumnNamesAnUnknownClient => {
                 let (mi, ws_i, ci) = ensure_column(st);
@@ -1098,14 +1288,18 @@ impl Violation {
             }
             Self::ClientStoredInTheWrongWorkspace => {
                 // A window that moved without being re-placed: the tree and the
-                // client's own placement record disagree about where it lives.
+                // client's own placement record disagree about where it lives. The
+                // client keeps naming the View it was originally placed in while a
+                // *different* View claims it in its tree.
                 let win = any_client(st);
-                let mi = st.clients[&win].monitor as usize;
-                let fresh = st.monitors[mi].workspaces.len();
-                st.monitors[mi]
-                    .workspaces
-                    .push(Workspace::new(fresh as u32));
-                st.monitors[mi].workspaces[fresh].add_tiled(win, 0.5);
+                let mut foreign = Monitor::new(Rect::new(0, 0, 640, 480), 1);
+                foreign.workspaces[0].add_tiled(win, 0.5);
+                // The extra monitor gives the state a second View to place the
+                // window in, but the client's own record is left naming the View
+                // the rest of the tree still uses.
+                let orig = st.clients[&win].workspace;
+                st.monitors.push(foreign);
+                st.clients.get_mut(&win).unwrap().workspace = orig;
                 "stored at"
             }
             Self::FocusColumnOutOfRange => {
@@ -1152,17 +1346,34 @@ impl Violation {
                 "no finito"
             }
             Self::ActiveWorkspaceOutOfRange => {
+                // A `ViewId` no View holds — the position-independent form of the
+                // same desync, and now the one that can genuinely happen, since a
+                // removed View's id is never re-minted.
+                //
+                // Reached by splicing the public `workspaces` list directly rather
+                // than through `remove_view_at`: that is exactly the corruption the
+                // checker exists to catch (a removed View's id must not be able to
+                // name anything), and no sequence of public calls can produce it.
                 let mon = &mut st.monitors[0];
-                mon.active_ws = mon.workspaces.len() + 2;
-                "active_ws"
+                let current = mon.carousel.current();
+                mon.workspaces.retain(|w| Some(w.id) != current);
+                if mon.workspaces.is_empty() {
+                    // Keep at least one View so the "no current but Views exist"
+                    // branch is what fires rather than the legal empty state.
+                    mon.workspaces.push(Workspace::new(mon.carousel.mint()));
+                }
+                "carousel"
             }
             Self::PresentedMaximizeIsNotMaximized => {
                 // A maximized overlay on a workspace that is not the active one
                 // is explicitly allowed, so this only breaks if the client stops
                 // being maximized at all.
                 let win = maximize_presented_client(st);
-                let mi = st.clients[&win].monitor as usize;
-                let ws_i = st.clients[&win].workspace as usize;
+                let mi = st.clients[&win].monitor;
+                let view = st.clients[&win].workspace;
+                let ws_i = st.monitors[mi]
+                    .view_index(view)
+                    .expect("the maximized client is placed in a View");
                 let c = st.clients.get_mut(&win).expect("a managed client");
                 c.flags.clear(WinFlags::MAXIMIZED);
                 c.flags.clear(WinFlags::MAXIMIZED_V);
@@ -1194,7 +1405,7 @@ impl Violation {
                     window: win,
                     owner: win,
                     monitor: 0,
-                    workspace: 0,
+                    workspace: st.monitors[0].workspaces[0].id,
                 });
                 "is not a presented overlay"
             }
