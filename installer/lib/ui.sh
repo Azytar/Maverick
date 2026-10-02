@@ -3,9 +3,8 @@
 #  MAVERICK installer — presentation (lib/ui.sh)
 #
 #  Everything that draws or asks lives here: terminal probing, colours, the
-#  banner, the live step block, the spinners, the celebration effects, the
-#  summary panel, and the one prompt helper every yes/no question goes
-#  through.
+#  banner, the live step block, the spinners, the summary panel, and the one
+#  prompt helper every yes/no question goes through.
 #
 #  Contract: sourcing defines, ui_init() probes. Nothing in this file writes
 #  a file, picks what to install or escalates — it prints, and returns a
@@ -16,6 +15,10 @@
 # Colour, width and animation are decided once, here. Everything below reads
 # these variables and degrades on its own: no tty means no colour, no cursor
 # games, and no question asked of nobody.
+#
+# The drawing here is a progress report, not a demo: a live step block, a bar
+# and a summary panel. There is no celebration effect, because an installer that
+# finished correctly has nothing to announce beyond the fact that it finished.
 ui_init() {
     if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" ]]; then
         HAS_TTY=1
@@ -148,7 +151,6 @@ _grad3() {
 }
 
 _nap() { if [[ $ANIM -eq 1 ]]; then sleep "$1"; fi; return 0; }
-_eoln() { if [[ $HAS_TTY -eq 1 ]]; then printf '\e[K\n'; else printf '\n'; fi; return 0; }
 
 hr() {
     local w=$COLS
@@ -517,54 +519,12 @@ _animate() {
     return 0
 }
 
-# ── finale fx ────────────────────────────────────────────────────────────────
-_shimmer() {
-    local text="$1" len=${#1}
-    if [[ $ANIM -ne 1 ]]; then
-        _gradient_print "$text"; _eoln
-        return 0
-    fi
-    local tt i d cv out
-    for ((tt=0; tt <= len + 10; tt++)); do
-        out=""
-        for ((i=0; i<len; i++)); do
-            d=$(( tt - i )); if (( d < 0 )); then d=$(( -d )); fi
-            local ch="${text:i:1}"
-            if (( d == 0 )); then _cv cv 255 255 255
-            elif (( d == 1 )); then _cv cv 255 230 170
-            elif (( d <= 4 )); then _cv cv 252 190 110
-            else _cv cv 168 120 72; fi
-            out+="$cv$ch"
-        done
-        printf '\r  %s%s\e[K' "$out" "$RESET"
-        sleep 0.045
-    done
-    _gradient_print "$text"; _eoln
-    return 0
-}
-
-_title_fx() {
-    local text="$1" len=${#1}
-    if [[ $ANIM -ne 1 ]]; then
-        _gradient_print "$text"; _eoln
-        return 0
-    fi
-    printf '  '
-    local i cv
-    for ((i=0; i<len; i++)); do
-        _grad3 cv "$(( i * 100 / (len > 1 ? len-1 : 1) ))"
-        printf '%s%s' "$cv" "${text:i:1}"
-        sleep 0.028
-    done
-    local sp
-    for sp in 4 13 7 20 26; do
-        printf '\e7\e[1A\r\e[%dC%s✦%s\e8' "$sp" "$C1" "$RESET"
-        sleep 0.09
-    done
-    sleep 0.18
-    printf '\e[1A\r\e[K\e[1B\r\e[K'
-    _shimmer "$text"
-    return 0
+# ── done title ───────────────────────────────────────────────────────────────
+# The heading the summary opens with. Deliberately plain: this is a status line
+# for an installation that either happened or did not, and nothing about it
+# needs a gradient, a sparkle or a per-character animation.
+_done_title() {
+    printf '  %s%s%s\n' "$BOLD" "$(t done_title)" "$RESET"
 }
 
 # ── panel resumen ────────────────────────────────────────────────────────────

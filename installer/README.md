@@ -27,7 +27,15 @@ maverick -p maverickctl` and installed into `<prefix>/bin`:
 
 `maverickctl` is an independent Unix client that talks to a running Maverick
 over its control socket. It is a separate binary by design, not a mode of
-`maverick`, so it is built by name and installed as its own file.
+`maverick`, so it is built by name and installed as its own file. There is no
+third binary: the obsolete `maverick-msg` and `maverick-setup` names are absent
+from the workspace and a test asserts they never reappear in an install.
+
+The third file in the prefix is not a binary:
+
+| file | role |
+|---|---|
+| `<prefix>/share/xsessions/maverick.desktop` | the X11 session entry, mode 0644 |
 
 Maverick is not a desktop environment. There is no compositor, no renderer,
 no wallpaper or animation subsystem, no panel, launcher, notification daemon
@@ -37,6 +45,11 @@ or session manager, and the installer offers no switch for any of them: the
 because there is nothing to select. The `maverick` package has exactly two
 features, `input-trace` and `window-trace`, both diagnostic and both off by
 default; the installer never passes `--features`.
+
+Nothing else is installed either. There is no documentation, no man page, no
+icon theme, no shell completion, no showcase asset and no demo entry point in
+the prefix: those are not in the repository, and the installer does not
+fabricate them.
 
 ## Where it writes
 
@@ -48,33 +61,48 @@ Inside the prefix (`--prefix DIR`, default `$HOME/.local`, or `--system` for
 
 Outside the prefix, only the caller's own files, and only after being asked:
 
-- `${XDG_CONFIG_HOME:-$HOME/.config}/maverick/config.toml` — the example
-  configuration from `config/config.toml`, unless one is already there
-  (`--no-config` skips it, answering the overwrite question keeps yours)
+- `${XDG_CONFIG_HOME:-$HOME/.config}/maverick/config.toml` — seeded from
+  `config/config.toml`, unless one is already there (`--no-config` skips it,
+  answering the overwrite question no keeps yours)
 - one marked, self-guarding block in the login file and interactive rc of
   `$SHELL`, when the bin directory is not already on PATH and the caller
   agrees (`--add-path` / `--no-path` answer that question in advance)
-- `<prefix>`'s session file is copied a second time into a display manager's
-  directory only when `--xsessions-dir DIR` names it — the one write that
-  deliberately leaves the prefix
+- the session file is copied a second time into a display manager's directory
+  only when `--xsessions-dir DIR` names it — the one write that deliberately
+  leaves the prefix
 
 It never invokes `sudo`, never escalates, never enables a service, never
 touches a desktop environment's configuration, and never changes which window
 manager your session selects; that is a `wm-setconfig`/display-manager
 decision, and the installer prints the session file's path instead.
 
+It is safe to run repeatedly: a second run converges, repairs umask-hostile
+permissions, replaces the binaries as a staged set (a failure leaves the
+previous set intact) and does not duplicate the `PATH` block. It verifies what
+it installed by executing `maverick --version`, `maverickctl --help` and
+`maverickctl session --help`, so a partial, stale or broken set is reported as
+a failure rather than as a successful install.
+
+The build directory is `CARGO_TARGET_DIR` as given, defaulting to a cache
+directory under `$XDG_CACHE_HOME` — never the checkout. The disk-space
+pre-flight measures that same directory, since it can sit on a different
+filesystem from where the script was invoked. The first build attempt passes
+`-C target-cpu=native` and falls back to a plain build if that fails, so the
+installed binary is built for the CPU of the machine that compiled it; use a
+normal `cargo build --release` for artifacts meant for another machine.
+
 ## Layout
 
 | file | lines | functions | responsibility |
 |---|---:|---:|---|
-| `install.sh` | 780 | 11 | command line, process state, the six steps, `main()` |
-| `lib/i18n.sh` | 246 | 4 | language selection, the two message tables, the table audit |
-| `lib/ui.sh` | 610 | 32 | everything that draws or asks |
-| `lib/setup.sh` | 421 | 13 | platform, toolchain, disk space, X11 probe, PATH |
-| **total** | **2057** | **60** | four files, one entry point |
+| `install.sh` | 820 | 11 | command line, process state, the six steps, `main()` |
+| `lib/i18n.sh` | 244 | 4 | language selection, the two message tables, the table audit |
+| `lib/ui.sh` | 570 | 30 | everything that draws or asks |
+| `lib/setup.sh` | 438 | 13 | platform, toolchain, disk space, X11 probe, PATH |
+| **total** | **2072** | **58** | four files, one entry point |
 
 Around them: `tests/partition.py` (307 lines) proves the behaviour,
-`lint.sh` (42) checks it statically, and `golden/` (2 × 44) freezes what it
+`lint.sh` (42) checks it statically, and `golden/` (2 × 42) freezes what it
 says.
 
 ## The contract
@@ -113,10 +141,14 @@ step_deps step_build step_install step_session step_config step_verify
 main "$@"
 ```
 
-Everything else lives out of the way: the banner, spinners, roadmap bar,
-celebration effects and summary panel in `ui.sh`; platform detection, Rust,
-disk, the X11 link probe and the whole PATH feature in `setup.sh`; `t()` and
-its two tables in `i18n.sh`.
+Everything else lives out of the way: the banner, spinners, the live step block
+and the summary panel in `ui.sh`; platform detection, Rust, disk, the X11 link
+probe and the whole PATH feature in `setup.sh`; `t()` and its two tables in
+`i18n.sh`.
+
+There is no celebration effect. An installer that finished correctly has
+nothing to announce beyond the fact that it finished, so the summary is a title,
+the panel, and what the caller has to act on.
 
 ## Prompts
 

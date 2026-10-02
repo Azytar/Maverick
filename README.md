@@ -316,7 +316,7 @@ invokes `sudo`, and never enables a service.
 ./installer/install.sh --system       # install into /usr/local instead
 ./installer/install.sh --prefix DIR   # install into DIR instead
 ./installer/install.sh --no-config    # do not create a configuration file
-./installer/install.sh --no-build     # install existing target/release binaries
+./installer/install.sh --no-build     # install existing $CARGO_TARGET_DIR/release binaries
 ./installer/install.sh --no-path      # never edit a shell startup file
 ```
 

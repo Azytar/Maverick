@@ -132,20 +132,36 @@ ensure_rust() {
 # Advisory: a full disk otherwise fails deep inside the build, so the check
 # runs first and reports. It never blocks — there is no recovery to offer
 # here, and a warning the caller can act on beats a refusal.
+#
+# The path it measures is the one the build writes to, not the directory the
+# script was invoked from: CARGO_TARGET_DIR is honoured as given and defaults
+# to a cache directory, so it can sit on a different filesystem from the
+# checkout. Measuring the checkout would report free space the build never
+# gets. `df` needs the path to exist, so walk up to the nearest ancestor that
+# does — a CARGO_TARGET_DIR that has not been created yet is the normal case.
 check_disk_space() {
-    local target_dir="$1"
+    local want="$1"
     local min_kb=2097152  # 2GB in KB
-    
-    # Obtener espacio disponible en KB usando df POSIX
+
+    local probe="$want" prev=""
+    while [[ ! -e "$probe" ]]; do
+        prev="$probe"
+        probe="$(dirname -- "$probe")"
+        if [[ -z "$probe" || "$probe" == "$prev" ]]; then
+            printf '  %s⚠%s  %s: %s\n' "$YELLOW" "$RESET" "$(t disk_unknown)" "$want"
+            return 0
+        fi
+    done
+
     local avail_kb
-    avail_kb=$(df -Pk "$target_dir" 2>/dev/null | awk 'NR==2 {print $4}' || true)
-    
+    avail_kb=$(df -Pk "$probe" 2>/dev/null | awk 'NR==2 {print $4}' || true)
+
     if [[ -z "$avail_kb" || ! "$avail_kb" =~ ^[0-9]+$ ]]; then
         # No se pudo determinar, continuar con advertencia
         printf '  %s⚠%s  %s\n' "$YELLOW" "$RESET" "$(t disk_unknown)"
         return 0
     fi
-    
+
     if (( avail_kb < min_kb )); then
         local avail_mb=$(( avail_kb / 1024 ))
         printf '  %s⡱⢎%s  %s (%d MB)\n' "$RED" "$RESET" "$(t disk_space_warn)" "$avail_mb"
@@ -164,9 +180,10 @@ check_disk_space() {
 }
 
 # ── X11 link probe ───────────────────────────────────────────────────────────
-# System link check, run only when we are about to compile. The GLX FFI links
-# libX11 and libX11-xcb; without them `cargo build` dies late with a cryptic
-# linker error, so this fails here instead, naming the distro packages.
+# System link check, run only when we are about to compile. `maverick-x11` is
+# the only crate that names `xcb_ffi`, and its extern blocks link libX11 and
+# libX11-xcb; without them `cargo build` dies late with a cryptic linker error,
+# so this fails here instead, naming the distro packages.
 #
 # Only what the installed binaries actually link is probed. libXcomposite is
 # not among them — it is used solely by the C test client in tests/, so

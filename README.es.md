@@ -331,7 +331,7 @@ nunca invoca `sudo` y nunca habilita ningún servicio.
 ./installer/install.sh --system       # instalar en /usr/local en su lugar
 ./installer/install.sh --prefix DIR   # instalar en DIR en su lugar
 ./installer/install.sh --no-config    # no crear fichero de configuración
-./installer/install.sh --no-build     # instalar los binarios existentes de target/release
+./installer/install.sh --no-build     # instalar los binarios existentes de $CARGO_TARGET_DIR/release
 ./installer/install.sh --no-path      # no editar nunca un fichero de inicio de shell
 ```
 

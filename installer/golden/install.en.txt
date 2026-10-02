@@ -15,7 +15,7 @@
   ✓ Installing binaries — 2/2 · installed (<TIME>)
   ✓ X11 session — <HOME>/.local/share/xsessions/maverick.desktop (<TIME>)
   ✓ Configuration — <HOME>/.config/maverick/config.toml ✓ (<TIME>)
-  ✓ Final verification — 3 ✓ · binary functional (<TIME>)
+  ✓ Final verification — 3 ✓ · installed binaries respond (<TIME>)
 
 
   ────────────────────────────────────────────────────────────────────────
@@ -40,5 +40,3 @@
 
   tip: maverick --check-config validates your config without starting the WM
   ────────────────────────────────────────────────────────────────────────
-
-  ⣦⠞  Maverick — cleared for takeoff
