@@ -58,8 +58,8 @@ fn setup_engine() -> Engine {
 /// workspace, the way `manage()` does before tiling it.
 fn add_client(engine: &mut Engine, win: WindowId) {
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
-    let mut c = Client::new(win, mi, ws_i);
+    let ws_i = engine.state.monitors[mi].active_index();
+    let mut c = Client::new(win, mi, engine.state.monitors[mi].workspaces[ws_i].id);
     c.border_w = engine.cfg.border_w;
     engine.state.add_client(c);
 }
@@ -69,7 +69,7 @@ fn two_columns(engine: &mut Engine, wins: [WindowId; 2]) {
     for (i, &win) in wins.iter().enumerate() {
         add_client(engine, win);
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         if i == 0 {
             let mut col = crate::types::Column::new(1.0);
             col.windows.push(win);
@@ -87,7 +87,7 @@ fn two_rows(engine: &mut Engine, wins: [WindowId; 2]) {
         add_client(engine, win);
     }
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let mut col = crate::types::Column::new(1.0);
     col.windows.extend_from_slice(&wins);
     col.focused = 0;
@@ -127,14 +127,14 @@ fn focus_via_sink(engine: &mut Engine, win: WindowId) {
 
 fn active_presented_maximize(engine: &Engine) -> Option<WindowId> {
     let mon = &engine.state.monitors[engine.state.sel_mon];
-    mon.workspaces[mon.active_ws].presented_maximize
+    mon.workspaces[mon.active_index()].presented_maximize
 }
 
 /// The engine's own readers of the derived field, checked on the state
 /// `Engine::execute` hands back — i.e. before any backend effect runs.
 fn assert_overlay_readers_track_focus(state: &State, mi: usize, ctx: &str) {
     let mon = &state.monitors[mi];
-    let owner = mon.workspaces[mon.active_ws].presented_maximize;
+    let owner = mon.workspaces[mon.active_index()].presented_maximize;
     assert_eq!(
         state.presented_overlay_owner(mi),
         owner,

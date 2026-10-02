@@ -26,7 +26,7 @@ use crate::core::layout::{
 };
 use crate::core::present::present;
 use crate::core::Engine;
-use crate::types::{Client, Column, Dir, Monitor, Rect, WinFlags, WindowId};
+use crate::types::{Client, Column, Dir, Monitor, Rect, ViewId, WinFlags, WindowId};
 
 fn default_cfg() -> Cfg {
     Cfg {
@@ -159,7 +159,7 @@ fn focus_step(
         engine.state.monitors[mi].focus_stack.push(*win);
         // Keep `ws.focus.column_idx` in sync (the backend's focus handler does
         // this too) so the settled boost targets the right column.
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         if let Some(ci) = engine.state.monitors[mi].workspaces[ws_i]
             .columns
             .iter()
@@ -178,7 +178,7 @@ fn focus_step(
             crate::core::effect::Effect::ArrangeMonitor(m) => *m,
             _ => continue,
         };
-        let ws_i = engine.state.monitors[m].active_ws;
+        let ws_i = engine.state.monitors[m].active_index();
         let wa = engine.state.monitors[m].workarea;
         let fs = fs_ctx(
             &engine.state.clients,
@@ -245,11 +245,13 @@ fn focus_window(
 fn h_l_focus_keeps_settled_geometry() {
     let mut engine = engine_with_columns(3, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
 
     for ci in 0..3 {
         let win = (ci + 1) as u32;
-        engine.state.add_client(Client::new(win, mi, ws_i));
+        engine
+            .state
+            .add_client(Client::new(win, mi, ViewId::new(0)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, engine.cfg.column_width);
     }
     let first = 1u32;
@@ -270,7 +272,7 @@ fn h_l_focus_keeps_settled_geometry() {
 fn mouse_focus_centers_focused_column() {
     let mut engine = engine_with_columns(3, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
 
     // Pure equivalent of Backend::focus(Some(col1 window)): retarget + settle + project.
     let proj = settle_on_column(&mut engine, mi, ws_i, 1);
@@ -284,12 +286,14 @@ fn mouse_focus_centers_focused_column() {
 fn fullscreen_then_neighbor_settled_geometry() {
     let mut engine = setup_engine();
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let screen = engine.state.monitors[mi].screen;
 
     for ci in 0..3 {
         let win = (ci + 1) as u32;
-        engine.state.add_client(Client::new(win, mi, ws_i));
+        engine
+            .state
+            .add_client(Client::new(win, mi, ViewId::new(0)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, engine.cfg.column_width);
         if ci == 0 {
             engine
@@ -339,7 +343,7 @@ fn fullscreen_then_neighbor_settled_geometry() {
 fn toggle_maximize_focused_only() {
     let mut engine = engine_with_columns(2, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let wa = engine.state.monitors[mi].workarea;
     let first = engine.state.monitors[mi].workspaces[ws_i].columns[0].windows[0];
     let second = engine.state.monitors[mi].workspaces[ws_i].columns[1].windows[0];
@@ -410,7 +414,7 @@ fn toggle_maximize_focused_only() {
 fn presented_maximize_tracks_focus_and_is_cleared_on_lifecycle() {
     let mut engine = engine_with_columns(2, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let a = engine.state.monitors[mi].workspaces[ws_i].columns[0].windows[0];
     let b = engine.state.monitors[mi].workspaces[ws_i].columns[1].windows[0];
 
@@ -475,7 +479,7 @@ fn presented_maximize_tracks_focus_and_is_cleared_on_lifecycle() {
 fn move_window_keeps_invariant() {
     let mut engine = engine_with_columns(3, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let first = engine.state.monitors[mi].workspaces[ws_i].columns[0].windows[0];
     engine.state.monitors[mi].focused = Some(first);
     engine.state.monitors[mi].focus_stack = vec![first];
@@ -491,7 +495,7 @@ fn page_snap_does_not_break_invariant() {
     // invariant that must hold is A: geom == settled projection.
     let mut engine = engine_with_columns(12, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let first = engine.state.monitors[mi].workspaces[ws_i].columns[0].windows[0];
     engine.state.monitors[mi].focused = Some(first);
     engine.state.monitors[mi].focus_stack = vec![first];
@@ -506,7 +510,7 @@ fn page_snap_does_not_break_invariant() {
 fn overview_returns_to_settled() {
     let mut engine = engine_with_columns(4, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let first = engine.state.monitors[mi].workspaces[ws_i].columns[0].windows[0];
     engine.state.monitors[mi].focused = Some(first);
     engine.state.monitors[mi].focus_stack = vec![first];
@@ -521,7 +525,7 @@ fn overview_returns_to_settled() {
 fn viewport_zoom_returns_to_settled() {
     let mut engine = engine_with_columns(3, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let first = engine.state.monitors[mi].workspaces[ws_i].columns[0].windows[0];
     engine.state.monitors[mi].focused = Some(first);
     engine.state.monitors[mi].focus_stack = vec![first];
@@ -540,13 +544,17 @@ fn workspace_switch_resettles() {
     let ws0 = 0usize;
     for ci in 0..2 {
         let win = (ci + 1) as u32;
-        engine.state.add_client(Client::new(win, mi, ws0));
+        engine
+            .state
+            .add_client(Client::new(win, mi, ViewId::new(0)));
         engine.state.monitors[mi].workspaces[ws0].add_tiled(win, engine.cfg.column_width);
     }
     let ws1 = 1usize;
     for ci in 0..2 {
         let win = (10 + ci) as u32;
-        engine.state.add_client(Client::new(win, mi, ws1));
+        engine
+            .state
+            .add_client(Client::new(win, mi, ViewId::new(0)));
         engine.state.monitors[mi].workspaces[ws1].add_tiled(win, engine.cfg.column_width);
     }
     let first0 = engine.state.monitors[mi].workspaces[ws0].columns[0].windows[0];
@@ -568,7 +576,7 @@ fn workspace_switch_resettles() {
 fn dock_strut_retarget_respects_workarea() {
     let mut engine = engine_with_columns(3, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let first = engine.state.monitors[mi].workspaces[ws_i].columns[0].windows[0];
     engine.state.monitors[mi].focused = Some(first);
     engine.state.monitors[mi].focus_stack = vec![first];
@@ -606,7 +614,7 @@ fn dock_strut_retarget_respects_workarea() {
 fn settled_follows_target_at_rest() {
     let mut engine = engine_with_columns(3, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
 
     let _proj = settle_on_column(&mut engine, mi, ws_i, 1);
     // The projection the backend writes to X11 must be reproducible from
@@ -636,7 +644,7 @@ fn settled_follows_target_at_rest() {
 fn repeated_abc_navigation_idempotent() {
     let mut engine = engine_with_columns(5, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let first = engine.state.monitors[mi].workspaces[ws_i].columns[0].windows[0];
     engine.state.monitors[mi].focused = Some(first);
     engine.state.monitors[mi].focus_stack = vec![1u32, 2u32, 3u32, 4u32, 5u32];
@@ -699,11 +707,13 @@ fn focus_none_is_safe() {
 fn border_w_is_part_of_geom() {
     let mut engine = setup_engine();
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let screen = engine.state.monitors[mi].screen;
     for ci in 0..2 {
         let win = (ci + 1) as u32;
-        engine.state.add_client(Client::new(win, mi, ws_i));
+        engine
+            .state
+            .add_client(Client::new(win, mi, ViewId::new(0)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, engine.cfg.column_width);
         if ci == 0 {
             engine
@@ -751,10 +761,10 @@ fn mouse_and_keyboard_focus_converge() {
     // Keyboard/EWMH path: focus window 2 via the command the backend emits.
     let mut kb = setup_engine();
     let mi = kb.state.sel_mon;
-    let ws_i = kb.state.monitors[mi].active_ws;
+    let ws_i = kb.state.monitors[mi].active_index();
     for ci in 0..3 {
         let win = (ci + 1) as u32;
-        kb.state.add_client(Client::new(win, mi, ws_i));
+        kb.state.add_client(Client::new(win, mi, ViewId::new(0)));
         kb.state.monitors[mi].workspaces[ws_i].add_tiled(win, kb.cfg.column_width);
     }
     kb.state.monitors[mi].focused = Some(1u32);
@@ -766,10 +776,10 @@ fn mouse_and_keyboard_focus_converge() {
     // Mouse path: pure simulate (retarget + settle + project), no ArrangeMonitor.
     let mut mouse = setup_engine();
     let mi = mouse.state.sel_mon;
-    let ws_i = mouse.state.monitors[mi].active_ws;
+    let ws_i = mouse.state.monitors[mi].active_index();
     for ci in 0..3 {
         let win = (ci + 1) as u32;
-        mouse.state.add_client(Client::new(win, mi, ws_i));
+        mouse.state.add_client(Client::new(win, mi, ViewId::new(0)));
         mouse.state.monitors[mi].workspaces[ws_i].add_tiled(win, mouse.cfg.column_width);
     }
     mouse.state.monitors[mi].focused = Some(1u32);
@@ -802,7 +812,7 @@ fn mouse_and_keyboard_focus_converge() {
 fn input_hittest_matches_settled_geom() {
     let mut engine = engine_with_columns(3, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let first = engine.state.monitors[mi].workspaces[ws_i].columns[0].windows[0];
     engine.state.monitors[mi].focused = Some(first);
     engine.state.monitors[mi].focus_stack = vec![1u32, 2u32, 3u32];
@@ -848,12 +858,14 @@ fn input_hittest_matches_settled_geom() {
 fn engine_with_columns(n_cols: usize, rows: usize) -> Engine {
     let mut engine = setup_engine();
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
     let mut win = 1u32;
     for _ in 0..n_cols {
         let mut col = Column::new(engine.cfg.column_width);
         for _ in 0..rows {
-            engine.state.add_client(Client::new(win, mi, ws_i));
+            engine
+                .state
+                .add_client(Client::new(win, mi, ViewId::new(0)));
             col.windows.push(win);
             win += 1;
         }
@@ -891,7 +903,7 @@ fn retarget_and_settle(
 fn close_window_before_focus_realigns_pointer_and_geometry() {
     let mut engine = engine_with_columns(4, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
 
     // Focus window 3 (column index 2).
     engine.state.monitors[mi].focused = Some(3);
@@ -935,7 +947,7 @@ fn close_window_before_focus_realigns_pointer_and_geometry() {
 fn close_focused_window_repoints_focus_to_neighbour() {
     let mut engine = engine_with_columns(4, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
 
     engine.state.monitors[mi].focused = Some(2);
     engine.state.monitors[mi].focus_stack = vec![2, 1, 3, 4];
@@ -975,7 +987,7 @@ fn close_focused_window_repoints_focus_to_neighbour() {
 fn close_window_after_focus_keeps_focus_column() {
     let mut engine = engine_with_columns(4, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
 
     engine.state.monitors[mi].focused = Some(2);
     engine.state.monitors[mi].focus_stack = vec![2, 1, 3, 4];
@@ -1001,7 +1013,7 @@ fn close_window_after_focus_keeps_focus_column() {
 fn close_row_before_focus_shifts_focused_row() {
     let mut engine = engine_with_columns(2, 3);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
 
     // Column 0 has windows [1, 2, 3]; focus row 1 (window 2).
     engine.state.monitors[mi].focused = Some(2);
@@ -1035,7 +1047,7 @@ fn close_row_before_focus_shifts_focused_row() {
 fn layout_switch_with_displaced_camera_recenters_focused_column() {
     let mut engine = engine_with_columns(4, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
 
     engine.state.monitors[mi].focused = Some(3);
     engine.state.monitors[mi].focus_stack = vec![3, 2, 1, 4];
@@ -1084,7 +1096,7 @@ fn layout_switch_with_displaced_camera_recenters_focused_column() {
 fn closing_any_window_keeps_focused_window_centered() {
     let mut engine = engine_with_columns(5, 1);
     let mi = engine.state.sel_mon;
-    let ws_i = engine.state.monitors[mi].active_ws;
+    let ws_i = engine.state.monitors[mi].active_index();
 
     engine.state.monitors[mi].focused = Some(3);
     engine.state.monitors[mi].focus_stack = vec![3, 2, 1, 4, 5];

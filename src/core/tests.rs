@@ -6,8 +6,18 @@ mod unit_tests {
     use crate::core::layout::{FsCtx, RibbonScratch};
     use crate::core::Engine;
     use crate::types::{
-        Action, Client, FullscreenPolicy, LayoutKind, Monitor, Rect, State, WinFlags, WindowId,
+        Action, Client, FullscreenPolicy, LayoutKind, Monitor, Rect, State, ViewId, WinFlags,
+        WindowId,
     };
+
+    /// The `ViewId` of carousel position `ws_i` on monitor `mi` of `st`.
+    ///
+    /// Membership is keyed by identity, but a test reasons about "workspace 2",
+    /// so every fixture resolves the position it means into the View that occupies
+    /// it. That keeps fixtures readable without ever hand-writing an id.
+    fn view_of(st: &State, mi: usize, ws_i: usize) -> ViewId {
+        st.monitors[mi].workspaces[ws_i].id
+    }
 
     fn default_cfg() -> Cfg {
         Cfg {
@@ -74,15 +84,19 @@ mod unit_tests {
         use crate::types::Dir;
 
         let mut engine = setup_engine_multi();
-        let ws0 = engine.state.monitors[0].active_ws;
-        let ws1 = engine.state.monitors[1].active_ws;
+        let ws0 = engine.state.monitors[0].active_index();
+        let ws1 = engine.state.monitors[1].active_index();
         // Several columns on monitor 0, so its camera has somewhere to move: a
         // single column has nothing to scroll.
         for win in 1..=6u32 {
-            engine.state.add_client(Client::new(win, 0, ws0));
+            engine
+                .state
+                .add_client(Client::new(win, 0, view_of(&engine.state, 0, ws0)));
             engine.state.monitors[0].workspaces[ws0].add_tiled(win, 0.6);
         }
-        engine.state.add_client(Client::new(20, 1, ws1));
+        engine
+            .state
+            .add_client(Client::new(20, 1, view_of(&engine.state, 1, ws1)));
         engine.state.monitors[1].workspaces[ws1].add_tiled(20, 0.6);
 
         engine.state.sel_mon = 1;
@@ -124,9 +138,11 @@ mod unit_tests {
         use crate::types::Dir;
 
         let mut engine = setup_engine_multi();
-        let ws1 = engine.state.monitors[1].active_ws;
+        let ws1 = engine.state.monitors[1].active_index();
         for win in [20u32, 21, 22] {
-            engine.state.add_client(Client::new(win, 1, ws1));
+            engine
+                .state
+                .add_client(Client::new(win, 1, view_of(&engine.state, 1, ws1)));
             engine.state.monitors[1].workspaces[ws1].add_tiled(win, 0.6);
         }
         engine.state.sel_mon = 1;
@@ -182,7 +198,7 @@ mod unit_tests {
         ] {
             let mut engine = setup_engine();
             for win in [1, 2] {
-                let mut c = Client::new(win, 0, 0);
+                let mut c = Client::new(win, 0, view_of(&engine.state, 0, 0));
                 c.border_w = 2;
                 engine.state.add_client(c);
                 engine.state.monitors[0].workspaces[0].add_tiled(win, 0.6);
@@ -201,7 +217,7 @@ mod unit_tests {
                 window: 2,
                 owner: 1,
                 monitor: 0,
-                workspace: 0,
+                workspace: view_of(&engine.state, 0, 0),
             });
 
             engine.execute(FocusDirection(direction));
@@ -275,7 +291,7 @@ mod unit_tests {
         use crate::core::commands::{FocusDirection, ToggleFullscreen};
         use crate::types::Dir;
         let mut engine = setup_engine();
-        engine.state.add_client(Client::new(1, 0, 0));
+        engine.state.add_client(Client::new(1, 0, ViewId::new(0)));
         engine.state.monitors[0].workspaces[0].add_tiled(1, 0.6);
         engine.state.monitors[0].focused = Some(1);
         engine.state.monitors[0].focus_stack = vec![1];
@@ -312,10 +328,10 @@ mod unit_tests {
         // Reproduce exactly what the backend's `manage` does on a MapRequest:
         // register the client and add it to the active workspace's columns.
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i]
             .add_tiled(new_window_id, engine.cfg.column_width);
-        let mut client = Client::new(new_window_id, mi, ws_i);
+        let mut client = Client::new(new_window_id, mi, view_of(&engine.state, mi, ws_i));
         client.border_w = engine.cfg.border_w;
         engine.state.add_client(client);
 
@@ -339,7 +355,7 @@ mod unit_tests {
     #[test]
     fn test_workspace_cycle_layout_helper_wraps() {
         use crate::types::Workspace;
-        let ws = Workspace::new(0);
+        let ws = Workspace::new(ViewId::new(0));
         assert_eq!(ws.layout, LayoutKind::Column);
         assert_eq!(ws.layout, LayoutKind::Column);
     }
@@ -347,8 +363,8 @@ mod unit_tests {
     fn setup_two_columns() -> Engine {
         use crate::types::{Client, Column, Focus};
         let mut engine = setup_engine();
-        engine.state.add_client(Client::new(10, 0, 0));
-        engine.state.add_client(Client::new(20, 0, 0));
+        engine.state.add_client(Client::new(10, 0, ViewId::new(0)));
+        engine.state.add_client(Client::new(20, 0, ViewId::new(0)));
         let ws = &mut engine.state.monitors[0].workspaces[0];
         ws.columns.push(Column {
             windows: vec![10],
@@ -392,8 +408,8 @@ mod unit_tests {
     fn test_move_right_multi_window_extracts() {
         use crate::types::{Client, Column, Focus};
         let mut engine = setup_engine();
-        engine.state.add_client(Client::new(10, 0, 0));
-        engine.state.add_client(Client::new(20, 0, 0));
+        engine.state.add_client(Client::new(10, 0, ViewId::new(0)));
+        engine.state.add_client(Client::new(20, 0, ViewId::new(0)));
         let ws = &mut engine.state.monitors[0].workspaces[0];
         ws.columns.push(Column {
             windows: vec![10, 20],
@@ -414,7 +430,7 @@ mod unit_tests {
     fn test_move_right_boundary_is_noop() {
         use crate::types::{Client, Column, Focus};
         let mut engine = setup_engine();
-        engine.state.add_client(Client::new(10, 0, 0));
+        engine.state.add_client(Client::new(10, 0, ViewId::new(0)));
         let ws = &mut engine.state.monitors[0].workspaces[0];
         ws.columns.push(Column {
             windows: vec![10],
@@ -506,9 +522,9 @@ mod unit_tests {
         use crate::core::commands::FocusDirection;
         use crate::types::{Client, Column, Dir, Focus};
         let mut engine = setup_engine();
-        engine.state.add_client(Client::new(10, 0, 0));
-        engine.state.add_client(Client::new(11, 0, 0));
-        engine.state.add_client(Client::new(20, 0, 0));
+        engine.state.add_client(Client::new(10, 0, ViewId::new(0)));
+        engine.state.add_client(Client::new(11, 0, ViewId::new(0)));
+        engine.state.add_client(Client::new(20, 0, ViewId::new(0)));
         let ws = &mut engine.state.monitors[0].workspaces[0];
         ws.columns.push(Column {
             windows: vec![10, 11],
@@ -589,7 +605,7 @@ mod unit_tests {
         // monitors and asks the sink to focus the window on the new one.
         let mut engine = setup_engine_multi();
         for win in [1, 2] {
-            let mut c = Client::new(win, 0, 0);
+            let mut c = Client::new(win, 0, view_of(&engine.state, 0, 0));
             c.border_w = 2;
             engine.state.add_client(c);
             engine.state.monitors[0].workspaces[0].add_tiled(win, 0.6);
@@ -631,7 +647,7 @@ mod unit_tests {
         // installs a logical focus, and the contract says the publish carries it.
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -730,7 +746,7 @@ mod unit_tests {
         engine
             .state
             .clients
-            .insert(10, crate::types::Client::new(10, 0, 0));
+            .insert(10, crate::types::Client::new(10, 0, ViewId::new(0)));
         engine.state.monitors[0].focused = Some(10);
 
         let batch: Vec<Box<dyn crate::core::commands::Command>> = vec![
@@ -760,7 +776,7 @@ mod unit_tests {
             42,
             Client {
                 name: "term".into(),
-                ..Client::new(42, 0, 0)
+                ..Client::new(42, 0, ViewId::new(0))
             },
         );
         {
@@ -872,8 +888,14 @@ mod unit_tests {
             ws.focus = Focus { column_idx: 0 };
         }
         engine.state.monitors[0].focused = Some(42);
-        engine.state.clients.insert(7, Client::new(7, 0, 0));
-        engine.state.clients.insert(42, Client::new(42, 0, 0));
+        engine
+            .state
+            .clients
+            .insert(7, Client::new(7, 0, ViewId::new(0)));
+        engine
+            .state
+            .clients
+            .insert(42, Client::new(42, 0, ViewId::new(0)));
         engine
             .state
             .clients
@@ -938,7 +960,7 @@ mod unit_tests {
         engine
             .state
             .clients
-            .insert(9, crate::types::Client::new(9, 0, 0));
+            .insert(9, crate::types::Client::new(9, 0, ViewId::new(0)));
         engine.state.monitors[0].focused = Some(9);
         let focused = query_json(&engine.state, &engine.cfg, "focused");
         assert!(focused.contains("\"window\":9"));
@@ -962,9 +984,9 @@ mod unit_tests {
         let n = 6usize;
         for i in 1..=n as u32 {
             let mi = engine.state.sel_mon;
-            let ws_i = engine.state.monitors[mi].active_ws;
+            let ws_i = engine.state.monitors[mi].active_index();
             engine.state.monitors[mi].workspaces[ws_i].add_tiled(i, 0.5);
-            let mut c = Client::new(i, mi, ws_i);
+            let mut c = Client::new(i, mi, view_of(&engine.state, mi, ws_i));
             c.border_w = engine.cfg.border_w;
             engine.state.add_client(c);
         }
@@ -1010,11 +1032,11 @@ mod unit_tests {
         use crate::types::Client;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, 0.6);
         engine.state.monitors[mi].focused = Some(1);
         engine.state.monitors[mi].focus_stack = vec![1];
-        let mut c = Client::new(1, mi, ws_i);
+        let mut c = Client::new(1, mi, view_of(&engine.state, mi, ws_i));
         c.border_w = engine.cfg.border_w;
         engine.state.add_client(c);
 
@@ -1037,9 +1059,9 @@ mod unit_tests {
         let mut engine = setup_engine();
         for i in 1..=2u32 {
             let mi = engine.state.sel_mon;
-            let ws_i = engine.state.monitors[mi].active_ws;
+            let ws_i = engine.state.monitors[mi].active_index();
             engine.state.monitors[mi].workspaces[ws_i].add_tiled(i, 0.5);
-            let mut c = Client::new(i, mi, ws_i);
+            let mut c = Client::new(i, mi, view_of(&engine.state, mi, ws_i));
             c.border_w = engine.cfg.border_w;
             engine.state.add_client(c);
         }
@@ -1094,8 +1116,14 @@ mod unit_tests {
         }
         engine.state.monitors[0].focused = Some(1);
         engine.state.monitors[0].focus_stack = vec![1, 2];
-        engine.state.clients.insert(1, Client::new(1, 0, 0));
-        engine.state.clients.insert(2, Client::new(2, 0, 0));
+        engine
+            .state
+            .clients
+            .insert(1, Client::new(1, 0, ViewId::new(0)));
+        engine
+            .state
+            .clients
+            .insert(2, Client::new(2, 0, ViewId::new(0)));
         engine
             .state
             .clients
@@ -1122,7 +1150,7 @@ mod unit_tests {
         // The fullscreen window must SCROLL AWAY with the camera (it is now a
         // ribbon participant) instead of staying pinned over the screen.
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
         let cam = ws.camera.position;
         let mut p = Placements::new();
@@ -1166,8 +1194,14 @@ mod unit_tests {
             ws.focus = Focus { column_idx: 0 };
         }
         engine.state.monitors[0].focused = Some(1);
-        engine.state.clients.insert(1, Client::new(1, 0, 0));
-        engine.state.clients.insert(2, Client::new(2, 0, 0));
+        engine
+            .state
+            .clients
+            .insert(1, Client::new(1, 0, ViewId::new(0)));
+        engine
+            .state
+            .clients
+            .insert(2, Client::new(2, 0, ViewId::new(0)));
         engine
             .state
             .clients
@@ -1186,7 +1220,7 @@ mod unit_tests {
         assert!(engine.state.clients.get(&1).unwrap().is_fullscreen());
 
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let fs = fs_ctx(
             &engine.state.clients,
             &engine.state.monitors[mi].workspaces[ws_i],
@@ -1252,7 +1286,7 @@ mod unit_tests {
         }
         for i in 0..n {
             let win = (i + 1) as u32;
-            let mut c = Client::new(win, mi, 0);
+            let mut c = Client::new(win, mi, ViewId::new(0));
             c.border_w = engine.cfg.border_w;
             engine.state.add_client(c);
         }
@@ -1501,7 +1535,7 @@ mod unit_tests {
         engine.state.monitors[mi].focused = Some(1);
         engine.state.monitors[mi].focus_stack = vec![1, 2, 3];
         for i in 1..=3u32 {
-            engine.state.add_client(Client::new(i, mi, 0));
+            engine.state.add_client(Client::new(i, mi, ViewId::new(0)));
         }
 
         // Next: focus moves to window 2 (column 1).
@@ -1557,7 +1591,7 @@ mod unit_tests {
     #[test]
     fn drop_into_column_sets_focused_row() {
         use crate::types::{Column, Focus, Workspace};
-        let mut ws = Workspace::new(0);
+        let mut ws = Workspace::new(ViewId::new(0));
         ws.columns.push(Column {
             windows: vec![10, 20],
             focused: 0,
@@ -1595,47 +1629,97 @@ mod unit_tests {
     fn reload_shrinking_tags_clamps_client_workspace() {
         use crate::types::Client;
         let mut engine = setup_engine();
-        // Start with 9 tags (default_cfg) and park a few clients on high workspaces.
-        for w in [1u32, 2, 3] {
-            let mut c = Client::new(w, 0, w as usize % 9 + 5); // workspaces 5,6,7
+        // Start with 9 tags (default_cfg) and park a few clients on high Views.
+        // One of them floats, so the re-home is exercised on both lists.
+        for (w, float) in [(1u32, false), (2, false), (3, true)] {
+            let pos = w as usize % 9 + 5; // positions 5,6,7
+            let mut c = Client::new(w, 0, view_of(&engine.state, 0, pos));
             c.border_w = engine.cfg.border_w;
+            c.geom = Rect::new(100 * w as i32, 50, 300, 200);
+            if float {
+                c.flags.set(WinFlags::FLOAT);
+            }
             engine.state.add_client(c);
+            // The client must actually be *placed* in that View, or the shrink
+            // below would find it already orphaned rather than re-homing it.
+            if float {
+                engine.state.monitors[0].workspaces[pos].floats.push(w);
+            } else {
+                engine.state.monitors[0].workspaces[pos].add_tiled(w, 0.5);
+            }
         }
+        let float_geom = engine.state.clients[&3].geom;
         let n_tags_before = engine.cfg.n_tags;
         assert_eq!(n_tags_before, 9);
 
         // Simulate the shrink part of `reload_config`: new config has 3 tags.
+        // Same loop the backend runs — re-home onto a survivor, then drop.
         let n_tags = 3usize;
+        while engine.state.monitors[0].workspaces.len() > n_tags.max(1) {
+            let pos = engine.state.monitors[0].workspaces.len() - 1;
+            let survivor = engine.state.monitors[0].workspaces[pos - 1].id;
+            let dropped = engine.state.monitors[0].workspaces[pos].id;
+            engine.state.rehome_clients(0, dropped, survivor);
+            engine.state.monitors[0].remove_view_at(pos);
+        }
         for mon in &mut engine.state.monitors {
             mon.reconcile_workspaces(n_tags);
         }
-        let clamped: Vec<u32> = engine
-            .state
-            .clients
-            .iter_mut()
-            .filter_map(|(&w, c)| {
-                if c.workspace >= n_tags {
-                    c.workspace = n_tags.saturating_sub(1);
-                    Some(w)
-                } else {
-                    None
-                }
-            })
-            .collect();
 
-        assert_eq!(
-            clamped.len(),
-            3,
-            "all three clients were on workspaces >= 3"
-        );
         assert_eq!(engine.state.monitors[0].workspaces.len(), n_tags);
+        // Every client names a *surviving* View...
         for c in engine.state.clients.values() {
             assert!(
-                c.workspace < n_tags,
-                "client must be clamped below n_tags after reload, got {}",
+                engine.state.monitors[c.monitor]
+                    .view_index(c.workspace)
+                    .is_some(),
+                "client must name a surviving View after reload, got {}",
                 c.workspace
             );
         }
+        // ...and is still placed exactly once. Rewriting only the record would
+        // leave a client naming a View that never references it — the desync
+        // invariant #5 exists to reject — so the tree is asserted too.
+        let placed: Vec<u32> = engine.state.monitors[0]
+            .workspaces
+            .iter()
+            .flat_map(|w| w.columns.iter().flat_map(|c| c.windows.iter().copied()))
+            .chain(
+                engine.state.monitors[0]
+                    .workspaces
+                    .iter()
+                    .flat_map(|w| w.floats.iter().copied()),
+            )
+            .collect();
+        assert_eq!(
+            placed.len(),
+            3,
+            "every client must still be placed exactly once after a shrink"
+        );
+        let mut uniq = placed.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), 3, "no client may be placed twice");
+        // Membership moved; floating did not.
+        assert!(
+            engine.state.clients[&3].is_float(),
+            "a re-homed float must stay floating"
+        );
+        assert_eq!(
+            engine.state.clients[&3].geom, float_geom,
+            "a re-homed float must keep its user-controlled geometry"
+        );
+        assert!(
+            engine.state.monitors[0].workspaces[n_tags - 1]
+                .floats
+                .contains(&3),
+            "the float landed on the float list of the surviving View"
+        );
+        assert!(
+            engine.state.check_invariants().is_ok(),
+            "the reload left an inconsistent state: {:?}",
+            engine.state.check_invariants()
+        );
     }
 
     #[test]
@@ -1709,7 +1793,7 @@ mod unit_tests {
             ws.focus = Focus { column_idx: 1 };
         }
         for i in 1..=3u32 {
-            engine.state.add_client(Client::new(i, mi, 0));
+            engine.state.add_client(Client::new(i, mi, ViewId::new(0)));
         }
         let before: f32 = engine.state.monitors[mi].workspaces[0]
             .columns
@@ -1769,7 +1853,7 @@ mod unit_tests {
             ws.focus = Focus { column_idx: 0 };
         }
         for i in 1..=7u32 {
-            engine.state.add_client(Client::new(i, mi, 0));
+            engine.state.add_client(Client::new(i, mi, ViewId::new(0)));
         }
         engine.state.monitors[mi].focused = Some(3);
         engine.state.monitors[mi].focus_stack = (1..=7u32).collect();
@@ -1827,8 +1911,12 @@ mod unit_tests {
             });
             ws.focus = Focus { column_idx: 1 };
         }
-        engine.state.add_client(Client::new(1, mi, 0));
-        engine.state.add_client(Client::new(2, mi, 0));
+        engine
+            .state
+            .add_client(Client::new(1, mi, view_of(&engine.state, mi, 0)));
+        engine
+            .state
+            .add_client(Client::new(2, mi, view_of(&engine.state, mi, 0)));
         engine
             .state
             .clients
@@ -1881,6 +1969,355 @@ mod unit_tests {
         assert_eq!(engine.state.best_focus(mi), Some(1));
     }
 
+    // --- carousel navigation -------------------------------------------------
+    //
+    // The five semantic contracts below are stated as behaviour, not as
+    // restatements of the implementation: navigation is circular, instantaneous
+    // and layout-independent; `origin` stays valid; deletion is deterministic;
+    // membership survives a move; and floating clients are excluded from tiled
+    // layout input.
+
+    /// Navigation is **circular**: `next` of the last View is the first, and
+    /// `previous` of the first is the last.
+    ///
+    /// Stated as behaviour because a ring that stopped at the ends would still
+    /// pass every "moves to the next View" assertion — only the wrap proves it.
+    #[test]
+    fn next_wraps_from_the_last_view_to_the_first() {
+        use crate::core::commands::{Command as _, NextView, PreviousView, ViewWorkspace};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        // Four Views: enough for a ring whose ends are distinguishable, and below
+        // `CreateView`'s ceiling so a sibling test can still append.
+        engine.state.monitors[mi].reconcile_workspaces(4);
+        let n = engine.state.monitors[mi].workspaces.len();
+        assert!(n >= 3, "the fixture needs at least three Views");
+
+        ViewWorkspace(n - 1).execute(&mut engine.state, &mut engine.cfg);
+        assert_eq!(engine.state.monitors[mi].active_index(), n - 1);
+
+        // next of the last wraps to the first.
+        assert!(!NextView
+            .execute(&mut engine.state, &mut engine.cfg)
+            .effects
+            .is_empty());
+        assert_eq!(
+            engine.state.monitors[mi].active_index(),
+            0,
+            "next of the last View must wrap to the first"
+        );
+
+        // previous of the first wraps to the last.
+        assert!(!PreviousView
+            .execute(&mut engine.state, &mut engine.cfg)
+            .effects
+            .is_empty());
+        assert_eq!(
+            engine.state.monitors[mi].active_index(),
+            n - 1,
+            "previous of the first View must wrap to the last"
+        );
+        engine.state.assert_invariants();
+    }
+
+    /// Navigation is **instantaneous and layout-independent**.
+    ///
+    /// The layout half is the campaign's hard invariant, so it is asserted
+    /// structurally: the navigation code must contain no branch on `LayoutKind`,
+    /// and the commands must behave identically whichever layout is installed.
+    #[test]
+    fn navigation_is_instantaneous_and_layout_independent() {
+        use crate::core::commands::{Command as _, NextView, PreviousView};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+
+        // `LayoutKind` has exactly one variant today, so the "same answer under
+        // every layout" half cannot be exercised by switching — it is instead
+        // asserted as the absence of layout knowledge. Both checks below fail if a
+        // layout branch is ever added to navigation.
+        let layout = |e: &Engine| e.state.monitors[mi].ws().layout;
+        let _before = layout(&engine);
+
+        NextView.execute(&mut engine.state, &mut engine.cfg);
+        let after_next = engine.state.monitors[mi].active_index();
+        assert_ne!(after_next, 0, "next must actually move");
+        assert_eq!(
+            layout(&engine),
+            _before,
+            "navigation must not change the layout"
+        );
+
+        // Deterministic: the same command from the same state gives the same
+        // View, which is what "instantaneous" means for a state machine — there
+        // is no interpolation, no partial transition and no frame to wait for.
+        let mut twin = setup_engine();
+        twin.state.sel_mon = mi;
+        NextView.execute(&mut twin.state, &mut twin.cfg);
+        assert_eq!(
+            twin.state.monitors[mi].active_index(),
+            after_next,
+            "navigation must be deterministic, not time-dependent"
+        );
+        assert!(
+            engine.state.monitors[mi].carousel.current().is_some(),
+            "current must name a View"
+        );
+
+        // And a full lap in the other direction is the identity too.
+        let n = engine.state.monitors[mi].workspaces.len();
+        for _ in 0..n {
+            PreviousView.execute(&mut engine.state, &mut engine.cfg);
+        }
+        assert_eq!(
+            engine.state.monitors[mi].active_index(),
+            after_next,
+            "a full lap of previous() must be the identity"
+        );
+        assert_eq!(layout(&engine), _before);
+        engine.state.assert_invariants();
+    }
+
+    /// `origin` is the return point, it stays valid, and `return_to_origin()` can
+    /// never select a deleted View.
+    #[test]
+    fn origin_is_pinned_and_return_never_selects_a_deleted_view() {
+        use crate::core::commands::{Command as _, NextView, ReturnToOriginView, ViewWorkspace};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        engine.state.monitors[mi].reconcile_workspaces(4);
+        let n = engine.state.monitors[mi].workspaces.len();
+        let origin = engine.state.monitors[mi].workspaces[0].id;
+        assert_eq!(
+            engine.state.monitors[mi].carousel.origin(),
+            Some(origin),
+            "a fresh monitor's origin is its first View"
+        );
+
+        // Walking the whole carousel leaves origin untouched.
+        for _ in 0..n {
+            NextView.execute(&mut engine.state, &mut engine.cfg);
+        }
+        assert_eq!(
+            engine.state.monitors[mi].carousel.origin(),
+            Some(origin),
+            "navigation must not move the origin"
+        );
+
+        // A full lap lands back on the origin, so move off it before returning —
+        // otherwise the return is correctly absorbed and the test proves nothing.
+        NextView.execute(&mut engine.state, &mut engine.cfg);
+        assert_ne!(engine.state.monitors[mi].active_index(), 0);
+        assert!(!ReturnToOriginView
+            .execute(&mut engine.state, &mut engine.cfg)
+            .effects
+            .is_empty());
+        assert_eq!(engine.state.monitors[mi].active_index(), 0);
+
+        // Deleting the origin must not leave it naming a dead View, and returning
+        // must then land on whatever inherited the position. The fixture Views are
+        // empty, so `RemoveView` accepts this one.
+        ViewWorkspace(n - 1).execute(&mut engine.state, &mut engine.cfg);
+        let mut cmd = crate::core::commands::RemoveView(0);
+        assert!(
+            !cmd.execute(&mut engine.state, &mut engine.cfg)
+                .effects
+                .is_empty(),
+            "removing an empty View must succeed"
+        );
+        let removed = engine.state.monitors[mi].view_index(origin);
+        assert!(removed.is_none(), "the origin View must be gone");
+        let repaired = engine.state.monitors[mi].carousel.origin();
+        assert!(
+            repaired.is_some_and(|o| engine.state.monitors[mi].view_index(o).is_some()),
+            "origin must be repaired to a surviving View, got {repaired:?}"
+        );
+        assert_ne!(
+            repaired,
+            Some(origin),
+            "origin must not still name the deleted View"
+        );
+        assert!(engine.state.monitors[mi].return_to_origin());
+        engine.state.assert_invariants();
+    }
+
+    /// Deleting the **current** View selects a deterministic replacement, and
+    /// deleting the **final** View defines the empty state explicitly.
+    #[test]
+    fn deleting_the_current_or_final_view_is_deterministic() {
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        // Four Views, so there is a successor to adopt and a tail to fall back to.
+        engine.state.monitors[mi].reconcile_workspaces(4);
+
+        // Deleting the current View adopts its successor.
+        let at2 = engine.state.monitors[mi].workspaces[2].id;
+        engine.state.monitors[mi].goto_view(at2);
+        let successor = engine.state.monitors[mi].workspaces[3].id;
+        engine.state.remove_view(mi, 2);
+        assert_eq!(
+            engine.state.monitors[mi].carousel.current(),
+            Some(successor),
+            "removing the current View must select the one that took its place"
+        );
+        assert_eq!(
+            engine.state.monitors[mi].active_index(),
+            2,
+            "position is now 2"
+        );
+
+        // Deleting the last View falls back to the new tail — still deterministic.
+        let last = engine.state.monitors[mi].workspaces.len() - 1;
+        let tail = engine.state.monitors[mi].workspaces[last - 1].id;
+        let at_last = engine.state.monitors[mi].workspaces[last].id;
+        engine.state.monitors[mi].goto_view(at_last);
+        engine.state.remove_view(mi, last);
+        assert_eq!(
+            engine.state.monitors[mi].carousel.current(),
+            Some(tail),
+            "removing the last View must select the new tail"
+        );
+
+        // And the survivor set shrinks monotonically to one.
+        while engine.state.monitors[mi].workspaces.len() > 1 {
+            let last = engine.state.monitors[mi].workspaces.len() - 1;
+            engine.state.remove_view(mi, last);
+        }
+        assert_eq!(engine.state.monitors[mi].workspaces.len(), 1);
+        assert_eq!(
+            engine.state.monitors[mi].workspaces[0].id,
+            engine.state.monitors[mi].carousel.current().unwrap(),
+            "the single surviving View must be both current and origin"
+        );
+        engine.state.assert_invariants();
+    }
+
+    /// A client belongs to exactly one View, and moving it changes *only*
+    /// membership — same floating state, same geometry, same identity.
+    #[test]
+    fn moving_a_client_changes_membership_and_nothing_else() {
+        use crate::core::commands::{Command as _, MoveToWorkspace};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        let src = engine.state.monitors[mi].workspaces[0].id;
+        let dst = engine.state.monitors[mi].workspaces[1].id;
+
+        // A tiled window and a floating one, both on the source View.
+        for (win, float) in [(1u32, false), (2, true)] {
+            let mut c = Client::new(win, mi, src);
+            c.name = format!("win{win}");
+            c.geom = Rect::new(300, 400, 250, 150);
+            c.saved_geom = c.geom;
+            if float {
+                c.flags.set(WinFlags::FLOAT);
+                engine.state.monitors[mi].workspaces[0].floats.push(win);
+            } else {
+                engine.state.monitors[mi].workspaces[0].add_tiled(win, 0.5);
+            }
+            engine.state.add_client(c);
+        }
+        let before: Vec<Client> = [1u32, 2]
+            .iter()
+            .map(|&w| engine.state.clients[&w].clone())
+            .collect();
+
+        engine.state.monitors[mi].focused = Some(1);
+        let report = MoveToWorkspace(1).execute(&mut engine.state, &mut engine.cfg);
+        assert!(!report.effects.is_empty(), "the move must do something");
+
+        // Gone from the old View, present in the new one — exactly once each.
+        let old: Vec<u32> = engine.state.monitors[mi].workspaces[0]
+            .columns
+            .iter()
+            .flat_map(|c| c.windows.iter().copied())
+            .collect();
+        assert!(!old.contains(&1), "the moved window left the old View");
+        let new_col: Vec<u32> = engine.state.monitors[mi].workspaces[1]
+            .columns
+            .iter()
+            .flat_map(|c| c.windows.iter().copied())
+            .collect();
+        assert_eq!(
+            new_col.iter().filter(|&&w| w == 1).count(),
+            1,
+            "the moved window appears exactly once in the destination"
+        );
+        assert_eq!(engine.state.clients[&1].workspace, dst);
+
+        // Floating survives a View move, geometry included.
+        engine.state.monitors[mi].focused = Some(2);
+        MoveToWorkspace(1).execute(&mut engine.state, &mut engine.cfg);
+        assert_eq!(engine.state.clients[&2].workspace, dst);
+        assert!(
+            engine.state.clients[&2].is_float(),
+            "a View move must not retile a floating client"
+        );
+        assert!(
+            engine.state.monitors[mi].workspaces[1].floats.contains(&2),
+            "the float must be on the destination View's float list"
+        );
+        assert!(
+            !engine.state.monitors[mi].workspaces[1]
+                .columns
+                .iter()
+                .any(|c| c.windows.contains(&2)),
+            "a floating client must never enter tiled layout input"
+        );
+
+        // Everything else about the clients is untouched.
+        for (win, b) in before.iter().enumerate() {
+            let after = &engine.state.clients[&(win as u32 + 1)];
+            assert_eq!(after.window, b.window, "X11 identity must not change");
+            assert_eq!(after.name, b.name, "app metadata must not change");
+            assert_eq!(after.geom, b.geom, "geometry must not change");
+            assert_eq!(
+                after.is_float(),
+                b.is_float(),
+                "floating state must not change"
+            );
+        }
+        engine.state.assert_invariants();
+    }
+
+    /// Creating a View is a purely logical transition: it must not move the
+    /// current View, and a removal of the *current* View re-points the carousel.
+    #[test]
+    fn view_creation_and_removal_respect_the_carousel() {
+        use crate::core::commands::{Command as _, CreateView, RemoveView};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        // Below the View ceiling, so `CreateView` has room; the default fixture has
+        // `n_tags = 9`, which is exactly the ceiling.
+        engine.state.monitors[mi].reconcile_workspaces(3);
+        let before = engine.state.monitors[mi].workspaces.len();
+        let current = engine.state.monitors[mi].carousel.current().unwrap();
+
+        CreateView.execute(&mut engine.state, &mut engine.cfg);
+        assert_eq!(
+            engine.state.monitors[mi].workspaces.len(),
+            before + 1,
+            "CreateView must append a View"
+        );
+        assert_eq!(
+            engine.state.monitors[mi].carousel.current(),
+            Some(current),
+            "creating a View must not move the user off what they were looking at"
+        );
+        let new = engine.state.monitors[mi].workspaces[before].id;
+        assert!(engine.state.monitors[mi].view_index(new).is_some());
+
+        // Removing that (empty, non-current) View leaves the current one alone.
+        let r = RemoveView(before).execute(&mut engine.state, &mut engine.cfg);
+        assert!(!r.effects.is_empty(), "removing an empty View must succeed");
+        assert_eq!(engine.state.monitors[mi].workspaces.len(), before);
+        assert_eq!(engine.state.monitors[mi].carousel.current(), Some(current));
+
+        // A removal that would leave no View at all is refused by the state API's
+        // own clamp path, so the monitor always has something to activate.
+        engine.state.monitors[mi].reconcile_workspaces(1);
+        assert_eq!(engine.state.monitors[mi].workspaces.len(), 1);
+        engine.state.assert_invariants();
+    }
+
     // A workspace round trip must preserve both halves of the focus contract:
     // `ViewWorkspace` picks its `FocusWindow` target through `best_focus`, so the
     // window Maverick considers focused has to survive the trip away and back.
@@ -1911,8 +2348,12 @@ mod unit_tests {
             });
             ws.focus = Focus { column_idx: 0 };
         }
-        engine.state.add_client(Client::new(1, mi, 0));
-        engine.state.add_client(Client::new(2, mi, 0));
+        engine
+            .state
+            .add_client(Client::new(1, mi, view_of(&engine.state, mi, 0)));
+        engine
+            .state
+            .add_client(Client::new(2, mi, view_of(&engine.state, mi, 0)));
 
         // ws1: a different window (3) of its own.
         {
@@ -1924,7 +2365,9 @@ mod unit_tests {
             });
             ws.focus = Focus { column_idx: 0 };
         }
-        engine.state.add_client(Client::new(3, mi, 1));
+        engine
+            .state
+            .add_client(Client::new(3, mi, view_of(&engine.state, mi, 1)));
 
         engine.state.monitors[mi].focused = Some(1);
         engine.state.monitors[mi].focus_stack = vec![1, 2];
@@ -1978,7 +2421,9 @@ mod unit_tests {
         let n = 25usize;
         for w in 1..=n as u32 {
             engine.state.monitors[mi].workspaces[ws_i].add_tiled(w, 1.0 / n as f32);
-            engine.state.add_client(Client::new(w, mi, ws_i));
+            engine
+                .state
+                .add_client(Client::new(w, mi, view_of(&engine.state, mi, ws_i)));
         }
         // Grow in both directions: the clamp bound must hold for either sign.
         engine.dispatch(Action::GrowCol(50));
@@ -2008,9 +2453,13 @@ mod unit_tests {
         // Two columns: the 1st at weight 1.0 (alone), the 2nd at
         // `cfg.column_width`.
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, 1.0);
-        engine.state.add_client(Client::new(1, mi, ws_i));
+        engine
+            .state
+            .add_client(Client::new(1, mi, view_of(&engine.state, mi, ws_i)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(2, 0.6);
-        engine.state.add_client(Client::new(2, mi, ws_i));
+        engine
+            .state
+            .add_client(Client::new(2, mi, view_of(&engine.state, mi, ws_i)));
         engine.state.monitors[mi].focused = Some(2);
         engine.state.monitors[mi].workspaces[ws_i].focus.column_idx = 1;
         // Push the 2nd column to the bound with oversized deltas.
@@ -2130,11 +2579,13 @@ mod unit_tests {
         }
         engine.state.monitors[mi].focused = Some(1);
         engine.state.monitors[mi].focus_stack = vec![1, 2];
-        let mut c1 = Client::new(1, mi, 0);
+        let mut c1 = Client::new(1, mi, view_of(&engine.state, mi, 0));
         c1.border_w = 0;
         c1.flags.set(WinFlags::FULLSCREEN);
         engine.state.add_client(c1);
-        engine.state.add_client(Client::new(2, mi, 0));
+        engine
+            .state
+            .add_client(Client::new(2, mi, view_of(&engine.state, mi, 0)));
 
         let wa = engine.state.monitors[mi].workarea;
         let fs = fs_ctx(
@@ -2192,11 +2643,11 @@ mod unit_tests {
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let win = 1u32;
 
         // A floating client.
-        let mut c = Client::new(win, mi, ws_i);
+        let mut c = Client::new(win, mi, view_of(&engine.state, mi, ws_i));
         c.border_w = 2;
         c.flags.set(WinFlags::FLOAT);
         c.geom = Rect::new(100, 100, 400, 300);
@@ -2286,11 +2737,11 @@ mod unit_tests {
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
 
         // A is a fullscreen overlay, logically and (X) input focused.
         let a = 1u32;
-        let mut ca = Client::new(a, mi, ws_i);
+        let mut ca = Client::new(a, mi, view_of(&engine.state, mi, ws_i));
         ca.border_w = 2;
         ca.flags.set(WinFlags::FULLSCREEN);
         engine.state.add_client(ca);
@@ -2303,7 +2754,7 @@ mod unit_tests {
         // advances the *logical* focus to B while leaving the X input focus on
         // the overlay A.
         let b = 2u32;
-        let mut cb = Client::new(b, mi, ws_i);
+        let mut cb = Client::new(b, mi, view_of(&engine.state, mi, ws_i));
         cb.border_w = 2;
         engine.state.add_client(cb);
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(b, engine.cfg.column_width);
@@ -2347,17 +2798,17 @@ mod unit_tests {
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
 
         let a = 1u32;
-        let mut ca = Client::new(a, mi, ws_i);
+        let mut ca = Client::new(a, mi, view_of(&engine.state, mi, ws_i));
         ca.border_w = 2;
         ca.flags.set(WinFlags::FULLSCREEN);
         engine.state.add_client(ca);
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(a, engine.cfg.column_width);
 
         let b = 2u32;
-        let mut cb = Client::new(b, mi, ws_i);
+        let mut cb = Client::new(b, mi, view_of(&engine.state, mi, ws_i));
         cb.border_w = 2;
         engine.state.add_client(cb);
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(b, engine.cfg.column_width);
@@ -2387,10 +2838,10 @@ mod unit_tests {
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
 
         let a = 1u32;
-        let mut ca = Client::new(a, mi, ws_i);
+        let mut ca = Client::new(a, mi, view_of(&engine.state, mi, ws_i));
         ca.border_w = 2;
         ca.flags.set(WinFlags::FULLSCREEN);
         engine.state.add_client(ca);
@@ -2399,7 +2850,7 @@ mod unit_tests {
         engine.state.monitors[mi].focus_stack = vec![a];
 
         let b = 2u32;
-        let mut cb = Client::new(b, mi, ws_i);
+        let mut cb = Client::new(b, mi, view_of(&engine.state, mi, ws_i));
         cb.border_w = 2;
         engine.state.add_client(cb);
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(b, engine.cfg.column_width);
@@ -2431,12 +2882,12 @@ mod unit_tests {
         let cfg = default_cfg();
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let win = 1u32;
 
         // A small floating client — exactly how mpv maps with `float = true`.
         let float_rect = Rect::new(100, 100, 400, 300);
-        let mut c = Client::new(win, mi, ws_i);
+        let mut c = Client::new(win, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = float_rect;
         c.saved_geom = float_rect;
@@ -2532,11 +2983,11 @@ mod unit_tests {
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let win = 1u32;
 
         let float_rect = Rect::new(100, 100, 400, 300);
-        let mut c = Client::new(win, mi, ws_i);
+        let mut c = Client::new(win, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = float_rect;
         c.saved_geom = float_rect;
@@ -2588,12 +3039,12 @@ mod unit_tests {
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
 
         let a_rect = Rect::new(50, 50, 300, 200);
         let b_rect = Rect::new(700, 400, 350, 250);
         for (win, r) in [(1u32, a_rect), (2u32, b_rect)] {
-            let mut c = Client::new(win, mi, ws_i);
+            let mut c = Client::new(win, mi, view_of(&engine.state, mi, ws_i));
             c.flags.set(WinFlags::FLOAT);
             c.geom = r;
             c.saved_geom = r;
@@ -2642,9 +3093,9 @@ mod unit_tests {
         use crate::types::{Client, FullscreenPolicy, WinFlags};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
 
-        let mut c = Client::new(1, mi, ws_i);
+        let mut c = Client::new(1, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = Rect::new(50, 50, 300, 200);
         c.saved_geom = c.geom;
@@ -2688,10 +3139,10 @@ mod unit_tests {
         let cfg = default_cfg();
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let win = 1u32;
 
-        let mut c = Client::new(win, mi, ws_i);
+        let mut c = Client::new(win, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = Rect::new(10, 10, 200, 150);
         engine.state.add_client(c);
@@ -2736,7 +3187,7 @@ mod unit_tests {
     #[test]
     fn fullscreen_policy_accessors() {
         use crate::types::{Client, FullscreenPolicy, WinFlags};
-        let mut c = Client::new(1, 0, 0);
+        let mut c = Client::new(1, 0, ViewId::new(0));
         // Default policy is Normal: no deny, no exclusive overlay.
         assert!(!c.denies_fullscreen());
         assert!(!c.is_true_fullscreen());
@@ -2762,9 +3213,11 @@ mod unit_tests {
         let cfg = default_cfg();
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         for win in 1..=2u32 {
-            engine.state.add_client(Client::new(win, mi, ws_i));
+            engine
+                .state
+                .add_client(Client::new(win, mi, view_of(&engine.state, mi, ws_i)));
         }
         {
             let ws = &mut engine.state.monitors[mi].workspaces[ws_i];
@@ -2803,7 +3256,7 @@ mod unit_tests {
     #[test]
     fn maximized_axis_flags_are_independent() {
         use crate::types::{Client, WinFlags};
-        let mut c = Client::new(1, 0, 0);
+        let mut c = Client::new(1, 0, ViewId::new(0));
         assert!(!c.is_maximized());
         assert!(!c.is_maximized_v());
         assert!(!c.is_maximized_h());
@@ -2829,9 +3282,11 @@ mod unit_tests {
         let cfg = default_cfg();
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         for win in 1..=2u32 {
-            engine.state.add_client(Client::new(win, mi, ws_i));
+            engine
+                .state
+                .add_client(Client::new(win, mi, view_of(&engine.state, mi, ws_i)));
             engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, cfg.column_width);
         }
 
@@ -2867,7 +3322,7 @@ mod unit_tests {
         use crate::types::{Action, ViewportMode};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
 
         // Start in Overview: the branch a rejected request must not reach.
         engine.state.monitors[mi].workspaces[ws_i].overview = true;
@@ -2909,7 +3364,7 @@ mod unit_tests {
         use crate::types::Action;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].overview = true;
 
         let before = {
@@ -2936,7 +3391,7 @@ mod unit_tests {
         use crate::types::{Action, ViewportMode};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.dispatch(Action::ViewportZoom(0.2));
         assert_eq!(
             engine.state.monitors[mi].workspaces[ws_i].viewport_mode,
@@ -2955,11 +3410,13 @@ mod unit_tests {
         let cfg = default_cfg();
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         // Enough columns that the ribbon is far wider than one screen, so a
         // page-snap has visible room to scroll.
         for win in 1..=12u32 {
-            engine.state.add_client(Client::new(win, mi, ws_i));
+            engine
+                .state
+                .add_client(Client::new(win, mi, view_of(&engine.state, mi, ws_i)));
             engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, cfg.column_width);
         }
         // Start the camera at the left edge, then snap one page to the right.
@@ -2981,8 +3438,10 @@ mod unit_tests {
         let cfg = default_cfg();
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
-        engine.state.add_client(Client::new(1, mi, ws_i));
+        let ws_i = engine.state.monitors[mi].active_index();
+        engine
+            .state
+            .add_client(Client::new(1, mi, view_of(&engine.state, mi, ws_i)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, cfg.column_width);
         // Recompute the settled center through the same command used by zoom
         // navigation, then install it as the current visual endpoint.
@@ -3063,8 +3522,8 @@ mod unit_tests {
                 }
                 let win = *next;
                 *next += 1;
-                let ws_i = engine.state.monitors[mi].active_ws;
-                let mut c = Client::new(win, mi, ws_i);
+                let ws_i = engine.state.monitors[mi].active_index();
+                let mut c = Client::new(win, mi, view_of(&engine.state, mi, ws_i));
                 c.border_w = 2;
                 if rng.below(2) == 0 {
                     c.flags.set(WinFlags::FLOAT);
@@ -3182,13 +3641,13 @@ mod unit_tests {
                             let _ = writeln!(
                                 dump,
                                 "  mon{mi2} ws{ws2} (active={}): {:?}",
-                                ws2 == mon2.active_ws,
+                                ws2 == mon2.active_index(),
                                 wins
                             );
                         }
                     }
                 }
-                let clients_ws: Vec<(WindowId, usize)> = engine
+                let clients_ws: Vec<(WindowId, ViewId)> = engine
                     .state
                     .clients
                     .iter()
@@ -3204,7 +3663,7 @@ mod unit_tests {
             // Periodically assert layout determinism + overview/scroll ops don't
             // corrupt the tree.
             if step % 200 == 0 {
-                let ws_i = engine.state.monitors[mi].active_ws;
+                let ws_i = engine.state.monitors[mi].active_index();
                 let mut p1 = Placements::new();
                 let mut p2 = Placements::new();
                 let mut r1 = RibbonScratch::default();
@@ -3262,8 +3721,8 @@ mod unit_tests {
     /// presentation-aware focus policy (and without touching the focus).
     fn t_add(engine: &mut Engine, win: WindowId) {
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
-        let mut c = Client::new(win, mi, ws_i);
+        let ws_i = engine.state.monitors[mi].active_index();
+        let mut c = Client::new(win, mi, view_of(&engine.state, mi, ws_i));
         c.border_w = engine.cfg.border_w;
         c.geom = Rect::new(0, 0, 800, 600);
         c.saved_geom = c.geom;
@@ -3284,12 +3743,20 @@ mod unit_tests {
                 monitor,
                 workspace,
             } => {
-                engine.state.pending_focus = Some(crate::types::PendingFocus {
-                    window: win,
-                    owner,
-                    monitor,
-                    workspace,
-                });
+                // `decide_manage_focus` names the View by position; the deferral
+                // records its identity.
+                if let Some(view) = engine.state.monitors[monitor]
+                    .workspaces
+                    .get(workspace)
+                    .map(|ws| ws.id)
+                {
+                    engine.state.pending_focus = Some(crate::types::PendingFocus {
+                        window: win,
+                        owner,
+                        monitor,
+                        workspace: view,
+                    });
+                }
                 false
             }
             crate::core::commands::ManageFocusIntent::Focus(_) => {
@@ -3332,7 +3799,7 @@ mod unit_tests {
                 engine.state.pending_focus = None;
                 t_focus(engine, p);
             } else {
-                let aws = engine.state.monitors[mon_i].active_ws;
+                let aws = engine.state.monitors[mon_i].active_index();
                 if let Some(p) = crate::core::commands::consume_pending_focus(
                     &mut engine.state,
                     mon_i,
@@ -3374,7 +3841,7 @@ mod unit_tests {
     fn fullscreen_column_normal_new_window_receives_focus() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -3447,7 +3914,7 @@ mod unit_tests {
     fn fullscreen_a_create_b_destroy_b_focus_returns_to_a() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -3472,7 +3939,7 @@ mod unit_tests {
         use crate::core::effect::Effect;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -3547,7 +4014,7 @@ mod unit_tests {
         );
 
         engine.execute(crate::core::commands::ViewWorkspace(1));
-        assert_eq!(engine.state.monitors[mi].active_ws, 1);
+        assert_eq!(engine.state.monitors[mi].active_index(), 1);
         assert_eq!(
             engine.state.best_focus(mi),
             None,
@@ -3661,7 +4128,7 @@ mod unit_tests {
                 );
                 assert!(
                     s.presented_overlay_owner(pf.monitor) == Some(pf.owner)
-                        || s.monitors.get(pf.monitor).and_then(|m| m.workspaces.get(pf.workspace)).is_some_and(|ws| {
+                        || s.monitors.get(pf.monitor).and_then(|m| m.workspaces.iter().find(|ws| ws.id == pf.workspace)).is_some_and(|ws| {
                             s.clients.get(&pf.owner).is_some_and(|c| c.monitor == pf.monitor && c.workspace == pf.workspace
                                 && (c.is_fullscreen() && (ws.layout == LayoutKind::Column || c.is_true_fullscreen())
                                     || ((c.is_maximized_v() || c.is_maximized_h()) && s.monitors[pf.monitor].focused == Some(pf.owner))))
@@ -3677,11 +4144,12 @@ mod unit_tests {
                 }
                 if let Some(w) = m
                     .workspaces
-                    .get(m.active_ws)
+                    .get(m.active_index())
                     .and_then(|ws| ws.presented_maximize)
                 {
                     match s.clients.get(&w) {
-                        Some(c) if c.is_maximized() && c.workspace == m.active_ws => {}
+                        Some(c) if c.is_maximized()
+                            && Some(c.workspace) == m.carousel.current() => {}
                         _ => panic!("seed {SEED:#x} step {step} op {op}: presented_maximize {w} on mon {mi} invalid"),
                     }
                 }
@@ -3695,7 +4163,7 @@ mod unit_tests {
                     {
                         assert_eq!(
                             m.workspaces
-                                .get(m.active_ws)
+                                .get(m.active_index())
                                 .and_then(|ws| ws.presented_maximize),
                             Some(w),
                             "seed {SEED:#x} step {step} op {op}: #9b mismatch on mon {mi}",
@@ -3763,7 +4231,11 @@ mod unit_tests {
                         let target = (rng.next() % nmon as u64) as usize;
                         let tws = (rng.next() % nws as u64) as usize;
                         engine.state.sel_mon = target;
-                        engine.state.monitors[target].active_ws = tws;
+                        // Switching Views is a carousel goto, not a positional
+                        // write — the same public path the command uses.
+                        if let Some(view) = engine.state.monitors[target].view_id(tws) {
+                            engine.state.monitors[target].goto_view(view);
+                        }
                         let w = next_win;
                         next_win += 1;
                         t_manage(&mut engine, w);
@@ -3800,7 +4272,7 @@ mod unit_tests {
     fn pending_focus_consumed_on_fullscreen_keyboard_dismiss() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -3809,7 +4281,7 @@ mod unit_tests {
             window: 2,
             owner: 1,
             monitor: mi,
-            workspace: ws_i,
+            workspace: engine.state.monitors[mi].workspaces[ws_i].id,
         });
         assert_eq!(engine.state.presented_overlay_owner(mi), Some(1));
 
@@ -3829,7 +4301,7 @@ mod unit_tests {
     fn pending_focus_consumed_on_maximize_keyboard_dismiss() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         t_manage(&mut engine, 1);
         t_set_maximized(&mut engine, 1);
         t_focus(&mut engine, 1);
@@ -3838,7 +4310,7 @@ mod unit_tests {
             window: 2,
             owner: 1,
             monitor: mi,
-            workspace: ws_i,
+            workspace: engine.state.monitors[mi].workspaces[ws_i].id,
         });
         assert_eq!(engine.state.presented_overlay_owner(mi), Some(1));
 
@@ -3858,7 +4330,7 @@ mod unit_tests {
     fn pending_focus_invalidated_when_deferred_window_gone() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -3866,7 +4338,7 @@ mod unit_tests {
             window: 999,
             owner: 1,
             monitor: mi,
-            workspace: ws_i,
+            workspace: engine.state.monitors[mi].workspaces[ws_i].id,
         });
 
         engine.execute(crate::core::commands::ToggleFullscreen(Some(1)));
@@ -3885,7 +4357,7 @@ mod unit_tests {
     fn destroy_overlay_owner_consumes_pending() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -3923,7 +4395,9 @@ mod unit_tests {
         assert_eq!(engine.state.pending_focus.map(|pf| pf.window), Some(2));
 
         // The overlay now lives on ws0 while the selected monitor shows ws1.
-        engine.state.monitors[mon0].active_ws = 1;
+        if let Some(view) = engine.state.monitors[mon0].view_id(1) {
+            engine.state.monitors[mon0].goto_view(view);
+        }
         engine.state.sync_presented_maximize(mon0);
 
         // Destroy overlay A on mon0/ws0 (a non-active workspace). B must be
@@ -4014,7 +4488,7 @@ mod unit_tests {
     fn pending_focus_resolved_when_overlay_owner_moved_to_other_ws() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let target_ws = ws_i + 1;
         assert!(
             target_ws < engine.state.monitors[mi].workspaces.len(),
@@ -4028,7 +4502,7 @@ mod unit_tests {
             window: 2,
             owner: 1,
             monitor: mi,
-            workspace: ws_i,
+            workspace: engine.state.monitors[mi].workspaces[ws_i].id,
         });
         assert_eq!(engine.state.presented_overlay_owner(mi), Some(1));
 
@@ -4053,7 +4527,7 @@ mod unit_tests {
     fn pending_focus_resolved_when_overlay_owner_moved_to_other_mon() {
         let mut engine = setup_engine_multi();
         let mon0 = 0;
-        let ws_i = engine.state.monitors[mon0].active_ws;
+        let ws_i = engine.state.monitors[mon0].active_index();
         engine.state.monitors[mon0].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -4062,7 +4536,7 @@ mod unit_tests {
             window: 2,
             owner: 1,
             monitor: mon0,
-            workspace: ws_i,
+            workspace: engine.state.monitors[mon0].workspaces[ws_i].id,
         });
         assert_eq!(engine.state.presented_overlay_owner(mon0), Some(1));
 
@@ -4092,7 +4566,7 @@ mod unit_tests {
     fn pending_focus_survives_when_overlay_hidden_by_workspace_switch() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let other_ws = ws_i + 1;
         assert!(
             other_ws < engine.state.monitors[mi].workspaces.len(),
@@ -4106,13 +4580,14 @@ mod unit_tests {
             window: 2,
             owner: 1,
             monitor: mi,
-            workspace: ws_i,
+            workspace: engine.state.monitors[mi].workspaces[ws_i].id,
         });
         assert_eq!(engine.state.presented_overlay_owner(mi), Some(1));
 
         engine.execute(crate::core::commands::ViewWorkspace(other_ws));
         assert_eq!(
-            engine.state.monitors[mi].active_ws, other_ws,
+            engine.state.monitors[mi].active_index(),
+            other_ws,
             "workspace switch applied"
         );
         assert!(
@@ -4131,7 +4606,7 @@ mod unit_tests {
     fn pending_focus_survives_when_overlay_on_non_selected_monitor() {
         let mut engine = setup_engine_multi();
         let mon0 = 0;
-        let ws_i = engine.state.monitors[mon0].active_ws;
+        let ws_i = engine.state.monitors[mon0].active_index();
         engine.state.monitors[mon0].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -4140,7 +4615,7 @@ mod unit_tests {
             window: 2,
             owner: 1,
             monitor: mon0,
-            workspace: ws_i,
+            workspace: engine.state.monitors[mon0].workspaces[ws_i].id,
         });
         assert_eq!(engine.state.presented_overlay_owner(mon0), Some(1));
 
@@ -4168,7 +4643,7 @@ mod unit_tests {
     fn the_per_axis_ewmh_maximize_path_resolves_the_deferral_it_orphans() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_focus(&mut engine, 1);
@@ -4221,7 +4696,7 @@ mod unit_tests {
         let case = |owner_fullscreen: bool, vert: Option<bool>, horiz: Option<bool>| {
             let mut engine = setup_engine();
             let mi = engine.state.sel_mon;
-            let ws_i = engine.state.monitors[mi].active_ws;
+            let ws_i = engine.state.monitors[mi].active_index();
             engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
             t_manage(&mut engine, 1);
             t_focus(&mut engine, 1);
@@ -4263,7 +4738,7 @@ mod unit_tests {
     fn maximize_roundtrip_and_unmaximize() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         t_manage(&mut engine, 1);
 
         engine.execute(crate::core::commands::ToggleMaximize(Some(1)));
@@ -4312,7 +4787,7 @@ mod unit_tests {
         t_manage(&mut engine, 1);
         // Background monitor 1 owns windows 2 and 3 (3 focused there).
         for win in [2u32, 3u32] {
-            let mut c = Client::new(win, 1, 0);
+            let mut c = Client::new(win, 1, view_of(&engine.state, 1, 0));
             c.border_w = engine.cfg.border_w;
             c.geom = Rect::new(1920, 0, 800, 600);
             c.saved_geom = c.geom;
@@ -4374,7 +4849,7 @@ mod unit_tests {
         use crate::types::LayoutKind;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -4400,7 +4875,7 @@ mod unit_tests {
         use crate::types::LayoutKind;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_manage(&mut engine, 2);
@@ -4430,7 +4905,7 @@ mod unit_tests {
     fn maximize_desired_geometry() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let _ws_i = engine.state.monitors[mi].active_ws;
+        let _ws_i = engine.state.monitors[mi].active_index();
         t_manage(&mut engine, 1);
         t_focus(&mut engine, 1);
         t_set_maximized(&mut engine, 1);
@@ -4454,9 +4929,9 @@ mod unit_tests {
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let g = Rect::new(100, 100, 300, 200);
-        let mut c = Client::new(1, mi, ws_i);
+        let mut c = Client::new(1, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = g;
         c.saved_geom = g;
@@ -4520,10 +4995,10 @@ mod unit_tests {
         for policy in [FullscreenPolicy::True, FullscreenPolicy::Normal] {
             let mut engine = setup_engine();
             let mi = engine.state.sel_mon;
-            let ws_i = engine.state.monitors[mi].active_ws;
+            let ws_i = engine.state.monitors[mi].active_index();
             // Two tiled columns, so horizontal navigation has somewhere to go.
             for win in [1u32, 2] {
-                let mut c = Client::new(win, mi, ws_i);
+                let mut c = Client::new(win, mi, view_of(&engine.state, mi, ws_i));
                 c.geom = Rect::new(0, 0, 800, 600);
                 c.saved_geom = c.geom;
                 engine.state.add_client(c);
@@ -4602,8 +5077,8 @@ mod unit_tests {
         // is no longer a float and must not claim to be a sticky one.
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
-        let mut c = Client::new(1, mi, ws_i);
+        let ws_i = engine.state.monitors[mi].active_index();
+        let mut c = Client::new(1, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.flags.set(WinFlags::STICKY);
         engine.state.add_client(c);
@@ -4628,8 +5103,8 @@ mod unit_tests {
         // what makes it a column, so the same rule applies.
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
-        let mut c = Client::new(1, mi, ws_i);
+        let ws_i = engine.state.monitors[mi].active_index();
+        let mut c = Client::new(1, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.flags.set(WinFlags::STICKY);
         c.geom = Rect::new(10, 10, 200, 100);
@@ -4680,10 +5155,12 @@ mod unit_tests {
 
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
 
         // Starting tiled: the user tears it off and puts it back.
-        engine.state.add_client(Client::new(1, mi, ws_i));
+        engine
+            .state
+            .add_client(Client::new(1, mi, view_of(&engine.state, mi, ws_i)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, engine.cfg.column_width);
         engine.state.monitors[mi].focused = Some(1);
         ToggleFloat(None).execute(&mut engine.state, &mut engine.cfg);
@@ -4701,7 +5178,7 @@ mod unit_tests {
 
         // Starting floating. A dialog, a rule and a restored session all leave
         // exactly this state, so each is the same round trip.
-        let mut f = Client::new(2, mi, ws_i);
+        let mut f = Client::new(2, mi, view_of(&engine.state, mi, ws_i));
         f.flags.set(WinFlags::FLOAT);
         engine.state.add_client(f);
         engine.state.monitors[mi].workspaces[ws_i].floats.push(2);
@@ -4728,17 +5205,19 @@ mod unit_tests {
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let wa = engine.state.monitors[mi].workarea;
 
         // One tiled window (defines the tile rect: column_width * workarea).
-        engine.state.add_client(Client::new(1, mi, ws_i));
+        engine
+            .state
+            .add_client(Client::new(1, mi, view_of(&engine.state, mi, ws_i)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, engine.cfg.column_width);
         engine.state.monitors[mi].focused = Some(1);
 
         // A float much smaller than any tile.
         let small = Rect::new(120, 90, 320, 240);
-        let mut f = Client::new(2, mi, ws_i);
+        let mut f = Client::new(2, mi, view_of(&engine.state, mi, ws_i));
         f.flags.set(WinFlags::FLOAT);
         f.geom = small;
         f.saved_geom = small;
@@ -4747,7 +5226,7 @@ mod unit_tests {
         engine.state.monitors[mi].workspaces[ws_i].floats.push(2);
 
         // A float larger than the workarea (must clamp to wa, not tile).
-        let mut big = Client::new(3, mi, ws_i);
+        let mut big = Client::new(3, mi, view_of(&engine.state, mi, ws_i));
         big.flags.set(WinFlags::FLOAT);
         big.geom = Rect::new(-100, -100, 9999, 9999);
         big.saved_geom = big.geom;
@@ -4803,7 +5282,7 @@ mod unit_tests {
         use crate::types::{Client, SizeHints, WinFlags};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
 
         // Float on a size-hints grid (base 0, increment 10, min 100x100).
         let hints = SizeHints {
@@ -4821,7 +5300,7 @@ mod unit_tests {
             valid: true,
         };
         let requested = Rect::new(60, 70, 600, 400); // on-grid, snap-neutral
-        let mut f = Client::new(2, mi, ws_i);
+        let mut f = Client::new(2, mi, view_of(&engine.state, mi, ws_i));
         f.flags.set(WinFlags::FLOAT);
         f.geom = requested;
         f.saved_geom = requested;
@@ -4863,11 +5342,13 @@ mod unit_tests {
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine_multi();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
 
         // ToggleFloat: the projected tile (~800x1080, off-grid) must be born
         // floating already re-settled onto the hint grid (inc 10).
-        engine.state.add_client(Client::new(1, mi, ws_i));
+        engine
+            .state
+            .add_client(Client::new(1, mi, view_of(&engine.state, mi, ws_i)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, engine.cfg.column_width);
         engine.state.monitors[mi].focused = Some(1);
         let hints_inc: u32 = 10;
@@ -4911,7 +5392,7 @@ mod unit_tests {
 
         // MoveWindowToMonitor: a still float changes to a new workarea (another
         // monitor) and must come out re-settled inside it in the same command.
-        let mut f = Client::new(2, mi, ws_i);
+        let mut f = Client::new(2, mi, view_of(&engine.state, mi, ws_i));
         f.flags.set(WinFlags::FLOAT);
         f.geom = Rect::new(100, 100, 200, 150); // off monitor 1 (x >= 1920)
         f.saved_geom = f.geom;
@@ -5042,10 +5523,10 @@ mod unit_tests {
         use crate::types::{Client, WinFlags};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let g0 = Rect::new(100, 100, 300, 200);
         let g1 = Rect::new(200, 150, 400, 250);
-        let mut c = Client::new(1, mi, ws_i);
+        let mut c = Client::new(1, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = g0;
         c.saved_geom = g0;
@@ -5166,7 +5647,11 @@ mod unit_tests {
                         let tws = rng.below(engine.state.monitors[target].workspaces.len() as u32)
                             as usize;
                         engine.state.sel_mon = target;
-                        engine.state.monitors[target].active_ws = tws;
+                        // Switching Views is a carousel goto, not a positional
+                        // write — the same public path the command uses.
+                        if let Some(view) = engine.state.monitors[target].view_id(tws) {
+                            engine.state.monitors[target].goto_view(view);
+                        }
                         let w = next_win;
                         next_win += 1;
                         t_manage(&mut engine, w);
@@ -5319,8 +5804,12 @@ mod unit_tests {
                     "seed {SEED:#x} step {step}: client {w} monitor {} out of range",
                     c.monitor
                 );
-                let mws = engine.state.monitors[c.monitor].workspaces.len();
-                assert!(c.workspace < mws, "seed {SEED:#x} step {step}: client {w} workspace {} out of range (mon {} has {mws})", c.workspace, c.monitor);
+                let mon = &engine.state.monitors[c.monitor];
+                assert!(
+                    mon.view_index(c.workspace).is_some(),
+                    "seed {SEED:#x} step {step}: client {w} view {} does not exist on mon {} ({} views)",
+                    c.workspace, c.monitor, mon.workspaces.len()
+                );
             }
 
             // (g) soft geometry check for FLOATS: the layout reads `client.geom`
@@ -5341,7 +5830,11 @@ mod unit_tests {
                     continue;
                 }
                 let mon = &engine.state.monitors[c.monitor];
-                let ws = &mon.workspaces[c.workspace];
+                let ws = mon
+                    .workspaces
+                    .iter()
+                    .find(|ws| ws.id == c.workspace)
+                    .expect("client is placed in an existing View");
                 let is_overlay = (c.is_fullscreen()
                     && (ws.layout == LayoutKind::Column || c.is_true_fullscreen()))
                     || ws.presented_maximize == Some(d.window);
@@ -5500,7 +5993,7 @@ mod unit_tests {
         };
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -5558,9 +6051,9 @@ mod unit_tests {
         use crate::types::WinFlags;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let g0 = Rect::new(100, 100, 300, 200);
-        let mut c = Client::new(1, mi, ws_i);
+        let mut c = Client::new(1, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = g0;
         c.saved_geom = g0;
@@ -5605,9 +6098,9 @@ mod unit_tests {
         use crate::types::WinFlags;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let g0 = Rect::new(100, 100, 300, 200);
-        let mut c = Client::new(1, mi, ws_i);
+        let mut c = Client::new(1, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = g0;
         c.saved_geom = g0;
@@ -5666,9 +6159,9 @@ mod unit_tests {
         use crate::types::WinFlags;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let g0 = Rect::new(100, 100, 300, 200);
-        let mut c = Client::new(1, mi, ws_i);
+        let mut c = Client::new(1, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = g0;
         c.saved_geom = g0;
@@ -5719,7 +6212,7 @@ mod unit_tests {
         };
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let _ws_i = engine.state.monitors[mi].active_ws;
+        let _ws_i = engine.state.monitors[mi].active_index();
         t_manage(&mut engine, 1);
         t_focus(&mut engine, 1);
 
@@ -5778,7 +6271,7 @@ mod unit_tests {
     fn audit_p2_fullscreen_lifecycle_no_orphan_overlay() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -5838,7 +6331,7 @@ mod unit_tests {
         };
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -5882,7 +6375,7 @@ mod unit_tests {
         // both reports are stale traffic it re-asserts over, never adopts.
 
         engine.execute(crate::core::commands::ViewWorkspace(1));
-        assert_eq!(engine.state.monitors[mi].active_ws, 1);
+        assert_eq!(engine.state.monitors[mi].active_index(), 1);
         engine.execute(crate::core::commands::ViewWorkspace(0));
         assert_eq!(
             engine.state.presented_overlay_owner(mi),
@@ -5899,7 +6392,7 @@ mod unit_tests {
     fn audit_p2_column_normal_fullscreen_is_ribbon_tile() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
@@ -5933,7 +6426,7 @@ mod unit_tests {
         t_manage(&mut engine, 1);
         t_set_maximized(&mut engine, 1);
         t_focus(&mut engine, 1);
-        let aws0 = engine.state.monitors[mi].active_ws;
+        let aws0 = engine.state.monitors[mi].active_index();
         assert_eq!(
             engine.state.monitors[mi].workspaces[aws0].presented_maximize,
             Some(1),
@@ -5946,7 +6439,7 @@ mod unit_tests {
         engine.state.clients.get_mut(&1).unwrap().geom = Rect::new(0, 0, 400, 300);
         // focus B (A no longer the focused maximize owner)
         t_focus(&mut engine, 2);
-        let aws1 = engine.state.monitors[mi].active_ws;
+        let aws1 = engine.state.monitors[mi].active_index();
         assert!(
             engine.state.monitors[mi].workspaces[aws1]
                 .presented_maximize
@@ -5957,7 +6450,7 @@ mod unit_tests {
 
         // unmaximize A (target A explicitly)
         aud_run_cmd(&mut engine, crate::core::commands::ToggleMaximize(Some(1)));
-        let aws2 = engine.state.monitors[mi].active_ws;
+        let aws2 = engine.state.monitors[mi].active_index();
         assert!(
             engine.state.monitors[mi].workspaces[aws2].presented_maximize != Some(1),
             "no stale presented_maximize naming A after unmaximize"
@@ -5972,9 +6465,9 @@ mod unit_tests {
     fn audit_p3_float_geometry_follows_model() {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let g0 = Rect::new(100, 100, 300, 200);
-        let mut c = Client::new(1, mi, ws_i);
+        let mut c = Client::new(1, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = g0;
         c.saved_geom = g0;
@@ -6064,14 +6557,14 @@ mod unit_tests {
         use crate::types::WinFlags;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         t_manage(&mut engine, 1);
         t_set_fullscreen(&mut engine, 1, true);
         assert_eq!(engine.state.presented_overlay_owner(mi), Some(1));
 
         // open child dialog B (transient to A, float)
-        let mut cb = Client::new(2, mi, ws_i);
+        let mut cb = Client::new(2, mi, view_of(&engine.state, mi, ws_i));
         cb.flags.set(WinFlags::FLOAT);
         cb.geom = Rect::new(200, 200, 300, 200);
         cb.saved_geom = cb.geom;
@@ -6109,11 +6602,11 @@ mod unit_tests {
         use crate::types::WinFlags;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         t_manage(&mut engine, 1);
         t_focus(&mut engine, 1);
 
-        let mut cb = Client::new(2, mi, ws_i);
+        let mut cb = Client::new(2, mi, view_of(&engine.state, mi, ws_i));
         cb.flags.set(WinFlags::FLOAT);
         cb.geom = Rect::new(200, 200, 300, 200);
         cb.saved_geom = cb.geom;
@@ -6137,7 +6630,7 @@ mod unit_tests {
             !engine.state.clients.contains_key(&2),
             "B removed from clients"
         );
-        let aws = engine.state.monitors[mi].active_ws;
+        let aws = engine.state.monitors[mi].active_index();
         assert!(
             !engine.state.monitors[mi].workspaces[aws]
                 .floats
@@ -6161,12 +6654,12 @@ mod unit_tests {
         use crate::types::WinFlags;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         t_manage(&mut engine, 1);
         t_focus(&mut engine, 1);
 
         // B with transient_parent = A
-        let mut cb = Client::new(2, mi, ws_i);
+        let mut cb = Client::new(2, mi, view_of(&engine.state, mi, ws_i));
         cb.flags.set(WinFlags::FLOAT);
         cb.geom = Rect::new(200, 200, 300, 200);
         cb.saved_geom = cb.geom;
@@ -6200,14 +6693,17 @@ mod unit_tests {
     /// same presentation-aware focus policy as `t_manage`.
     fn t_manage_transient(engine: &mut Engine, win: WindowId, parent: WindowId) -> bool {
         let mi = engine.state.sel_mon;
-        let (mi, ws_i) = engine
-            .state
-            .clients
-            .get(&parent)
-            .map_or((mi, engine.state.monitors[mi].active_ws), |p| {
-                (p.monitor, p.workspace)
-            });
-        let mut c = Client::new(win, mi, ws_i);
+        // A transient child follows its parent onto the parent's own View.
+        let (mi, ws_i) = match engine.state.clients.get(&parent) {
+            Some(p) => (
+                p.monitor,
+                engine.state.monitors[p.monitor]
+                    .view_index(p.workspace)
+                    .unwrap_or(0),
+            ),
+            None => (mi, engine.state.monitors[mi].active_index()),
+        };
+        let mut c = Client::new(win, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = Rect::new(200, 200, 300, 200);
         c.saved_geom = c.geom;
@@ -6221,12 +6717,20 @@ mod unit_tests {
                 monitor,
                 workspace,
             } => {
-                engine.state.pending_focus = Some(crate::types::PendingFocus {
-                    window: win,
-                    owner,
-                    monitor,
-                    workspace,
-                });
+                // `decide_manage_focus` names the View by position; the deferral
+                // records its identity.
+                if let Some(view) = engine.state.monitors[monitor]
+                    .workspaces
+                    .get(workspace)
+                    .map(|ws| ws.id)
+                {
+                    engine.state.pending_focus = Some(crate::types::PendingFocus {
+                        window: win,
+                        owner,
+                        monitor,
+                        workspace: view,
+                    });
+                }
                 false
             }
             crate::core::commands::ManageFocusIntent::Focus(_) => {
@@ -6315,7 +6819,7 @@ mod unit_tests {
     fn r5_build_chain(depth: u32, maximized: bool) -> Engine {
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         if !maximized {
             engine.state.monitors[mi].workspaces[ws_i].layout = LayoutKind::Column;
         }
@@ -6474,11 +6978,11 @@ mod unit_tests {
         // window that no longer exists.
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         t_manage(&mut engine, 1);
 
         // 2 is transient for the not-yet-managed 99 → deferred.
-        let mut c = Client::new(2, mi, ws_i);
+        let mut c = Client::new(2, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = Rect::new(200, 200, 300, 200);
         c.saved_geom = c.geom;
@@ -6554,7 +7058,11 @@ mod unit_tests {
                 .any(|col| col.windows.contains(&1))
                 || engine.state.monitors[mi].workspaces[3].floats.contains(&1)
         );
-        assert_eq!(engine.state.clients.get(&1).unwrap().workspace, 3);
+        assert_eq!(
+            engine.state.clients.get(&1).unwrap().workspace,
+            view_of(&engine.state, mi, 3),
+            "the client must now name the destination View by identity"
+        );
         engine
             .state
             .check_invariants()
@@ -6722,7 +7230,9 @@ mod unit_tests {
         {
             let mi = 0;
             engine.state.sel_mon = mi;
-            engine.state.monitors[mi].active_ws = 0;
+            if let Some(view) = engine.state.monitors[mi].view_id(0) {
+                engine.state.monitors[mi].goto_view(view);
+            }
             t_manage(&mut engine, next_win);
             live.push(next_win);
             next_win += 1;
@@ -6738,7 +7248,11 @@ mod unit_tests {
                         let tws = rng.below(engine.state.monitors[target].workspaces.len() as u32)
                             as usize;
                         engine.state.sel_mon = target;
-                        engine.state.monitors[target].active_ws = tws;
+                        // Switching Views is a carousel goto, not a positional
+                        // write — the same public path the command uses.
+                        if let Some(view) = engine.state.monitors[target].view_id(tws) {
+                            engine.state.monitors[target].goto_view(view);
+                        }
                         let w = next_win;
                         next_win += 1;
                         t_manage(&mut engine, w);
@@ -7007,13 +7521,13 @@ mod unit_tests {
             window: 1,
             owner: 1,
             monitor: mi,
-            workspace: 0,
+            workspace: view_of(&engine.state, mi, 0),
         });
         t_destroy(&mut engine, 1);
         applied.forget(1);
 
         assert!(!engine.state.clients.contains_key(&1), "client removed");
-        let aws = engine.state.monitors[mi].active_ws;
+        let aws = engine.state.monitors[mi].active_index();
         assert!(!engine.state.monitors[mi].workspaces[aws]
             .floats
             .contains(&1));
@@ -7052,13 +7566,17 @@ mod unit_tests {
                 || engine.state.monitors[mi].workspaces[4].floats.contains(&1)
         );
         // Old workspace's Desired no longer references the moved window (5).
-        engine.state.monitors[mi].active_ws = 0;
+        if let Some(view) = engine.state.monitors[mi].view_id(0) {
+            engine.state.monitors[mi].goto_view(view);
+        }
         let d0 = pipeline_desired(&engine, mi);
         assert!(
             !d0.windows.iter().any(|d| d.window == 1),
             "old workspace desired no longer references the moved window"
         );
-        engine.state.monitors[mi].active_ws = 4;
+        if let Some(view) = engine.state.monitors[mi].view_id(4) {
+            engine.state.monitors[mi].goto_view(view);
+        }
         engine
             .state
             .check_invariants()
@@ -7099,14 +7617,14 @@ mod unit_tests {
         t_manage(&mut engine, 1);
         t_set_maximized(&mut engine, 1);
         t_focus(&mut engine, 1);
-        let aws0 = engine.state.monitors[mi].active_ws;
+        let aws0 = engine.state.monitors[mi].active_index();
         assert_eq!(
             engine.state.monitors[mi].workspaces[aws0].presented_maximize,
             Some(1)
         );
 
         t_destroy(&mut engine, 1);
-        let aws2 = engine.state.monitors[mi].active_ws;
+        let aws2 = engine.state.monitors[mi].active_index();
         assert!(
             engine.state.monitors[mi].workspaces[aws2]
                 .presented_maximize
@@ -7131,9 +7649,9 @@ mod unit_tests {
         use crate::types::WinFlags;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         let g0 = Rect::new(100, 100, 300, 200);
-        let mut c = Client::new(1, mi, ws_i);
+        let mut c = Client::new(1, mi, view_of(&engine.state, mi, ws_i));
         c.flags.set(WinFlags::FLOAT);
         c.geom = g0;
         c.saved_geom = g0;
@@ -7378,19 +7896,26 @@ mod unit_tests {
             if let Some(pf) = engine.state.pending_focus {
                 let owner_presented = engine.state.monitors.get(pf.monitor).is_some_and(|m| {
                     let focused = m.focused;
-                    m.workspaces.get(pf.workspace).is_some_and(|ws| {
-                        engine.state.clients.get(&pf.owner).is_some_and(|c| {
-                            c.monitor == pf.monitor
-                                && c.workspace == pf.workspace
-                                && ((c.is_fullscreen()
-                                    && (ws.layout == LayoutKind::Column || c.is_true_fullscreen()))
-                                    || ((c.is_maximized_v() || c.is_maximized_h())
-                                        && focused == Some(pf.owner)))
+                    m.workspaces
+                        .iter()
+                        .find(|ws| ws.id == pf.workspace)
+                        .is_some_and(|ws| {
+                            engine.state.clients.get(&pf.owner).is_some_and(|c| {
+                                c.monitor == pf.monitor
+                                    && c.workspace == pf.workspace
+                                    && ((c.is_fullscreen()
+                                        && (ws.layout == LayoutKind::Column
+                                            || c.is_true_fullscreen()))
+                                        || ((c.is_maximized_v() || c.is_maximized_h())
+                                            && focused == Some(pf.owner)))
+                            })
                         })
-                    })
                 });
                 if !owner_presented {
-                    consume_pending_focus(&mut engine.state, pf.monitor, pf.workspace, None);
+                    let pf_pos = engine.state.monitors[pf.monitor]
+                        .view_index(pf.workspace)
+                        .unwrap_or(0);
+                    consume_pending_focus(&mut engine.state, pf.monitor, pf_pos, None);
                 }
             }
 
@@ -7754,7 +8279,7 @@ mod unit_tests {
                     // the harness never runs the focus commands, so without this
                     // the focused column starts off-screen and every later
                     // assertion about it is vacuous.
-                    let aws = engine.state.monitors[mi].active_ws;
+                    let aws = engine.state.monitors[mi].active_index();
                     let scroll = {
                         let m = &engine.state.monitors[mi];
                         let ws = &m.workspaces[aws];
@@ -7902,7 +8427,11 @@ mod unit_tests {
                 if let Some(c) = engine.state.clients.get(win) {
                     if c.is_float() && !c.is_fullscreen() {
                         let mon = &engine.state.monitors[c.monitor];
-                        let ws = &mon.workspaces[c.workspace];
+                        let ws = mon
+                            .workspaces
+                            .iter()
+                            .find(|ws| ws.id == c.workspace)
+                            .expect("client is placed in an existing View");
                         let is_overlay = (c.is_fullscreen()
                             && (ws.layout == LayoutKind::Column || c.is_true_fullscreen()))
                             || ws.presented_maximize == Some(*win);
@@ -7934,19 +8463,26 @@ mod unit_tests {
             if let Some(pf) = engine.state.pending_focus {
                 let owner_presented = engine.state.monitors.get(pf.monitor).is_some_and(|m| {
                     let focused = m.focused;
-                    m.workspaces.get(pf.workspace).is_some_and(|ws| {
-                        engine.state.clients.get(&pf.owner).is_some_and(|c| {
-                            c.monitor == pf.monitor
-                                && c.workspace == pf.workspace
-                                && ((c.is_fullscreen()
-                                    && (ws.layout == LayoutKind::Column || c.is_true_fullscreen()))
-                                    || ((c.is_maximized_v() || c.is_maximized_h())
-                                        && focused == Some(pf.owner)))
+                    m.workspaces
+                        .iter()
+                        .find(|ws| ws.id == pf.workspace)
+                        .is_some_and(|ws| {
+                            engine.state.clients.get(&pf.owner).is_some_and(|c| {
+                                c.monitor == pf.monitor
+                                    && c.workspace == pf.workspace
+                                    && ((c.is_fullscreen()
+                                        && (ws.layout == LayoutKind::Column
+                                            || c.is_true_fullscreen()))
+                                        || ((c.is_maximized_v() || c.is_maximized_h())
+                                            && focused == Some(pf.owner)))
+                            })
                         })
-                    })
                 });
                 if !owner_presented {
-                    consume_pending_focus(&mut engine.state, pf.monitor, pf.workspace, None);
+                    let pf_pos = engine.state.monitors[pf.monitor]
+                        .view_index(pf.workspace)
+                        .unwrap_or(0);
+                    consume_pending_focus(&mut engine.state, pf.monitor, pf_pos, None);
                 }
             }
 
@@ -8133,7 +8669,7 @@ mod unit_tests {
         ws_i: usize,
         grid_fs_overlay: bool,
     ) {
-        let mut c = Client::new(win, mi, ws_i);
+        let mut c = Client::new(win, mi, view_of(&engine.state, mi, ws_i));
         c.border_w = engine.cfg.border_w;
         c.geom = Rect::new(0, 0, 800, 600);
         c.saved_geom = c.geom;
@@ -8158,7 +8694,7 @@ mod unit_tests {
         {
             let mut engine = setup_engine();
             let mi = engine.state.sel_mon;
-            let ws_i = engine.state.monitors[mi].active_ws;
+            let ws_i = engine.state.monitors[mi].active_index();
             aw_add_client(&mut engine, 1, mi, ws_i, true); // A: fullscreen overlay
             aw_add_client(&mut engine, 2, mi, ws_i, false); // B: plain tiled
             assert_eq!(engine.state.presented_overlay_owner(mi), Some(1));
@@ -8173,7 +8709,7 @@ mod unit_tests {
         {
             let mut engine = setup_engine();
             let mi = engine.state.sel_mon;
-            let ws_i = engine.state.monitors[mi].active_ws;
+            let ws_i = engine.state.monitors[mi].active_index();
             aw_add_client(&mut engine, 1, mi, ws_i, true); // A: overlay owner
             aw_add_client(&mut engine, 2, mi, ws_i, false); // B
             engine.state.clients.get_mut(&2).unwrap().transient_parent = Some(1);
@@ -8189,11 +8725,16 @@ mod unit_tests {
         {
             let mut engine = setup_engine();
             let mi = engine.state.sel_mon;
-            let ws0 = engine.state.monitors[mi].active_ws;
+            let ws0 = engine.state.monitors[mi].active_index();
             let ws1 = 1;
             aw_add_client(&mut engine, 1, mi, ws0, true); // A overlay on ws0
             aw_add_client(&mut engine, 2, mi, ws1, false); // B on ws1
-            assert_eq!(engine.state.presented_overlay_owner_in(mi, ws0), Some(1));
+            assert_eq!(
+                engine
+                    .state
+                    .presented_overlay_owner_in(mi, view_of(&engine.state, mi, ws0)),
+                Some(1)
+            );
             assert_eq!(
                 decide_active_window(&engine.state, 2),
                 ActiveWindowIntent::Focus(2),
@@ -8210,7 +8751,12 @@ mod unit_tests {
             let ws0 = 0usize;
             aw_add_client(&mut engine, 1, m0, ws0, true); // A overlay on mon0/ws0
             aw_add_client(&mut engine, 2, m1, ws0, false); // B on mon1/ws0
-            assert_eq!(engine.state.presented_overlay_owner_in(m0, ws0), Some(1));
+            assert_eq!(
+                engine
+                    .state
+                    .presented_overlay_owner_in(m0, view_of(&engine.state, m0, ws0)),
+                Some(1)
+            );
             assert_eq!(
                 decide_active_window(&engine.state, 2),
                 ActiveWindowIntent::Focus(2),
@@ -8222,7 +8768,7 @@ mod unit_tests {
         {
             let mut engine = setup_engine();
             let mi = engine.state.sel_mon;
-            let ws_i = engine.state.monitors[mi].active_ws;
+            let ws_i = engine.state.monitors[mi].active_index();
             aw_add_client(&mut engine, 2, mi, ws_i, false);
             assert!(engine.state.presented_overlay_owner(mi).is_none());
             assert_eq!(
@@ -8239,14 +8785,14 @@ mod unit_tests {
         {
             let mut engine = setup_engine();
             let mi = engine.state.sel_mon;
-            let ws_i = engine.state.monitors[mi].active_ws;
+            let ws_i = engine.state.monitors[mi].active_index();
             aw_add_client(&mut engine, 1, mi, ws_i, true); // A overlay on ws0
             aw_add_client(&mut engine, 2, mi, ws_i, false); // B unrelated
             engine.state.pending_focus = Some(crate::types::PendingFocus {
                 window: 2,
                 owner: 1,
                 monitor: mi,
-                workspace: ws_i,
+                workspace: engine.state.monitors[mi].workspaces[ws_i].id,
             });
             assert_eq!(engine.state.presented_overlay_owner(mi), Some(1));
             assert_eq!(
@@ -8261,7 +8807,7 @@ mod unit_tests {
         {
             let mut engine = setup_engine();
             let mi = engine.state.sel_mon;
-            let ws_i = engine.state.monitors[mi].active_ws;
+            let ws_i = engine.state.monitors[mi].active_index();
             aw_add_client(&mut engine, 1, mi, ws_i, true); // A overlay owner
             assert_eq!(
                 decide_active_window(&engine.state, 1),
@@ -8287,8 +8833,8 @@ mod unit_tests {
             .monitors
             .push(Monitor::new(crate::types::Rect::new(0, 0, 1920, 1080), 9));
         let mi = state.sel_mon;
-        state.add_client(Client::new(1, mi, 0));
-        state.add_client(Client::new(2, mi, 1));
+        state.add_client(Client::new(1, mi, view_of(&state, mi, 0)));
+        state.add_client(Client::new(2, mi, view_of(&state, mi, 1)));
         state.monitors[mi].workspaces[0].add_tiled(1, 0.6);
         state.monitors[mi].workspaces[1].add_tiled(2, 0.6);
         state.monitors[mi].focused = Some(1);
@@ -8309,7 +8855,7 @@ mod unit_tests {
             let mut cmd = ViewWorkspace(2);
             let _ = cmd.execute(&mut state, &mut default_cfg());
             let m = &state.monitors[state.sel_mon];
-            assert_eq!(m.active_ws, 2);
+            assert_eq!(m.active_index(), 2);
             assert_eq!(
                 m.focused, None,
                 "stale focus from the previous workspace must be cleared immediately"
@@ -8323,10 +8869,13 @@ mod unit_tests {
             let mut cmd = ViewWorkspace(1);
             let _ = cmd.execute(&mut state, &mut default_cfg());
             let m = &state.monitors[state.sel_mon];
-            assert_eq!(m.active_ws, 1);
-            assert!(m
-                .focused
-                .is_none_or(|w| state.clients.get(&w).is_some_and(|c| c.workspace == 1)));
+            assert_eq!(m.active_index(), 1);
+            assert!(m.focused.is_none_or(|w| {
+                state
+                    .clients
+                    .get(&w)
+                    .is_some_and(|c| Some(c.workspace) == m.carousel.current())
+            }));
         }
     }
 
@@ -8337,19 +8886,22 @@ mod unit_tests {
         use crate::core::commands::ViewWorkspace;
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        engine.state.add_client(Client::new(1, mi, 0));
+        engine
+            .state
+            .add_client(Client::new(1, mi, view_of(&engine.state, mi, 0)));
         engine.state.monitors[mi].workspaces[0].add_tiled(1, 0.6);
         engine.state.monitors[mi].focused = Some(1);
 
         engine.execute(ViewWorkspace(1));
         let st = &engine.state;
         let m = &st.monitors[mi];
-        assert_eq!(m.active_ws, 1);
+        assert_eq!(m.active_index(), 1);
         assert!(
-            m.focused.is_none_or(|w| st
-                .clients
-                .get(&w)
-                .is_some_and(|c| c.workspace == m.active_ws)),
+            m.focused.is_none_or(|w| {
+                st.clients
+                    .get(&w)
+                    .is_some_and(|c| Some(c.workspace) == m.carousel.current())
+            }),
             "focused must live on the active workspace after ViewWorkspace"
         );
     }
@@ -8368,9 +8920,11 @@ mod unit_tests {
         // Three columns, focus the middle one, target the ones on either side.
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
+        let ws_i = engine.state.monitors[mi].active_index();
         for win in [1u32, 2, 3] {
-            engine.state.add_client(Client::new(win, mi, ws_i));
+            engine
+                .state
+                .add_client(Client::new(win, mi, view_of(&engine.state, mi, ws_i)));
             engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, 0.5);
         }
         engine.state.monitors[mi].focused = Some(2);
@@ -8429,7 +8983,7 @@ mod unit_tests {
         use crate::types::Action;
         let mut engine = setup_engine_multi();
         // Window 2 lives on monitor 1 while monitor 0 stays selected.
-        engine.state.add_client(Client::new(2, 1, 0));
+        engine.state.add_client(Client::new(2, 1, ViewId::new(0)));
         engine.state.monitors[1].workspaces[0].add_tiled(2, 1.0);
         engine.state.monitors[0].focused = None;
         engine.state.sel_mon = 0;
@@ -8456,8 +9010,10 @@ mod unit_tests {
         use crate::types::{Action, Dir};
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
-        engine.state.add_client(Client::new(1, mi, ws_i));
+        let ws_i = engine.state.monitors[mi].active_index();
+        engine
+            .state
+            .add_client(Client::new(1, mi, view_of(&engine.state, mi, ws_i)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, 1.0);
         engine.state.monitors[mi].focused = Some(1);
         // `State` is not `Clone`, so the invariant is checked as a fingerprint:
@@ -8510,8 +9066,10 @@ mod unit_tests {
 
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
-        engine.state.add_client(Client::new(1, mi, ws_i));
+        let ws_i = engine.state.monitors[mi].active_index();
+        engine
+            .state
+            .add_client(Client::new(1, mi, view_of(&engine.state, mi, ws_i)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, 1.0);
         engine.state.monitors[mi].focused = Some(1);
 
@@ -8590,8 +9148,10 @@ mod unit_tests {
 
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
-        engine.state.add_client(Client::new(0x42, mi, ws_i));
+        let ws_i = engine.state.monitors[mi].active_index();
+        engine
+            .state
+            .add_client(Client::new(0x42, mi, view_of(&engine.state, mi, ws_i)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(0x42, 1.0);
 
         let report = KillWindow(0x42).execute(&mut engine.state, &mut engine.cfg);
@@ -8624,8 +9184,10 @@ mod unit_tests {
 
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
-        engine.state.add_client(Client::new(1, mi, ws_i));
+        let ws_i = engine.state.monitors[mi].active_index();
+        engine
+            .state
+            .add_client(Client::new(1, mi, view_of(&engine.state, mi, ws_i)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(1, 1.0);
         // The slot names a window that was never a client.
         engine.state.monitors[mi].focused = Some(0xdead);
@@ -8661,8 +9223,10 @@ mod unit_tests {
 
         let mut engine = setup_engine();
         let mi = engine.state.sel_mon;
-        let ws_i = engine.state.monitors[mi].active_ws;
-        engine.state.add_client(Client::new(7, mi, ws_i));
+        let ws_i = engine.state.monitors[mi].active_index();
+        engine
+            .state
+            .add_client(Client::new(7, mi, view_of(&engine.state, mi, ws_i)));
         engine.state.monitors[mi].workspaces[ws_i].add_tiled(7, 1.0);
         engine.state.monitors[mi].focused = Some(7);
         assert!(!engine.state.clients[&7].is_maximized());
@@ -8719,7 +9283,9 @@ mod unit_tests {
                 .monitors
                 .push(Monitor::new(Rect::new(0, 0, w, 600), 9));
             for win in [1u32, 2] {
-                engine.state.add_client(Client::new(win, 0, 0));
+                engine
+                    .state
+                    .add_client(Client::new(win, 0, view_of(&engine.state, 0, 0)));
                 engine.state.monitors[0].workspaces[0].add_tiled(win, 0.5);
             }
             engine
@@ -8781,7 +9347,7 @@ mod unit_tests {
         let mut engine = setup_engine_multi();
         let _mi = engine.state.sel_mon; // monitor 0 selected (deliberately != client monitor)
                                         // Window 1 lives on monitor 1, workspace 0, tiled.
-        engine.state.add_client(Client::new(1, 1, 0));
+        engine.state.add_client(Client::new(1, 1, ViewId::new(0)));
         engine.state.monitors[1].workspaces[0].add_tiled(1, 0.6);
         // Cross-monitor (corrupt) logical focus on monitor 0.
         engine.state.monitors[0].focused = Some(1);
@@ -8822,7 +9388,7 @@ mod unit_tests {
 
             for i in 0..n_clients {
                 let win = (100 + i) as u32;
-                let mut c = Client::new(win, 0, 0);
+                let mut c = Client::new(win, 0, view_of(&engine.state, 0, 0));
                 c.border_w = 2;
                 engine.state.add_client(c);
                 engine.state.monitors[0].workspaces[0].add_tiled(win, 1.0);
@@ -8904,12 +9470,12 @@ mod unit_tests {
         use crate::core::ipc::{query_json, state_json};
         use crate::core::Engine;
         use crate::types::{
-            Action, Client, Dir, LayoutKind, PendingFocus, Rect, State, WinFlags, WindowId,
+            Action, Client, Dir, LayoutKind, PendingFocus, Rect, State, ViewId, WinFlags, WindowId,
         };
         use proptest::prelude::*;
         use std::fmt::Write as _;
 
-        use super::{setup_engine, setup_engine_multi, t_focus, t_manage};
+        use super::{setup_engine, setup_engine_multi, t_focus, t_manage, view_of};
 
         /// `Engine::execute` takes `impl Command` while the generated vocabulary
         /// is only available as the `Box<dyn Command>` the trait object erases
@@ -9180,8 +9746,8 @@ mod unit_tests {
         /// from a generated sequence.
         fn map_window(engine: &mut Engine, win: WindowId, float: bool, parent: Option<WindowId>) {
             let mi = engine.state.sel_mon;
-            let ws_i = engine.state.monitors[mi].active_ws;
-            let mut c = Client::new(win, mi, ws_i);
+            let ws_i = engine.state.monitors[mi].active_index();
+            let mut c = Client::new(win, mi, view_of(&engine.state, mi, ws_i));
             c.border_w = engine.cfg.border_w;
             c.geom = Rect::new(20 + (win as i32 % 9) * 25, 24, 430, 310);
             c.saved_geom = c.geom;
@@ -9202,12 +9768,20 @@ mod unit_tests {
                     monitor,
                     workspace,
                 } => {
-                    engine.state.pending_focus = Some(PendingFocus {
-                        window: win,
-                        owner,
-                        monitor,
-                        workspace,
-                    });
+                    // The intent names the View by position; the deferral records
+                    // its identity.
+                    if let Some(view) = engine.state.monitors[monitor]
+                        .workspaces
+                        .get(workspace)
+                        .map(|ws| ws.id)
+                    {
+                        engine.state.pending_focus = Some(PendingFocus {
+                            window: win,
+                            owner,
+                            monitor,
+                            workspace: view,
+                        });
+                    }
                 }
                 ManageFocusIntent::Focus(_) => {
                     focus_logical_on(&mut engine.state, mi, win);
@@ -9331,13 +9905,17 @@ mod unit_tests {
                 let _ = writeln!(
                     d,
                     "mon{mi} screen={:?} wa={:?} active_ws={} focused={:?} stack={:?}",
-                    mon.screen, mon.workarea, mon.active_ws, mon.focused, mon.focus_stack
+                    mon.screen,
+                    mon.workarea,
+                    mon.active_index(),
+                    mon.focused,
+                    mon.focus_stack
                 );
                 for (wi, ws) in mon.workspaces.iter().enumerate() {
                     let _ = writeln!(
                         d,
-                        "  ws{wi} tag={} layout={:?} overview={} zoom={:.4} vz={:?} pz={:.4} pmax={:?} cam={:.4} floats={:?}",
-                        ws.tag,
+                        "  ws{wi} id={} layout={:?} overview={} zoom={:.4} vz={:?} pz={:.4} pmax={:?} cam={:.4} floats={:?}",
+                        ws.id,
                         ws.layout,
                         ws.overview,
                         ws.zoom,
@@ -9576,7 +10154,7 @@ mod unit_tests {
             assert_eq!(
                 (placements[0].0, placements[0].1),
                 (c.monitor, c.workspace),
-                "the client record must name the placement the window actually has"
+                "the client record must name the View the window is actually placed in"
             );
             // Convergent: addressing the *same* window's current workspace again
             // is absorbed outright, with no second placement and no effects at
@@ -9600,17 +10178,23 @@ mod unit_tests {
         /// Every `(monitor, workspace, kind)` placement slot that names `win`.
         /// The same two slot kinds `State::check_invariants` sweeps: a tiled
         /// column entry and a float entry.
-        fn placements_of(s: &State, win: WindowId) -> Vec<(usize, usize, &'static str)> {
+        /// Every placement that references `win`, as `(monitor, ViewId, kind)`.
+        ///
+        /// Carries the View's *identity* rather than its position: the contract
+        /// under test is "exactly one placement, and the client record names it",
+        /// and comparing positions would let a move that silently re-pointed at a
+        /// different View still pass.
+        fn placements_of(s: &State, win: WindowId) -> Vec<(usize, ViewId, &'static str)> {
             let mut out = Vec::new();
             for (mi, mon) in s.monitors.iter().enumerate() {
-                for (ws_i, ws) in mon.workspaces.iter().enumerate() {
+                for ws in &mon.workspaces {
                     for col in &ws.columns {
                         if col.windows.contains(&win) {
-                            out.push((mi, ws_i, "column"));
+                            out.push((mi, ws.id, "column"));
                         }
                     }
                     if ws.floats.contains(&win) {
-                        out.push((mi, ws_i, "float"));
+                        out.push((mi, ws.id, "float"));
                     }
                 }
             }
@@ -9711,7 +10295,7 @@ mod unit_tests {
             );
             // Window 3 is mapped on the other monitor and focused there, which is
             // what the move below will carry back across.
-            let mut c3 = Client::new(3, 1, 0);
+            let mut c3 = Client::new(3, 1, ViewId::new(0));
             c3.border_w = engine.cfg.border_w;
             c3.geom = Rect::new(0, 0, 800, 600);
             c3.saved_geom = c3.geom;
@@ -10147,6 +10731,7 @@ mod unit_tests {
             SyncWindowPrefs(WindowId),
             SetCurrentDesktop(usize),
             SetWindowDesktop(WindowId, usize),
+            RefreshDesktops,
             Spawn,
             Quit,
             Restart,
@@ -10168,6 +10753,7 @@ mod unit_tests {
                 Effect::SyncWindowPrefs(w) => EffectKind::SyncWindowPrefs(*w),
                 Effect::SetCurrentDesktop(d) => EffectKind::SetCurrentDesktop(*d),
                 Effect::SetWindowDesktop { win, ws } => EffectKind::SetWindowDesktop(*win, *ws),
+                Effect::RefreshDesktops => EffectKind::RefreshDesktops,
                 Effect::Spawn(_) => EffectKind::Spawn,
                 Effect::Quit => EffectKind::Quit,
                 Effect::Restart => EffectKind::Restart,
@@ -10198,18 +10784,22 @@ mod unit_tests {
                     let Some(mon) = engine.state.monitors.get(engine.state.sel_mon) else {
                         return out;
                     };
-                    out.effects = kinds(&engine.execute(ViewWorkspace(mon.active_ws)));
+                    out.effects = kinds(&engine.execute(ViewWorkspace(mon.active_index())));
                 }
                 Absorb::MoveToCurrent => {
                     let mi = engine.state.sel_mon;
                     let Some(mon) = engine.state.monitors.get(mi) else {
                         return out;
                     };
-                    let active = mon.active_ws;
+                    // The focused window's *home* View, resolved to a position
+                    // because `MoveToWorkspace` is addressed positionally (the wire
+                    // vocabulary is). Falls back to the active one when the focus
+                    // names no client or one whose View is gone.
                     let home = mon
                         .focused
-                        .and_then(|w| engine.state.clients.get(&w).map(|c| c.workspace))
-                        .unwrap_or(active);
+                        .and_then(|w| engine.state.clients.get(&w))
+                        .and_then(|c| mon.view_index(c.workspace))
+                        .unwrap_or_else(|| mon.active_index());
                     out.effects = kinds(&engine.execute(MoveToWorkspace(home)));
                 }
                 Absorb::FullscreenTopology { pick, entering } => {
@@ -10789,7 +11379,7 @@ mod unit_tests {
                     for ws in &mut mon.workspaces {
                         // Alternate the two kinds of poison, so both are covered
                         // instead of the second write clobbering the first.
-                        ws.camera.position = if ws.tag % 2 == 0 {
+                        ws.camera.position = if ws.id.get() % 2 == 0 {
                             f32::NAN
                         } else {
                             f32::INFINITY
@@ -10838,7 +11428,7 @@ mod unit_tests {
         st.monitors
             .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 1));
         for i in 0..3u32 {
-            let mut c = Client::new(0x300 + i, 0, 0);
+            let mut c = Client::new(0x300 + i, 0, ViewId::new(0));
             c.flags.clear(WinFlags::MAXIMIZED);
             st.add_client(c);
             st.monitors[0].workspaces[0].add_tiled(0x300 + i, 0.5);

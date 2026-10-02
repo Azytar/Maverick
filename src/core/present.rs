@@ -96,7 +96,7 @@ fn maximized_rect(tile: Rect, workarea: Rect, client: &crate::types::Client) -> 
 mod tests {
     use super::*;
     use crate::config::Cfg;
-    use crate::types::{Client, LayoutKind, Monitor, Rect, State, WinFlags, WindowId};
+    use crate::types::{Client, LayoutKind, Monitor, Rect, State, ViewId, WinFlags, WindowId};
 
     fn setup() -> (State, Cfg) {
         let mut state = State::new();
@@ -112,7 +112,7 @@ mod tests {
     }
 
     fn add(state: &mut State, win: WindowId) {
-        let mut c = Client::new(win, 0, 0);
+        let mut c = Client::new(win, 0, ViewId::new(0));
         c.geom = Rect::new(0, 0, 100, 100);
         state.add_client(c);
         state.monitors[0].workspaces[0].add_tiled(win, 0.5);
@@ -359,8 +359,8 @@ mod proptests {
     use crate::config::Cfg;
     use crate::core::layout::{arrange, Placements, RibbonScratch};
     use crate::types::{
-        Client, Column, Edge, Focus, FullscreenPolicy, Monitor, Rect, SizeHints, State, WinFlags,
-        WindowId,
+        Client, Column, Edge, Focus, FullscreenPolicy, Monitor, Rect, SizeHints, State, ViewId,
+        WinFlags, WindowId,
     };
     use proptest::prelude::*;
 
@@ -533,7 +533,7 @@ mod proptests {
             let mut tiled: Vec<WindowId> = Vec::new();
             for (i, spec) in self.windows.iter().enumerate() {
                 let win = (i + 1) as WindowId;
-                let mut c = Client::new(win, 0, 0);
+                let mut c = Client::new(win, 0, ViewId::new(0));
                 c.geom = spec.geom;
                 c.hints = spec.hints;
                 c.border_w = spec.border_w;

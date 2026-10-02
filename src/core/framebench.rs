@@ -118,7 +118,7 @@ mod frame_alloc_tests {
     use crate::config::Cfg;
     use crate::core::layout::{arrange, Placements, RibbonScratch};
     use crate::core::present::present_into;
-    use crate::types::{Client, Column, Focus, Monitor, Rect, State, WindowId};
+    use crate::types::{Client, Column, Focus, Monitor, Rect, State, ViewId, WindowId};
 
     /// A workspace with `n` single-window columns on one 1920x1080 monitor —
     /// the shape of a scrolling ribbon.
@@ -128,7 +128,7 @@ mod frame_alloc_tests {
         state.monitors.push(Monitor::new(screen, 1));
         for i in 0..n {
             let win = (i + 1) as WindowId;
-            let mut c = Client::new(win, 0, 0);
+            let mut c = Client::new(win, 0, ViewId::new(0));
             c.geom = Rect::new(0, 0, 400, 900);
             state.add_client(c);
             state.monitors[0].workspaces[0].columns.push(Column {

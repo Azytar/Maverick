@@ -53,7 +53,7 @@ pub trait StateExt {
 impl StateExt for State {
     fn covering_fullscreen_window(&self, mon_idx: usize) -> Option<WindowId> {
         let mon = self.monitors.get(mon_idx)?;
-        let ws = mon.workspaces.get(mon.active_ws)?;
+        let ws = mon.workspaces.get(mon.active_index())?;
         if ws.overview {
             return None;
         }
