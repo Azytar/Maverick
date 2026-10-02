@@ -154,6 +154,16 @@ pub fn main_with_args(tool: &str, args: Vec<String>) -> ExitCode {
         "layout" => run_group(tool, rest, "layout", |c, a| {
             windows::layout(c, a).map(|_| true)
         }),
+        // ── views (workspaces) ─────────────────────────────────────────────
+        // The carousel's navigation. Each verb only *encodes* the action and
+        // prints the reply: which View becomes current, and where a View is
+        // created or removed, is the window manager's decision, not this
+        // client's.
+        //
+        // "view" names the carousel concept. The pre-existing `view <n>` and
+        // `move_to_ws <n>` action strings are kept verbatim so existing configs,
+        // hooks and scripts keep working — only the *client-side* noun changed.
+        "view" | "views" => run_group(tool, rest, "view", |c, a| windows::view(c, a).map(|_| true)),
         "list" | "ls" => cmd_list(tool),
         "state" => cmd_state(tool, rest, true),
         "query" | "q" => cmd_state(tool, rest, false),
@@ -395,7 +405,7 @@ fn usage_for(group: &str) -> Usage {
         // documented on the WINDOWS page's LAYOUT block. They used to fall
         // through to `_`, so `maverickctl camera --help` printed the SESSIONS
         // page, which never mentions the verb it was asked about.
-        "camera" | "resize" | "layout" => Usage::Windows,
+        "camera" | "resize" | "layout" | "view" => Usage::Windows,
         "process" => Usage::Process,
         _ => Usage::Sessions,
     }
@@ -486,13 +496,19 @@ LAYOUT
     resize <session> <+10%|40>              Resize the focused column
     layout <session> <column>               Set the layout
 
-    Every one of these is dispatched as an action and goes through the same
-    state machine a keybinding does; none of them touches X11 directly.
+    VIEWS
+    view   <session> <verb>   goto <n> | next | prev | return | create |
+                               remove <n>
+
+    The session's Views form a circular carousel; these move around it. Each is
+    dispatched as an action and goes through the same state machine a keybinding
+    does; none of them touches X11 directly.
 
 EXAMPLES
     maverickctl window list debug
     maverickctl window focus debug firefox
     maverickctl window inspect debug 0x42003
+    maverickctl view debug next
     maverickctl resize debug +10%"
         ),
         Usage::Process => println!(
@@ -572,6 +588,8 @@ COMMANDS:
     camera <session> <dir>     Move the camera (the scroll position)
     resize <session> <+10%|40> Resize the focused column
     layout <session> <column>  Set the layout
+    view   <session> <verb>    goto <n> | next | prev | return | create |
+                               remove <n>
     list                       List running/known instances
     state    [--name <id>] [--session <sid>]   Print the WM state snapshot (JSON)
     query <topic> [--name <id>] [--session <sid>]

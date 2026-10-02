@@ -696,6 +696,76 @@ pub fn resize(c: &Ctl, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `maverickctl view <session> <goto N|next|prev|return|create|remove N>`
+///
+/// The carousel's navigation, exposed under its own name. This is a thin
+/// encoder: it validates the shape of the request, sends one action, and prints
+/// the reply. It never decides which View becomes current, how many exist, or
+/// where a new one goes — that is the window manager's carousel policy.
+///
+/// The sub-verbs map onto the existing action vocabulary, so `maverickctl view
+/// debug next` and `maverickctl msg view_next` are the same request, and the
+/// pre-existing `view <n>` / `move_to_ws <n>` spellings are unchanged.
+pub fn view(c: &Ctl, args: &[String]) -> Result<(), String> {
+    let name = session_target(c)?;
+    let (_, rest) =
+        split_session_and_rest(c, args).ok_or_else(|| "view needs a session".to_string())?;
+    let verb = rest
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .cloned()
+        .ok_or_else(|| "view needs a verb\n\n  try: maverickctl view debug next".to_string())?;
+    // (action, human description) — the two spellings differ so the reply reads
+    // in the user's own words while the wire stays the documented vocabulary.
+    let (action, described) = match verb.to_ascii_lowercase().as_str() {
+        // A bare number keeps the pre-existing meaning of `maverickctl view 3`,
+        // which reached the WM through the verbatim forwarder as `dispatch view
+        // 3`. Promoting it to a real verb is the only way to preserve that
+        // spelling now that `view` is a group name; the action on the wire is
+        // unchanged, so scripts and hooks are unaffected.
+        n if n.chars().all(|c| c.is_ascii_digit()) => {
+            (format!("view {n}"), format!("view {n}"))
+        }
+        "goto" | "go" => {
+            let n = rest
+                .iter()
+                .filter(|a| !a.starts_with('-'))
+                .nth(1)
+                .cloned()
+                .ok_or_else(|| {
+                    "view goto needs a number\n\n  try: maverickctl view debug goto 3"
+                        .to_string()
+                })?;
+            (format!("view {n}"), format!("view {n}"))
+        }
+        "next" => ("view_next".to_string(), "view next".to_string()),
+        "prev" | "previous" => ("view_prev".to_string(), "view previous".to_string()),
+        "return" | "origin" => ("view_return".to_string(), "view return".to_string()),
+        "create" | "new" => ("view_create".to_string(), "view create".to_string()),
+        "remove" | "delete" => {
+            let n = rest
+                .iter()
+                .filter(|a| !a.starts_with('-'))
+                .nth(1)
+                .cloned()
+                .ok_or_else(|| {
+                    "view remove needs a number\n\n  try: maverickctl view debug remove 3"
+                        .to_string()
+                })?;
+            (format!("view_remove {n}"), format!("view remove {n}"))
+        }
+        other => {
+            return Err(format!(
+                "unknown view verb '{other}'\n\n  try one of: goto <n>, next, prev, return, create, remove <n>"
+            ))
+        }
+    };
+    let view = crate::session::resolve(&name).map_err(|e| e.to_string())?;
+    dispatch(&view.sid, &action, &format!("{described} failed"))?;
+    report(c, &name, &described);
+    Ok(())
+}
+
 /// `maverickctl layout <session> <column>`
 pub fn layout(c: &Ctl, args: &[String]) -> Result<(), String> {
     let name = session_target(c)?;
