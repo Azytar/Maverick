@@ -202,7 +202,7 @@ impl WindowManager {
             let hit = self.find_client(e.event);
             itrace!(
                 "BP-enter mi={} sel_mon={} mon.focused={:?} x11_input_focus={:?} active_ws={} e.event={:#x} hit_client={:?} e.root=({},{})",
-                mi, self.engine.state.sel_mon, m.focused, self.engine.state.x11_input_focus, m.active_ws, e.event, hit, e.root_x, e.root_y
+                mi, self.engine.state.sel_mon, m.focused, self.engine.state.x11_input_focus, m.active_index(), e.event, hit, e.root_x, e.root_y
             );
         }
 
@@ -251,7 +251,7 @@ impl WindowManager {
                         .state
                         .monitors
                         .get(mi)
-                        .and_then(|m| m.workspaces.get(m.active_ws))
+                        .and_then(|m| m.workspaces.get(m.active_index()))
                         .and_then(|ws| ws.presented_maximize)
                         == Some(fw)
                 });
@@ -279,16 +279,17 @@ impl WindowManager {
                     // click dismisses the overlay and focuses the deferred
                     // window — otherwise it stays unreachable by pointer for as
                     // long as the overlay is up.
-                    let ws_i = self.engine.state.monitors[mi].active_ws;
+                    let view = self.engine.state.monitors[mi].ws().id;
                     // Only consume the global deferral when it is bound to THIS
-                    // monitor/workspace, was created by the overlay (`fw`) we are
+                    // monitor/View, was created by the overlay (`fw`) we are
                     // clicking, names a different (still-alive) window, and that
                     // window is still a live client. Otherwise leave it (it
-                    // belongs to a different overlay/monitor/workspace and must
-                    // not be orphaned).
+                    // belongs to a different overlay/monitor/View and must
+                    // not be orphaned). Compared by `ViewId`, so a deferral still
+                    // belongs here after a View is inserted or removed ahead of it.
                     let pending = self.engine.state.pending_focus.filter(|pf| {
                         pf.monitor == mi
-                            && pf.workspace == ws_i
+                            && pf.workspace == view
                             && pf.owner == fw
                             && pf.window != fw
                             && self.engine.state.clients.contains_key(&pf.window)
@@ -317,10 +318,14 @@ impl WindowManager {
                         }
                         // Consume the deferral (its owner overlay is being torn
                         // down) and focus the deferred window through the sink.
+                        // `view` was read above, before the overlay was torn down;
+                        // its position is resolved first, outside the mutable
+                        // borrow `consume_pending_focus` needs.
+                        let view_i = self.engine.state.monitors[mi].view_index(view).unwrap_or(0);
                         crate::core::commands::consume_pending_focus(
                             &mut self.engine.state,
                             mi,
-                            ws_i,
+                            view_i,
                             Some(fw),
                         );
                         self.focus(Some(p))?;

@@ -345,11 +345,13 @@ impl WindowManager {
 #[cfg(test)]
 mod stacking_order_tests {
     use super::*;
-    use maverick_core::types::Client;
+    use maverick_core::types::{Client, ViewId};
     use std::collections::HashMap;
 
     fn clients(ids: &[u32]) -> HashMap<WindowId, Client> {
-        ids.iter().map(|id| (*id, Client::new(*id, 0, 0))).collect()
+        ids.iter()
+            .map(|id| (*id, Client::new(*id, 0, ViewId::new(0))))
+            .collect()
     }
 
     /// The published stack order must not depend on `HashMap` iteration order.

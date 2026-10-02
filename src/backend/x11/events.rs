@@ -471,11 +471,20 @@ impl WindowManager {
                     let target = (0..old_to_new.len())
                         .find_map(|oi| old_to_new[oi])
                         .unwrap_or(0);
-                    if let Some(c) = self.engine.state.clients.get_mut(win) {
+                    // The destination monitor has its own `ViewId` space, so a
+                    // window arriving from a removed monitor cannot keep its old
+                    // id: it lands on the target's first View, which is where the
+                    // old positional clamp to tag 0 put it.
+                    let dest = self.engine.state.monitors[target]
+                        .workspaces
+                        .first()
+                        .map(|ws| ws.id);
+                    if let (Some(dest), Some(c)) = (dest, self.engine.state.clients.get_mut(win)) {
                         c.monitor = target;
-                        let n_ws = self.engine.state.monitors[target].workspaces.len();
-                        c.workspace = c.workspace.min(n_ws.saturating_sub(1));
-                        let ws_i = c.workspace;
+                        c.workspace = dest;
+                        let ws_i = self.engine.state.monitors[target]
+                            .view_index(dest)
+                            .unwrap_or(0);
                         if is_float {
                             self.engine.state.monitors[target].workspaces[ws_i]
                                 .floats

@@ -141,9 +141,12 @@ impl WindowManager {
         );
 
         let mon_idx = self.engine.state.sel_mon;
-        let ws_idx = self.engine.state.monitors[mon_idx].active_ws;
+        // A new window joins the selected monitor's *current* View, resolved to its
+        // identity so the placement below is keyed on the same `ViewId` the client
+        // record will carry.
+        let view = self.engine.state.monitors[mon_idx].ws().id;
 
-        let mut client = Client::new(win, mon_idx, ws_idx);
+        let mut client = Client::new(win, mon_idx, view);
         client.geom = geom;
         client.saved_geom = geom;
         client.border_w = self.engine.cfg.border_w;
@@ -474,13 +477,16 @@ impl WindowManager {
         // fullscreen/maximize transitions that change it.
         let _ = self.set_wm_state(win, 1);
 
-        let ws_i = client.workspace;
+        let view = client.workspace;
         let mon_i = client.monitor;
         let is_fl = client.is_float();
 
         self.engine.state.add_client(client);
 
-        if ws_i < self.engine.state.monitors[mon_i].workspaces.len() {
+        // Resolved from the client's own `ViewId`: a hotplug or a reload between
+        // construction and placement must not drop the window into a View that
+        // does not exist.
+        if let Some(ws_i) = self.engine.state.monitors[mon_i].view_index(view) {
             if is_fl {
                 self.engine.state.monitors[mon_i].workspaces[ws_i]
                     .floats
@@ -527,6 +533,15 @@ impl WindowManager {
             .notify(crate::core::event::Event::WindowMapped(win));
 
         // Inform EWMH-aware taskbars (polybar, eww, etc.) which desktop this window is on.
+        // `_NET_WM_DESKTOP` is a *position*, so it is resolved from the View the
+        // client was placed in rather than carried over from the identity.
+        let ws_i = self
+            .engine
+            .state
+            .monitors
+            .get(mon_i)
+            .and_then(|m| m.view_index(view))
+            .unwrap_or(0);
         let _ = self.conn.change_property32(
             PropMode::REPLACE,
             win,
@@ -558,6 +573,16 @@ impl WindowManager {
                 monitor,
                 workspace,
             } => {
+                // `decide_manage_focus` hands back the View's *position*; the
+                // deferral records the View's identity, so the context survives a
+                // View being inserted or removed ahead of it.
+                let workspace = self
+                    .engine
+                    .state
+                    .monitors
+                    .get(monitor)
+                    .and_then(|m| m.workspaces.get(workspace))
+                    .map(|ws| ws.id);
                 if let Some(c) = self.engine.state.clients.get_mut(&win) {
                     c.flags.set(WinFlags::URGENT);
                 }
@@ -566,9 +591,12 @@ impl WindowManager {
                 // Record the deferral in the global slot with full context.
                 #[cfg(feature = "input-trace")]
                 itrace!(
-                    "manage() -> DEFER win={:#x} behind overlay {:#x} (mon={}, ws={}); X input focus stays on overlay",
+                    "manage() -> DEFER win={:#x} behind overlay {:#x} (mon={}, view={:?}); X input focus stays on overlay",
                     win, owner, monitor, workspace
                 );
+                let Some(workspace) = workspace else {
+                    return Ok(());
+                };
                 self.engine.state.pending_focus = Some(crate::types::PendingFocus {
                     window: win,
                     owner,
@@ -597,15 +625,14 @@ impl WindowManager {
                     self.focus(Some(resolved))?;
                 }
                 #[cfg(feature = "window-trace")]
+                // The trace reports the View's *identity*, which is what the client
+                // record holds and what a trace reader needs to correlate with
+                // `ViewId` from the `workspace`/`pending_focus` lines.
                 wtrace!(
-                    "manage() -> FOCUS win={:#x} mon={} ws={} (transient_parent={:?})",
+                    "manage() -> FOCUS win={:#x} mon={} view={:?} (transient_parent={:?})",
                     win,
                     self.engine.state.clients.get(&win).map_or(0, |c| c.monitor),
-                    self.engine
-                        .state
-                        .clients
-                        .get(&win)
-                        .map_or(0, |c| c.workspace),
+                    self.engine.state.clients.get(&win).map(|c| c.workspace),
                     self.engine
                         .state
                         .clients
@@ -671,93 +698,98 @@ impl WindowManager {
             order.retain(|&w| w != win);
         }
 
-        // The monitor may no longer exist after a hotplug.
-        if mon_i < self.engine.state.monitors.len() {
-            let ws_i = client.workspace;
-            if ws_i < self.engine.state.monitors[mon_i].workspaces.len() {
-                let wa = self.engine.state.monitors[mon_i].workarea;
-                let fs = fs_ctx(
-                    &self.engine.state.clients,
-                    &self.engine.state.monitors[mon_i].workspaces[ws_i],
-                    self.engine.state.monitors[mon_i].screen,
-                );
-                let scroll = ideal_scroll(
-                    &self.engine.state.monitors[mon_i].workspaces[ws_i],
-                    &self.engine.cfg,
-                    wa,
-                    fs,
-                );
-                let now_empty = self.engine.state.monitors[mon_i].workspaces[ws_i].is_empty();
-                let cam = &mut self.engine.state.monitors[mon_i].workspaces[ws_i].camera;
-                if now_empty {
-                    cam.snap(0.0)
-                } else {
-                    // Through `retarget`, not a bare field write. A held
-                    // `Mod4+]` recomputes the destination for every close, and
-                    // `retarget` ignores a destination that is not finite so a
-                    // poisoned scroll keeps the last offset the server was told
-                    // about instead of writing a NaN into a `ConfigureWindow`.
-                    cam.retarget(scroll)
-                }
-            }
-            let _ = self.arrange(mon_i);
-            // `remove_client` (above) may have already cleared the global deferral
-            // slot because this window was its `owner` (the presented overlay) or
-            // its `window` (the deferred target). Snapshot the slot *before* that so
-            // we can still consume the deferred window deterministically when the
-            // overlay owner is destroyed — that is exactly the orphan-fix path.
-            let pending_snapshot = self.engine.state.pending_focus;
-            if mon_i == self.engine.state.sel_mon {
-                let aws = self.engine.state.monitors[mon_i].active_ws;
-                // If the window just destroyed was the overlay that created the
-                // deferral, focus the deferred window now (consume). This is keyed
-                // on the overlay's own monitor and works regardless of whether the
-                // overlay's workspace is the active one.
-                let deferred = match pending_snapshot {
-                    Some(pf)
-                        if pf.owner == win
-                            && pf.monitor == mon_i
-                            && self.engine.state.clients.contains_key(&pf.window) =>
-                    {
-                        Some(pf.window)
-                    }
-                    _ => None,
-                };
-                if let Some(p) = deferred {
-                    self.engine.state.pending_focus = None;
-                    self.focus(Some(p))?;
-                } else if let Some(p) = crate::core::commands::consume_pending_focus(
-                    &mut self.engine.state,
-                    mon_i,
-                    aws,
-                    Some(win),
-                ) {
-                    self.focus(Some(p))?;
-                } else {
-                    self.focus_best(mon_i)?;
-                }
+        // The monitor — or the View the window was placed in — may no longer exist
+        // after a hotplug.
+        if let Some(ws_i) = self
+            .engine
+            .state
+            .monitors
+            .get(mon_i)
+            .and_then(|m| m.view_index(client.workspace))
+        {
+            let wa = self.engine.state.monitors[mon_i].workarea;
+            let fs = fs_ctx(
+                &self.engine.state.clients,
+                &self.engine.state.monitors[mon_i].workspaces[ws_i],
+                self.engine.state.monitors[mon_i].screen,
+            );
+            let scroll = ideal_scroll(
+                &self.engine.state.monitors[mon_i].workspaces[ws_i],
+                &self.engine.cfg,
+                wa,
+                fs,
+            );
+            let now_empty = self.engine.state.monitors[mon_i].workspaces[ws_i].is_empty();
+            let cam = &mut self.engine.state.monitors[mon_i].workspaces[ws_i].camera;
+            if now_empty {
+                cam.snap(0.0)
             } else {
-                // A non-selected monitor: apply the logical focus only, never the
-                // real-X sink (that runs for `sel_mon`). Route through the core
-                // helper so `mon.focused`/`focus_stack` are only mutated by the
-                // single logical funnel. When the destroyed window was this
-                // monitor's presented overlay, consume the deferral onto it.
-                let deferred = match pending_snapshot {
-                    Some(pf)
-                        if pf.owner == win
-                            && pf.monitor == mon_i
-                            && self.engine.state.clients.contains_key(&pf.window) =>
-                    {
-                        Some(pf.window)
-                    }
-                    _ => None,
-                };
-                if let Some(p) = deferred {
-                    self.engine.state.pending_focus = None;
-                    crate::core::commands::focus_logical_on(&mut self.engine.state, mon_i, p);
-                } else if let Some(c) = self.engine.state.best_focus(mon_i) {
-                    crate::core::commands::focus_logical_on(&mut self.engine.state, mon_i, c);
+                // Through `retarget`, not a bare field write. A held
+                // `Mod4+]` recomputes the destination for every close, and
+                // `retarget` ignores a destination that is not finite so a
+                // poisoned scroll keeps the last offset the server was told
+                // about instead of writing a NaN into a `ConfigureWindow`.
+                cam.retarget(scroll)
+            }
+        }
+
+        let _ = self.arrange(mon_i);
+        // `remove_client` (above) may have already cleared the global deferral
+        // slot because this window was its `owner` (the presented overlay) or
+        // its `window` (the deferred target). Snapshot the slot *before* that so
+        // we can still consume the deferred window deterministically when the
+        // overlay owner is destroyed — that is exactly the orphan-fix path.
+        let pending_snapshot = self.engine.state.pending_focus;
+        if mon_i == self.engine.state.sel_mon {
+            let aws = self.engine.state.monitors[mon_i].active_index();
+            // If the window just destroyed was the overlay that created the
+            // deferral, focus the deferred window now (consume). This is keyed
+            // on the overlay's own monitor and works regardless of whether the
+            // overlay's workspace is the active one.
+            let deferred = match pending_snapshot {
+                Some(pf)
+                    if pf.owner == win
+                        && pf.monitor == mon_i
+                        && self.engine.state.clients.contains_key(&pf.window) =>
+                {
+                    Some(pf.window)
                 }
+                _ => None,
+            };
+            if let Some(p) = deferred {
+                self.engine.state.pending_focus = None;
+                self.focus(Some(p))?;
+            } else if let Some(p) = crate::core::commands::consume_pending_focus(
+                &mut self.engine.state,
+                mon_i,
+                aws,
+                Some(win),
+            ) {
+                self.focus(Some(p))?;
+            } else {
+                self.focus_best(mon_i)?;
+            }
+        } else {
+            // A non-selected monitor: apply the logical focus only, never the
+            // real-X sink (that runs for `sel_mon`). Route through the core
+            // helper so `mon.focused`/`focus_stack` are only mutated by the
+            // single logical funnel. When the destroyed window was this
+            // monitor's presented overlay, consume the deferral onto it.
+            let deferred = match pending_snapshot {
+                Some(pf)
+                    if pf.owner == win
+                        && pf.monitor == mon_i
+                        && self.engine.state.clients.contains_key(&pf.window) =>
+                {
+                    Some(pf.window)
+                }
+                _ => None,
+            };
+            if let Some(p) = deferred {
+                self.engine.state.pending_focus = None;
+                crate::core::commands::focus_logical_on(&mut self.engine.state, mon_i, p);
+            } else if let Some(c) = self.engine.state.best_focus(mon_i) {
+                crate::core::commands::focus_logical_on(&mut self.engine.state, mon_i, c);
             }
         }
         Ok(())
@@ -797,15 +829,22 @@ impl WindowManager {
                 // config that parsed it. A later `reload` with fewer tags (or a
                 // hotplug-restored monitor with fewer workspaces) can leave it
                 // out of range, stranding the window off-tree and invisible.
-                // Clamp to the live workspace count.
+                // Clamp to the live View count, then re-home by identity: the rule
+                // names a *position*, while the client records a `ViewId`.
                 if let Some(ws) = rule.ws {
-                    let n = self
+                    if let Some(view) = self
                         .engine
                         .state
                         .monitors
                         .get(c.monitor)
-                        .map_or(self.engine.cfg.n_tags.max(1), |m| m.workspaces.len());
-                    c.workspace = ws.min(n.saturating_sub(1));
+                        .and_then(|m| {
+                            m.workspaces
+                                .get(ws.min(m.workspaces.len().saturating_sub(1)))
+                        })
+                        .map(|ws| ws.id)
+                    {
+                        c.workspace = view;
+                    }
                 }
                 // Per-rule opacity: copied into the client so the
                 // `_NET_WM_WINDOW_OPACITY` write in manage() (gated on
@@ -1052,14 +1091,20 @@ impl WindowManager {
             if let Some(c) = self.engine.state.clients.get_mut(&child) {
                 let from = c.monitor;
                 // Detach from the monitor/workspace where it wrongly landed.
-                if from < self.engine.state.monitors.len()
-                    && c.workspace < self.engine.state.monitors[from].workspaces.len()
+                // Detach from the View where it wrongly landed, located by the
+                // child's own `ViewId` — the placement tree and the client record
+                // can disagree, and only the record knows which View this child
+                // claims.
+                if let Some(from_ws) = self
+                    .engine
+                    .state
+                    .monitors
+                    .get(from)
+                    .and_then(|m| m.view_index(c.workspace))
                 {
-                    let ws = &mut self.engine.state.monitors[from].workspaces[c.workspace];
-                    ws.floats.retain(|&w| w != child);
-                    self.engine.state.monitors[from]
-                        .focus_stack
-                        .retain(|&w| w != child);
+                    let mon = &mut self.engine.state.monitors[from];
+                    mon.workspaces[from_ws].floats.retain(|&w| w != child);
+                    mon.focus_stack.retain(|&w| w != child);
                 }
                 c.monitor = pmon;
                 c.workspace = pws;
@@ -1089,10 +1134,17 @@ impl WindowManager {
                 // dropped.
                 c.float_client_authority = false;
                 c.geometry_dirty = true;
-                if pmon < self.engine.state.monitors.len()
-                    && pws < self.engine.state.monitors[pmon].workspaces.len()
+                // The parent owns the child on the parent's *View*, located by the
+                // parent's own `ViewId` — the two are on the same monitor, so the
+                // id space is shared.
+                if let Some(pws_i) = self
+                    .engine
+                    .state
+                    .monitors
+                    .get(pmon)
+                    .and_then(|m| m.view_index(pws))
                 {
-                    self.engine.state.monitors[pmon].workspaces[pws]
+                    self.engine.state.monitors[pmon].workspaces[pws_i]
                         .floats
                         .push(child);
                     self.engine.state.monitors[pmon].focus_stack.push(child);
@@ -1255,7 +1307,7 @@ impl WindowManager {
             .state
             .monitors
             .get(mi)
-            .and_then(|m| m.workspaces.get(m.active_ws))
+            .and_then(|m| m.workspaces.get(m.active_index()))
             .and_then(|ws| ws.presented_maximize)
             == Some(win)
         {

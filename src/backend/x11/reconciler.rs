@@ -309,7 +309,7 @@ pub(crate) fn classify_configure(
 mod tests {
     use super::*;
     use crate::core::desired::DesiredWindow;
-    use crate::types::{Client, WinFlags};
+    use crate::types::{Client, ViewId, WinFlags};
 
     #[test]
     fn first_apply_always_emits() {
@@ -527,7 +527,7 @@ mod tests {
         let rect = Rect::new(10, 10, 100, 200);
         let border: u32 = 2;
         let mut state = State::new();
-        let mut c = Client::new(win, 0, 0);
+        let mut c = Client::new(win, 0, ViewId::new(0));
         c.geometry_dirty = false;
         state.clients.insert(win, c);
         let mut applied = AppliedState::default();
@@ -560,7 +560,7 @@ mod tests {
         let applied_rect = Rect::new(0, 0, 50, 50);
         let border: u32 = 2;
         let mut state = State::new();
-        let mut c = Client::new(win, 0, 0);
+        let mut c = Client::new(win, 0, ViewId::new(0));
         c.geometry_dirty = false;
         state.clients.insert(win, c);
         let mut applied = AppliedState::default();
@@ -608,7 +608,7 @@ mod tests {
         let rect = Rect::new(10, 10, 100, 200);
         let border: u32 = 2;
         let mut state_dirty = State::new();
-        let mut c = Client::new(win, 0, 0);
+        let mut c = Client::new(win, 0, ViewId::new(0));
         c.geometry_dirty = true;
         state_dirty.clients.insert(win, c);
         let mut applied = AppliedState::default();
@@ -635,7 +635,7 @@ mod tests {
         );
         // After the forced apply, simulate geometry_dirty cleared:
         let mut state_clean = State::new();
-        let mut c2 = Client::new(win, 0, 0);
+        let mut c2 = Client::new(win, 0, ViewId::new(0));
         c2.geometry_dirty = false;
         state_clean.clients.insert(win, c2);
         let e2 = reconcile(&desired, &state_clean, &mut applied);
@@ -655,7 +655,7 @@ mod tests {
         let border: u32 = 1;
         let mut state = State::new();
         for (w, dirty) in [(a, false), (b, false), (c, false)] {
-            let mut cl = Client::new(w, 0, 0);
+            let mut cl = Client::new(w, 0, ViewId::new(0));
             cl.geometry_dirty = dirty;
             state.clients.insert(w, cl);
         }
@@ -806,7 +806,7 @@ mod tests {
     #[test]
     fn drag_authority_table() {
         let mk = |is_float: bool, is_fs: bool| {
-            let mut c = Client::new(1, 0, 0);
+            let mut c = Client::new(1, 0, ViewId::new(0));
             if is_float {
                 c.flags.set(WinFlags::FLOAT);
             }
@@ -1069,7 +1069,7 @@ mod tests {
     fn state_for(rows: &[Row]) -> State {
         let mut state = State::new();
         for r in rows.iter().filter(|r| r.known) {
-            let mut c = Client::new(r.win, 0, 0);
+            let mut c = Client::new(r.win, 0, ViewId::new(0));
             c.geometry_dirty = r.dirty;
             state.clients.insert(r.win, c);
         }
@@ -1285,7 +1285,7 @@ mod tests {
         let mut applied = AppliedState::default();
         let state = {
             let mut s = State::new();
-            let mut c = Client::new(1, 0, 0);
+            let mut c = Client::new(1, 0, ViewId::new(0));
             c.geometry_dirty = false;
             s.clients.insert(1, c);
             s
@@ -1334,7 +1334,7 @@ mod tests {
     fn a_duplicate_desired_entry_still_converges() {
         let mut state = State::new();
         for win in [1u32, 2] {
-            let mut c = Client::new(win, 0, 0);
+            let mut c = Client::new(win, 0, ViewId::new(0));
             c.geometry_dirty = false;
             state.clients.insert(win, c);
         }
@@ -1402,7 +1402,7 @@ mod tests {
         let foreign = Rect::new(4000, 4000, 640, 480); // what X11 really holds
         let mut applied = AppliedState::default();
         let mut state = State::new();
-        let mut c = Client::new(1, 0, 0);
+        let mut c = Client::new(1, 0, ViewId::new(0));
         c.geometry_dirty = false;
         state.clients.insert(1, c);
 

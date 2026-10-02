@@ -642,7 +642,7 @@ impl WindowManager {
         mon_idx: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mon = &self.engine.state.monitors[mon_idx];
-        let ws = &mon.workspaces[mon.active_ws];
+        let ws = &mon.workspaces[mon.active_index()];
 
         // Pre-allocated scratch sets, cleared in place.
         self.hide_ws_set.clear();
@@ -1484,13 +1484,13 @@ impl WindowManager {
             .filter(|&m| m < self.engine.state.monitors.len())
             .unwrap_or(self.engine.state.sel_mon);
         if let Some(m) = self.engine.state.monitors.get(guard_mon) {
-            if m.active_ws < m.workspaces.len() {
+            if m.active_index() < m.workspaces.len() {
                 if let Some(r) = real {
                     if self.engine.state.presented_overlay_owner(guard_mon) == Some(r) {
                         #[cfg(feature = "input-trace")]
                         itrace!(
                             "reconcile_focus BAIL guard: real={:#x} is a presented overlay on monitor={} active_ws={}",
-                            r, guard_mon, m.active_ws
+                            r, guard_mon, m.active_index()
                         );
                         return Ok(());
                     }
@@ -1571,6 +1571,7 @@ impl WindowManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ViewId;
 
     /// A 22px-tall bar reserved at the top, so `workarea != screen` and the
     /// vertical clamp has a non-zero origin to respect.
@@ -2005,7 +2006,7 @@ mod tests {
         let mut clients = std::collections::HashMap::new();
         let mut prev: Option<WindowId> = None;
         for w in 1..=(depth + 1) {
-            let mut c = Client::new(w, 0, 0);
+            let mut c = Client::new(w, 0, ViewId::new(0));
             c.transient_parent = prev;
             clients.insert(w, c);
             prev = Some(w);
@@ -2081,7 +2082,7 @@ mod tests {
     fn transient_chain_cycle_terminates() {
         // Self-loop: WM_TRANSIENT_FOR pointing at the window itself.
         let mut clients = std::collections::HashMap::new();
-        let mut c = Client::new(1, 0, 0);
+        let mut c = Client::new(1, 0, ViewId::new(0));
         c.transient_parent = Some(1);
         clients.insert(1, c);
         assert!(!transient_chain_reaches(&clients, 1, &[42]));
@@ -2089,9 +2090,9 @@ mod tests {
 
         // Two-window cycle: 1 ↔ 2, neither reaches an unrelated root.
         let mut clients = std::collections::HashMap::new();
-        let mut a = Client::new(1, 0, 0);
+        let mut a = Client::new(1, 0, ViewId::new(0));
         a.transient_parent = Some(2);
-        let mut b = Client::new(2, 0, 0);
+        let mut b = Client::new(2, 0, ViewId::new(0));
         b.transient_parent = Some(1);
         clients.insert(1, a);
         clients.insert(2, b);
@@ -2186,7 +2187,7 @@ mod tests {
         state.monitors.push(mon);
 
         // Window 1: a Column fullscreen tile.
-        let mut c1 = Client::new(1, 0, 0);
+        let mut c1 = Client::new(1, 0, ViewId::new(0));
         c1.geom = Rect::new(0, 0, 100, 100);
         c1.flags.set(WinFlags::FULLSCREEN);
         state.add_client(c1);
@@ -2214,7 +2215,7 @@ mod tests {
 
         // Window 3: a transient/modal popup belonging to the fullscreen app, drawn
         // on top of it. It is neither covering nor the overlay owner.
-        let mut c3 = Client::new(3, 0, 0);
+        let mut c3 = Client::new(3, 0, ViewId::new(0));
         c3.geom = Rect::new(50, 50, 80, 60);
         c3.flags.set(WinFlags::FLOAT);
         c3.transient_parent = Some(1);
@@ -2235,7 +2236,7 @@ mod tests {
 
         // Window 2: a maximized (presented_maximize) window. It IS the overlay
         // owner, but is NOT fullscreen and NOT a covering fullscreen.
-        let mut c2 = Client::new(2, 0, 0);
+        let mut c2 = Client::new(2, 0, ViewId::new(0));
         c2.geom = Rect::new(0, 0, 100, 100);
         c2.flags.set(WinFlags::MAXIMIZED_V | WinFlags::MAXIMIZED_H);
         state.add_client(c2);
@@ -2618,7 +2619,7 @@ mod tests {
     /// A float adopted under a larger workarea: its frame hangs off the right
     /// edge of the shrunk one, so re-settling genuinely moves it.
     fn adopted_float(hints: SizeHints, geom: Rect) -> Client {
-        let mut c = Client::new(1, 0, 0);
+        let mut c = Client::new(1, 0, ViewId::new(0));
         c.flags.set(WinFlags::FLOAT);
         c.geom = geom;
         c.saved_geom = geom;
@@ -2891,7 +2892,7 @@ mod tests {
                 }
                 continue;
             }
-            let mut c = Client::new(win, 0, 0);
+            let mut c = Client::new(win, 0, ViewId::new(0));
             c.geom = spec.geom;
             c.saved_geom = spec.geom;
             c.border_w = spec.border_w;
@@ -3443,7 +3444,7 @@ mod tests {
             let mut clients = std::collections::HashMap::new();
             for (i, &p) in parents.iter().enumerate() {
                 let w = i as WindowId + 1;
-                let mut c = Client::new(w, 0, 0);
+                let mut c = Client::new(w, 0, ViewId::new(0));
                 c.transient_parent = if p == 0 { None } else { Some(p) };
                 clients.insert(w, c);
             }
@@ -3498,7 +3499,7 @@ mod tests {
                     },
                 )
             };
-            let mut c = Client::new(1, 0, 0);
+            let mut c = Client::new(1, 0, ViewId::new(0));
             c.flags.set(WinFlags::FLOAT);
             c.geom = geom;
             c.saved_geom = geom;
@@ -3796,9 +3797,9 @@ mod tests {
             assert!(!urgent, "these bodies carry no Urgent hint");
         }
 
-        let mut declared_true = Client::new(1, 0, 0);
+        let mut declared_true = Client::new(1, 0, ViewId::new(0));
         declared_true.wants_input = true;
-        let mut flipped = Client::new(2, 0, 0);
+        let mut flipped = Client::new(2, 0, ViewId::new(0));
         refresh(&mut flipped, &hints_body(1, 0));
         assert!(!flipped.wants_input, "input = False must be recorded");
         refresh(&mut flipped, &hints_body(1, 1));

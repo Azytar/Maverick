@@ -106,6 +106,44 @@ impl WindowManager {
                     &[ws as u32],
                 );
             }
+            Effect::RefreshDesktops => {
+                // The live View count is authoritative for EWMH, so the count and
+                // the names are rewritten from the *selected monitor's* View list
+                // rather than from `cfg.n_tags` / `cfg.tag_names` — a
+                // `CreateView`/`RemoveView` at runtime changes neither, and the
+                // old pairing would report a stale desktop count to pagers and
+                // taskbars. `_NET_CURRENT_DESKTOP` is deliberately untouched.
+                let Some(mon) = self.engine.state.monitors.get(self.engine.state.sel_mon) else {
+                    return Ok(());
+                };
+                let n = mon.workspaces.len() as u32;
+                let _ = self.conn.change_property32(
+                    PropMode::REPLACE,
+                    self.root,
+                    self.atoms.net_number_of_desktops,
+                    AtomEnum::CARDINAL,
+                    &[n],
+                );
+                let mut names = Vec::new();
+                for i in 0..mon.workspaces.len() {
+                    let name = self
+                        .engine
+                        .cfg
+                        .tag_names
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| (i + 1).to_string());
+                    names.extend_from_slice(name.as_bytes());
+                    names.push(0);
+                }
+                let _ = self.conn.change_property8(
+                    PropMode::REPLACE,
+                    self.root,
+                    self.atoms.net_desktop_names,
+                    self.atoms.utf8_string,
+                    &names,
+                );
+            }
             Effect::Spawn(cmd) => self.spawn(&cmd),
             Effect::Quit => self.begin_shutdown(),
             Effect::Restart => self.restart(),
@@ -336,17 +374,29 @@ impl WindowManager {
 
         let tags_changed =
             cfg.n_tags != self.engine.cfg.n_tags || cfg.tag_names != self.engine.cfg.tag_names;
-        let mut clamped_wins = Vec::new();
+        // (window, monitor) pairs re-homed by the shrink, so their
+        // `_NET_WM_DESKTOP` can be re-emitted at the new position.
+        let mut clamped_wins: Vec<(WindowId, usize)> = Vec::new();
         if tags_changed {
+            // Shrink first (one View at a time, so each removal re-homes onto a
+            // View that still exists), then grow.
+            for mi in 0..self.engine.state.monitors.len() {
+                while self.engine.state.monitors[mi].workspaces.len() > cfg.n_tags.max(1) {
+                    let pos = self.engine.state.monitors[mi].workspaces.len() - 1;
+                    let survivor = self.engine.state.monitors[mi]
+                        .workspaces
+                        .get(pos.saturating_sub(1))
+                        .map(|ws| ws.id);
+                    let Some(survivor) = survivor else { break };
+                    let dropped = self.engine.state.monitors[mi].workspaces[pos].id;
+                    for win in self.engine.state.rehome_clients(mi, dropped, survivor) {
+                        clamped_wins.push((win, mi));
+                    }
+                    self.engine.state.monitors[mi].remove_view_at(pos);
+                }
+            }
             for mon in &mut self.engine.state.monitors {
                 mon.reconcile_workspaces(cfg.n_tags);
-            }
-            let n_tags = cfg.n_tags;
-            for (&win, client) in &mut self.engine.state.clients {
-                if client.workspace >= n_tags {
-                    client.workspace = n_tags.saturating_sub(1);
-                    clamped_wins.push(win);
-                }
             }
         }
 
@@ -361,13 +411,19 @@ impl WindowManager {
         // re-emitted so the new desktop index is reflected.
         if tags_changed {
             self.update_ewmh_desktop_count()?;
-            for win in clamped_wins {
+            for (win, mi) in clamped_wins {
+                // `_NET_WM_DESKTOP` is a *position*, so it is resolved from the
+                // client's new `ViewId` rather than carried over.
+                let Some(mon) = self.engine.state.monitors.get(mi) else {
+                    continue;
+                };
                 let ws = self
                     .engine
                     .state
                     .clients
                     .get(&win)
-                    .map_or(0, |c| c.workspace);
+                    .and_then(|c| mon.view_index(c.workspace))
+                    .unwrap_or(0);
                 let _ = self.conn.change_property32(
                     PropMode::REPLACE,
                     win,
