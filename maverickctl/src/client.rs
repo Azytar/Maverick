@@ -181,6 +181,7 @@ mod tests {
     #[test]
     fn subscribe_receives_events() {
         let name = "testsub";
+        crate::test_support::runtime_root();
         let info = InstanceInfo {
             name: name.into(),
             session_id: name.into(),
@@ -228,6 +229,7 @@ mod tests {
     #[test]
     fn subscribe_cap_rejects_beyond_max() {
         let name = "testsubcap";
+        crate::test_support::runtime_root();
         let info = InstanceInfo {
             name: name.into(),
             session_id: name.into(),
@@ -273,6 +275,7 @@ mod tests {
     #[test]
     fn server_full_protocol() {
         let name = "testctl";
+        crate::test_support::runtime_root();
         let info = InstanceInfo {
             name: name.into(),
             session_id: name.into(),
@@ -335,6 +338,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let name = "testsilent";
+        crate::test_support::runtime_root();
         let path = identity::sock_path(name);
         // Same directory setup `ControlServer::spawn` performs: private (0700)
         // so this fixture does not leave a world-readable session directory in

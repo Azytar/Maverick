@@ -559,4 +559,55 @@ pub(crate) mod prop_support {
             1 => string_regex(".").expect("static pattern"),
         ]
     }
+
+    /// The runtime root this test process publishes, created once.
+    ///
+    /// [`crate::identity::runtime_dir`] resolves `$XDG_RUNTIME_DIR/maverick` and
+    /// falls back to `/run/user/$UID/maverick` when that is unset — so a unit
+    /// test here that stands up a control server publishes a session directory
+    /// and a socket into the *user's* Maverick runtime. Nothing there is owned by
+    /// the test, and a fixture that cleans up too broadly takes a live instance's
+    /// control socket and identity record with it.
+    ///
+    /// The root lives under this crate's `target/`, reached through the
+    /// compile-time manifest path so it does not depend on the working directory
+    /// the test binary was launched from. It is deliberately not under `/tmp`:
+    /// `runtime_dir_never_tmp` asserts the real runtime directory never is, and
+    /// that assertion has to keep describing production rather than a fixture's
+    /// scratch space.
+    ///
+    /// The root lives under `$XDG_RUNTIME_DIR`'s usual per-user parent, as a
+    /// sibling of the real `maverick` directory rather than a child of it, and
+    /// it is deliberately short: `sock_path_fits_sun_len` requires the longest
+    /// realistic sid to keep `control.sock` under the 108-byte `sockaddr_un`
+    /// limit, so this fixture root has only a few bytes of headroom over the
+    /// production fallback. A longer or more descriptive name breaks that
+    /// invariant rather than just looking untidy.
+    /// Written once per process and read through the same `OnceLock`, so every
+    /// test that touches the runtime root sees the same constant. Each such test
+    /// calls this *before* it touches anything, which is what makes the single
+    /// write ordered before every read rather than racing one.
+    pub fn runtime_root() -> &'static std::path::Path {
+        use std::sync::OnceLock;
+        static ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
+        ROOT.get_or_init(|| {
+            let dir = std::path::Path::new("/run/user")
+                .join(crate::identity::current_uid().to_string())
+                .join("maverick-t");
+            std::fs::create_dir_all(&dir).expect("test runtime root");
+            crate::identity::set_private_dir(&dir).expect("private test runtime root");
+            std::env::set_var("XDG_RUNTIME_DIR", &dir);
+            // Verified rather than assumed: if the redirect did not take,
+            // every caller below this line would publish into the user's
+            // own runtime directory, so the failure has to surface here
+            // rather than as a stray socket much later.
+            assert!(
+                crate::identity::runtime_dir().starts_with(&dir),
+                "the test runtime root is not in effect: unit tests would publish into {}",
+                crate::identity::runtime_dir().display()
+            );
+            dir
+        })
+        .as_path()
+    }
 }

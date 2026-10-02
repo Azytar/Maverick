@@ -628,6 +628,7 @@ mod tests {
     #[test]
     fn the_server_records_this_process_uid_as_the_only_authorised_peer() {
         use std::os::unix::net::UnixStream;
+        crate::prop_support::runtime_root();
         let name = format!("peercred{}", std::process::id());
         let _ = std::fs::remove_file(identity::sock_path(&name));
         let hub = ControlHub::new();
@@ -727,6 +728,7 @@ mod tests {
     #[test]
     fn subscribers_streaming_oversized_events_leave_the_server_serving() {
         let name = "testsubbig";
+        crate::prop_support::runtime_root();
         let hub = ControlHub::new();
         let server = ControlServer::spawn(name, "{}\n".into(), hub.clone()).expect("server binds");
         // A 2-byte character laid across the bound: the offset the raw cut
@@ -832,6 +834,7 @@ mod tests {
     #[test]
     fn subscribe_cap_rejects_extras_from_concurrent_connections() {
         let name = "testsubrace";
+        crate::prop_support::runtime_root();
         let hub = ControlHub::new();
         let server = ControlServer::spawn(name, "{}\n".into(), hub.clone()).expect("server binds");
 

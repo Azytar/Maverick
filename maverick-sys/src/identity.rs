@@ -640,6 +640,7 @@ mod tests {
 
     #[test]
     fn session_dirs_are_isolated_per_sid() {
+        crate::prop_support::runtime_root();
         // Two distinct session ids must map to distinct directories, sockets
         // and fichas — two sessions both named `default` must not clobber
         // each other's control socket.
@@ -654,6 +655,7 @@ mod tests {
 
     #[test]
     fn sock_path_fits_sun_len() {
+        crate::prop_support::runtime_root();
         // Longest realistic sid (pid up to 8 hex + '-' + nanos up to 16 hex +
         // '-' + 16 hex) must keep the socket path under the 108-byte kernel
         // limit (107 usable).
@@ -674,6 +676,7 @@ mod tests {
 
     #[test]
     fn sock_path_is_stable_and_isolated() {
+        crate::prop_support::runtime_root();
         let s = new_session_id();
         assert_eq!(sock_path(&s), sock_path(&s));
         assert_ne!(sock_path("aaaaaaaa"), sock_path("bbbbbbbb"));
@@ -689,6 +692,7 @@ mod tests {
     /// mode is the boundary. `create_dir_all` would apply the umask instead.
     #[test]
     fn the_runtime_directory_is_private() {
+        crate::prop_support::runtime_root();
         let dir = ensure_runtime_dir().expect("runtime dir");
         let mode = std::fs::metadata(&dir)
             .expect("metadata")
@@ -700,6 +704,7 @@ mod tests {
 
     #[test]
     fn runtime_dir_never_tmp() {
+        crate::prop_support::runtime_root();
         let dir = runtime_dir();
         assert!(
             !dir.starts_with("/tmp"),
@@ -712,6 +717,7 @@ mod tests {
     /// manager address the same socket and the same ficha.
     #[test]
     fn an_explicit_sid_names_every_path_the_instance_publishes() {
+        crate::prop_support::runtime_root();
         let info = self_info_with_sid("debug", "debug").expect("a valid sid");
         assert_eq!(info.session_id, "debug");
         assert_eq!(info.name, "debug");
@@ -1032,6 +1038,7 @@ mod meta_mode_tests {
     /// chose. Asserted on a real file rather than on the open flags.
     #[test]
     fn the_identity_record_is_owner_only() {
+        crate::prop_support::runtime_root();
         let sid = "modecheck";
         ensure_runtime_dir().expect("runtime dir");
         let dir = try_session_dir(sid).expect("session dir");
