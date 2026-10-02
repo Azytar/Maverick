@@ -643,6 +643,34 @@ mod tests {
         drop(stream);
         srv.shutdown();
         let _ = std::fs::remove_file(path);
+
+        // `spawn` created a session directory for this fixture and `shutdown`
+        // only unlinks the socket, so the empty directory outlived every
+        // resource in it. The name carries the pid, so it was one stranded
+        // directory per test *process* — an unbounded trail in the real runtime
+        // directory that nothing ever reclaims.
+        //
+        // A sibling stands in for anything else living there: cleanup is scoped
+        // to the one directory this fixture created, by exact path and only while
+        // empty, so it cannot reach a neighbour. `remove_dir` rather than
+        // `remove_dir_all` is what enforces the second half.
+        let neighbour =
+            identity::runtime_dir().join(format!("peercred-neighbour{}", std::process::id()));
+        std::fs::create_dir_all(&neighbour).expect("neighbour dir");
+        std::fs::write(neighbour.join("keep"), b"x").expect("neighbour file");
+
+        let owned = identity::try_session_dir(&name).expect("owned session dir");
+        let _ = std::fs::remove_dir(&owned);
+
+        assert!(
+            !owned.exists(),
+            "the fixture must not leave its session dir behind"
+        );
+        assert!(
+            neighbour.join("keep").exists(),
+            "cleanup is scoped to the fixture's own directory"
+        );
+        let _ = std::fs::remove_dir_all(&neighbour);
     }
 
     /// The credentials are of the *peer process*, not of some path, so a socket
