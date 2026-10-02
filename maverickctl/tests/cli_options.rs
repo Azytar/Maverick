@@ -533,3 +533,60 @@ fn the_usage_page_documents_the_option_scopes() {
         "the usage page must document --name"
     );
 }
+
+/// A selector that matches nothing has to say which selector missed.
+///
+/// `--session` and `--name` address the same object by different keys, and both
+/// resolve before anything is connected: a miss here is a *resolution* failure,
+/// which is a different layer from a refused socket or an unanswered request.
+/// Asserting only that the command failed cannot tell those three apart — every
+/// one of them exits non-zero — which is how `--name` came to exit non-zero with
+/// nothing on either stream while `--session` beside it named the session that
+/// was missing.
+///
+/// So each arm asserts the whole observable: the exit status, the empty stdout
+/// (a diagnostic on stdout would vanish under `maverickctl 2>/dev/null`), and
+/// the exact stderr, which also pins that one failure produces one message.
+#[test]
+fn a_selector_that_matches_nothing_names_the_selector_that_missed() {
+    let dir = runtime_dir();
+    // Names nothing on any machine and cannot be produced by another arm of the
+    // resolver, so a failure here can only be this lookup — not the context
+    // fallback, and not a socket or protocol error.
+    const MISSING: &str = "__maverick_no_such_instance__";
+    let missing_sid = format!("{MISSING}_session");
+
+    for (flag, selector, expected) in [
+        (
+            "--name",
+            MISSING,
+            format!("maverickctl: no instance named '{MISSING}'"),
+        ),
+        (
+            "--session",
+            missing_sid.as_str(),
+            format!("maverickctl: no instance with session id '{missing_sid}'"),
+        ),
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_maverickctl"))
+            .env("XDG_RUNTIME_DIR", &dir)
+            .args([flag, selector, "query", "state"])
+            .output()
+            .expect("run maverickctl");
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{flag} must fail on a target that matches nothing"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "",
+            "{flag} resolves before it reports: stdout must stay empty"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr).trim(),
+            expected,
+            "{flag} must name the selector that missed, and say it once"
+        );
+    }
+}

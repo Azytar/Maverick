@@ -705,7 +705,21 @@ fn resolve_target(tool: &str, name: &Option<String>, session: &Option<String>) -
         };
     }
     if let Some(n) = name {
-        return discover::find_by_name(n).map(|i| i.session_id);
+        // The other three arms all report a miss, and this function's own
+        // contract is that no match is printed rather than guessed at. Mapping
+        // a miss straight to `None` left the caller — which does nothing but
+        // `return ExitCode::FAILURE` — exiting non-zero with nothing on either
+        // stream, so `--name typo` was indistinguishable from a command killed
+        // by a signal, while `--session typo` beside it named the session that
+        // was missing. Both options select the same object by different keys,
+        // so the diagnostic has to name the key that missed.
+        return match discover::find_by_name(n) {
+            Some(i) => Some(i.session_id),
+            None => {
+                eprintln!("{tool}: no instance named '{n}'");
+                None
+            }
+        };
     }
     // `$MAVERICK_INSTANCE` holds the session id the WM exported to its children
     // (the common case when a tool is launched from a Maverick keybind).
