@@ -979,7 +979,7 @@ fn action_name_of(list: &[(u16, u32, Action)], mods: u16, keysym: u32) -> String
 
 fn action_workspace_is_valid(action: &Action, n_tags: usize) -> bool {
     match action {
-        Action::View(ws) | Action::MoveToWs(ws) => *ws < n_tags,
+        Action::View(ws) | Action::MoveToWs(ws) | Action::ViewRemove(ws) => *ws < n_tags,
         _ => true,
     }
 }

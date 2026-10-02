@@ -18,9 +18,10 @@
 
 use crate::config::Cfg;
 use crate::core::commands::{
-    CollapseColumn, Command, FocusDirection, FocusMonitor, FocusWindow, GrowColumn, KillWindow,
-    MoveToWorkspace, MoveWindow, MoveWindowToMonitor, NewColumn, OverviewEnter, OverviewNav,
-    PageSnap, Quit, Restart, SetLayout, Spawn, ToggleFloat, ToggleFullscreen, ToggleMaximize,
+    CollapseColumn, Command, CreateView, FocusDirection, FocusMonitor, FocusWindow, GrowColumn,
+    KillWindow, MoveToWorkspace, MoveWindow, MoveWindowToMonitor, NewColumn, NextView,
+    OverviewEnter, OverviewNav, PageSnap, PreviousView, Quit, RemoveView, Restart,
+    ReturnToOriginView, SetLayout, Spawn, ToggleFloat, ToggleFullscreen, ToggleMaximize,
     ToggleOverview, ViewWorkspace, ViewportZoom,
 };
 use crate::core::effect::Effect;
@@ -216,6 +217,11 @@ impl Engine {
                 None => vec![],
             },
             Action::View(ws_idx) => self.execute(ViewWorkspace(ws_idx)),
+            Action::ViewNext => self.execute(NextView),
+            Action::ViewPrev => self.execute(PreviousView),
+            Action::ViewReturn => self.execute(ReturnToOriginView),
+            Action::ViewCreate => self.execute(CreateView),
+            Action::ViewRemove(pos) => self.execute(RemoveView(pos)),
             Action::MoveToWs(ws_idx) => self.execute(MoveToWorkspace(ws_idx)),
             Action::GrowCol(px) => self.execute(GrowColumn(px)),
             Action::GrowColPct(pct) => {

@@ -48,6 +48,16 @@ use crate::types::{
     WinFlags, WindowId, WindowMode,
 };
 
+/// Ceiling on Views per monitor, for `CreateView`.
+///
+/// The same limit config parsing already enforces on `n_tags` (1..=9), reused so
+/// `CreateView` cannot grow a desktop layout the rest of the system refuses to
+/// describe: EWMH `_NET_DESKTOP_NAMES`, the `tag_names` config list and the
+/// generated `Mod4+N` binds are all sized by it. Config reload re-reconciles to
+/// `n_tags`, so a runtime-created View is not permanent across a reload — the
+/// same relationship the pre-existing `n_tags` shrink already has.
+const MAX_VIEWS: usize = 9;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ToggleMaximize(pub Option<WindowId>);
 
@@ -89,13 +99,13 @@ fn scroll_to_focused(state: &mut State, cfg: &Cfg, mi: usize, ws_i: usize) {
 /// stale (e.g. after a hotplug), in which case nothing was mutated.
 #[must_use = "retargeting the camera without re-projecting leaves client.geom stale"]
 pub fn retarget_focus_to_window(state: &mut State, cfg: &Cfg, win: WindowId) -> Option<usize> {
-    let (mi, ws_i) = {
-        let c = state.clients.get(&win)?;
-        (c.monitor, c.workspace)
-    };
-    if mi >= state.monitors.len() || ws_i >= state.monitors[mi].workspaces.len() {
-        return None;
-    }
+    // Resolved through the client's own `ViewId`, never through the monitor's
+    // active View: a focus slot can name a window placed on another View.
+    let mi = state.clients.get(&win)?.monitor;
+    let ws_i = state
+        .monitors
+        .get(mi)?
+        .view_index(state.clients[&win].workspace)?;
     let screen = state.monitors[mi].screen;
     let wa = state.monitors[mi].workarea;
     // Disjoint field borrows (same trick as `struts::retarget_cameras`): read
@@ -156,10 +166,14 @@ pub fn apply_fullscreen_topology(
     let Some(client) = state.clients.get(&win) else {
         return false;
     };
-    let (mi, ws_i) = (client.monitor, client.workspace);
-    if mi >= state.monitors.len() || ws_i >= state.monitors[mi].workspaces.len() {
+    let mi = client.monitor;
+    let Some(ws_i) = state
+        .monitors
+        .get(mi)
+        .and_then(|m| m.view_index(client.workspace))
+    else {
         return false;
-    }
+    };
     if entering {
         if !client.is_float() {
             return false;
@@ -243,23 +257,22 @@ pub(crate) fn consume_pending_focus(
     ws_i: usize,
     dismissed: Option<WindowId>,
 ) -> Option<WindowId> {
-    if mi >= state.monitors.len() || ws_i >= state.monitors[mi].workspaces.len() {
-        return None;
-    }
+    let mon = state.monitors.get(mi)?;
+    let ws = mon.workspaces.get(ws_i)?;
+    // The deferral is keyed on a `ViewId`, so the comparison is by identity: a
+    // deferral recorded against a View that still exists at a *different*
+    // position after a removal is still the right deferral.
+    let view = ws.id;
     let pf = state.pending_focus?;
-    // Wrong monitor/workspace: this deferral belongs elsewhere. Leave it in place.
-    if pf.monitor != mi || pf.workspace != ws_i {
+    // Wrong monitor/view: this deferral belongs elsewhere. Leave it in place.
+    if pf.monitor != mi || pf.workspace != view {
         return None;
     }
     // A live overlay `o` (not the one that created this deferral) is dismissing:
     // it must not consume a deferral owned by a different overlay. Leave it.
     if let Some(o) = dismissed {
         let o_presented = state.presented_overlay_owner(mi) == Some(o)
-            && state
-                .monitors
-                .get(mi)
-                .and_then(|m| m.workspaces.get(ws_i))
-                .is_some_and(|_ws| state.clients.get(&o).is_some_and(|c| c.workspace == ws_i));
+            && state.clients.get(&o).is_some_and(|c| c.workspace == view);
         if o_presented && pf.owner != o {
             return None;
         }
@@ -373,7 +386,7 @@ pub enum ManageFocusIntent {
 /// current presented overlay or focused immediately. See `ManageFocusIntent`.
 pub fn decide_manage_focus(state: &State, win: WindowId) -> ManageFocusIntent {
     let mi = state.sel_mon;
-    let ws_i = state.monitors[mi].active_ws;
+    let ws_i = state.monitors[mi].active_index();
     if let Some(owner) = state.presented_overlay_owner(mi) {
         // The owner has to be presented *in the context the deferral is keyed on*.
         // `presented_overlay_owner` is monitor-scoped: it reads that monitor's
@@ -387,7 +400,11 @@ pub fn decide_manage_focus(state: &State, win: WindowId) -> ManageFocusIntent {
         // slot is keyed to a context the owner does not live in, so the next
         // command's safety net would resolve it again immediately and the new
         // window would never actually be held back.
-        if state.overlay_presented_in(mi, ws_i, owner) {
+        if state.monitors[mi]
+            .workspaces
+            .get(ws_i)
+            .is_some_and(|ws| state.overlay_presented_in(mi, ws.id, owner))
+        {
             let owned_dialog = state
                 .clients
                 .get(&win)
@@ -528,7 +545,7 @@ impl Command for ViewportZoom {
         let Some(mon) = state.monitors.get(mi) else {
             return CommandReport::new(cmds);
         };
-        let ws_i = mon.active_ws;
+        let ws_i = mon.active_index();
         let Some(_) = mon.workspaces.get(ws_i) else {
             return CommandReport::new(cmds);
         };
@@ -601,7 +618,7 @@ impl Command for PageSnap {
         if mi >= state.monitors.len() {
             return CommandReport::new(cmds);
         }
-        let ws_i = state.monitors[mi].active_ws;
+        let ws_i = state.monitors[mi].active_index();
         let wa = state.monitors[mi].workarea;
         let fs = fs_of(state, mi, ws_i);
         let ws = &mut state.monitors[mi].workspaces[ws_i];
@@ -695,7 +712,7 @@ impl Command for FocusDirection {
         // from `mi` when the focus slot names a window placed on another monitor.
         let mut retargeted = None;
         let from = state.monitors[mi].focused;
-        let ws_i = state.monitors[mi].active_ws;
+        let ws_i = state.monitors[mi].active_index();
         // A window mapped behind an overlay can insert a column and move the
         // workspace cursor without receiving focus. Navigate from the actual
         // focused window, not that insertion cursor.
@@ -749,7 +766,7 @@ impl Command for FocusDirection {
                 state.monitors[mi].workspaces[ws_i].columns[new_ci].focused_win()
             }
             Dir::Up | Dir::Down => {
-                let ws_i = state.monitors[mi].active_ws;
+                let ws_i = state.monitors[mi].active_index();
                 let ci = state.monitors[mi].workspaces[ws_i].focus.column_idx;
                 if ci >= state.monitors[mi].workspaces[ws_i].columns.len() {
                     return CommandReport::new(cmds);
@@ -778,7 +795,7 @@ impl Command for FocusDirection {
                 Some(target)
             }
             Dir::Next | Dir::Prev => {
-                let ws_i = state.monitors[mi].active_ws;
+                let ws_i = state.monitors[mi].active_index();
                 let focused = state.monitors[mi].focused;
                 let stack = &state.monitors[mi].focus_stack;
                 if stack.is_empty() {
@@ -787,7 +804,12 @@ impl Command for FocusDirection {
                 let stack: Vec<WindowId> = stack
                     .iter()
                     .copied()
-                    .filter(|&w| state.clients.get(&w).is_some_and(|c| c.workspace == ws_i))
+                    .filter(|&w| {
+                        state
+                            .clients
+                            .get(&w)
+                            .is_some_and(|c| c.workspace == state.monitors[mi].ws().id)
+                    })
                     .collect();
                 if stack.is_empty() {
                     return CommandReport::new(cmds);
@@ -910,10 +932,14 @@ impl Command for MoveWindow {
         let Some(client) = state.clients.get(&self.0) else {
             return CommandReport::new(cmds);
         };
-        let (mi, ws_i) = (client.monitor, client.workspace);
-        if mi >= state.monitors.len() || ws_i >= state.monitors[mi].workspaces.len() {
+        let mi = client.monitor;
+        let Some(ws_i) = state
+            .monitors
+            .get(mi)
+            .and_then(|m| m.view_index(client.workspace))
+        else {
             return CommandReport::new(cmds);
-        }
+        };
         if !state.apply_move_dir_for(self.0, self.1) {
             return CommandReport::new(cmds);
         }
@@ -1012,8 +1038,8 @@ impl Command for ToggleFloat {
         // placement index, and a placement index must only ever name live
         // clients, so a stale slot absorbs the toggle instead of pushing a
         // phantom entry into `floats`.
-        let (ws_i, is_float) = match state.clients.get(&win) {
-            Some(c) => (c.workspace, c.is_float()),
+        let is_float = match state.clients.get(&win) {
+            Some(c) => c.is_float(),
             None => return CommandReport::new(cmds),
         };
         // Guard against cross-monitor focus corruption — only for the
@@ -1022,9 +1048,21 @@ impl Command for ToggleFloat {
         if self.0.is_none() && state.clients.get(&win).is_some_and(|c| c.monitor != mi) {
             return CommandReport::new(cmds);
         }
-        if ws_i >= state.monitors[mi].workspaces.len() {
-            return CommandReport::new(cmds);
-        }
+        // The View the window is *actually* placed in, resolved from its own
+        // `ViewId`. A window named by a focus slot can sit on another View of the
+        // same monitor, and toggling against the active one would splice it into
+        // a tree that does not contain it.
+        let ws_i = {
+            let c = &state.clients[&win];
+            match state
+                .monitors
+                .get(c.monitor)
+                .and_then(|m| m.view_index(c.workspace))
+            {
+                Some(i) => i,
+                None => return CommandReport::new(cmds),
+            }
+        };
         // A fullscreen window may only be a float if it is an *exclusive*
         // overlay. `FullscreenPolicy::True` is one wherever it lives —
         // `present_into` rewrites its entry to `mon.screen` regardless of the
@@ -1116,7 +1154,7 @@ impl Command for ToggleFullscreen {
         if mi >= state.monitors.len() {
             return CommandReport::new(cmds);
         }
-        let ws_i = state.monitors[mi].active_ws;
+        let ws_i = state.monitors[mi].active_index();
         if let Some(win) = target {
             // This command owns ALL fullscreen logical state. The backend's
             // `SetFullscreen` handler is the X11-only half (the EWMH atom and
@@ -1210,7 +1248,7 @@ impl Command for ToggleMaximize {
         let Some(mon) = state.monitors.get(mi) else {
             return CommandReport::new(cmds);
         };
-        let ws_i = mon.active_ws;
+        let ws_i = mon.active_index();
         if ws_i >= mon.workspaces.len() {
             return CommandReport::new(cmds);
         }
@@ -1308,7 +1346,7 @@ impl Command for SetLayout {
         let mut cmds = Vec::new();
         let mi = state.sel_mon;
         if mi < state.monitors.len() {
-            let ws_i = state.monitors[mi].active_ws;
+            let ws_i = state.monitors[mi].active_index();
             if ws_i >= state.monitors[mi].workspaces.len() {
                 return CommandReport::new(cmds);
             }
@@ -1335,6 +1373,16 @@ impl Command for SetLayout {
     }
 }
 
+/// Select View `self.0` (carousel position) on the selected monitor.
+///
+/// The **goto** half of the carousel. It addresses a position rather than a
+/// `ViewId` because that is what the wire vocabulary already carries
+/// (`Action::View(n)`, EWMH `_NET_CURRENT_DESKTOP`, the generated `Mod4+N`
+/// binds), and the mapping from one to the other happens here — exactly once,
+/// at the boundary. The carousel itself only ever speaks `ViewId`.
+///
+/// Refuses when the position names no View, and when it is already current: a
+/// no-op switch would re-arrange and re-focus the monitor for nothing.
 #[derive(Debug, Clone, Copy)]
 pub struct ViewWorkspace(pub usize);
 
@@ -1346,26 +1394,33 @@ impl Command for ViewWorkspace {
             Some(m) => m,
             None => return CommandReport::new(cmds),
         };
-        let from = mon.active_ws;
+        let from = mon.active_index();
         let ws_idx = self.0;
-        if ws_idx >= mon.workspaces.len() || ws_idx == mon.active_ws {
+        let Some(target) = mon.view_id(ws_idx) else {
+            return CommandReport::new(cmds);
+        };
+        if Some(target) == mon.carousel.current() {
             return CommandReport::new(cmds);
         }
-        state.monitors[mi].active_ws = ws_idx;
+        // Resolved through the carousel, so the switch is a View-identity change
+        // and never a positional index the layout might disagree with.
+        if !state.monitors[mi].goto_view(target) {
+            return CommandReport::new(cmds);
+        }
         // Resolve the post-switch focus *inside* the command (the same
         // resolution the `FocusWindow` effect applies below), so the logical
         // state is coherent immediately and never depends on the effect being
-        // applied: `focused == best_focus(active_ws)` — a window of the new
-        // workspace (or its presented overlay owner), or `None`. An alive
+        // applied: `focused == best_focus(active View)` — a window of the new
+        // View (or its presented overlay owner), or `None`. An alive
         // `pending_focus` deferral is untouched: `best_focus` never returns the
         // deferred window, so the ping-pong restore keeps handing input to the
         // overlay owner, never to the deferred window.
         let focus = state.best_focus(mi);
         state.monitors[mi].focused = focus;
         // The presented maximize overlay follows `mon.focused`; leaving the
-        // source workspace's overlay recorded while focus moved would dangle
-        // the overlay/`pending_focus` bookkeeping (`presented_maximize` must
-        // name a maximized client on the *active* workspace).
+        // source View's overlay recorded while focus moved would dangle the
+        // overlay/`pending_focus` bookkeeping (`presented_maximize` must name a
+        // maximized client on the *active* View).
         state.sync_presented_maximize(mi);
         let wa = state.monitors[mi].workarea;
         let scroll = ideal_scroll(
@@ -1386,6 +1441,200 @@ impl Command for ViewWorkspace {
                 to: ws_idx,
             },
         )
+    }
+}
+
+/// Advance the carousel one step on the selected monitor.
+///
+/// The **next** half: purely logical and instantaneous, wrapping from the last
+/// View to the first. It contains no layout branch — `Carousel::next` decides,
+/// and `Carousel` knows nothing about `LayoutKind`.
+#[derive(Debug, Clone, Copy)]
+pub struct NextView;
+
+impl Command for NextView {
+    fn execute(&mut self, state: &mut State, cfg: &mut Cfg) -> CommandReport {
+        select_relative_view(state, cfg, ViewStep::Next)
+    }
+}
+
+/// Step the carousel backwards one place, wrapping from the first View to the
+/// last. See [`NextView`].
+#[derive(Debug, Clone, Copy)]
+pub struct PreviousView;
+
+impl Command for PreviousView {
+    fn execute(&mut self, state: &mut State, cfg: &mut Cfg) -> CommandReport {
+        select_relative_view(state, cfg, ViewStep::Prev)
+    }
+}
+
+/// Select the origin View — the explicit return point pinned where the session
+/// started on this monitor. See [`NextView`] for the "no layout branch" contract.
+#[derive(Debug, Clone, Copy)]
+pub struct ReturnToOriginView;
+
+impl Command for ReturnToOriginView {
+    fn execute(&mut self, state: &mut State, cfg: &mut Cfg) -> CommandReport {
+        let mi = state.sel_mon;
+        let Some(mon) = state.monitors.get(mi) else {
+            return CommandReport::new(Vec::new());
+        };
+        let from = mon.active_index();
+        if mon.carousel.current() == mon.carousel.origin() {
+            return CommandReport::new(Vec::new());
+        }
+        if !state.monitors[mi].return_to_origin() {
+            return CommandReport::new(Vec::new());
+        }
+        finish_view_switch(state, cfg, mi, from)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ViewStep {
+    Next,
+    Prev,
+}
+
+/// Move the carousel by one relative step and settle the monitor.
+///
+/// Shared by [`NextView`] and [`PreviousView`] so the two cannot drift: both
+/// take exactly the same post-switch path, and neither inspects `LayoutKind`.
+fn select_relative_view(state: &mut State, cfg: &mut Cfg, step: ViewStep) -> CommandReport {
+    let mi = state.sel_mon;
+    let Some(mon) = state.monitors.get(mi) else {
+        return CommandReport::new(Vec::new());
+    };
+    let from = mon.active_index();
+    let moved = match step {
+        ViewStep::Next => state.monitors[mi].next_view(),
+        ViewStep::Prev => state.monitors[mi].previous_view(),
+    };
+    // A single-View carousel refuses to step: there is nowhere to go, and
+    // re-arranging for a no-op would only cost a frame.
+    if !moved {
+        return CommandReport::new(Vec::new());
+    }
+    finish_view_switch(state, cfg, mi, from)
+}
+
+/// The post-switch settle shared by every way of changing the active View:
+/// re-derive the monitor's logical focus, re-point the maximize overlay, snap
+/// the new View's camera to its own content, then arrange and focus.
+///
+/// Extracted so goto / next / previous / return cannot diverge: the only thing
+/// that distinguishes them is *which* View they selected, never what they do
+/// afterwards.
+fn finish_view_switch(state: &mut State, cfg: &Cfg, mi: usize, from: usize) -> CommandReport {
+    let mut cmds = Vec::new();
+    let to = state.monitors[mi].active_index();
+    let focus = state.best_focus(mi);
+    state.monitors[mi].focused = focus;
+    state.sync_presented_maximize(mi);
+    let wa = state.monitors[mi].workarea;
+    let scroll = ideal_scroll(
+        &state.monitors[mi].workspaces[to],
+        cfg,
+        wa,
+        fs_of(state, mi, to),
+    );
+    state.monitors[mi].workspaces[to].camera.snap(scroll);
+    cmds.push(Effect::SetCurrentDesktop(to));
+    cmds.push(Effect::ArrangeMonitor(mi));
+    cmds.push(Effect::FocusWindow(state.best_focus(mi)));
+    CommandReport::with_event(
+        cmds,
+        Event::WorkspaceChanged {
+            monitor: mi,
+            from,
+            to,
+        },
+    )
+}
+
+/// Append a new empty View on the selected monitor.
+///
+/// The **create** lifecycle operation. It is a pure logical transition: no X11
+/// window, pixmap or slot is created, and the current/origin View is left alone
+/// (creating a View must not move the user off what they were looking at).
+///
+/// The count ceiling is the one already enforced by config parsing for `n_tags`,
+/// reused here so `CreateView` cannot produce a desktop layout the rest of the
+/// system refuses to describe (EWMH `_NET_DESKTOP_NAMES`, the `tag_names` config,
+/// and the generated `Mod4+N` binds are all sized by it).
+#[derive(Debug, Clone, Copy)]
+pub struct CreateView;
+
+impl Command for CreateView {
+    fn execute(&mut self, state: &mut State, _cfg: &mut Cfg) -> CommandReport {
+        let mi = state.sel_mon;
+        let Some(mon) = state.monitors.get_mut(mi) else {
+            return CommandReport::new(Vec::new());
+        };
+        if mon.workspaces.len() >= MAX_VIEWS {
+            return CommandReport::new(Vec::new());
+        }
+        mon.create_view();
+        CommandReport::new(vec![Effect::RefreshDesktops, Effect::PublishIpcState])
+    }
+}
+
+/// Drop a View by carousel position on the selected monitor.
+///
+/// The **remove** lifecycle operation. Removing is refused outright when the
+/// View still holds clients: where they would go is a policy decision the
+/// campaign does not specify, and silently relocating a user's windows would be
+/// the more surprising outcome. Empty it first (or move its clients out) and the
+/// removal goes through.
+///
+/// `Carousel::detach` repairs `current` and `origin` inside
+/// `Monitor::remove_view_at`, so this command cannot leave either dangling.
+#[derive(Debug, Clone, Copy)]
+pub struct RemoveView(pub usize);
+
+impl Command for RemoveView {
+    fn execute(&mut self, state: &mut State, cfg: &mut Cfg) -> CommandReport {
+        let mi = state.sel_mon;
+        let Some(mon) = state.monitors.get(mi) else {
+            return CommandReport::new(Vec::new());
+        };
+        let pos = self.0;
+        let Some(view) = mon.workspaces.get(pos) else {
+            return CommandReport::new(Vec::new());
+        };
+        if !view.is_empty() {
+            return CommandReport::new(Vec::new());
+        }
+        let from = mon.active_index();
+        // `State::remove_view` (not `Monitor::remove_view_at`) so the clients are
+        // re-homed first: the command already refused a non-empty View, but
+        // routing through `State` means a future caller cannot get the unsafe
+        // half.
+        if state.remove_view(mi, pos).is_none() {
+            return CommandReport::new(Vec::new());
+        }
+        // The camera, focus and overlay bookkeeping were all derived against the
+        // View that just went away; re-derive them for whatever the carousel
+        // selected instead. A `pending_focus` keyed on the removed View is dropped
+        // by its own lifetime test on the next transition.
+        //
+        // Removing the *current* View is a View switch (`detach` re-pointed it) and
+        // so owes exactly the settle a goto does — same code path, so the two
+        // cannot disagree. Removing any other View leaves the current one alone and
+        // only needs the EWMH count refreshed.
+        let mut report = if pos == from {
+            finish_view_switch(state, cfg, mi, from)
+        } else {
+            state.monitors[mi].focused = state.best_focus(mi);
+            state.sync_presented_maximize(mi);
+            CommandReport::new(vec![
+                Effect::ArrangeMonitor(mi),
+                Effect::FocusWindow(state.best_focus(mi)),
+            ])
+        };
+        report.effects.insert(0, Effect::RefreshDesktops);
+        report
     }
 }
 
@@ -1410,11 +1659,15 @@ impl Command for MoveToWorkspace {
         // addresses a workspace that never held the window, is a silent no-op,
         // and the re-insert below leaves the client referenced from two
         // placements at once.
-        let (src_mi, src_ws) = match state.clients.get(&win) {
-            Some(c) => (c.monitor, c.workspace),
+        let src_mi = match state.clients.get(&win) {
+            Some(c) => c.monitor,
             None => return CommandReport::new(cmds),
         };
-        // A workspace belongs to exactly one monitor, so this command can only
+        let src_ws = match state.clients.get(&win) {
+            Some(c) => c.workspace,
+            None => return CommandReport::new(cmds),
+        };
+        // A View belongs to exactly one monitor, so this command can only
         // relocate a window that is already on the selected monitor. A window
         // belonging to another monitor is `MoveWindowToMonitor`'s business — that
         // command re-derives the focus and re-arranges *both* monitors, which a
@@ -1424,27 +1677,33 @@ impl Command for MoveToWorkspace {
         if src_mi != mi {
             return CommandReport::new(cmds);
         }
+        let mon = match state.monitors.get(mi) {
+            Some(m) => m,
+            None => return CommandReport::new(cmds),
+        };
+        // Destination is a carousel *position* (what the wire carries), resolved to
+        // its `ViewId` here; the source is already an identity.
         let ws_idx = self.0;
-        let n_ws = state.monitors.get(mi).map_or(0, |m| m.workspaces.len());
-        if n_ws == 0 || ws_idx >= n_ws {
+        let Some(dst_view) = mon.view_id(ws_idx) else {
             return CommandReport::new(cmds);
-        }
-        // `src_ws` comes from the client record, which can be stale after a
-        // `n_tags` shrink / session restore: bound-check before indexing.
-        if src_ws >= n_ws {
+        };
+        // The source comes from the client record, which can name a View that no
+        // longer exists (a `n_tags` shrink / session restore). Resolving it
+        // through the monitor's own list is what makes that detectable.
+        let Some(src_ws_i) = mon.view_index(src_ws) else {
             return CommandReport::new(cmds);
-        }
-        if src_ws == ws_idx {
+        };
+        if src_ws == dst_view {
             return CommandReport::new(cmds);
         }
         // `remove_window` is a no-op when the tree does not actually contain
         // `win` (a stale client record), so bail out rather than duplicating the
         // window into the destination. Same guard `MoveWindowToMonitor` uses.
-        let contained = state.monitors[mi].workspaces[src_ws]
+        let contained = mon.workspaces[src_ws_i]
             .columns
             .iter()
             .any(|c| c.windows.contains(&win))
-            || state.monitors[mi].workspaces[src_ws].floats.contains(&win);
+            || mon.workspaces[src_ws_i].floats.contains(&win);
         if !contained {
             return CommandReport::new(cmds);
         }
@@ -1452,36 +1711,39 @@ impl Command for MoveToWorkspace {
             .clients
             .get(&win)
             .is_some_and(crate::types::Client::is_float);
-        state.monitors[mi].workspaces[src_ws].remove_window(win);
+        state.monitors[mi].workspaces[src_ws_i].remove_window(win);
         state.monitors[mi].focus_stack.retain(|&w| w != win);
         if state.monitors[mi].focused == Some(win) {
             state.monitors[mi].focused = state.monitors[mi].focus_stack.last().copied();
         }
         if is_float {
+            // A float's `Client::geom` is WM-authoritative and is *not* touched by a
+            // membership change: the window keeps the exact rect the user gave it,
+            // and `settle_float_in_workarea` only clears the client-authority seal
+            // (the move was the WM's doing, not the client's).
             state.monitors[mi].workspaces[ws_idx].floats.push(win);
-            // The workarea is unchanged (same monitor), but the client's
-            // authority seal is cleared: the window is moved by the WM (the user
-            // sent it to another workspace), not by the client.
             crate::core::layout::settle_float_in_workarea(state, mi, win);
         } else {
             // The source removal above already took the window out of its only
             // placement (the `contained` guard proved where that was), so the
-            // destination insert needs no second removal: the two workspaces are
+            // destination insert needs no second removal: the two Views are
             // distinct, and re-removing from the destination is what used to
             // address the wrong workspace when the source coordinate was wrong.
             state.monitors[mi].workspaces[ws_idx].add_tiled(win, cfg.column_width);
         }
         if let Some(c) = state.clients.get_mut(&win) {
-            c.workspace = ws_idx;
+            // Only membership changes. Floating, geometry, metadata and identity
+            // are all deliberately untouched by a View move.
+            c.workspace = dst_view;
         }
-        // The source workspace just lost a column: recenter its camera so it
+        // The source View just lost a column: recenter its camera so it
         // doesn't stay scrolled past the new (shorter) ribbon.
-        scroll_to_focused(state, cfg, mi, src_ws);
-        // The moved window may have owned the source workspace's maximize
+        scroll_to_focused(state, cfg, mi, src_ws_i);
+        // The moved window may have owned the source View's maximize
         // overlay; clear the now-dangling `presented_maximize` (it must name a
-        // maximized client on the active workspace).
-        if state.monitors[mi].workspaces[src_ws].presented_maximize == Some(win) {
-            state.monitors[mi].workspaces[src_ws].presented_maximize = None;
+        // maximized client on the active View).
+        if state.monitors[mi].workspaces[src_ws_i].presented_maximize == Some(win) {
+            state.monitors[mi].workspaces[src_ws_i].presented_maximize = None;
         }
         // Resolve the post-move focus the same way the `FocusWindow` effect will.
         // `sync_presented_maximize` reads `mon.focused`, so it must be pointed at
@@ -1512,7 +1774,7 @@ impl Command for GrowColumn {
         if mi >= state.monitors.len() {
             return CommandReport::new(cmds);
         }
-        let ws_i = state.monitors[mi].active_ws;
+        let ws_i = state.monitors[mi].active_index();
         let workarea_w = state.monitors[mi].workarea.w;
         let wa = state.monitors[mi].workarea;
         let fs = fs_of(state, mi, ws_i);
@@ -1572,16 +1834,21 @@ impl Command for NewColumn {
         if mi >= state.monitors.len() {
             return CommandReport::new(cmds);
         }
-        let ws_i = state.monitors[mi].active_ws;
+        let ws_i = state.monitors[mi].active_index();
         let win = match state.monitors[mi].focused {
             Some(w) => w,
             None => return CommandReport::new(cmds),
         };
-        // The focused window may live on a workspace other than `active_ws`
+        // The focused window may live on a View other than the active one
         // (left pointed there by `ViewWorkspace`/`MoveToWorkspace`), so operate
-        // on its own workspace — otherwise we would splice it into the wrong
-        // tree while it is still tiled on its own (cross-workspace duplication).
-        let ws_i = state.clients.get(&win).map_or(ws_i, |c| c.workspace);
+        // on its own View — otherwise we would splice it into the wrong
+        // tree while it is still tiled on its own (cross-View duplication).
+        let ws_i = state
+            .clients
+            .get(&win)
+            .and_then(|c| state.monitors.get(c.monitor))
+            .and_then(|m| m.view_index(state.clients[&win].workspace))
+            .unwrap_or(ws_i);
         // Same for the monitor: the focus slot lives on the monitor the user is
         // looking at and can name a window that is placed on another one. Splicing
         // that window into this monitor's tree would reference it from two
@@ -1662,7 +1929,7 @@ impl Command for CollapseColumn {
         if mi >= state.monitors.len() {
             return CommandReport::new(cmds);
         }
-        let ws_i = state.monitors[mi].active_ws;
+        let ws_i = state.monitors[mi].active_index();
         let ci = state.monitors[mi].workspaces[ws_i].focus.column_idx;
         let n_cols = state.monitors[mi].workspaces[ws_i].columns.len();
         if n_cols < 2 || ci == 0 || ci >= n_cols {
@@ -1768,16 +2035,19 @@ impl Command for MoveWindowToMonitor {
             .clients
             .get(&win)
             .is_some_and(crate::types::Client::is_float);
-        let n_src = state.monitors[mi].workspaces.len();
         let n_dst = state.monitors[new_mi].workspaces.len();
-        if n_src == 0 || n_dst == 0 || src_ws >= n_src {
+        // The source View must still exist on the source monitor; its id is what
+        // the removal below is addressed by.
+        let Some(src_ws_real) = state.monitors[mi].view_index(src_ws) else {
+            return CommandReport::new(cmds);
+        };
+        if n_dst == 0 {
             return CommandReport::new(cmds);
         }
-        // The real source index drives removal on the origin monitor; only the
-        // insertion index on the destination is clamped, so a monitor with
-        // fewer workspaces lands the window on its last one.
-        let src_ws_real = src_ws;
-        let dst_ws = src_ws.min(n_dst.saturating_sub(1));
+        // The real source position drives removal on the origin monitor; only the
+        // insertion position on the destination is clamped, so a monitor with
+        // fewer Views lands the window on its last one.
+        let dst_ws = src_ws_real.min(n_dst - 1);
         // `remove_window` is a no-op if the tree didn't contain `win`
         // (stale client record): bail instead of duplicating below.
         let contained = state.monitors[mi].workspaces[src_ws_real]
@@ -1824,7 +2094,10 @@ impl Command for MoveWindowToMonitor {
         state.monitors[new_mi].focus_stack.push(win);
         if let Some(c) = state.clients.get_mut(&win) {
             c.monitor = new_mi;
-            c.workspace = dst_ws;
+            // The destination monitor has its own `ViewId` space, so the new
+            // membership is the destination View's identity — never the source
+            // View's id, which would name an unrelated View there.
+            c.workspace = state.monitors[new_mi].workspaces[dst_ws].id;
         }
         // Refresh the maximize-overlay owner on both the source (which just lost
         // the window) and destination (which just gained it) monitors so neither
@@ -1911,7 +2184,7 @@ impl Command for ToggleOverview {
         if mi >= state.monitors.len() {
             return CommandReport::new(cmds);
         }
-        let ws_i = state.monitors[mi].active_ws;
+        let ws_i = state.monitors[mi].active_index();
         let layout = state.monitors[mi].workspaces[ws_i].layout;
         let wa = state.monitors[mi].workarea;
         let fs = fs_of(state, mi, ws_i);
@@ -1957,7 +2230,7 @@ impl Command for OverviewNav {
         if mi >= state.monitors.len() {
             return CommandReport::new(cmds);
         }
-        let ws_i = state.monitors[mi].active_ws;
+        let ws_i = state.monitors[mi].active_index();
         let layout = state.monitors[mi].workspaces[ws_i].layout;
         let wa = state.monitors[mi].workarea;
         let fs = fs_of(state, mi, ws_i);
@@ -2019,7 +2292,7 @@ impl Command for OverviewEnter {
         if mi >= state.monitors.len() {
             return CommandReport::new(cmds);
         }
-        let ws_i = state.monitors[mi].active_ws;
+        let ws_i = state.monitors[mi].active_index();
         let layout = state.monitors[mi].workspaces[ws_i].layout;
         let wa = state.monitors[mi].workarea;
         let fs = fs_of(state, mi, ws_i);

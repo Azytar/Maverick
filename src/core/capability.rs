@@ -70,7 +70,7 @@ impl<'a> Query<'a> {
         self.state
             .monitors
             .get(self.selected_monitor())
-            .map_or(0, |m| m.active_ws)
+            .map_or(0, |m| m.active_index())
     }
 
     /// Number of workspaces on the selected monitor.
@@ -86,7 +86,7 @@ impl<'a> Query<'a> {
         self.state
             .monitors
             .get(self.selected_monitor())
-            .and_then(|m| m.workspaces.get(m.active_ws))
+            .and_then(|m| m.workspaces.get(m.active_index()))
             .map_or(LayoutKind::Column, |w| w.layout)
     }
 
@@ -106,7 +106,7 @@ impl<'a> Query<'a> {
             return Vec::new();
         };
         let mut out = Vec::new();
-        if let Some(w) = m.workspaces.get(m.active_ws) {
+        if let Some(w) = m.workspaces.get(m.active_index()) {
             for col in &w.columns {
                 out.extend(col.windows.iter().copied());
             }
@@ -125,7 +125,16 @@ impl<'a> Query<'a> {
             instance: c.instance.clone(),
             floating: c.is_float(),
             fullscreen: c.is_fullscreen(),
-            workspace: c.workspace,
+            // Membership is stored by `ViewId`; the read API reports the View's
+            // carousel *position*, because that is what every consumer (bars,
+            // `maverickctl`, keybindings) means by "which desktop". A window whose
+            // View no longer exists reports 0 rather than a stale identity.
+            workspace: self
+                .state
+                .monitors
+                .get(c.monitor)
+                .and_then(|m| m.view_index(c.workspace))
+                .unwrap_or(0),
             monitor: c.monitor,
         })
     }

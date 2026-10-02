@@ -66,6 +66,14 @@ pub enum Effect {
     SetCurrentDesktop(usize),
     /// Set _`NET_WM_DESKTOP` on a window.
     SetWindowDesktop { win: WindowId, ws: usize },
+    /// Republish `_NET_NUMBER_OF_DESKTOPS` / `_NET_DESKTOP_NAMES` after the View
+    /// count changed.
+    ///
+    /// A *semantic* effect on purpose: the backend owns how those two root
+    /// properties are written and what it does about the names when the live count
+    /// no longer matches the configured `tag_names`. The core only knows that the
+    /// desktop count it just changed is now stale for EWMH consumers.
+    RefreshDesktops,
     /// Launch an external process.
     Spawn(Vec<String>),
     /// Terminate the WM cleanly.

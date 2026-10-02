@@ -60,6 +60,11 @@ pub static ACTIONS: &[(&str, ArgKind)] = &[
     ("new_column", ArgKind::None),
     ("collapse_column", ArgKind::None),
     ("view", ArgKind::Ws),
+    ("view_next", ArgKind::None),
+    ("view_prev", ArgKind::None),
+    ("view_return", ArgKind::None),
+    ("view_create", ArgKind::None),
+    ("view_remove", ArgKind::Ws),
     ("move_to_ws", ArgKind::Ws),
     ("focus_mon", ArgKind::Dir),
     ("move_mon", ArgKind::Dir),
@@ -94,6 +99,11 @@ pub fn name(a: &Action) -> &'static str {
         Action::NewColumn => "new_column",
         Action::CollapseColumn => "collapse_column",
         Action::View(_) => "view",
+        Action::ViewNext => "view_next",
+        Action::ViewPrev => "view_prev",
+        Action::ViewReturn => "view_return",
+        Action::ViewCreate => "view_create",
+        Action::ViewRemove(_) => "view_remove",
         Action::MoveToWs(_) => "move_to_ws",
         Action::FocusMon(_) => "focus_mon",
         Action::MoveMon(_) => "move_mon",
@@ -298,6 +308,14 @@ pub fn parse(input: &str) -> Option<Action> {
         "new_column" => none_if_arg(has_arg, Action::NewColumn),
         "collapse_column" => none_if_arg(has_arg, Action::CollapseColumn),
         "view" => has_arg.then(|| ws_from(arg)).flatten().map(Action::View),
+        "view_next" => none_if_arg(has_arg, Action::ViewNext),
+        "view_prev" => none_if_arg(has_arg, Action::ViewPrev),
+        "view_return" => none_if_arg(has_arg, Action::ViewReturn),
+        "view_create" => none_if_arg(has_arg, Action::ViewCreate),
+        "view_remove" => has_arg
+            .then(|| ws_from(arg))
+            .flatten()
+            .map(Action::ViewRemove),
         "move_to_ws" => has_arg
             .then(|| ws_from(arg))
             .flatten()

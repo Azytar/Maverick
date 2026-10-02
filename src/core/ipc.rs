@@ -43,7 +43,7 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
         // learned from the window manager that measured it.
         write!(s, "\"screen\":[{},{}],", mon.screen.w, mon.screen.h).unwrap();
         write!(s, "\"workarea\":[{},{}],", mon.workarea.w, mon.workarea.h).unwrap();
-        write!(s, "\"active_ws\":{},", mon.active_ws).unwrap();
+        write!(s, "\"active_ws\":{},", mon.active_index()).unwrap();
 
         match mon.focused {
             Some(w) => {
@@ -79,7 +79,7 @@ pub fn state_json(state: &State, cfg: &Cfg) -> String {
             s.push('{');
             write!(s, "\"index\":{wi},").unwrap();
             write!(s, "\"name\":\"{}\",", maverick_sys::json::json_escape(name)).unwrap();
-            write!(s, "\"active\":{},", wi == mon.active_ws).unwrap();
+            write!(s, "\"active\":{},", wi == mon.active_index()).unwrap();
             write!(s, "\"occupied\":{},", !ws.is_empty()).unwrap();
             write!(s, "\"windows\":{n_wins},").unwrap();
             write!(s, "\"layout\":\"{}\"", layout_name(ws.layout)).unwrap();
@@ -166,7 +166,7 @@ pub fn inspect_json(state: &State, cfg: &Cfg) -> String {
             mon.screen.h,
             mon.workarea.w,
             mon.workarea.h,
-            mon.active_ws,
+            mon.active_index(),
             mon.focused.map_or("null".to_string(), |w| w.to_string()),
         )
         .unwrap();
@@ -192,7 +192,7 @@ fn workspaces_json(state: &State, cfg: &Cfg) -> String {
         }
         s.push('{');
         write!(s, "\"index\":{mi},").unwrap();
-        write!(s, "\"active_ws\":{},", mon.active_ws).unwrap();
+        write!(s, "\"active_ws\":{},", mon.active_index()).unwrap();
         s.push_str("\"workspaces\":[");
         for (wi, ws) in mon.workspaces.iter().enumerate() {
             if wi > 0 {
@@ -202,7 +202,7 @@ fn workspaces_json(state: &State, cfg: &Cfg) -> String {
             s.push('{');
             write!(s, "\"index\":{wi},").unwrap();
             write!(s, "\"name\":\"{}\",", maverick_sys::json::json_escape(name)).unwrap();
-            write!(s, "\"active\":{},", wi == mon.active_ws).unwrap();
+            write!(s, "\"active\":{},", wi == mon.active_index()).unwrap();
             write!(s, "\"occupied\":{},", !ws.is_empty()).unwrap();
             write!(s, "\"layout\":\"{}\",", layout_name(ws.layout)).unwrap();
             s.push_str("\"windows\":[");
@@ -324,7 +324,7 @@ fn tree_json(state: &State) -> String {
         }
         s.push('{');
         write!(s, "\"index\":{mi},").unwrap();
-        write!(s, "\"active_ws\":{},", mon.active_ws).unwrap();
+        write!(s, "\"active_ws\":{},", mon.active_index()).unwrap();
         s.push_str("\"workspaces\":[");
         for (wi, ws) in mon.workspaces.iter().enumerate() {
             if wi > 0 {
@@ -463,9 +463,10 @@ mod tests {
             9,
         ));
         let mi = 0;
-        let ws_i = state.monitors[mi].active_ws;
+        let ws_i = state.monitors[mi].active_index();
+        let view = state.monitors[mi].workspaces[ws_i].id;
         for (win, float) in [(1u32, false), (2, false), (3, true)] {
-            state.add_client(Client::new(win, mi, ws_i));
+            state.add_client(Client::new(win, mi, view));
             if float {
                 state.monitors[mi].workspaces[ws_i].floats.push(win);
                 state
