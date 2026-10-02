@@ -1586,11 +1586,18 @@ mod tests {
 
     /// Removing a session directory must not be steerable: the path is built
     /// from a validated name, and a symlink in its place is refused rather than
-    /// followed. The planted link is removed again at the end, because the path
-    /// is the real runtime directory and a leftover one would break every
-    /// later run of this test.
+    /// followed. The planted link is removed again at the end, because a
+    /// leftover one would break every later run of this test.
+    ///
+    /// The path this plants into is the runtime directory, so the test has to
+    /// select the test-owned root before it names one — otherwise it would be
+    /// creating and removing a symlink inside the user's own Maverick runtime
+    /// directory. The runtime directory itself is created here rather than
+    /// assumed, so the test does not depend on some other test having run first.
     #[test]
     fn removal_refuses_a_symlink_where_the_directory_should_be() {
+        crate::test_support::runtime_root();
+        identity::ensure_runtime_dir().expect("runtime dir");
         let dir = tempfile::tempdir().expect("tempdir");
         // Unique per process: this test writes into the shared runtime dir, so
         // two concurrent runs must not collide on the same name.
