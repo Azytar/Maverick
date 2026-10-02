@@ -534,6 +534,102 @@ fn the_usage_page_documents_the_option_scopes() {
     );
 }
 
+/// Every help document is a complete terminal document.
+///
+/// This asserts the *bytes*, from the built binary, rather than a reconstructed
+/// page: the properties are about what a terminal receives, so a caller-visible
+/// defect has to be observable at the process boundary. Three things hold for
+/// every page, on either stream.
+///
+/// 1. It ends with exactly one newline. The top-level page's text is a `format!`
+///    of a literal with no terminator, so the newline belongs to the emitting
+///    macro — and it was `print!` there while the three group pages already used
+///    `println!`. Without it the last line ran into the shell prompt, and
+///    `maverickctl --help >> file` left a partial final line.
+/// 2. It does not end with a blank line. A terminator, not a paragraph break:
+///    the extra newline would be a line the page never wrote.
+/// 3. Its first line is the page's own header. A bare program name on a line of
+///    its own is the one shape that reads as a stray echo, so it is pinned
+///    here rather than left to a reader to notice.
+///
+/// The stderr arm is the same page for a different reason — a usage error — and
+/// goes through the same emitting site, so it is held to the same contract.
+#[test]
+fn every_help_document_is_a_complete_terminal_document() {
+    // The top-level page, every documented spelling of it, and each group page.
+    // `camera`/`resize`/`layout`/`view` are dispatched as layout verbs but are
+    // documented on the WINDOWS page, so they belong to the same set.
+    let pages: [(&[&str], i32); 10] = [
+        (&["--help"], 0),
+        (&["-h"], 0),
+        (&["help"], 0),
+        (&["h"], 0),
+        (&["session", "--help"], 0),
+        (&["sessions", "--help"], 0),
+        (&["window", "--help"], 0),
+        (&["process", "--help"], 0),
+        (&["view", "--help"], 0),
+        (&["camera", "--help"], 0),
+    ];
+    for (args, want) in pages {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_maverickctl"))
+            .args(args)
+            .output()
+            .expect("run maverickctl");
+        let page = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(want),
+            "`maverickctl {args:?}` must exit {want}: {page}"
+        );
+        assert!(
+            page.ends_with('\n'),
+            "`maverickctl {args:?}` must end with a newline, so the next thing \
+             printed starts on its own line: {page:?}"
+        );
+        assert!(
+            !page.ends_with("\n\n"),
+            "`maverickctl {args:?}` must not end with a blank line: {page:?}"
+        );
+        let first = page.lines().next().unwrap_or_default();
+        assert!(
+            first.starts_with("maverickctl "),
+            "`maverickctl {args:?}` must open with its own header, not a bare \
+             program name: {first:?}"
+        );
+        assert!(
+            !page.lines().any(|l| l == "maverickctl"),
+            "`maverickctl {args:?}` must not repeat the program name on a line of \
+             its own: {page:?}"
+        );
+    }
+
+    // No arguments is the same page on stderr, because a usage error is a
+    // diagnostic: asserting the stream and the terminator together is what keeps
+    // the two paths from drifting apart again.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_maverickctl"))
+        .output()
+        .expect("run maverickctl");
+    let page = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "no arguments is a usage error: {page}"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "a usage error must not write to stdout: {page}"
+    );
+    assert!(
+        page.ends_with('\n') && !page.ends_with("\n\n"),
+        "the stderr usage page must be newline-terminated exactly once: {page:?}"
+    );
+    assert!(
+        page.starts_with("maverickctl — control"),
+        "the stderr usage page must open with its own header: {page:?}"
+    );
+}
+
 /// A selector that matches nothing has to say which selector missed.
 ///
 /// `--session` and `--name` address the same object by different keys, and both

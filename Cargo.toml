@@ -14,7 +14,7 @@ tempfile = "3"
 
 [package]
 name = "maverick"
-version = "1.1.0"
+version = "1.1.1-dev"
 edition = "2021"
 rust-version = "1.82"
 authors = ["azytar"]

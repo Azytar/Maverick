@@ -566,6 +566,12 @@ pub fn session_target(c: &Ctl) -> Result<String, String> {
 /// commands are, but a usage error is a diagnostic: on stdout it would be
 /// silently swallowed by `maverickctl 2>/dev/null` and would flood the terminal
 /// of anything that only meant to discard a command's data.
+///
+/// Every help document this tool emits is newline-terminated, on either
+/// stream. The `page` literal carries no trailing newline of its own, so the
+/// terminator belongs to the emitting macro: `print!` left the last line glued
+/// to whatever the shell printed next, and this page is the one `print_usage`
+/// does not route through `println!`.
 fn usage(tool: &str, to_stderr: bool) {
     let page = format!(
         "\
@@ -641,9 +647,9 @@ INSTANCE SELECTION:
     resolves, and does not look for a session named `5`."
     );
     if to_stderr {
-        eprint!("{page}");
+        eprintln!("{page}");
     } else {
-        print!("{page}");
+        println!("{page}");
     }
 }
 
