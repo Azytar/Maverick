@@ -315,4 +315,79 @@ mod tests {
         server.shutdown();
         assert!(!identity::sock_path(name).exists());
     }
+
+    /// A peer that accepts the connection and then says nothing must not be able
+    /// to hold the client forever.
+    ///
+    /// `send_command` bounds its own read, so the wait ends there rather than in
+    /// the peer. That bound is what keeps every caller finite: discovery pings
+    /// every instance it finds, so a peer that never answers would otherwise put
+    /// an unbounded wait in front of an unrelated lookup.
+    ///
+    /// The peer here never replies and never closes. It holds the connection
+    /// open until the test releases it, so the only thing that can end the wait
+    /// is the client's own timeout — EOF is deliberately not available as an
+    /// explanation, which is what separates this from a peer that answers with
+    /// nothing and hangs up.
+    #[test]
+    fn a_peer_that_never_answers_is_bounded_by_the_client_timeout() {
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let name = "testsilent";
+        let path = identity::sock_path(name);
+        // Same directory setup `ControlServer::spawn` performs: private (0700)
+        // so this fixture does not leave a world-readable session directory in
+        // the real runtime dir.
+        let dir = identity::try_session_dir(name).expect("valid fixture name");
+        std::fs::create_dir_all(&dir).expect("session dir");
+        identity::set_private_dir(&dir).expect("private session dir");
+        let _ = std::fs::remove_file(&path);
+
+        let listener = UnixListener::bind(&path).expect("bind a socket to answer");
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let accepted = std::sync::Arc::new(AtomicUsize::new(0));
+        let accepted_c = std::sync::Arc::clone(&accepted);
+        let peer = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("the client connects");
+            accepted_c.fetch_add(1, Ordering::SeqCst);
+            let mut request = String::new();
+            let _ = BufReader::new(&stream).read_line(&mut request);
+            // Parked until the test has watched the client give up. The reply is
+            // never written and the connection is never closed while the client
+            // is waiting, so the client cannot be released by the peer.
+            let _ = release_rx.recv();
+            drop(stream);
+        });
+
+        // The command runs off-thread so that losing the timeout fails with a
+        // diagnosis instead of hanging the test binary forever.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let target = name.to_string();
+        let caller = std::thread::spawn(move || {
+            let _ = done_tx.send(send_command(&target, PING_CMD));
+        });
+        let reply = done_rx
+            .recv_timeout(Duration::from_secs(20))
+            .unwrap_or_else(|_| {
+                panic!("send_command gave up on nothing: a peer that never replies must be bounded")
+            });
+        caller.join().expect("the client thread returns");
+
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "the peer must have taken the connection, or the failure below would be the connect"
+        );
+        let err = reply.expect_err("a peer that answers nothing is an error, not an empty reply");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::WouldBlock,
+            "only the read timeout can end this wait; a peer that hung up would be UnexpectedEof"
+        );
+
+        release_tx.send(()).expect("release the peer");
+        peer.join().expect("the peer thread returns");
+        let _ = std::fs::remove_file(&path);
+    }
 }
