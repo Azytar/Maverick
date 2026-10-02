@@ -590,3 +590,90 @@ fn a_selector_that_matches_nothing_names_the_selector_that_missed() {
         );
     }
 }
+
+/// A record whose socket is gone is still a target, and the tool still says so.
+///
+/// Liveness is a ping, so `list_instances` hands every caller an `alive` flag and
+/// leaves the judgement to them: the context arm of `resolve_target` and
+/// `quit_all` filter on it, and the session chain checks it itself and reports
+/// `NotFound`. The explicit `--name`/`--session` arms do not, because across an
+/// `exec` the record deliberately outlives its socket — `restart_lifecycle`
+/// pins that as "a handoff leaves a resolvable target, not an absent one" — so
+/// a session part-way through a restart is not a session that is gone. The
+/// failure therefore belongs to the connection layer, and this asserts it landed
+/// there.
+///
+/// Gating resolution on `alive` would be wrong for a second, sharper reason:
+/// since liveness *is* a ping, a peer that is bound and accepting but does not
+/// answer `ping` also reads as stale, and its target would be reported as not
+/// existing at all. `a_reachable_peer_that_answers_nothing_is_a_failed_command`
+/// fails on exactly that mutation.
+#[test]
+fn a_stale_record_is_still_a_resolvable_target() {
+    let dir = runtime_dir();
+    let sid = "staleremembered";
+    // A record with no socket behind it: published, resolvable, not alive.
+    // `alive: true` is what the window manager wrote, and discovery overwrites
+    // it — which is the point, so the fixture cannot pass by being declared
+    // stale rather than being measured stale.
+    maverick_sys::identity::write_meta(&InstanceInfo {
+        name: sid.to_string(),
+        session_id: sid.to_string(),
+        pid: std::process::id(),
+        display: String::new(),
+        tty_nr: 0,
+        x_server_identity: String::new(),
+        start_time: 0,
+        exe: String::new(),
+        started_at: 0,
+        alive: true,
+    })
+    .expect("write a record with no socket");
+
+    // Each precondition is checked, so a fixture that quietly became "no record
+    // at all" or "still listening" cannot satisfy this.
+    assert!(
+        maverick_sys::identity::read_meta(sid).is_some(),
+        "the record must exist: a missing target is a different case"
+    );
+    assert!(
+        !maverick_sys::identity::sock_path(sid).exists(),
+        "the socket must be gone: a listening peer is a different case"
+    );
+    let found = maverickctl::discover::find_by_name(sid).expect("a record is still a target");
+    assert!(
+        !found.alive,
+        "the fixture must measure as stale, or this asserts nothing"
+    );
+
+    for flag in ["--name", "--session"] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_maverickctl"))
+            .env("XDG_RUNTIME_DIR", &dir)
+            .args([flag, sid, "query", "state"])
+            .output()
+            .expect("run maverickctl");
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{flag} must fail against a target that is not answering"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "",
+            "{flag} resolves before it reports: stdout must stay empty"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr).trim(),
+            "maverickctl: query failed: No such file or directory (os error 2)",
+            "{flag} resolved the record, so the failure is the connection, not the target"
+        );
+    }
+
+    // This fixture writes a record directly rather than through a handle, so it
+    // withdraws it directly too: `cleanup_meta` is scoped to this session and
+    // unlinks the record and nothing else, and leaving it published would make
+    // this the one test in the binary that accumulates a file per run — and an
+    // instance nothing owns, which is the thing the ownership work has been
+    // removing. There is no socket to unlink; the record is all this published.
+    maverick_sys::identity::cleanup_meta(sid);
+}
