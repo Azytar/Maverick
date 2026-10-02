@@ -364,11 +364,11 @@ error de permisos en lugar de escalarse, así que una instalación en todo el
 sistema necesita que tú dispongas de acceso de escritura a `/usr/local`.
 
 Cada paso falla ruidosamente. El instalador ejecuta los binarios que acaba de
-instalar — `maverick --version`, `maverickctl --help`, `maverickctl session
---help` — y un conjunto parcial, obsoleto o roto se informa como fallo en lugar
-de como instalación correcta. Es seguro ejecutarlo repetidamente: una segunda
-pasada converge, corrige permisos hostiles al umask y no duplica el bloque de
-`PATH`.
+instalar — `maverick --version`, `maverickctl --help` y
+`maverickctl session --help` — y un conjunto parcial, obsoleto o roto se informa
+como fallo en lugar de como instalación correcta. Es seguro ejecutarlo
+repetidamente: una segunda pasada converge, corrige permisos hostiles al umask y
+no duplica el bloque de `PATH`.
 
 `CARGO_TARGET_DIR` se respeta tal cual. Cuando no está definido, la compilación
 ocurre en un directorio de caché bajo `$XDG_CACHE_HOME` y el checkout nunca se
@@ -591,12 +591,6 @@ integración manuales. **No** están todos aislados con el mismo rigor —alguno
 helpers antiguos en `tests/common.sh` matan procesos por nombre o usan displays
 fijos—, así que lee un script antes de ejecutarlo, y ejecuta la suite legacy
 sólo en una sesión gráfica desechable.
-
-[`showcase/`](showcase/README.md) es un harness de presentación sólo para
-desarrollo. Ejecuta Maverick dentro de un display Xephyr privado con directorios
-XDG privados y captura pantallazos de la ventana raíz en `docs/screenshots/`. No
-forma parte del gestor de ventanas, no hace falta para compilar ni instalar nada,
-y nada más en el repositorio depende de él.
 
 CI (`.github/workflows/ci.yml`) ejecuta tres trabajos: tests del workspace con
 Clippy estricto, las comprobaciones del instalador, y un test de humo de apilado

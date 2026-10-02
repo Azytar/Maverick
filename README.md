@@ -567,12 +567,6 @@ helpers in `tests/common.sh` kill processes by name or use fixed displays — so
 read a script before running it, and run the legacy suite only in a disposable
 graphical session.
 
-[`showcase/`](showcase/README.md) is a development-only presentation harness. It
-runs Maverick inside a private Xephyr display with private XDG directories and
-captures root-window screenshots to `docs/screenshots/`. It is not part of the
-window manager, is not needed to build or install anything, and nothing else in
-the repository depends on it.
-
 CI (`.github/workflows/ci.yml`) runs three jobs: workspace tests with strict
 Clippy, the installer checks, and an Xvfb stacking smoke test.
 
