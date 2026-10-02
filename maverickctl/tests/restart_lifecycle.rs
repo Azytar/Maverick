@@ -54,6 +54,7 @@ enum Behaviour {
 }
 
 struct Instance {
+    sid: String,
     path: PathBuf,
     stop: Arc<AtomicBool>,
     mode: Arc<std::sync::Mutex<Behaviour>>,
@@ -121,6 +122,7 @@ impl Instance {
             }
         });
         Self {
+            sid: sid.to_string(),
             path,
             stop,
             mode,
@@ -137,6 +139,14 @@ impl Instance {
 
     /// Model the teardown half of the handoff: the socket stops answering and
     /// its path goes away, as `identity::cleanup_meta` leaves it across `exec`.
+    ///
+    /// The record deliberately survives. Across an `exec` the session id has to
+    /// stay addressable while the replacement starts, and the point of the
+    /// restart tests is that state: an addressable session with nothing
+    /// listening is a different failure from a session that never existed, and
+    /// the tool reports the first one (`restart failed: No such file or
+    /// directory`) and not the second. Taking the record here as well would make
+    /// every restart test pass for the wrong reason.
     fn handoff_out(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
@@ -149,6 +159,13 @@ impl Instance {
 impl Drop for Instance {
     fn drop(&mut self) {
         self.handoff_out();
+        // Nothing is waiting on this session any more, so the record goes too.
+        // Leaving it is what made this binary the one that did not empty its
+        // runtime directory: six records per run, accumulating under `$TMPDIR`,
+        // each still selectable by name — `find_by_name` matches a stale record
+        // as readily as a live one, and the tool then fails at the connect with
+        // an error about a session nothing is serving.
+        maverick_sys::identity::cleanup_meta(&self.sid);
     }
 }
 
@@ -262,4 +279,80 @@ fn an_announced_departure_that_never_returns_is_not_a_finished_restart() {
         std::thread::sleep(std::time::Duration::from_secs(3));
     });
     assert_eq!(restart(sid), ExitCode::FAILURE);
+}
+
+/// A handoff is not a shutdown, and the record is the whole difference.
+///
+/// Across an `exec` the session id has to stay addressable while the
+/// replacement starts, so an addressable session with nothing listening has to
+/// remain a state the tool can resolve and then fail on. Tearing the record
+/// down with the socket would collapse that into "no such session", and the
+/// restart assertions above only compare exit codes — both failures are
+/// `FAILURE` — so the whole file would keep passing while testing something
+/// else. This pins the half of the contract that keeps them honest.
+#[test]
+fn a_handoff_leaves_the_session_addressable() {
+    isolate_runtime_dir();
+    let sid = "handoffsid";
+    let mut first = Instance::start(sid, Behaviour::Serving);
+    first.handoff_out();
+    assert!(
+        !maverick_sys::identity::sock_path(sid).exists(),
+        "socket must go"
+    );
+    assert!(
+        maverick_sys::identity::read_meta(sid).is_some(),
+        "record must survive the handoff: across an exec the session stays addressable"
+    );
+    assert!(
+        maverickctl::discover::find_by_name(sid).is_some(),
+        "a handoff leaves a resolvable target, not an absent one"
+    );
+}
+
+/// The other half: once nothing is waiting on the session, it stops being
+/// published at all.
+///
+/// Without this the record outlives every owner and accumulates under
+/// `$TMPDIR` a file per fixture per run, and a stale one is still selectable by
+/// name — `find_by_name` does not filter on liveness — so the tool resolves a
+/// session nobody is serving and fails at the connect instead of reporting that
+/// no such session exists.
+#[test]
+fn dropping_the_last_owner_unpublishes_the_session() {
+    isolate_runtime_dir();
+    let sid = "withdrawn";
+    drop(Instance::start(sid, Behaviour::Serving));
+    assert!(
+        !maverick_sys::identity::sock_path(sid).exists(),
+        "socket must go"
+    );
+    assert!(
+        maverick_sys::identity::read_meta(sid).is_none(),
+        "record must not outlive its owner"
+    );
+    assert!(
+        maverickctl::discover::find_by_name(sid).is_none(),
+        "an unowned session must not still be selectable"
+    );
+}
+
+/// Withdrawal is per session, not per owner: retiring one fixture must leave
+/// its neighbour serving.
+#[test]
+fn retiring_one_instance_leaves_another_serving() {
+    isolate_runtime_dir();
+    let retired = Instance::start("retired", Behaviour::Serving);
+    let kept = Instance::start("kept", Behaviour::Serving);
+    drop(retired);
+    assert!(maverick_sys::identity::read_meta("retired").is_none());
+    assert!(maverick_sys::identity::read_meta("kept").is_some());
+    assert!(maverick_sys::identity::sock_path("kept").exists());
+    assert!(
+        maverickctl::client::ping("kept").is_ok(),
+        "the surviving fixture is still answering"
+    );
+    assert!(maverickctl::discover::find_by_name("kept").is_some());
+    drop(kept);
+    assert!(maverick_sys::identity::read_meta("kept").is_none());
 }
