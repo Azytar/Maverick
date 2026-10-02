@@ -11,7 +11,10 @@
 //! assertion depend on whether a fixture happened to be up.
 
 use maverickctl::ctl::main_with_args;
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 mod instance;
 mod runtime_dir;
@@ -20,8 +23,8 @@ use instance::{Instance, Published};
 
 /// A private runtime directory, so nothing here is visible to another test
 /// binary's fixtures and no live instance can be discovered.
-fn isolate_runtime_dir() {
-    runtime_dir::isolate("maverick-ctl-replies");
+fn isolate_runtime_dir() -> PathBuf {
+    runtime_dir::isolate("maverick-ctl-replies")
 }
 
 /// A refusal that arrives as a successful transport is still a failure.
@@ -93,14 +96,74 @@ fn a_json_reply_is_a_successful_command() {
 ///
 /// What this fixture actually exercises is the step *before* the protocol: it
 /// publishes a socket and no record, so the tool never resolves an instance to
-/// ask. The silent-peer branch of the protocol — reachable, but answering
-/// nothing — is not covered here, and `a_refused_socket_is_a_failed_command`
-/// covers the mirror case of a record with no socket.
+/// ask, and it fails in silence — the `--name` arm of resolution prints nothing
+/// when the name matches no instance. That silence is what makes this assertion
+/// too coarse to stand alone: an unreachable peer and a reachable one that says
+/// nothing are both `FAILURE`. The reachable half is
+/// `a_reachable_peer_that_answers_nothing_is_a_failed_command`, and
+/// `a_refused_socket_is_a_failed_command` covers the mirror case of a record
+/// with no socket.
 #[test]
 fn a_silent_peer_is_a_failed_command() {
     isolate_runtime_dir();
     let _server = serve_silent("silentpeer");
     assert_eq!(query("silentpeer"), ExitCode::FAILURE);
+}
+
+/// A peer that is found, connected to, and answers nothing is a different
+/// failure from a session that was never found.
+///
+/// The other silent fixture here publishes no record, so it stops the tool
+/// before a request exists. This one publishes both, so the tool resolves the
+/// session, connects, the peer reads the request and writes nothing back, and
+/// the client's read comes up empty.
+///
+/// That last step is the whole point of the assertion. `send_command` raises
+/// `UnexpectedEof` with "no reply from the instance" in exactly one place —
+/// after `UnixStream::connect` has already succeeded and `read_line` has
+/// returned zero bytes — so the message is unreachable unless a session was
+/// found *and* a peer received the request and stayed mute. Asserting the exit
+/// code would not: an unresolved session exits non-zero for the same reason, and
+/// with no output at all.
+#[test]
+fn a_reachable_peer_that_answers_nothing_is_a_failed_command() {
+    let dir = isolate_runtime_dir();
+    let sid = "reachablemute";
+    // Counted so that "the peer was reached" is observed rather than inferred
+    // from the message it produced. The worker drops its stream once the reply
+    // closure has run, and the client's zero-byte read can only follow that, so
+    // by the time the command has exited the count is already final — no
+    // sleeping and no polling to establish that.
+    let reached = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&reached);
+    let _server = Instance::serve(sid, Published::Instance, Some(64), move |request| {
+        if !request.trim().is_empty() {
+            counted.fetch_add(1, Ordering::Relaxed);
+        }
+        None
+    });
+    assert!(
+        maverick_sys::identity::read_meta(sid).is_some(),
+        "a peer that cannot be resolved would make this the other test"
+    );
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_maverickctl"))
+        .env("XDG_RUNTIME_DIR", &dir)
+        .args(["--name", sid, "query", "state"])
+        .output()
+        .expect("run maverickctl");
+
+    assert!(!out.status.success(), "a mute peer must not exit 0");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no reply from the instance"),
+        "the tool must report that it reached a peer and got nothing, which is \
+         what an unresolved session cannot produce: {stderr}"
+    );
+    assert!(
+        reached.load(Ordering::Relaxed) > 0,
+        "the peer must actually have been handed a request"
+    );
 }
 
 #[test]
