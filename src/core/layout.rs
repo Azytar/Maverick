@@ -182,7 +182,7 @@ fn effective_gaps(ws: &Workspace, cfg: &Cfg) -> (i32, i32) {
     )
 }
 
-/// Project `mon_idx`'s active workspace into `out`. Idempotent by contract: the
+/// Project `mon_idx`'s **active View** into `out`. Idempotent by contract: the
 /// buffer is cleared and refilled, never appended to and never reallocated, so a
 /// caller may run this once per monitor per frame over a reused buffer.
 ///
@@ -190,6 +190,23 @@ fn effective_gaps(ws: &Workspace, cfg: &Cfg) -> (i32, i32) {
 /// should have right now. There is no interpolated or "live" variant — the
 /// ribbon scrolls by rewriting the camera and re-projecting, so this is always
 /// the final geometry the WM writes to X.
+///
+/// # Contract
+///
+/// This is the Scroll (column-ribbon) layout's *only* entry point, and it
+/// consumes exactly one View: the active one, resolved through that monitor's
+/// [`Carousel`]. It therefore knows nothing about the carousel's navigation,
+/// `origin`, creation or removal, IPC, or keybindings, and it never mutates
+/// View membership — it reads `columns` and `floats` and returns geometry.
+/// Floating clients are excluded from tiled input because they live in `floats`
+/// rather than in `columns`, which is the whole reason that split exists.
+///
+/// # Invariants
+///
+/// - Only the active View's tiled clients enter the projection; a client on an
+///   inactive View is not in this View's `columns` and so cannot be placed here.
+/// - A floating client is never placed by this function — `floats` is projected
+///   from `Client::geom` elsewhere (`present_into`).
 pub fn arrange(
     state: &State,
     mon_idx: usize,
@@ -203,17 +220,19 @@ pub fn arrange(
         out.clear();
         return;
     };
-    if mon.workspaces.get(mon.active_ws).is_none() {
+    // The active View, resolved by identity through the carousel. `None` means the
+    // monitor has no View at all (hotplug), which produces no placements.
+    if mon.carousel.current().is_none() {
         out.clear();
         return;
     }
     // `out` is the WM's *shared* `desired` buffer. It must be cleared, not
     // appended to: a stale placement gets re-applied by `apply_geom` and
     // physically re-shows a window that `hide_offscreen` just moved off-screen
-    // — a fullscreen window on the previously active workspace would reappear
+    // — a fullscreen window on the previously active View would reappear
     // covering the current one.
     out.clear();
-    arrange_columns(state, mon, cfg, out, scratch);
+    arrange_columns(state, mon, mon.ws(), cfg, out, scratch);
 }
 
 // Each column sits at a fixed x position (derived from the sum of prior column
@@ -386,14 +405,25 @@ fn effective_border_w(cfg: &Cfg) -> u32 {
     cfg.border_w.min(MAX_CFG_BORDER as u32)
 }
 
+/// Project one View's tiled columns into `out`.
+///
+/// Takes the View **explicitly** rather than resolving the active one itself: the
+/// caller decides which View is being laid out (see [`arrange`]), and that keeps
+/// the layout unable to reach the navigation policy even if it wanted to. Floats
+/// are absent from `ws.columns` by construction, which is how the
+/// "floating ∉ tiled input" invariant holds structurally rather than by a filter.
+///
+/// It also takes the whole `State`, because the ribbon's geometry is a function of
+/// the clients as well as of the View: a fullscreen column's descriptor is derived
+/// from `State::clients` (see [`fs_ctx`]) rather than stored on the View.
 fn arrange_columns(
     state: &State,
     mon: &Monitor,
+    ws: &Workspace,
     cfg: &Cfg,
     out: &mut Placements,
     scratch: &mut RibbonScratch,
 ) {
-    let ws = mon.ws();
     let full_wa = mon.workarea;
     let bw = effective_border_w(cfg);
 
@@ -999,7 +1029,7 @@ pub(crate) fn fixed_size_hints(h: &SizeHints) -> bool {
 mod tests {
     use super::*;
     use crate::config::Cfg;
-    use crate::types::{Client, Column, Edge, Focus, Monitor, Rect, WinFlags};
+    use crate::types::{Client, Column, Edge, Focus, Monitor, Rect, ViewId, WinFlags};
 
     /// Build a one-monitor state whose workarea is optionally inset on the left
     /// by a dock strut, with a single fullscreen window in a sole column.
@@ -1018,7 +1048,7 @@ mod tests {
             weight: 1.0,
         });
         ws.focus = Focus { column_idx: 0 };
-        let mut c = Client::new(1, 0, 0);
+        let mut c = Client::new(1, 0, ViewId::new(0));
         c.border_w = 0;
         c.flags.set(WinFlags::FULLSCREEN);
         state.add_client(c);
@@ -1036,8 +1066,372 @@ mod tests {
         state.monitors[0].workspaces[0].camera.position = scroll;
         let mut out = Placements::new();
         let mut scratch = RibbonScratch::default();
-        arrange_columns(state, &state.monitors[0], cfg, &mut out, &mut scratch);
+        arrange_columns(
+            state,
+            &state.monitors[0],
+            state.monitors[0].ws(),
+            cfg,
+            &mut out,
+            &mut scratch,
+        );
         out
+    }
+
+    /// `place_all` runs the real entry point (`arrange`), so these tests exercise
+    /// the same path the reconciler does — including the carousel lookup — rather
+    /// than a hand-called `arrange_columns`.
+    fn place_all(state: &State, cfg: &Cfg) -> Placements {
+        let mut out = Placements::new();
+        let mut scratch = RibbonScratch::default();
+        arrange(state, 0, cfg, &mut out, &mut scratch);
+        out
+    }
+
+    /// Add a tiled client to View `pos` and return its window id.
+    fn add_tiled_at(state: &mut State, win: WindowId, pos: usize, width: f32) {
+        let view = state.monitors[0].workspaces[pos].id;
+        state.monitors[0].workspaces[pos].add_tiled(win, width);
+        let mut c = Client::new(win, 0, view);
+        c.border_w = 0;
+        state.add_client(c);
+    }
+
+    /// Add a floating client to View `pos` and return its window id.
+    ///
+    /// Placed on the float list, never in a column — which is precisely the
+    /// structural reason a float cannot reach tiled layout input.
+    fn add_float_at(state: &mut State, win: WindowId, pos: usize) {
+        let view = state.monitors[0].workspaces[pos].id;
+        state.monitors[0].workspaces[pos].floats.push(win);
+        let mut c = Client::new(win, 0, view);
+        c.border_w = 0;
+        c.flags.set(WinFlags::FLOAT);
+        c.geom = Rect::new(120, 130, 200, 140);
+        state.add_client(c);
+    }
+
+    fn active_pos(state: &State) -> usize {
+        state.monitors[0].active_index()
+    }
+
+    fn wins(placed: &[(WindowId, Rect, u32)]) -> Vec<WindowId> {
+        let mut v: Vec<WindowId> = placed.iter().map(|p| p.0).collect();
+        v.sort_unstable();
+        v
+    }
+
+    // --- Scroll consumes only the active View ------------------------------
+
+    /// Only the **active** View's tiled clients enter Scroll. A client on an
+    /// inactive View is not placed at all.
+    ///
+    /// This is the campaign's core layout contract, and it is stated as
+    /// observable geometry: an inactive View's windows get no placement, so the
+    /// reconciler cannot write them a rect.
+    #[test]
+    fn scroll_places_only_the_active_views_tiled_clients() {
+        let cfg = Cfg::default();
+        let mut state = State::new();
+        state
+            .monitors
+            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 3));
+        add_tiled_at(&mut state, 1, 0, 0.5);
+        add_tiled_at(&mut state, 2, 0, 0.5);
+        add_tiled_at(&mut state, 3, 1, 0.5);
+        add_tiled_at(&mut state, 4, 2, 0.5);
+
+        assert_eq!(active_pos(&state), 0);
+        let placed = place_all(&state, &cfg);
+        assert_eq!(
+            wins(&placed),
+            vec![1, 2],
+            "only the active View's tiled clients may be placed"
+        );
+
+        // Switch the carousel and the projection follows it — with no layout
+        // state touched in between.
+        let v1 = state.monitors[0].workspaces[1].id;
+        state.monitors[0].goto_view(v1);
+        assert_eq!(wins(&place_all(&state, &cfg)), vec![3]);
+
+        let v2 = state.monitors[0].workspaces[2].id;
+        state.monitors[0].goto_view(v2);
+        assert_eq!(wins(&place_all(&state, &cfg)), vec![4]);
+    }
+
+    /// A floating client is excluded from **tiled** layout input: the ribbon never
+    /// derives a column rect for it, its rect comes from `Client::geom`, and adding
+    /// it does not move a single tile.
+    ///
+    /// "Excluded from tiled input" is about the *tiled* computation, not about
+    /// being absent from the projection: a float on the active View still needs a
+    /// placement (its own rect) or it would be left at stale geometry. The
+    /// structural reason it cannot reach the tiling is that it lives in
+    /// `Workspace::floats`, not in `Workspace::columns`.
+    #[test]
+    fn a_floating_client_is_excluded_from_tiled_layout_input() {
+        let cfg = Cfg::default();
+        let mut state = State::new();
+        state
+            .monitors
+            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 2));
+
+        // The same tiled arrangement, once without a float and once with one.
+        add_tiled_at(&mut state, 1, 0, 0.5);
+        add_tiled_at(&mut state, 2, 0, 0.5);
+        let without = place_all(&state, &cfg);
+
+        add_float_at(&mut state, 3, 0);
+        let with = place_all(&state, &cfg);
+
+        // Not in any column — the tiled tree never saw it.
+        assert!(
+            !state.monitors[0].workspaces[0]
+                .columns
+                .iter()
+                .any(|c| c.windows.contains(&3)),
+            "a float must not be in the tiled column tree"
+        );
+        // Its rect is its own, not a slice of the ribbon.
+        let float_rect = with
+            .iter()
+            .find(|p| p.0 == 3)
+            .expect("the float is still placed from its View's float list")
+            .1;
+        assert_eq!(
+            float_rect, state.clients[&3].geom,
+            "a float's rect comes from Client::geom, never from the tiled layout"
+        );
+        // And the tiles did not move — compared on the tiled entries only, since
+        // the float's own placement is legitimately new.
+        let tiles_of = |p: &Placements| -> Vec<(WindowId, Rect, u32)> {
+            p.iter().copied().filter(|e| e.0 != 3).collect()
+        };
+        assert_eq!(
+            tiles_of(&with),
+            tiles_of(&without),
+            "a float must not change the tiled arrangement of its View"
+        );
+    }
+
+    /// A float keeps floating, and keeps its geometry, across a View change and
+    /// across a layout change.
+    #[test]
+    fn a_float_keeps_its_state_across_view_and_layout_changes() {
+        let mut state = State::new();
+        state
+            .monitors
+            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 3));
+        add_tiled_at(&mut state, 1, 0, 0.5);
+        add_float_at(&mut state, 9, 0);
+        add_float_at(&mut state, 8, 1);
+
+        let geom = state.clients[&9].geom;
+        assert!(state.clients[&9].is_float());
+
+        // Moving the float between Views is a membership change only. Driven
+        // through the public helper the backend's reload path uses. Both clients
+        // on View 0 move (the tile and the float) — that is what re-homing a View
+        // means — and what is asserted below is that neither changed *kind*.
+        let src = state.monitors[0].workspaces[0].id;
+        let dst = state.monitors[0].workspaces[1].id;
+        let mut moved = state.rehome_clients(0, src, dst);
+        moved.sort_unstable();
+        assert_eq!(moved, vec![1, 9], "View 0's clients moved to View 1");
+
+        assert!(
+            state.clients[&9].is_float(),
+            "changing View must not retile a floating client"
+        );
+        assert_eq!(state.clients[&9].geom, geom, "a float keeps its geometry");
+        assert_eq!(state.clients[&9].workspace, dst);
+        assert!(
+            state.monitors[0].workspaces[1].floats.contains(&9),
+            "the float is on the destination View's float list"
+        );
+        assert!(
+            !state.monitors[0].workspaces[1]
+                .columns
+                .iter()
+                .any(|c| c.windows.contains(&9)),
+            "a float must never appear in a column"
+        );
+
+        // Changing the layout must not touch membership or floating state.
+        for ws in &mut state.monitors[0].workspaces {
+            ws.layout = LayoutKind::Column;
+        }
+        assert!(state.clients[&9].is_float());
+        assert_eq!(state.clients[&9].workspace, dst);
+        assert!(state.clients[&8].is_float());
+        assert_eq!(
+            state.clients[&8].workspace,
+            state.monitors[0].workspaces[1].id
+        );
+        state.assert_invariants();
+    }
+
+    /// An empty View and a single-tile View both produce valid layout state.
+    #[test]
+    fn an_empty_and_a_single_client_view_both_arrange_cleanly() {
+        let cfg = Cfg::default();
+        let mut state = State::new();
+        state
+            .monitors
+            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 3));
+
+        // Empty active View: no placements, and no panic.
+        let empty = place_all(&state, &cfg);
+        assert!(
+            empty.is_empty(),
+            "an empty View must place nothing, got {empty:?}"
+        );
+
+        // Single tiled client: exactly one placement, with a real rect.
+        add_tiled_at(&mut state, 1, 0, 1.0);
+        let one = place_all(&state, &cfg);
+        assert_eq!(wins(&one), vec![1]);
+        assert!(
+            one[0].1.w > 0 && one[0].1.h > 0,
+            "a single client must get a non-degenerate rect, got {:?}",
+            one[0].1
+        );
+
+        // Multiple tiled clients: all placed, each with its own rect.
+        add_tiled_at(&mut state, 2, 0, 0.5);
+        add_tiled_at(&mut state, 3, 0, 0.5);
+        let many = place_all(&state, &cfg);
+        assert_eq!(wins(&many), vec![1, 2, 3]);
+        assert!(
+            many.iter().all(|p| p.1.w > 0 && p.1.h > 0),
+            "every placement must be a real rect: {many:?}"
+        );
+        // Distinct columns really do get distinct x.
+        let xs: Vec<i32> = many.iter().map(|p| p.1.x).collect();
+        let mut sorted = xs.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(xs.len(), sorted.len(), "columns overlap: {xs:?}");
+    }
+
+    /// Changing the layout changes geometry only — never View membership,
+    /// identity, the carousel pointers, floating state, or client identity.
+    ///
+    /// `LayoutKind` has exactly one variant today, so the transition itself is
+    /// not expressible yet; the invariant is therefore asserted at the
+    /// state/model level the campaign specifies, which is what a future Mosaic
+    /// will have to preserve.
+    #[test]
+    fn changing_layout_never_touches_logical_state() {
+        let mut state = State::new();
+        state
+            .monitors
+            .push(Monitor::new(Rect::new(0, 0, 1920, 1080), 3));
+        add_tiled_at(&mut state, 1, 0, 0.5);
+        add_tiled_at(&mut state, 2, 0, 0.5);
+        add_float_at(&mut state, 9, 0);
+        let at = state.monitors[0].workspaces[2].id;
+        state.monitors[0].goto_view(at);
+
+        // Snapshot every piece of logical state the invariant names.
+        let before = (
+            state.monitors[0].carousel.current(),
+            state.monitors[0].carousel.origin(),
+            state.monitors[0]
+                .workspaces
+                .iter()
+                .map(|w| {
+                    (
+                        w.id,
+                        w.columns
+                            .iter()
+                            .map(|c| c.windows.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            state.clients[&9].is_float(),
+            state.clients[&9].geom,
+            state.clients[&1].workspace,
+            state.clients[&9].workspace,
+        );
+
+        // Apply the layout change through the real command.
+        let mut cfg = Cfg::default();
+        crate::core::commands::Command::execute(
+            &mut crate::core::commands::SetLayout(LayoutKind::Column),
+            &mut state,
+            &mut cfg,
+        );
+
+        let after = (
+            state.monitors[0].carousel.current(),
+            state.monitors[0].carousel.origin(),
+            state.monitors[0]
+                .workspaces
+                .iter()
+                .map(|w| {
+                    (
+                        w.id,
+                        w.columns
+                            .iter()
+                            .map(|c| c.windows.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            state.clients[&9].is_float(),
+            state.clients[&9].geom,
+            state.clients[&1].workspace,
+            state.clients[&9].workspace,
+        );
+        assert_eq!(
+            before, after,
+            "changing the layout must leave membership, identity, the carousel and \
+             floating state untouched"
+        );
+        state.assert_invariants();
+    }
+
+    /// Scroll must not have learned about navigation: the layout module contains
+    /// no navigation, origin or View-lifecycle vocabulary at all.
+    ///
+    /// Asserted on the *production* portion of this file (everything above the
+    /// `mod tests` block, so the assertions below do not match themselves),
+    /// because the behavioural alternative cannot detect a navigation call that
+    /// happens to be unreachable today.
+    #[test]
+    fn the_layout_module_knows_nothing_about_navigation() {
+        let src = include_str!("layout.rs");
+        let production = src
+            .split_once("\nmod tests {")
+            .map(|(head, _)| head)
+            .expect("layout.rs has a `mod tests` block");
+        let code: String = production
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("//")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in [
+            "next_view",
+            "previous_view",
+            "return_to_origin",
+            "create_view",
+            "remove_view",
+            "goto_view",
+            "set_origin",
+            "carousel.origin",
+            "Action::View",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "the layout must not reference `{forbidden}`: it receives the View \
+                 it must arrange and computes geometry, nothing else"
+            );
+        }
     }
 
     #[test]
@@ -1091,11 +1485,11 @@ mod tests {
             });
             ws.focus = Focus { column_idx: 0 };
         }
-        let mut cf = Client::new(1, 0, 0);
+        let mut cf = Client::new(1, 0, ViewId::new(0));
         cf.flags.set(WinFlags::FULLSCREEN);
         cf.border_w = 0;
         state.add_client(cf);
-        let cn = Client::new(2, 0, 0);
+        let cn = Client::new(2, 0, ViewId::new(0));
         state.add_client(cn);
 
         // Focused on the fullscreen column: it fills the screen.
@@ -1109,7 +1503,14 @@ mod tests {
         state.monitors[0].workspaces[0].camera.position = scroll0;
         let mut out = Placements::new();
         let mut scratch = RibbonScratch::default();
-        arrange_columns(&state, &state.monitors[0], &cfg, &mut out, &mut scratch);
+        arrange_columns(
+            &state,
+            &state.monitors[0],
+            state.monitors[0].ws(),
+            &cfg,
+            &mut out,
+            &mut scratch,
+        );
         let (_, fs_rect_focused, _) = out.iter().find(|e| e.0 == 1).copied().unwrap();
         assert_eq!(
             fs_rect_focused.x, screen.x,
@@ -1131,7 +1532,14 @@ mod tests {
         state.monitors[0].workspaces[0].camera.position = scroll1;
         let mut out2 = Placements::new();
         let mut scratch = RibbonScratch::default();
-        arrange_columns(&state, &state.monitors[0], &cfg, &mut out2, &mut scratch);
+        arrange_columns(
+            &state,
+            &state.monitors[0],
+            state.monitors[0].ws(),
+            &cfg,
+            &mut out2,
+            &mut scratch,
+        );
         let (_, fs_rect_away, _) = out2.iter().find(|e| e.0 == 1).copied().unwrap();
         assert!(
             fs_rect_away.x < screen.x,
@@ -1155,18 +1563,25 @@ mod tests {
             });
             ws.focus = Focus { column_idx: 0 };
         }
-        let mut c1 = Client::new(1, 0, 0);
+        let mut c1 = Client::new(1, 0, ViewId::new(0));
         c1.flags.set(WinFlags::FULLSCREEN);
         c1.border_w = 0;
         state.add_client(c1);
-        state.add_client(Client::new(2, 0, 0));
+        state.add_client(Client::new(2, 0, ViewId::new(0)));
 
         let fs = fs_ctx(&state.clients, state.monitors[0].ws(), screen);
         let scroll = ideal_scroll(state.monitors[0].ws(), &cfg, state.monitors[0].workarea, fs);
         state.monitors[0].workspaces[0].camera.position = scroll;
         let mut out = Placements::new();
         let mut scratch = RibbonScratch::default();
-        arrange_columns(&state, &state.monitors[0], &cfg, &mut out, &mut scratch);
+        arrange_columns(
+            &state,
+            &state.monitors[0],
+            state.monitors[0].ws(),
+            &cfg,
+            &mut out,
+            &mut scratch,
+        );
 
         assert_eq!(out.len(), 1, "only the fullscreen window is placed");
         assert_eq!(out[0].0, 1, "the sibling is hidden, not placed");
@@ -1198,11 +1613,11 @@ mod tests {
             });
             ws.focus = Focus { column_idx: 0 };
         }
-        let mut c1 = Client::new(1, 0, 0);
+        let mut c1 = Client::new(1, 0, ViewId::new(0));
         c1.flags.set(WinFlags::FULLSCREEN);
         c1.border_w = 0;
         state.add_client(c1);
-        state.add_client(Client::new(2, 0, 0));
+        state.add_client(Client::new(2, 0, ViewId::new(0)));
 
         let fs = fs_ctx(&state.clients, state.monitors[0].ws(), screen);
         let scroll = ideal_scroll(
@@ -1215,7 +1630,14 @@ mod tests {
 
         let mut out = Placements::new();
         let mut scratch = RibbonScratch::default();
-        arrange_columns(&state, &state.monitors[0], &cfg, &mut out, &mut scratch);
+        arrange_columns(
+            &state,
+            &state.monitors[0],
+            state.monitors[0].ws(),
+            &cfg,
+            &mut out,
+            &mut scratch,
+        );
         let (_, rect, _) = out.iter().find(|e| e.0 == 1).copied().unwrap();
 
         let extents = column_screen_extents(
@@ -1267,7 +1689,7 @@ mod tests {
             });
         }
         for i in 0..n {
-            state.add_client(Client::new((i + 1) as u32, 0, 0));
+            state.add_client(Client::new((i + 1) as u32, 0, ViewId::new(0)));
         }
         state.monitors[0].workspaces[0].focus = Focus { column_idx: 0 };
         state
@@ -1337,7 +1759,7 @@ mod tests {
         }
         ws.focus = Focus { column_idx: 0 };
         for i in 0..(cols * rows) as u32 {
-            state.add_client(Client::new(i + 1, 0, 0));
+            state.add_client(Client::new(i + 1, 0, ViewId::new(0)));
         }
         state
     }
@@ -1557,7 +1979,7 @@ mod tests {
 #[cfg(test)]
 mod proptests {
     use super::*;
-    use crate::types::{Client, Column, Edge, Focus, Monitor, Rect, State, WinFlags};
+    use crate::types::{Client, Column, Edge, Focus, Monitor, Rect, State, ViewId, WinFlags};
     use proptest::prelude::*;
 
     /// A screen rect spanning the shapes a `RandR` report can produce: a
@@ -1782,7 +2204,7 @@ mod proptests {
                 state.monitors[0].set_reserved_region(0xD0C, edge, thickness);
             }
             for win in 1..next {
-                state.add_client(Client::new(win, 0, 0));
+                state.add_client(Client::new(win, 0, ViewId::new(0)));
             }
             state
         }
@@ -2082,7 +2504,7 @@ mod proptests {
                 focused: 0,
                 weight: 1.0,
             });
-            state.add_client(Client::new(1, 0, 0));
+            state.add_client(Client::new(1, 0, ViewId::new(0)));
 
             let p = project(&state, &cfg);
             prop_assert_eq!(p.len(), 1, "a lone tiled window must be placed");
@@ -2664,7 +3086,7 @@ mod proptests {
             let mut state = State::new();
             state.monitors.push(Monitor::new(wa, 2));
             state.monitors[0].workspaces[0].floats.push(7);
-            let mut c = Client::new(7, 0, 0);
+            let mut c = Client::new(7, 0, ViewId::new(0));
             c.geom = geom;
             c.hints = h;
             c.flags.set(WinFlags::FLOAT);
@@ -2717,7 +3139,7 @@ mod cross_monitor_float {
     use crate::config::Cfg;
     use crate::core::commands::{Command, MoveWindowToMonitor};
     use crate::core::layout::{arrange, Placements, RibbonScratch};
-    use crate::types::{Client, Dir, LayoutKind, Monitor, Rect, State, WinFlags, WindowId};
+    use crate::types::{Client, Dir, LayoutKind, Monitor, Rect, State, ViewId, WinFlags, WindowId};
     use proptest::prelude::*;
 
     /// Run a full `arrange` for `mon_idx` and return the rects it produced.
@@ -2755,7 +3177,7 @@ mod cross_monitor_float {
             mon.workspaces[0].layout = LayoutKind::Column;
             state.monitors.push(mon);
         }
-        let mut c = Client::new(7, 0, 0);
+        let mut c = Client::new(7, 0, ViewId::new(0));
         c.geom = geom;
         c.saved_geom = geom;
         c.flags.set(WinFlags::FLOAT);
@@ -2929,7 +3351,7 @@ mod cross_monitor_float {
                 mon.workspaces[0].layout = LayoutKind::Column;
                 state.monitors.push(mon);
             }
-            let mut c = Client::new(7, 0, 0);
+            let mut c = Client::new(7, 0, ViewId::new(0));
             c.geom = geom;
             c.saved_geom = geom;
             c.flags.set(WinFlags::FLOAT);
