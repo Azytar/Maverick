@@ -224,6 +224,7 @@ mod tests {
         assert!(events[0].contains("\"event\":\"focus\""));
 
         server.shutdown();
+        crate::test_support::retire(name);
     }
 
     #[test]
@@ -268,6 +269,7 @@ mod tests {
         assert!(ping(name).is_ok(), "commands must survive full subs");
 
         server.shutdown();
+        crate::test_support::retire(name);
         for h in handles {
             h.join().unwrap();
         }
@@ -316,6 +318,7 @@ mod tests {
         assert!(cmds.iter().any(|c| matches!(c, ControlCommand::Quit)));
 
         server.shutdown();
+        crate::test_support::retire(name);
         assert!(!identity::sock_path(name).exists());
     }
 
@@ -393,5 +396,6 @@ mod tests {
         release_tx.send(()).expect("release the peer");
         peer.join().expect("the peer thread returns");
         let _ = std::fs::remove_file(&path);
+        crate::test_support::retire(name);
     }
 }
