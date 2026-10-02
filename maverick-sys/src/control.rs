@@ -800,6 +800,7 @@ mod tests {
             "every handler slot must be back after every connection"
         );
         server.shutdown();
+        crate::prop_support::retire(name);
     }
 
     // Simultaneous `subscribe` attempts per round of the cap-race test:
@@ -916,6 +917,7 @@ mod tests {
         assert!(server_answers(name), "commands must survive full subs");
 
         server.shutdown();
+        crate::prop_support::retire(name);
         drop(replies);
     }
 }

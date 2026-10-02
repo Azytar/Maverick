@@ -610,4 +610,64 @@ pub(crate) mod prop_support {
         })
         .as_path()
     }
+
+    /// Retire the session directory a fixture caused to be created.
+    ///
+    /// `ControlServer::shutdown` unlinks the socket and deliberately stops
+    /// there: in production that same directory holds the spec file, the
+    /// `Xauthority` cookie and the window manager's logs, so the server does not
+    /// own it. A test fixture does own the directory it made, and this is how it
+    /// gives it back.
+    ///
+    /// Exact path and non-recursive, which is what makes it safe to run while
+    /// another process is part-way through its own fixture in the same runtime
+    /// root: a directory that still holds a socket simply fails to be removed
+    /// rather than being emptied.
+    pub fn retire(name: &str) {
+        let dir =
+            crate::identity::try_session_dir(name).expect("a fixture owns a valid session id");
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    /// A teardown that only ever leaves an empty directory behind would pass
+    /// every assertion while still being the wrong thing: the moment a directory
+    /// holds something the fixture did not put there, a recursive removal takes
+    /// that too. Both halves are pinned instead — a neighbour survives, and
+    /// unexpected content inside the fixture's own directory stops the removal
+    /// rather than being destroyed with it.
+    #[test]
+    fn retiring_a_fixture_directory_is_scoped_by_ownership() {
+        runtime_root();
+        crate::identity::ensure_runtime_dir().expect("runtime dir");
+
+        let owned = format!("retire-owned-{}", std::process::id());
+        let neighbour = format!("retire-neighbour-{}", std::process::id());
+        let owned_dir = crate::identity::try_session_dir(&owned).expect("owned dir");
+        let neighbour_dir = crate::identity::try_session_dir(&neighbour).expect("neighbour dir");
+        std::fs::create_dir_all(&owned_dir).expect("owned dir");
+        std::fs::create_dir_all(&neighbour_dir).expect("neighbour dir");
+        std::fs::write(neighbour_dir.join("keep"), b"x").expect("neighbour file");
+
+        retire(&owned);
+
+        assert!(
+            !owned_dir.exists(),
+            "the directory the fixture created must be gone"
+        );
+        assert!(
+            neighbour_dir.join("keep").exists(),
+            "cleanup reaches one directory by exact path, never a sibling"
+        );
+
+        std::fs::create_dir_all(&owned_dir).expect("owned dir again");
+        std::fs::write(owned_dir.join("unexpected"), b"x").expect("unexpected file");
+        retire(&owned);
+        assert!(
+            owned_dir.join("unexpected").exists(),
+            "a directory that is not empty is left alone rather than emptied"
+        );
+
+        let _ = std::fs::remove_dir_all(&neighbour_dir);
+        let _ = std::fs::remove_dir_all(&owned_dir);
+    }
 }
