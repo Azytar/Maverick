@@ -1,12 +1,12 @@
 [package]
 name = "maverick-x11"
-version = "1.1.1-dev"
-edition = "2021"
-rust-version = "1.82"
-authors = ["azytar"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Maverick's X11 bootstrap: the Xlib display and the XCB connection the window manager uses"
-license = "GPL-3.0"
-repository = "https://github.com/azytar/Maverick"
 categories = ["os::unix-apis"]
 keywords = ["x11", "window-manager"]
 

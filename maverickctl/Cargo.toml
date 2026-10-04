@@ -1,17 +1,17 @@
 [package]
 name = "maverickctl"
-version = "1.1.1-dev"
-edition = "2021"
-rust-version = "1.82"
-authors = ["azytar"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "maverickctl — external Unix control tool for the Maverick window manager: CLI parsing, control-socket IPC client, and session/discovery operations. It drives a running Maverick over the control socket and never links the window manager itself."
-license = "GPL-3.0"
-repository = "https://github.com/azytar/Maverick"
 categories = ["command-line-utilities"]
 keywords = ["window-manager", "ipc", "cli"]
 
 [dependencies]
-maverick-sys = { path = "../maverick-sys" }
+maverick-sys.workspace = true
 libc = "0.2"
 rustix = { version = "1", default-features = false, features = [
     "std",

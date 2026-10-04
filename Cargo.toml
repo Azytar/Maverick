@@ -8,19 +8,31 @@ members = [
 ]
 resolver = "2"
 
-[workspace.dependencies]
-proptest = "1"
-tempfile = "3"
-
-[package]
-name = "maverick"
+[workspace.package]
 version = "1.1.1-dev"
 edition = "2021"
 rust-version = "1.82"
 authors = ["azytar"]
-description = "maverick — columnar tiling WM with niri-style layout"
 license = "GPL-3.0"
 repository = "https://github.com/azytar/Maverick"
+
+[workspace.dependencies]
+proptest = "1"
+tempfile = "3"
+maverick-core = { version = "1.1.1-dev", path = "maverick-core" }
+maverick-sys = { version = "1.1.1-dev", path = "maverick-sys" }
+maverick-x11 = { version = "1.1.1-dev", path = "maverick-x11" }
+maverick-toml = { version = "1.1.1-dev", path = "maverick-toml" }
+
+[package]
+name = "maverick"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "maverick — columnar tiling WM with niri-style layout"
 categories = ["command-line-utilities", "gui"]
 keywords = ["window-manager", "tiling", "x11"]
 
@@ -29,11 +41,11 @@ name = "maverick"
 path = "src/main.rs"
 
 [dependencies]
-maverick-core = { path = "maverick-core" }
-maverick-sys = { path = "maverick-sys" }
-maverick-toml = { path = "maverick-toml" }
+maverick-core.workspace = true
+maverick-sys.workspace = true
+maverick-toml.workspace = true
 libc = "0.2"
-maverick-x11 = { path = "maverick-x11" }
+maverick-x11.workspace = true
 # `xkb` subscribes to keyboard-map changes core `MappingNotify` can miss.
 # `allow-unsafe-code` is set in `maverick-x11`, the only crate that names
 # `xcb_ffi`; cargo unifies the feature across the graph.

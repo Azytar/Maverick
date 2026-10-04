@@ -1,12 +1,12 @@
 [package]
 name = "maverick-core"
-version = "1.1.1-dev"
-edition = "2021"
-rust-version = "1.82"
-authors = ["azytar"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Pure core state and logic for Maverick (types, layout, commands) — no X11/GL"
-license = "GPL-3.0"
-repository = "https://github.com/azytar/Maverick"
 categories = ["os::unix-apis"]
 keywords = ["window-manager", "tiling", "core"]
 

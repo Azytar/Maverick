@@ -1,12 +1,12 @@
 [package]
 name = "maverick-toml"
-version = "1.1.1-dev"
-edition = "2021"
-rust-version = "1.82"
-authors = ["azytar"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Ultra-light, zero-dependency TOML-subset parser for Maverick's optional config"
-license = "GPL-3.0"
-repository = "https://github.com/azytar/Maverick"
 categories = ["parsing"]
 keywords = ["toml", "parser", "window-manager"]
 

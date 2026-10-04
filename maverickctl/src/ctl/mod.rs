@@ -124,6 +124,10 @@ pub fn main_with_args(tool: &str, args: Vec<String>) -> ExitCode {
             usage(tool, false);
             ExitCode::SUCCESS
         }
+        "-v" | "--version" => {
+            println!("{} {}", tool, env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
         // ── sessions ──────────────────────────────────────────────────────
         // A session is the whole graphical unit — an X server, a Maverick, the
         // applications inside them — so these commands own a process graph
@@ -627,6 +631,7 @@ GLOBAL OPTIONS:
     action — `msg focus-left --json` dispatches `focus-left`, not a literal
     action reading `focus-left --json`.
 
+    --version, -v  Print the version and exit.
     --json, -j     Ask for machine-readable output where a command produces a
                    document (`window`/`process`/`session` listings, `inspect`,
                    `status`). Commands that print nothing on success, such as
