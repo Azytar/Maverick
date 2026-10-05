@@ -1,43 +1,54 @@
 # Maverick
 
-Maverick es un gestor de ventanas X11 con mosaico para Linux, escrito en Rust.
-Es Unix-oriented y deliberadamente estrecho de alcance: ordena ventanas en una
-pantalla X11, publica las propiedades EWMH que un escritorio espera, y hasta ahí
-llega.
+Maverick es un gestor de ventanas con mosaico para X11, escrito en Rust. Ordena
+ventanas en una pantalla X11, publica las propiedades EWMH que un escritorio
+espera, y hasta ahí llega. Sigue las convenciones de Unix y es deliberadamente
+estrecho de alcance: sin compositor, sin panel, sin lanzador, sin demonio de
+notificaciones, sin subsistema de wallpaper y sin sistema de animación.
 
 Su modelo se articula en torno a las **Views lógicas**. Cada View contiene un
 conjunto de columnas en mosaico y sus propias ventanas flotantes; un **Carousel**
-selecciona qué View es la actual; un **layout** decide dónde van los clientes en
-mosaico de la View actual; y un par `DesiredState`/`Reconciler` convierte esa
-decisión en peticiones a X11.
+selecciona qué View es la actual; el **layout Scroll** decide dónde van los
+clientes en mosaico de la View actual; y un par `DesiredState`/`Reconciler`
+convierte esa decisión en peticiones a X11. Una View es un contenedor lógico, no
+una ventana X11: crearla, seleccionarla y eliminarla es una transición de
+estado, y nada de eso requiere un viaje de ida y vuelta al servidor.
+
+Maverick distribuye dos binarios. `maverick` es el gestor de ventanas.
+`maverickctl` es un cliente de control separado que nunca enlaza el gestor de
+ventanas ni toca X11; habla con una instancia en marcha a través del socket de
+control Unix de esa instancia. La instalación es desde código fuente: no hay
+archivos de release ni binarios precompilados.
 
 [Panorámica](#panorámica) · [Lo que Maverick no es](#lo-que-maverick-no-es) ·
-[Funcionalidad](#funcionalidad) · [Arquitectura](#arquitectura) ·
-[Instalación](#instalación) · [Ejecución](#ejecución) ·
-[Configuración](#configuración) · [Control](#control) ·
-[Desarrollo](#desarrollo) · [Estado](#estado) · [Licencia](#licencia)
+[Arquitectura](#arquitectura) · [Estructura del proyecto](#estructura-del-proyecto) ·
+[Requisitos](#requisitos) · [Instalación](#instalación) ·
+[Ejecutar Maverick](#ejecutar-maverick) · [Atajos](#atajos) ·
+[Configuración](#configuración) · [maverickctl](#maverickctl) ·
+[Sesiones](#sesiones) · [Diagnóstico de problemas](#diagnóstico-de-problemas) ·
+[Compilar desde el código](#compilar-desde-el-código) ·
+[Pruebas](#pruebas) · [Estado](#estado) · [Licencia](#licencia)
 
 Léelo en inglés: [README.md](README.md).
 
 ## Panorámica
 
-- **Un gestor de ventanas X11 con mosaico, escrito en Rust.** Linux, X11,
-  ICCCM/EWMH para lo que un gestor de ventanas necesita. No hay backend de
+- **Un gestor de ventanas con mosaico para X11, escrito en Rust.** Linux, X11,
+  ICCCM y EWMH para lo que un gestor de ventanas necesita. No hay backend de
   Wayland.
 - **Construido alrededor de Views lógicas.** Una View es un contenedor de
-  ventanas, no una ventana X11: crearla, seleccionarla y eliminarla es una
-  transición puramente lógica. El tipo de Rust detrás de una View es
+  ventanas, no una ventana X11. El tipo de Rust detrás de una View es
   `Workspace`.
-- **Navegado con un Carousel.** Cada monitor posee un `Carousel` que registra
-  qué View es `current` y cuál es `origin`, y se mueve entre ellas paso a paso.
-  La navegación es lógica e instantánea.
+- **Navegado con un Carousel.** Cada monitor posee un `Carousel` que registra qué
+  View es `current` y cuál es `origin`, y se mueve entre ellas paso a paso. La
+  navegación es lógica e instantánea.
 - **Ordenado por layouts.** Un layout convierte los clientes en mosaico de una
-  View en rectángulos. Scroll es el único layout que Maverick ofrece hoy.
+  View en rectángulos. Scroll es el único layout que se proporciona.
 - **Los clientes flotantes quedan fuera del layout.** Una ventana flotante
   conserva su propia geometría en espacio de pantalla; el layout en mosaico ni
   la coloca ni la mueve.
 - **Materializado con un DesiredState y un Reconciler.** El motor calcula una
-  intención pura, el reconciler la compara con lo que X11 ya tiene, y sólo la
+  intención pura, el reconciler la compara con lo que X11 ya sostiene, y sólo la
   diferencia se convierte en llamadas `ConfigureWindow`.
 
 Cinco cosas se mantienen deliberadamente separadas, y todo el diseño gira en
@@ -51,52 +62,20 @@ mantenerlas separadas:
 | **Geometría del layout** | Los rectángulos que reciben los clientes en mosaico de una View | la pertenencia a una View; ningún layout añade, quita ni reubica un cliente |
 | **Materialización X11** | Las llamadas `ConfigureWindow` que hacen que el servidor coincida | una segunda fuente de verdad; el estado aplicado es una caché del backend |
 
-## Lo que Maverick no es
-
-Maverick es un gestor de ventanas, no un entorno de escritorio. No contiene, no
-distribuye y no arranca:
-
-- ningún entorno de escritorio;
-- ningún compositor, renderer ni camino por GPU — no hay bucle de frames, ni GL,
-  ni Vulkan;
-- ningún subsistema de wallpaper — el fondo de la ventana raíz no es una
-  ventana que gestionar;
-- ningún demonio de notificaciones;
-- ningún system tray;
-- ningún sistema de animación o transiciones — la geometría se escribe una
-  sola vez, en su posición final;
-- ningún modo Monocle;
-- ningún layout distinto de Scroll.
-
-La composición, un panel, un lanzador, las notificaciones y el wallpaper son
-programas de otro. Maverick los arranca si los listas en `[autostart]`, lee los
-struts que publican y no vuelve a hablar con ellos.
-
-No hay un segundo layout. `LayoutKind` es un enum de una sola variante,
-`set_layout` sólo acepta `column`, y no existe ningún layout Mosaic en este
-repositorio.
-
-## Funcionalidad
-
-Todo lo que sigue está implementado en este árbol. El estado lógico, la
-geometría del layout, la capa de comandos y las superficies de control están
-cubiertos por la suite de tests; el comportamiento de protocolo, apilado y foco
-tiene sus propios harnesses sobre X11 real.
-
 ### Views e identidad de View
 
-- Cada monitor posee una lista de Views. Un monitor arranca con `n_tags` de
-  ellas (9 por defecto, 9 como máximo).
+- Cada monitor posee una lista de Views. Un monitor arranca con `n_tags` de ellas
+  (9 por defecto, 9 como máximo; el valor se recorta a 9).
 - Cada View lleva un `ViewId`: un `u32` acuñado por el Carousel de ese monitor,
   estrictamente creciente y nunca reutilizado. Una View eliminada libera su id
-  para siempre, así que un `ViewId` obsoleto es *detectable* en lugar de apuntar
-  en silencio a lo que heredó la posición anterior.
-- Una View está o bien en mosaico (sus columnas) o bien flotante (su propia
-  lista de floats). Cada ventana gestionada se referencia desde exactamente una
-  de las dos, en exactamente un monitor.
+  de forma permanente, así que un `ViewId` obsoleto es *detectable* en lugar de
+  apuntar en silencio a lo que heredó la posición anterior.
+- Una View está o bien en mosaico (sus columnas) o bien flotante (su propia lista
+  de floats). Cada ventana gestionada se referencia desde exactamente una de las
+  dos, en exactamente un monitor.
 - `view_create` añade una View, hasta 9 por monitor. `view_remove` se rechaza
   mientras la View que nombra siga teniendo clientes: adónde irían es una
-  decisión de política, así que la eliminación no se hace por ti.
+  decisión de política, así que la eliminación se rechaza en lugar de adivinarse.
 - `view_create` y `view_remove` están expuestos como acciones y por
   `maverickctl view`; no vienen enlazados por defecto.
 
@@ -106,14 +85,15 @@ tiene sus propios harnesses sobre X11 real.
   la última View, `next` es la primera; desde la primera, `previous` es la
   última.
 - `view_return` selecciona el `origin` — la View a la que quedó anclado el
-  carousel cuando se creó la primera View de ese monitor. Es una operación
-  total: `origin` se repara en cada eliminación, así que nunca puede nombrar una
-  View borrada.
+  carousel cuando se creó la primera View de ese monitor. Es una operación total:
+  `origin` se repara en cada eliminación, así que nunca puede nombrar una View
+  borrada.
 - `view <n>` selecciona una View por su posición en la lista del monitor,
-  resuelta a través del Carousel, de modo que el cambio es de identidad de View
-  y no de índice posicional.
-- Crear una View mientras ya existen otras **no** te mueve: sólo la transición
-  de vacío a no-vacío convierte una View nueva en actual y ancla el origin.
+  resuelta a través del Carousel, de modo que el cambio es de identidad de View y
+  no de índice posicional.
+- Crear una View mientras ya existen otras **no** cambia la View actual: sólo la
+  transición de vacío a no-vacío convierte una View nueva en actual y ancla el
+  origin.
 - Eliminar una View repara `current` y `origin` de forma independiente: cada uno
   adopta la sucesora de la posición liberada, o la nueva cola cuando se va la
   última View.
@@ -144,6 +124,8 @@ que mantiene a la vista la columna enfocada.
   (`present::present_into`), no layouts aparte. Una ventana que toma un
   fullscreen exclusivo real también recibe `_NET_WM_BYPASS_COMPOSITOR`
   publicado, para que un compositor externo se aparte de ella.
+- `LayoutKind` tiene una sola variante, `Column`. `set_layout` sólo acepta
+  `column`, y no existe un segundo layout en este repositorio.
 
 ### Clientes flotantes
 
@@ -164,8 +146,8 @@ que mantiene a la vista la columna enfocada.
   mediante `ConfigureRequest`.
 - El `_NET_WM_STATE_MAXIMIZED_*` / `_NET_WM_STATE_FULLSCREEN` pedido al mapearse
   se normaliza para todos los clientes por defecto, así que las aplicaciones que
-  recuerdan estar maximizadas abren como un tile normal. `honor_initial_state`
-  lo permite, globalmente o por regla.
+  recuerdan estar maximizadas abren como un tile normal. `honor_initial_state` lo
+  permite, globalmente o por regla.
 
 ### X11
 
@@ -192,39 +174,35 @@ que mantiene a la vista la columna enfocada.
 - `--replace` pide el relevo a un gestor de ventanas en marcha y adopta sus
   ventanas. El reinicio se reejecuta en el sitio con los mismos argumentos.
 
-### maverickctl
+## Lo que Maverick no es
 
-`maverickctl` es un binario separado — un cliente de control fino que nunca
-enlaza el gestor de ventanas ni toca X11. Habla con una instancia en marcha a
-través del socket de control Unix de esa instancia.
+Maverick es un gestor de ventanas, no un entorno de escritorio. No contiene, no
+distribuye y no arranca:
 
-- `maverickctl list`, `state`, `query <topic>`, `subscribe`, `msg <action>`,
-  `reload`, `restart`, `quit`, `quit-all`, `prune`.
-- `maverickctl view <session> goto <n> | next | prev | return | create |
-  remove <n>` — el Carousel, codificado como las mismas acciones que ejecuta un
-  atajo de teclado.
-- `maverickctl window <session> list | inspect | focus | close | move | float |
-  fullscreen`, más `camera`, `resize` y `layout` para el layout en sí.
-- `maverickctl session …` gestiona sesiones gráficas completas: un servidor X
-  anidado, un Maverick, los programas lanzados en ella, una cookie, logs y un
-  ciclo de vida. Ver [`docs/sessions.md`](docs/sessions.md).
-- Cada instancia tiene un directorio de runtime privado bajo
-  `$XDG_RUNTIME_DIR/maverick/<session-id>/` (`0700`), un socket `0600`
-  verificado contra pares con `SO_PEERCRED` y un registro de identidad. El
-  descubrimiento prefiere `--session`, luego `--name`, luego
-  `$MAVERICK_INSTANCE`, luego el contexto de display/TTY; se niega a adivinar
-  cuando hay varios candidatos.
-- Cualquier palabra que `maverickctl` no reconozca como comando se reenvía tal
-  cual al gestor de ventanas, que es lo único que puede distinguir una acción de
-  un tema de consulta de una errata.
+- ningún entorno de escritorio;
+- ningún compositor, renderer ni camino por GPU — no hay bucle de frames, ni GL,
+  ni Vulkan;
+- ningún subsistema de wallpaper — el fondo de la ventana raíz no es una ventana
+  que gestionar;
+- ningún demonio de notificaciones;
+- ningún system tray;
+- ningún sistema de animación o transiciones — la geometría se escribe una sola
+  vez, en su posición final;
+- ningún modo Monocle;
+- ningún layout distinto de Scroll.
 
-### Configuración
+La composición, un panel, un lanzador, las notificaciones y el wallpaper son
+trabajo de otros programas. Maverick arranca los que aparecen en `[autostart]`,
+lee los struts que publican y no vuelve a hablar con ellos.
 
-Ver [Configuración](#configuración) más abajo.
+El instalador refleja ese mismo alcance: no hay ningún interruptor para un
+compositor, un wallpaper, un componente de animación o un asset de demostración, y
+`--with-compositor` y `--no-default-features` se rechazan con estado de salida 2
+porque no hay nada que seleccionar.
 
 ## Arquitectura
 
-El flujo de alto nivel, desde la View activa hasta los píxeles que X11 sostiene:
+El flujo de alto nivel, desde la View activa hasta la geometría que X11 sostiene:
 
 ```text
         Carousel
@@ -268,19 +246,19 @@ Las fronteras que importan:
   `State` y emite `Effect`s. Sólo el backend ejecuta los efectos, y sólo el
   backend toca X11.
 
-| Ubicación | Responsabilidad |
+| crate o ruta | responsabilidad |
 | --- | --- |
-| `src/main.rs` | CLI, selección de configuración, señales, identidad de instancia, arranque del backend |
-| `maverick-core/` | Tipos de dominio sin dependencias: `State`, `Monitor`, `Workspace` (una View), `ViewId`, `Carousel`, `Column`, `Client`, `Rect` |
+| `maverick` (paquete raíz) | El binario del gestor de ventanas: CLI, selección de configuración, señales, identidad de instancia, arranque del backend |
+| `maverick-core/` | Tipos de dominio sin dependencias: `State`, `Monitor`, `Workspace` (una View), `ViewId`, `Carousel`, `Column`, `Client`, `Rect`, `Action` |
 | `src/core/` | Motor, acciones/comandos/efectos/eventos, layout, presentación, `DesiredState` |
 | `src/backend/x11/` | Eventos, gestión de clientes, entrada, EWMH, struts, reconciliación |
 | `src/config.rs`, `src/userconfig.rs` | Defaults compilados, fusión de configuración, validación |
-| `maverick-x11/` | Arranque compartido de la conexión Xlib/XCB |
-| `maverick-sys/` | Frontera del SO/FFI, identidad de instancia, socket de control y hub |
-| `maverick-toml/` | Parser de un subconjunto de TOML |
-| `maverickctl/` | Binario cliente de control: CLI, cliente IPC por socket, descubrimiento, ciclo de vida de sesiones |
-| `tests/` | Sondas sobre X11 real, scripts de integración, tests de humo del instalador |
-| `installer/` | El instalador y su suite de tests |
+| `maverick-x11/` | Arranque compartido de la conexión Xlib/XCB; enlaza `X11` y `X11-xcb` |
+| `maverick-sys/` | Frontera del SO/FFI, identidad de instancia, servidor del protocolo de control, JSON mínimo |
+| `maverick-toml/` | Parser de un subconjunto de TOML sin dependencias |
+| `maverickctl/` | Cliente de control: CLI, cliente IPC por socket, descubrimiento, ciclo de vida de sesiones |
+| `installer/` | El instalador, su biblioteca shell y su suite de tests |
+| `tests/` | Sondas sobre X11 real, scripts de integración, test de humo del instalador |
 
 `maverick-core` no depende de X11, del reloj, del sistema de ficheros ni del
 entorno, y por eso la mayor parte de la suite de tests no necesita display. La
@@ -290,12 +268,47 @@ en Rust. No hay runtime asíncrono ni toolkit de GUI.
 
 `docs/architecture.md` describe las mismas fronteras con anclajes `file:line`.
 
-## Instalación
+## Estructura del proyecto
 
-### Requisitos
+```text
+Maverick/
+├── Cargo.toml            raíz del workspace, y el binario `maverick`
+├── Cargo.lock
+├── config/
+│   └── config.toml       configuración de ejemplo comentada
+├── docs/
+│   ├── architecture.md   fronteras entre módulos con anclajes file:line
+│   └── sessions.md       el modelo de sesión y su frontera de seguridad
+├── installer/
+│   ├── install.sh        el instalador
+│   ├── lint.sh           bash -n, más shellcheck cuando está disponible
+│   ├── lib/              bibliotecas shell de i18n, setup y UI de terminal
+│   ├── tests/            suite de comportamiento del instalador
+│   └── golden/           salida esperada del instalador, inglés y español
+├── maverick-core/        tipos de dominio puros; sin X11, reloj ni sistema de ficheros
+├── maverick-sys/         FFI de libc, identidad de instancia, servidor de control
+├── maverick-toml/        parser de un subconjunto de TOML sin dependencias
+├── maverick-x11/         arranque de la conexión Xlib/XCB
+├── maverickctl/          el cliente de control `maverickctl`
+├── src/
+│   ├── main.rs           CLI, arranque, señales, cableado del backend
+│   ├── config.rs         defaults compilados
+│   ├── userconfig.rs     parseo, fusión y validación de la configuración
+│   ├── types.rs          reexportaciones de tipos del gestor de ventanas
+│   ├── log.rs            manejo del nivel de log
+│   ├── core/             motor, acciones, layout, presentación, IPC
+│   └── backend/x11/      eventos, clientes, entrada, EWMH, struts, reconciliación
+├── tests/                sondas sobre X11 real y scripts de integración
+├── CHANGELOG.md
+├── README.md
+├── README.es.md
+└── LICENSE
+```
 
-Linux, un servidor X11, un enlazador C y Rust 1.82 o posterior. Maverick enlaza
-`libX11` y `libX11-xcb`, y el parser del repo es un subconjunto de TOML.
+## Requisitos
+
+Linux, un servidor X11, un enlazador C y Rust 1.82 o posterior (`rust-version` en
+`Cargo.toml`). Maverick enlaza `libX11` y `libX11-xcb`.
 
 ```bash
 # Arch Linux
@@ -306,36 +319,62 @@ sudo apt install --no-install-recommends build-essential cargo libx11-dev libxcb
 sudo dnf install -y cargo gcc libX11-devel libxcb-devel
 ```
 
-Para una sesión X11 arrancada con `startx`, instala también `xorg-server` y
+Para una sesión X11 arrancada con `startx` también hacen falta `xorg-server` y
 `xorg-xinit` (Arch: `xorg-server xorg-xinit`).
 
 Los atajos compilados por defecto lanzan `alacritty` y `rofi`, y el autostart
-compilado lanza `xdg-desktop-portal` y `xdg-desktop-portal-gtk`. Son
-conveniencias, no requisitos: sobrescribe los atajos o proporciona tu propia
-lista `[autostart] commands`. El motor de layout no necesita ninguna de ellas.
+compilado lanza `/usr/lib/xdg-desktop-portal` y `/usr/lib/xdg-desktop-portal-gtk`
+mediante ruta absoluta. Son conveniencias, no requisitos: los atajos pueden
+sobrescribirse y la lista `[autostart] commands` reemplazarse. El motor de layout
+no necesita ninguna de ellas.
 
-### Instalar
+Variables de entorno relevantes:
+
+| variable | efecto |
+| --- | --- |
+| `DISPLAY` | la pantalla X a la que Maverick se conecta |
+| `XDG_RUNTIME_DIR` | padre del directorio del socket de control; si falta, recurre a `/run/user/$UID`, nunca a `/tmp` |
+| `XDG_CONFIG_HOME` | padre de `maverick/config.toml` |
+| `MAVERICK_INSTANCE` | selector de instancia por defecto para `maverickctl` |
+| `MAVERICK_SESSION` | selector de sesión usado por las herramientas de sesión |
+| `MAVERICK_LOG` | nivel de log; `--debug` equivale a `MAVERICK_LOG=debug` |
+
+## Instalación
+
+La instalación es desde código fuente. El instalador compila ambos binarios desde
+este workspace con `cargo build --release -p maverick -p maverickctl`.
 
 ```bash
-git clone https://github.com/Azytar/Maverick.git
+git clone https://github.com/azytar/Maverick.git
 cd Maverick
 ./installer/install.sh
 ```
 
-El instalador compila los binarios de release y los instala en `$HOME/.local`
-por defecto, lo cual no necesita privilegios. Se niega a ejecutarse como root,
-nunca invoca `sudo` y nunca habilita ningún servicio.
+El prefijo por defecto es `$HOME/.local`, que no necesita privilegios. El
+instalador se niega a ejecutarse como root, nunca invoca `sudo` y nunca habilita
+ningún servicio.
 
-```bash
-./installer/install.sh --help          # todas las opciones
-./installer/install.sh --system       # instalar en /usr/local en su lugar
-./installer/install.sh --prefix DIR   # instalar en DIR en su lugar
-./installer/install.sh --no-config    # no crear fichero de configuración
-./installer/install.sh --no-build     # instalar los binarios existentes de $CARGO_TARGET_DIR/release
-./installer/install.sh --no-path      # no editar nunca un fichero de inicio de shell
+```text
+--system               instalar en /usr/local en lugar del prefijo por defecto
+--prefix DIR           instalar en DIR
+--xsessions-dir DIR    instalar además el fichero de sesión en DIR (la única
+                       escritura que sale del prefijo; desactivada por defecto
+                       porque los gestores de pantalla suelen leer sólo
+                       ubicaciones del sistema)
+--lang LANG            forzar el idioma del instalador: en | es | auto
+--yes, -y              omitir las confirmaciones del instalador
+--no-config            no crear fichero de configuración
+--no-build             omitir la compilación y usar el $CARGO_TARGET_DIR/release
+                       existente
+--add-path             añadir el directorio bin a PATH sin preguntar
+--no-path              no modificar ficheros de inicio del shell; imprimir la
+                       línea de export en su lugar
+--no-anim              desactivar la animación de terminal del propio instalador
+--keep-log             conservar el log de compilación incluso si hay éxito
+-h, --help             mostrar todas las opciones
 ```
 
-Qué instala, y dónde:
+Lo que instala, y dónde:
 
 | ruta | qué |
 | --- | --- |
@@ -343,125 +382,139 @@ Qué instala, y dónde:
 | `<prefix>/bin/maverickctl` | el cliente de control |
 | `<prefix>/share/xsessions/maverick.desktop` | la entrada de sesión X11 |
 
-Fuera del prefijo sólo escribe tus propios ficheros, y sólo si aceptas:
+Fuera del prefijo el instalador sólo escribe ficheros del usuario que lo invoca,
+y sólo tras confirmación:
 
 - `${XDG_CONFIG_HOME:-$HOME/.config}/maverick/config.toml`, sembrado desde
-  [`config/config.toml`](config/config.toml) salvo que ya exista uno (`--no-config`
-  omite este paso; responder "no" a la pregunta de sobrescribir conserva el
-  tuyo);
-- un bloque marcado y autoprotegido en un fichero de inicio de shell bajo
-  `$HOME`, ofrecido sólo cuando el directorio de binarios no está en `PATH` y
-  nunca con `--no-path`.
+  [`config/config.toml`](config/config.toml) salvo que ya exista uno
+  (`--no-config` omite este paso; rechazar la sobrescritura conserva el
+  fichero existente);
+- un bloque marcado y autoprotegido en un fichero de inicio del shell bajo
+  `$HOME`, que se ofrece sólo cuando el directorio bin falta en `PATH`, y nunca
+  con `--no-path`.
 
-La única escritura que sale del prefijo deliberadamente es el fichero de sesión,
-y sólo cuando nombras el directorio: `--xsessions-dir /usr/share/xsessions`. Los
-gestores de sesión suelen leer sólo ubicaciones del sistema, así que una entrada
-de sesión en el home del usuario no aparecerá por sí sola en un selector.
+El prefijo es una frontera estricta: fuera de él no se crea ni se modifica nada
+salvo esos dos ficheros. Un prefijo en el que no se puede escribir se informa como
+error de permisos en lugar de escalarse con `sudo`, así que una instalación en
+todo el sistema necesita acceso de escritura a `/usr/local` previsto de antemano.
 
-El prefijo es una frontera dura: no se crea ni modifica nada fuera de él salvo
-los dos ficheros de arriba. Un prefijo que no puedas escribir se informa como
-error de permisos en lugar de escalarse, así que una instalación en todo el
-sistema necesita que tú dispongas de acceso de escritura a `/usr/local`.
-
-Cada paso falla ruidosamente. El instalador ejecuta los binarios que acaba de
-instalar — `maverick --version`, `maverickctl --help` y
+Cada paso falla de forma ruidosa. El instalador ejecuta los binarios que acaba de
+instalar — `maverick --version`, `maverickctl --help`,
 `maverickctl session --help` — y un conjunto parcial, obsoleto o roto se informa
-como fallo en lugar de como instalación correcta. Es seguro ejecutarlo
-repetidamente: una segunda pasada converge, corrige permisos hostiles al umask y
-no duplica el bloque de `PATH`.
+como fallo y no como instalación correcta. Es seguro ejecutarlo repetidamente:
+una segunda pasada converge, corrige permisos hostiles al umask y no duplica el
+bloque de `PATH`.
 
-`CARGO_TARGET_DIR` se respeta tal cual. Cuando no está definido, la compilación
-ocurre en un directorio de caché bajo `$XDG_CACHE_HOME` y el checkout nunca se
-usa como directorio de build. El primer intento de compilación pasa
-`-C target-cpu=native` y vuelve a un build normal si ese falla, así que el
-binario instalado queda ajustado para la máquina que lo compiló; usa un
-`cargo build` normal cuando necesites artefactos para otra CPU.
+`CARGO_TARGET_DIR` se respeta tal cual. Cuando no está definido la compilación
+ocurre en un directorio de caché bajo `$XDG_CACHE_HOME`, y el checkout nunca se
+usa como directorio de compilación. El primer intento de compilación pasa
+`-C target-cpu=native` y cae a una compilación normal si falla, de modo que el
+binario instalado queda ajustado para la máquina que lo compiló; conviene un
+`cargo build` normal cuando se necesiten artefactos para otra CPU.
 
-Para desinstalar, borra los dos binarios y el fichero de sesión del prefijo, y
-elimina el bloque entre los marcadores `# >>> maverick (install.sh) >>>` de
-cualquier fichero de inicio que haya tocado.
+Verificar una instalación con:
 
-Ver [`installer/README.md`](installer/README.md) para la documentación propia
-del instalador y su suite de tests.
+```bash
+maverick --version
+maverickctl --version
+```
 
-## Ejecución
+Para desinstalar, borrar los dos binarios y el fichero de sesión del prefijo, y
+eliminar el bloque delimitado por las marcas `# >>> maverick (install.sh) >>>` de
+cualquier fichero de inicio que el instalador haya tocado.
 
-Para una sesión con `startx`, pon esto al final de `~/.xinitrc`:
+Ver [`installer/README.md`](installer/README.md) para la documentación propia del
+instalador y su suite de tests.
+
+## Ejecutar Maverick
+
+Para una sesión `startx`, esto va al final de `~/.xinitrc`:
 
 ```sh
 exec maverick
 ```
 
-O selecciona la sesión de Maverick instalada en tu gestor de sesión.
+Como alternativa, seleccionar la sesión Maverick instalada en el gestor de
+pantalla.
 
 ```bash
-maverick --check-config "$HOME/.config/maverick/config.toml"   # validar, no arrancar nada
-maverick --config "$HOME/.config/maverick/config.toml" --name desktop
+maverick --check-config ~/.config/maverick/config.toml   # validar, no arrancar nada
+maverick --config ~/.config/maverick/config.toml --name desktop
 maverick --help
 ```
 
-- `--check-config [path]` valida una configuración y sale: `0` si está limpia,
-  `1` si hay avisos o errores. Nunca abre un display X.
-- `--config <path>` sustituye la ubicación por defecto de la configuración y se
-  reutiliza en el reload y el reinicio.
-- `--name <id>` etiqueta la instancia; `--session-id <id>` la publica bajo un
-  session id fijo, que es lo que usa `maverickctl session`.
-- `--replace` releva a un gestor de ventanas en marcha y adopta sus ventanas.
-- `--debug` / `--log-level <off|error|warn|info|debug|trace>` fijan el nivel de
-  log. `--log-level` gana sobre `--debug`.
-
-### Atajos compilados por defecto
-
-`Super` es Mod4, normalmente la tecla de Windows. `Super+1…9` y
-`Super+Shift+1…9` se generan para `n_tags`; pon
-`auto_workspace_binds = false` para gestionarlos tú.
-
-| atajo | acción |
+| flag | efecto |
 | --- | --- |
-| `Super+Return` | terminal (`alacritty`) |
-| `Super+P` / `Super+Shift+P` | lanzador (`rofi`) |
-| `Super+H/J/K/L` | foco izquierda / abajo / arriba / derecha |
-| `Super+Shift+H/J/K/L` | mover ventana izquierda / abajo / arriba / derecha |
-| `Super+Shift+Return` | poner la ventana en una columna nueva |
-| `Super+Ctrl+H` / `Super+Ctrl+L` / `Super+Ctrl+J` | encoger / agrandar la columna / colapsarla |
-| `Super+T` | fijar el layout (`column`) |
-| `Super+Shift+Space` | conmutar flotante |
-| `Super+Shift+F` / `Super+Shift+M` | conmutar fullscreen / maximize |
-| `Super+1…9` | seleccionar View |
-| `Super+Shift+1…9` | enviar la ventana a la View |
-| `Super+Tab` / `Super+Shift+Tab` | enfocar el monitor siguiente / mover la ventana a él |
-| `Super+O` / `Super+E` / `Super+N` / `Super+Shift+O` | Overview: conmutar / entrar / siguiente / anterior |
-| `Super+=` / `Super+-` | zoom del viewport hacia dentro / hacia fuera |
-| `Super+]` / `Super+[` | page-snap a la derecha / a la izquierda |
-| `Super+Shift+C` | cerrar la ventana enfocada |
-| `Super+Shift+R` / `Super+F5` | reiniciar en el sitio |
-| `Super+Shift+Q` | salir |
+| `--name <id>` | etiquetar la instancia para control e identificación |
+| `--session-id <id>` | publicar la instancia con un id de sesión fijo (`[A-Za-z0-9_-]`), que es lo que usa `maverickctl session`; por defecto es aleatorio |
+| `--replace` | tomar el relevo de un gestor de ventanas en marcha, adoptando sus ventanas |
+| `--debug` | log en nivel debug, equivalente a `MAVERICK_LOG=debug` |
+| `--log-level <nivel>` | `off`, `error`, `warn`, `info`, `debug` o `trace`; tiene precedencia sobre `--debug` |
+| `--config <ruta>` | leer la configuración de `<ruta>` en lugar de `$XDG_CONFIG_HOME/maverick/config.toml`; reutilizado por reload y restart |
+| `--check-config [ruta]` | validar una configuración y salir: `0` limpio, `1` con avisos o errores. No arranca ningún gestor de ventanas ni abre display |
+| `-v`, `--version` | imprimir la versión y salir |
+| `-h`, `--help` | mostrar la ayuda incorporada |
 
-El avance por el Carousel (`view_next`, `view_prev`, `view_return`) y el ciclo
-de vida de las Views (`view_create`, `view_remove`) no vienen enlazados por
-defecto; llámalos con `maverickctl view` o añade tus propios
+## Atajos
+
+`Super` es Mod4, normalmente la tecla Windows. La tabla siguiente es el conjunto
+**compilado por defecto**: 33 atajos explícitos más un `Super+<dígito>` y un
+`Super+Shift+<dígito>` por View, 51 en total.
+
+| acción | atajo | comportamiento |
+| --- | --- | --- |
+| Lanzar una terminal | `Super+Return` | ejecuta `alacritty` |
+| Lanzador, ejecutar un comando | `Super+Shift+P` | ejecuta `rofi -show run` |
+| Lanzador, ejecutar una entrada de escritorio | `Super+P` | ejecuta `rofi -show drun` |
+| Cerrar la ventana enfocada | `Super+Shift+C` | pide al cliente que cierre |
+| Conmutar flotante | `Super+Shift+Space` | mueve la ventana dentro o fuera del layout |
+| Conmutar fullscreen | `Super+Shift+F` | overlay de fullscreen exclusivo real |
+| Conmutar maximize | `Super+Shift+M` | maximize sólo de presentación |
+| Enfocar izquierda / abajo / arriba / derecha | `Super+H` / `J` / `K` / `L` | mueve el foco dentro de la View |
+| Mover ventana izquierda / abajo / arriba / derecha | `Super+Shift+H` / `J` / `K` / `L` | mueve el cliente a una columna vecina |
+| Nueva columna | `Super+Shift+Return` | añade una columna al ribbon |
+| Encoger columna | `Super+Ctrl+H` | `grow_col:-50` |
+| Agrandar columna | `Super+Ctrl+L` | `grow_col:50` |
+| Plegar columna | `Super+Ctrl+J` | elimina la columna enfocada |
+| Fijar el layout | `Super+T` | `layout:column`; el único valor aceptado |
+| Salir | `Super+Shift+Q` | apagado ordenado: pide cerrar a los clientes, espera, fuerza el cierre del resto y limpia |
+| Reiniciar | `Super+Shift+R`, `Super+F5` | se reejecuta en el sitio con los mismos argumentos |
+| Enfocar el monitor siguiente | `Super+Tab` | cicla por el orden de enumeración de monitores |
+| Mover la ventana al monitor siguiente | `Super+Shift+Tab` | cicla por el orden de enumeración de monitores |
+| Overview: alternar / entrar / siguiente / anterior | `Super+O` / `Super+E` / `Super+N` / `Super+Shift+O` | proyección reducida para elegir columna |
+| Zoom del viewport dentro / fuera | `Super+=` / `Super+-` | agranda o restaura el ribbon |
+| Page-snap derecha / izquierda | `Super+]` / `Super+[` | mueve la cámara una pantalla |
+| Seleccionar View | `Super+1` … `Super+9` | generados por View, hasta `n_tags` |
+| Enviar ventana a una View | `Super+Shift+1` … `Super+Shift+9` | generados por View |
+
+Los atajos de dígitos generados siguen a `n_tags`. Fijar
+`auto_workspace_binds = false` en `[general]` los suprime, dejando la fila de
+dígitos completamente sin gestionar.
+
+Los pasos del carousel (`view_next`, `view_prev`, `view_return`) y el ciclo de
+vida de las Views (`view_create`, `view_remove`) **no** vienen enlazados por
+defecto. Son accesibles por `maverickctl view`, o mediante una tabla
 `[[keybindings]]`.
 
-### Diagnóstico
+Los atajos se resuelven a través del layout XKB activo, así que una combinación
+coincide con lo que el teclado produce realmente y no con el código nominal. Una
+combinación escrita en un fichero de configuración usa nombres de keysym de X con
+modificadores tipo `Mod4`/`Mod1`, por ejemplo `Mod4+Shift+Return` o
+`Mod4+Control+h`.
 
-Compila con las features opcionales `input-trace` y/o `window-trace` para
-añadir trazas estructuradas de entrada/foco y de estado deseado/aplicado/X11.
-Ambas están apagadas por defecto y ambas sólo añaden logging.
-
-```bash
-cargo build -p maverick --features input-trace,window-trace
-./target/debug/maverick --config /path/to/test.toml 2> /tmp/maverick-debug.log
-```
-
-Ejecuta eso sólo en un `DISPLAY` que estés dispuesto a entregar a un gestor de
-ventanas.
+La configuración de ejemplo de [`config/config.toml`](config/config.toml) es un
+preset y no una copia de los defaults compilados: enlaza el zoom del viewport y
+el page-snap a otras teclas y añade reglas, un tema y una lista de autostart, así
+que usarla como punto de partida reemplaza los atajos compilados.
 
 ## Configuración
 
 La configuración es opcional. Maverick lee
-`$XDG_CONFIG_HOME/maverick/config.toml`, con
-`~/.config/maverick/config.toml` como alternativa, y usa los defaults
-compilados para lo que el fichero no fije.
+`$XDG_CONFIG_HOME/maverick/config.toml`, con recurso a
+`~/.config/maverick/config.toml`, y usa los defaults compilados para todo lo que
+el fichero no fije.
+
+Un fichero mínimo que funciona:
 
 ```toml
 [general]
@@ -471,34 +524,69 @@ gaps_outer = 14
 focus_mouse = false
 ```
 
-Dos reglas deciden cómo se combina tu fichero con los defaults:
+Defaults compilados de las claves `[general]` más relevantes:
+
+| clave | default | significado |
+| --- | --- | --- |
+| `n_tags` | `9` | Views por monitor al arrancar; recortado a un máximo de 9 |
+| `column_width` | `0.6` | ancho de columna como fracción del workarea del monitor; debe estar entre `0.1` y `1.0` |
+| `gaps_inner` | `4` | hueco entre tiles adyacentes |
+| `gaps_outer` | `8` | hueco entre los tiles y el borde de la pantalla |
+| `border_width` | `1` | grosor del borde del tile en píxeles |
+| `focus_mouse` | `false` | si mover el puntero cambia el foco |
+| `honor_initial_state` | `false` | respetar el estado maximizado/fullscreen pedido al mapearse, en lugar de normalizarlo |
+| `auto_workspace_binds` | `true` | generar los atajos de View `Super+<dígito>` |
+| `smart_gaps` | `false` | suprimir los huecos exteriores cuando sólo hay un tile visible |
+| `corner_radius` | `0` | radio de esquina del tile en píxeles |
+| `theme` | `catppuccin-mocha` | nombre del tema integrado |
+| `tag_names` | `["1"]` … `["9"]` | etiquetas de View publicadas como `_NET_DESKTOP_NAMES` |
+
+Otras claves `[general]` aceptadas: `gaps`, `accordion_boost`,
+`overview_zoom_min` y `warp_cursor`. `border_w` es un alias de `border_width`.
+
+Dos claves son alias obsoletos conservados por compatibilidad. Ambas se siguen
+cargando, y ambas emiten un aviso:
+
+| clave obsoleta | alias | tipo | sustituida por |
+| --- | --- | --- | --- |
+| `default_col_width` | `default_col_w` | píxeles | `column_width`, convirtiendo contra un workarea fijo de 1920px |
+| `split_bias` | — | fracción, `0.0`–`1.0` | `column_width` |
+
+`[colors]` acepta `normal`, `focused` y `urgent`, legibles también como
+`col_normal`, `col_focused` y `col_urgent`.
+
+### Cómo se combina un fichero con los defaults
 
 - Los ajustes ordinarios se fusionan campo a campo.
-- `[[keybindings]]` y `[[rules]]` **sustituyen** la lista compilada entera
-  cuando las declaras. Aportar una sola `[[rules]]` descarta la política
-  compilada de flotación por aplicación, así que repite las entradas que
-  quieras.
+- `[[keybindings]]` y `[[rules]]` **reemplazan** la lista compilada por completo
+  cuando se declaran. Declarar un solo `[[rules]]` descarta la política compilada
+  de float por aplicación, así que hay que repetir las entradas necesarias.
 
-Un TOML mal formado vuelve a los defaults compilados; una entrada individual
-inválida se diagnostica y se ignora, y el resto del fichero sigue cargando. Una
-tabla que Maverick no conoce (una escrita para otro Maverick) se salta en
-silencio, mientras que una clave desconocida dentro de una tabla que *sí*
-conoce se informa. Valida antes de confiar en ella:
+### Comportamiento ante un fichero mal formado o incompleto
+
+- Un TOML mal formado recurre a los defaults compilados.
+- Una entrada individual inválida se diagnostica y se ignora; el resto del
+  fichero se carga igualmente.
+- Una tabla desconocida se salta en silencio, de modo que un fichero escrito para
+  otro Maverick no produce ruido.
+- Una clave desconocida dentro de una tabla que Maverick sí conoce se informa como
+  aviso y se ignora.
+
+Conviene validar antes de depender de cualquiera de estos casos:
 
 ```bash
 maverick --check-config ~/.config/maverick/config.toml
 ```
 
-[`config/config.toml`](config/config.toml) es un ejemplo comentado que cubre el
-vocabulario más amplio. Es un preset, no una copia de los defaults compilados:
-copiarlo cambia tus atajos, reglas y autostart.
+[`config/config.toml`](config/config.toml) es una muestra comentada que cubre el
+vocabulario más amplio. Es un preset, no una copia de los defaults compilados.
 
 ### Reglas de aplicación
 
-`class`, `instance` y `title` hacen coincidencia como subcadena sin distinguir
-mayúsculas de los propios textos de la ventana; `window_type` coincide con un
-nombre `_NET_WM_WINDOW_TYPE` normalizado completo. Todos los criterios presentes
-en una regla deben coincidir.
+`class`, `instance` y `title` coinciden con subcadenas sin distinción de mayúsculas
+de las cadenas propias de la ventana; `window_type` (alias `type`) coincide con un
+nombre `_NET_WM_WINDOW_TYPE` normalizado y completo. Todos los criterios
+presentes en una regla deben coincidir.
 
 ```toml
 [[rules]]
@@ -508,11 +596,21 @@ size = [480, 360]
 position = [120, 100]
 ```
 
-Las reglas también aceptan `sticky`, `workspace` (base 1), `opacity`,
-`border_width`, `ignore_initial_state`, `honor_initial_state`,
-`deny_fullscreen` y `true_fullscreen`. `deny_fullscreen` rechaza las peticiones
-de fullscreen del propio cliente, no tu `Super+Shift+F`. `true_fullscreen` pide
-un overlay realmente exclusivo y tiene prioridad sobre `deny_fullscreen`.
+| clave de regla | alias | efecto |
+| --- | --- | --- |
+| `class`, `instance`, `title` | — | coincidencia por subcadena sin distinguir mayúsculas |
+| `window_type` | `type` | un nombre `_NET_WM_WINDOW_TYPE` normalizado y completo |
+| `float` | — | gestionar la ventana como cliente flotante |
+| `sticky` | — | mostrar la ventana en todas las Views de su monitor |
+| `workspace` | `ws` | colocar la ventana en esta View, numerada desde 1 |
+| `size` | — | `[ancho, alto]` para una ventana flotante |
+| `position` | — | `[x, y]` respecto al origen del workarea |
+| `opacity` | — | opacidad de la ventana |
+| `border_width` | `border_w` | grosor de borde por ventana |
+| `honor_initial_state` | — | eximir esta ventana de la normalización del estado inicial |
+| `ignore_initial_state` | `no_initial_state`, `no_maximize` | lo contrario de lo anterior |
+| `deny_fullscreen` | `no_fullscreen` | rechazar las peticiones de fullscreen del propio cliente, no el atajo `Super+Shift+F` |
+| `true_fullscreen` | `exclusive_fullscreen` | pedir un overlay realmente exclusivo; tiene precedencia sobre `deny_fullscreen` |
 
 ### Autostart
 
@@ -523,15 +621,20 @@ un overlay realmente exclusivo y tiene prioridad sobre `deny_fullscreen`.
 commands = [["polybar", "main"], ["picom", "--vsync"]]
 ```
 
-Una lista no vacía sustituye a la compilada. Aquí es donde pertenece un
-compositor, un panel o un programa de wallpaper: Maverick arranca el comando y
-no vuelve a hablar con él. Los docks que publican struts reservan workarea
-automáticamente. El arranque de sesión y el reinicio no son un supervisor de
-servicios de propósito general.
+Una lista no vacía reemplaza la compilada. Aquí es donde pertenece un compositor,
+un panel o un programa de wallpaper: Maverick arranca el comando y no vuelve a
+hablar con él. Los docks que publican struts reservan workarea automáticamente.
+El arranque de sesión y el reinicio no son un supervisor general de servicios.
 
-## Control
+## maverickctl
+
+`maverickctl` es un cliente de control separado. Nunca enlaza el gestor de
+ventanas ni abre un display X; habla con una instancia en marcha a través del
+socket de control Unix de esa instancia, verificado contra pares con `SO_PEERCRED`
+dentro de un directorio de runtime privado `0700`.
 
 ```bash
+maverickctl --version
 maverickctl list
 maverickctl state --name desktop
 maverickctl query tree --name desktop
@@ -542,96 +645,202 @@ maverickctl restart --name desktop
 maverickctl quit --name desktop --confirm
 ```
 
-Las Views y las ventanas se direccionan semánticamente, por View o por id o
-nombre de ventana, y cada operación es la misma acción que ejecuta un atajo de
-teclado:
+Las opciones globales pueden aparecer en cualquier punto de la línea y nunca se
+reenvían a la instancia como parte de una acción:
+
+| opción | efecto |
+| --- | --- |
+| `-v`, `--version` | imprimir la versión y salir |
+| `-j`, `--json` | salida legible por máquina donde el comando produce un documento |
+| `-y`, `--yes` | omitir una pregunta de confirmación |
+| `-s`, `--session <sid>` | id de sesión explícito, obtainable con `list` |
+| `-n`, `--name <id>` | etiqueta de instancia, o id de sesión |
+
+La selección de instancia prefiere `--session`, luego `--name`, luego
+`$MAVERICK_INSTANCE`, luego la única instancia del `DISPLAY`/TTY actual. Cuando
+coinciden varios candidatos, el descubrimiento se niega a adivinar.
+
+Las Views y las ventanas se direccionan semánticamente, y toda operación es la
+misma acción que ejecuta un atajo de teclado:
 
 ```bash
 maverickctl view debug next
+maverickctl view debug goto 3
 maverickctl window list debug --json
 maverickctl window focus debug firefox
 maverickctl window float debug 0x42003
 maverickctl resize debug +10%
 maverickctl process list debug --json
 maverickctl inspect debug
-maverickctl session stop debug
 ```
 
-Cada listado tiene su forma `--json`. Salir de una sesión pide a sus clientes
-que cierren mediante `WM_DELETE_WINDOW` y fuerza el cierre de los supervivientes
-tras una espera acotada; guarda tu trabajo antes. Ver
-[`docs/sessions.md`](docs/sessions.md) para el modelo de sesión, sus
-limitaciones y la frontera de seguridad.
+Una ventana se direcciona por su id X11 (`0x42003`) o por un nombre que coincide
+con la clase, el nombre de instancia y el título — primero se intenta una
+coincidencia exacta y después una coincidencia por subcadena, y un nombre ambiguo
+se rechaza indicando los ids candidatos en lugar de adivinar. Omitir la ventana
+actúa sobre la enfocada.
 
-## Desarrollo
+Cualquier palabra que `maverickctl` no reconozca como comando se reenvía tal cual
+al gestor de ventanas, que es lo único que puede distinguir una acción de un tema
+de consulta de una errata.
+
+`maverickctl <grupo> --help` documenta un grupo completo: `session`, `window`,
+`process`. `maverickctl --help` ofrece la lista completa de comandos.
+
+## Sesiones
+
+`maverickctl session` gestiona sesiones gráficas completas: un servidor X
+anidado, un Maverick, los programas lanzados en ella, una cookie, logs y un
+ciclo de vida.
 
 ```bash
-cargo fmt --all
+maverickctl session create work --resolution 1920x1080
+maverickctl session status work --json
+maverickctl session logs work -f
+maverickctl session stop work
+maverickctl session remove work
+```
+
+Cada sesión ejecuta un servidor X anidado —`xephyr` por defecto, que es visible, o
+`xvfb` con `--backend xvfb`. La identidad, el socket y los logs de la sesión
+viven bajo el directorio de runtime privado, y una sesión se niega a arrancar en
+una display que no haya reclamado de forma exclusiva.
+
+Detener una sesión pide a sus clientes que cierren mediante `WM_DELETE_WINDOW` y
+fuerza el cierre de los supervivientes tras una espera acotada, así que conviene
+guardar el trabajo pendiente antes.
+
+Ver [`docs/sessions.md`](docs/sessions.md) para el modelo de sesión completo, sus
+limitaciones y su frontera de seguridad.
+
+## Diagnóstico de problemas
+
+**`maverickctl` no encuentra la instancia.** El descubrimiento se niega a adivinar
+cuando más de un candidato coincide con el display. Listar los candidatos con
+`maverickctl list` y seleccionar de forma explícita con `--name` o `--session`.
+
+**Un cambio de configuración no surtió efecto.** `reload` es un no-op cuando el
+binario en marcha se compiló únicamente con configuración compilada; en ese caso
+conviene reiniciar la instancia. `--check-config <ruta>` informa de si un fichero
+parsea y si tiene claves desconocidas.
+
+**Un atajo no se dispara.** Los atajos se resuelven a través del layout XKB
+activo. Una tabla `[[keybindings]]` reemplaza la lista compilada por completo, así
+que declarar una elimina todos los defaults que no se repitan en ella.
+
+**Una ventana abre maximizada o a pantalla completa cuando no debería.** El
+`_NET_WM_STATE` pedido al mapearse se normaliza por defecto. Fijar
+`honor_initial_state = true` en `[general]`, o por regla, conserva el estado
+propio del cliente.
+
+**Se informa de un `ViewId` obsoleto.** Los ids de View nunca se reutilizan, así
+que una referencia a una View eliminada es detectable en lugar de redirigirse en
+silencio. Volver a seleccionar la View por posición con
+`maverickctl view <sesión> goto <n>`.
+
+**El instalador sale con estado 2.** `--with-compositor`,
+`--without-compositor`, `--no-compositor` y `--no-default-features` se rechazan:
+Maverick no tiene compositor y la compilación no tiene característica por
+defecto, así que no hay nada que seleccionar.
+
+**El instalador falla en un prefijo en el que no se puede escribir.** El prefijo
+es una frontera estricta y nunca se escala con `sudo`. Usar `--prefix` con una
+ubicación escribible, o previsto de antemano el acceso de escritura a
+`/usr/local` para `--system`.
+
+**Hace falta más detalle sobre la entrada o el estado de las ventanas.**
+Compilar con las características opt-in `input-trace` y `window-trace` para añadir
+trazas estructuradas. Ambas están desactivadas por defecto y sólo añaden log:
+
+```bash
+cargo build -p maverick --features input-trace,window-trace
+./target/debug/maverick --config /ruta/a/config.toml 2> /tmp/maverick-debug.log
+```
+
+Ejecutar eso sólo sobre un `DISPLAY` previsto para entregarse a un gestor de
+ventanas.
+
+**La animación del instalador embarulla la salida canalizada.** Usar `--no-anim`,
+o exportar `MAVERICK_NO_ANIM=1`. No alcanza a ninguna compilación de cargo:
+Maverick dibuja a través de X11 y no tiene subsistema de animación.
+
+## Compilar desde el código
+
+```bash
+cargo build --release -p maverick -p maverickctl
 cargo check --workspace --all-targets
+cargo fmt --all -- --check      # forma de solo lectura; `cargo fmt --all` aplica
+```
+
+## Pruebas
+
+```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-`cargo fmt --all -- --check` es la forma de sólo lectura. Mantén el trabajo de
-layout, de Carousel y de comandos cubierto por tests de estado puros, que no
-necesitan display; usa un servidor X aislado para el comportamiento de
-protocolo, apilado y foco. Al cambiar la interoperabilidad EWMH (struts, bypass
-hints, opacidad), valida contra una sesión real.
+El layout, el Carousel y el trabajo de comandos está cubierto por tests de estado
+puros, que no necesitan display. El comportamiento de protocolo, apilado y foco
+usa un servidor X aislado.
 
 El instalador tiene sus propias comprobaciones:
 
 ```bash
-bash installer/lint.sh                  # bash -n, y shellcheck si está presente
+bash installer/lint.sh                  # bash -n, y shellcheck cuando está disponible
 python3 installer/tests/partition.py    # la suite de comportamiento del instalador
 ```
 
-Los harnesses sobre X11 real viven en `tests/`: `tests/xvfb-stacking.py` es la
+Los harnesses sobre X11 real viven en `tests/`. `tests/xvfb-stacking.py` es la
 regresión automatizada, y los scripts `tests/xephyr-*.sh` son escenarios de
 integración manuales. **No** están todos aislados con el mismo rigor —algunos
-helpers antiguos en `tests/common.sh` matan procesos por nombre o usan displays
-fijos—, así que lee un script antes de ejecutarlo, y ejecuta la suite legacy
-sólo en una sesión gráfica desechable.
+helpers antiguos de `tests/common.sh` matan procesos por nombre o usan displays
+fijos—, así que conviene leer un script antes de ejecutarlo y reservar la suite
+legacy para una sesión gráfica desechable.
 
-CI (`.github/workflows/ci.yml`) ejecuta tres trabajos: tests del workspace con
-Clippy estricto, las comprobaciones del instalador, y un test de humo de apilado
-con Xvfb.
+CI (`.github/workflows/ci.yml`) ejecuta tres trabajos: el workspace con Clippy
+estricto y ambos conjuntos de características, las comprobaciones del instalador,
+y un test de humo de apilado con Xvfb.
 
 ## Estado
 
-Maverick está en preview. No está declarado como listo para producción, y los
-scripts de integración son comprobaciones de regresión, no una certificación de
-compatibilidad de aplicaciones.
+La versión canónica se declara una sola vez, en `[workspace.package]` en
+`Cargo.toml`, y cada paquete la hereda. El árbol lleva actualmente **1.1.1-dev**,
+una versión de desarrollo: no es una release, no tiene tag ni sección de
+changelog. La release más reciente es **1.1.0**; el historial completo está en
+[`CHANGELOG.md`](CHANGELOG.md).
 
-- **Alcance:** sólo Linux y X11. Sin backend de Wayland, compositor, subsistema
-  de animación, shell de escritorio, blur ni sombras.
+Maverick está en preview. No se declara lista para producción, y los scripts de
+integración son comprobaciones de regresión y no una certificación de compatibilidad
+de aplicaciones.
+
+- **Alcance:** sólo Linux y X11. Sin backend de Wayland, compositor, subsistema de
+  animación, shell de escritorio, desenfoque ni sombras.
 - **Layouts:** Scroll es el único layout. `LayoutKind` tiene una variante; un
-  segundo layout no está implementado y no debe documentarse como si lo
-  estuviera.
-- **Views:** como mucho 9 por monitor. `n_tags` fija cuántas existen al arrancar,
-  y la fila de números no tiene una décima tecla.
+  segundo layout no está implementado y no se documenta como si lo estuviera.
+- **Views:** como máximo 9 por monitor. `n_tags` fija cuántas existen al arrancar, y
+  la fila de dígitos no tiene décima tecla.
 - **Compatibilidad:** ICCCM y EWMH están implementados para lo que el gestor de
-  ventanas necesita, lo cual no es una afirmación de cobertura completa del
-  protocolo o de las aplicaciones.
-- **Monitores:** el foco y el movimiento recorren el orden de enumeración de los
-  monitores, no la dirección física. La recuperación de topología usa rectángulos
+  ventanas necesita, lo que no equivale a una cobertura completa del protocolo o
+  de las aplicaciones.
+- **Monitores:** el foco y el movimiento ciclan por el orden de enumeración de
+  monitores, no por dirección física. La recuperación de topología usa rectángulos
   e índices, no identidades estables de conector, así que un hotplug o
   reordenamiento arbitrario no preserva las asignaciones.
-- **Geometría:** X11 tiene un único espacio global de coordenadas raíz con los
-  límites de tamaño y coordenadas del protocolo; la proyección de Scroll y los
-  workareas multi-monitor los respetan.
+- **Geometría:** X11 tiene un único espacio global de coordenadas raíz con límites
+  de tamaño y coordenada de protocolo; la proyección de Scroll y los workareas
+  multimonitor los respetan.
 - **Interfaces:** la configuración, las APIs internas y la política de
-  presentación pueden cambiar. El parser de TOML del repo soporta un subconjunto
-  de TOML, no toda la especificación.
-- **Nomenclatura:** el vocabulario de acciones dice `view`; la configuración
-  sigue diciendo `n_tags` y `workspace` para los mismos objetos. Ambas grafías
-  están vivas.
+  presentación pueden cambiar. El parser TOML del repo soporta un subconjunto de
+  TOML, no la especificación completa.
+- **Nomenclatura:** el vocabulario de acciones dice `view`; la configuración sigue
+  diciendo `n_tags` y `workspace` para los mismos objetos. Ambas grafías están
+  vivas.
 
 Antes de usar Maverick como único gestor de ventanas para trabajo importante,
-valida una sesión X11 desechable en la máquina destino: inicio de sesión y salida
-limpia, lanzamiento y cierre de aplicaciones, foco y entrada, fullscreen,
-diálogos flotantes y transient, cambio de View, suspensión/reanudación de
-pantalla, y cambios de monitor. Ten siempre una forma de volver a la sesión
-anterior.
+validar una sesión X11 desechable en la máquina destino: inicio y salida limpia,
+lanzamiento y cierre de aplicaciones, foco y entrada, fullscreen, flotantes y
+diálogos transitorios, cambio de View, suspensión/reactivación de display y
+cambios de monitor. Conviene conservar una vía de vuelta a la sesión anterior.
 
 ## Licencia
 
