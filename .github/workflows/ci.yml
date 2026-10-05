@@ -18,17 +18,26 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Format
+        # Documented in README.md ("Building from source") and
+        # docs/architecture.md ("Checking these claims") but never run here.
+        # No `--locked`: cargo fmt resolves no dependency graph, and rejects
+        # the flag outright, so it cannot detect a stale lock.
+        run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test
-        run: cargo test --workspace --all-features
+        # `--all-targets` matches the `cargo check --workspace --all-targets`
+        # gate in docs/architecture.md: a target Clippy compiles is a target
+        # whose tests should run.
+        run: cargo test --workspace --all-targets --all-features --locked
       - name: Test (default features)
         # The only features left are the two diagnostic trace builds, so this
         # is what catches a trace-only build breaking. It is the configuration
         # the release binary ships.
-        run: cargo test --workspace
+        run: cargo test --workspace --all-targets --locked
 
   # The installer is plain bash — check its syntax so it cannot silently bitrot.
   # `installer/tests/partition.py` runs every smoke suite from
@@ -57,9 +66,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y \
           xvfb x11-utils xdotool libx11-dev libxcb1-dev
       - name: Build release profile
-        # There is no `default` feature and no compositor to leave out, so the
-        # release profile is the only build there is: one command, no feature
-        # flags, and the two binaries the installer installs.
-        run: cargo build --release -p maverick -p maverickctl
+        # `tests/xvfb-stacking.py` drives target/release/maverick, so build
+        # that profile: it is the one `installer/install.sh` produces and
+        # installs. A debug build is not the artifact that ships, and the gate
+        # must not pass against it instead.
+        # There is no `default` feature and no compositor to leave out, so this
+        # is one command with no feature flags — not "the only build there is".
+        run: cargo build --release -p maverick -p maverickctl --locked
       - name: Xvfb stacking regression
         run: python3 tests/xvfb-stacking.py

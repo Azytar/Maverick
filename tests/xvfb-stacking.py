@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""XQueryTree regression. Run after cargo build -p maverick.
+"""XQueryTree regression. Run after cargo build --release -p maverick.
+
+Drives the *release* binary: it is the profile the installer builds and
+installs, so a pass here is a statement about the artifact that ships. There is
+deliberately no fallback to `target/debug` — a missing binary is a failure,
+never a skip.
 Uses its own Xvfb, runtime/config and PIDs; never touches a live session.
 """
 import os
@@ -10,6 +15,25 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
+WM_BIN = ROOT / "target/release/maverick"
+WM_BUILD = "cargo build --release -p maverick"
+
+
+def require_wm_binary():
+    """Fail loudly and specifically when the release binary is absent.
+
+    A bare `Popen` here raises FileNotFoundError from deep inside the harness
+    and, worse, reads like a flake next to a live Xvfb. Name the profile and
+    the command that produces it instead.
+    """
+    if WM_BIN.is_file() and os.access(WM_BIN, os.X_OK):
+        return
+    why = "is not executable" if WM_BIN.is_file() else "does not exist"
+    raise SystemExit(
+        f"error: {WM_BIN} {why}\n"
+        "This regression drives the release profile and has no debug fallback.\n"
+        f"Build it first from {ROOT}:\n\n    {WM_BUILD}\n"
+    )
 
 
 def line(pipe):
@@ -22,6 +46,7 @@ def line(pipe):
 
 
 def main():
+    require_wm_binary()
     processes = []
     with tempfile.TemporaryDirectory(prefix="mst-", dir="/tmp") as tmp:
         tmp = Path(tmp)
@@ -59,7 +84,7 @@ action = "focus:right"
                                           stderr=log, text=True)
                 processes.append(server)
                 env["DISPLAY"] = ":" + line(server.stdout)
-                wm = subprocess.Popen([str(ROOT / "target/debug/maverick"), "--config", str(config)],
+                wm = subprocess.Popen([str(WM_BIN), "--config", str(config)],
                                       env=env, stdout=log, stderr=log)
                 processes.append(wm)
                 for _ in range(100):
