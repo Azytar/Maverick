@@ -896,7 +896,21 @@ pub fn process(c: &mut Ctl, args: &[String]) -> Result<bool, String> {
         .first()
         .map(|&i| args[i].as_str())
         .unwrap_or("list");
-    let rest = if args.is_empty() { &[][..] } else { &args[1..] };
+    // Everything *after the verb*, not `args[1..]`. A global option lifted by
+    // `run_group` sits at index 0, so for `maverickctl --json process list debug`
+    // the slice from index 1 still began with the verb — and `session_target`
+    // then resolved the *verb* as the session name. `session_target` reads
+    // positionals against `raw`, so the offset is recorded as well.
+    let rest = match c.positionals.first() {
+        Some(&i) => {
+            c.set_rest_start(i + 1);
+            &args[i + 1..]
+        }
+        None => {
+            c.set_rest_start(args.len());
+            &args[args.len()..]
+        }
+    };
     match verb {
         "list" | "ls" => process_list(c, rest),
         "inspect" | "info" => {

@@ -503,6 +503,199 @@ fn an_explicit_session_that_cannot_be_a_name_is_refused() {
     }
 }
 
+/// A process outside every session, as a pid the fixture does not own.
+///
+/// A child of this test rather than an arbitrary number so that the kill case
+/// has something that genuinely exists: the refusal under test is the ownership
+/// one, and it is only reachable once `/proc` has answered for the pid.
+fn spawn_outside_probe() -> std::process::Child {
+    Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn a probe process")
+}
+
+/// Every documented `process` order reaches the session it names.
+///
+/// The group sliced `args[1..]` for "the rest" while the verb was the first
+/// *positional*, so the two disagreed exactly when a global option was lifted to
+/// the front — and the session came out as the verb, one word before the one the
+/// user typed. All four orders below are in `docs/sessions.md`, in
+/// `process --help` and in the README; a record exists for the session they
+/// name, so each can only succeed if the arguments were read from the right
+/// offset.
+#[test]
+fn the_documented_process_orders_reach_the_session_they_name() {
+    runtime_dir();
+    let sid = "cliprocdocumented";
+    write_session_record(sid);
+    let mut probe = spawn_outside_probe();
+    let pid = probe.id().to_string();
+
+    // `process list <session>`, with the global on either side of the verb.
+    for args in [
+        vec!["process", "list", sid],
+        vec!["process", "list", sid, "--json"],
+        vec!["process", "list", "--json", sid],
+        vec!["--json", "process", "list", sid],
+    ] {
+        let r = run(&args);
+        assert_eq!(
+            r.code, 0,
+            "`maverickctl {args:?}` must list the session it was given: {r:?}"
+        );
+        assert!(
+            r.stdout.contains(sid),
+            "`maverickctl {args:?}` must report on '{sid}': {r:?}"
+        );
+    }
+
+    // `--json` must still be a document naming that session, not a table.
+    let r = run(&["--json", "process", "list", sid]);
+    assert_eq!(r.code, 0, "`--json process list {sid}` must succeed: {r:?}");
+    assert!(
+        maverick_sys::json::parse(r.stdout.trim()).is_some(),
+        "`--json process list {sid}` must print one JSON document: {r:?}"
+    );
+
+    // `process inspect <session> <pid>`: the pid is the word after the session,
+    // so a slice that began at the verb put the pid in the session's place and
+    // reported a missing session named by a number.
+    for args in [
+        vec!["process", "inspect", sid, &pid],
+        vec!["process", "inspect", sid, &pid, "--json"],
+        vec!["--json", "process", "inspect", sid, &pid],
+    ] {
+        let r = run(&args);
+        assert_eq!(
+            r.code, 0,
+            "`maverickctl {args:?}` must inspect the process: {r:?}"
+        );
+        assert!(
+            r.stdout.contains(&pid),
+            "`maverickctl {args:?}` must report pid {pid}: {r:?}"
+        );
+    }
+
+    // `process kill <session> <pid>` reaches the ownership guard, which is where
+    // a session that exists but does not own the pid stops. Nothing is
+    // signalled: the probe is refused precisely because the record names no live
+    // root.
+    let r = run(&["process", "kill", sid, &pid]);
+    assert_ne!(
+        r.code, 0,
+        "a process this session does not own must not be signalled: {r:?}"
+    );
+    assert!(
+        r.stderr
+            .contains(&format!("process {pid} is not part of session '{sid}'")),
+        "`process kill {sid} {pid}` must reach the ownership guard and name both \
+         the pid and the session, got: {}",
+        r.stderr
+    );
+
+    let _ = probe.kill();
+    let _ = probe.wait();
+}
+
+/// A pid argument is reported as a pid, never resolved as a session.
+///
+/// The pid is the word after the session, so the offset that misread the verb
+/// also had the pid in the session's place: a malformed pid was answered with a
+/// complaint about a session named after it. A pid is a pid, and a missing or
+/// unparsable one is a statement about the pid.
+#[test]
+fn a_pid_argument_is_reported_as_a_pid_not_as_a_session_name() {
+    runtime_dir();
+    let sid = "cliprocpidreport";
+    write_session_record(sid);
+
+    for args in [
+        vec!["process", "inspect", sid, "not-a-pid"],
+        vec!["process", "kill", sid, "not-a-pid"],
+        // A global in front is what put both the verb and the pid in the
+        // session's place, so it is the order that discriminates.
+        vec!["--json", "process", "inspect", sid, "not-a-pid"],
+    ] {
+        let r = run(&args);
+        assert_ne!(r.code, 0, "`maverickctl {args:?}` must fail: {r:?}");
+        assert!(
+            r.stderr.contains("'not-a-pid' is not a pid"),
+            "`maverickctl {args:?}` must report the pid it was given, got: {}",
+            r.stderr
+        );
+        assert!(
+            !r.stderr
+                .contains(&format!("session '{sid}' does not exist")),
+            "`maverickctl {args:?}` resolved an argument as the session instead \
+             of the pid: {}",
+            r.stderr
+        );
+    }
+
+    // A pid that was never given is a missing pid, not a session the caller has
+    // to name.
+    let r = run(&["process", "inspect", sid]);
+    assert_ne!(r.code, 0, "a missing pid must fail: {r:?}");
+    assert!(
+        r.stderr.contains("pid"),
+        "the diagnostic must be about the pid: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr
+            .contains(&format!("session '{sid}' does not exist")),
+        "the session exists; only the pid is missing: {}",
+        r.stderr
+    );
+}
+
+/// A bare verb asks for the caller's own session, as every other group does.
+///
+/// `process list` with nothing after it is the documented way to ask about the
+/// session the caller is in, so resolution has to fall through to the context.
+/// Reading the verb as the session instead made that command report a missing
+/// session called `list` — a request the user never made.
+#[test]
+fn a_bare_process_verb_resolves_the_callers_session_rather_than_the_verb() {
+    runtime_dir();
+    let sid = "cliproccontext";
+    write_session_record(sid);
+    let in_context = |args: &[&str]| -> Run {
+        let out = Command::new(env!("CARGO_BIN_EXE_maverickctl"))
+            .env("MAVERICK_SESSION", sid)
+            .args(args)
+            .output()
+            .expect("run maverickctl");
+        Run {
+            code: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    };
+
+    for args in [
+        vec!["process"],
+        vec!["process", "list"],
+        vec!["process", "list", "--json"],
+        vec!["--json", "process", "list"],
+    ] {
+        let r = in_context(&args);
+        assert_eq!(
+            r.code, 0,
+            "`maverickctl {args:?}` with $MAVERICK_SESSION={sid} must succeed: {r:?}"
+        );
+        assert!(
+            r.stdout.contains(sid),
+            "`maverickctl {args:?}` must list '{sid}': {r:?}"
+        );
+        assert!(
+            !r.stderr.contains("session 'list'"),
+            "`maverickctl {args:?}` resolved the verb as a session name: {r:?}"
+        );
+    }
+}
+
 /// The precedence itself: an explicit session beats the positional, and the
 /// positional beats the environment.
 #[test]

@@ -451,6 +451,68 @@ fn the_session_after_the_verb_is_still_resolved() {
     }
 }
 
+/// The `process` group reads its arguments from after the verb, like every
+/// other group.
+///
+/// `run_group` lifts globals to the front of `args` and `process` took `args[1..]`
+/// as "the rest", so for `maverickctl --json process list debug` the slice still
+/// began with the verb — and `session_target`, which takes the first positional
+/// at or after `rest_start`, resolved the *verb* as the session name. It also
+/// never recorded where the verb ended, so `rest_start` stayed 0 and the verb was
+/// resolved as the session even with no global on the line: every documented
+/// `process` order reported a missing session named after its own verb.
+///
+/// The diagnostic is what a user acts on, so it has to name the session they
+/// typed — a report about `list` sends them looking for a session they never
+/// mentioned.
+#[test]
+fn the_process_group_reads_its_arguments_after_the_verb() {
+    runtime_dir();
+    for (args, verb) in [
+        (vec!["process", "list", "sessP"], "list"),
+        (vec!["process", "list", "sessP", "--json"], "list"),
+        (vec!["--json", "process", "list", "sessP"], "list"),
+        (vec!["process", "list", "--json", "sessP"], "list"),
+        (vec!["process", "inspect", "sessP", "1234"], "inspect"),
+        (
+            vec!["--json", "process", "inspect", "sessP", "1234"],
+            "inspect",
+        ),
+        (
+            vec!["process", "inspect", "--json", "sessP", "1234"],
+            "inspect",
+        ),
+        (vec!["process", "kill", "sessP", "1234"], "kill"),
+        (vec!["process", "kill", "sessP", "1234", "--force"], "kill"),
+        (vec!["--session", "sessP", "process", "list"], "list"),
+        (
+            vec!["--session", "sessP", "process", "inspect", "1234"],
+            "inspect",
+        ),
+        (vec!["--name", "sessP", "process", "kill", "1234"], "kill"),
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_maverickctl"))
+            .args(&args)
+            .output()
+            .expect("run maverickctl");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(
+            out.status.code(),
+            Some(0),
+            "`maverickctl {args:?}` must fail: no such session exists"
+        );
+        assert!(
+            stderr.contains("session 'sessP'"),
+            "`maverickctl {args:?}` must name the session it was given, got: {stderr}"
+        );
+        assert!(
+            !stderr.contains(&format!("session '{verb}'")),
+            "`maverickctl {args:?}` resolved the verb ({verb}) as the session name: \
+             {stderr}"
+        );
+    }
+}
+
 /// `-n` keeps its documented meaning in `logs` and its meaning elsewhere.
 ///
 /// The two are different options that share a spelling: `logs`'s `-n` is a line
