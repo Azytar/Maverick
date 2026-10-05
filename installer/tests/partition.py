@@ -81,18 +81,38 @@ def tree_of(prefix):
     return rows
 
 
-def run_install(*args):
+def run_install(*args, **env):
     """One clean install in its own sandbox, as this tree produces it."""
     with tempfile.TemporaryDirectory(prefix="maverick-partition-") as d:
         box = smoke.Sandbox(Path(d))
         box.seed_build()
-        result = box.install(*args, env=box.env(SHELL="/bin/bash"))
+        environment = box.env(SHELL="/bin/bash")
+        environment.update(env)
+        result = box.install(*args, env=environment)
         return (
             result.returncode,
             normalize(result.stdout, box),
             normalize(result.stderr, box),
             tree_of(box.prefix),
         )
+
+
+def plain_snapshot(lang, **env):
+    """The plain output of one --no-build install, in the shape golden/ records.
+
+    Both the golden comparison and the locale comparison want the same thing,
+    and a snapshot that is built twice from two places is a snapshot that will
+    quietly stop being the same thing.
+    """
+    rc, out, err, _tree = run_install("--no-build", "--lang", lang, **env)
+    assert rc == 0, (lang, env, out[-2000:], err[-2000:])
+    return out if not err.strip() else out + "\n--- stderr ---\n" + err
+
+
+def differing(expected, got):
+    """The lines of a snapshot comparison, in the form the golden check uses."""
+    return "\n".join(f"- {l}\n+ {r}" for l, r in
+                     zip(expected.split("\n"), got.split("\n")) if l != r)
 
 
 # ── 1. the smoke suite, unmodified ────────────────────────────────────────────
@@ -112,6 +132,10 @@ ORIGINAL_SUITES = [
     smoke.suite_no_partial_install,
     smoke.suite_repeat_and_overwrite,
     smoke.suite_builds_from_source,
+    # The live progress loop needs a tty and a real build, and answers no
+    # question: --yes pre-answers the prompts the harness would otherwise have
+    # to type. It is a gate suite, not a thing a human has to sit through.
+    smoke.suite_interactive_build_progress,
     smoke.suite_prefix_with_spaces,
     smoke.suite_obsolete_artifacts_absent,
     smoke.suite_cli_contract,
@@ -262,9 +286,7 @@ def suite_golden_output():
     update = os.environ.get("MAVERICK_UPDATE_GOLDEN") == "1"
     GOLDEN.mkdir(exist_ok=True)
     for lang in ("en", "es"):
-        rc, out, err, _tree = run_install("--no-build", "--lang", lang)
-        assert rc == 0, (lang, out[-2000:], err[-2000:])
-        snapshot = out if not err.strip() else out + "\n--- stderr ---\n" + err
+        snapshot = plain_snapshot(lang)
         path = GOLDEN / f"install.{lang}.txt"
         if update:
             path.write_text(snapshot)
@@ -272,14 +294,44 @@ def suite_golden_output():
         assert path.exists(), f"{path} missing — run with MAVERICK_UPDATE_GOLDEN=1"
         expected = path.read_text()
         if expected != snapshot:
-            diff = "\n".join(f"- {l}\n+ {r}" for l, r in
-                             zip(expected.split("\n"), snapshot.split("\n")) if l != r)
-            raise AssertionError(f"{path.name} changed:\n{diff}\n"
+            raise AssertionError(f"{path.name} changed:\n{differing(expected, snapshot)}\n"
                                  f"(MAVERICK_UPDATE_GOLDEN=1 to accept)")
     if update:
         print("WROTE: golden/install.en.txt, golden/install.es.txt")
     else:
         print("PASS: plain output matches the golden in en and es")
+
+
+def suite_layout_is_locale_independent():
+    """The panel has to come out the same width in every locale.
+
+    Column padding is measured in characters, and both obvious ways of counting
+    them quietly return bytes outside a UTF-8 locale: `wc -m` does, and so does
+    ${#str}. The em dash in the summary title is then three columns wide instead
+    of one, so every row of the panel is padded two columns short and the box
+    no longer closes. Nothing on a UTF-8 machine can see that, and a build
+    machine is routinely LC_ALL=C — so the locales are named here rather than
+    inherited, or the property would only be tested by whoever happened to run
+    the gate in the right locale.
+
+    The golden is the recorded UTF-8 rendering, so each byte locale has to
+    reproduce it exactly; C.UTF-8 is asserted against it too, which also makes
+    a host with no UTF-8 locale at all report that instead of blaming the
+    layout.
+    """
+    for lang in ("en", "es"):
+        golden = (GOLDEN / f"install.{lang}.txt").read_text()
+        reference = plain_snapshot(lang, LC_ALL="C.UTF-8")
+        assert reference == golden, \
+            f"LC_ALL=C.UTF-8 no longer reproduces install.{lang}.txt " \
+            f"(no UTF-8 locale here?):\n{differing(golden, reference)}"
+        for locale in ("C", "POSIX"):
+            got = plain_snapshot(lang, LC_ALL=locale)
+            if got != reference:
+                raise AssertionError(
+                    f"LC_ALL={locale} laid the {lang} output out differently "
+                    f"from C.UTF-8:\n{differing(reference, got)}")
+    print("PASS: panel layout is identical under LC_ALL=C, POSIX and C.UTF-8")
 
 
 SUITES = [
@@ -290,6 +342,7 @@ SUITES = [
     suite_syntax,
     suite_build_command_names_the_release_set,
     suite_golden_output,
+    suite_layout_is_locale_independent,
 ]
 
 

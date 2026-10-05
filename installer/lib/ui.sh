@@ -66,11 +66,27 @@ ui_init() {
     if (( COLS < 64 )); then BAR_W=16; fi
     PANEL_W=48
 
-    # Pad by display width; falls back to a byte count when wc is unavailable.
     _SPACES="                                                                                                                            "
-    HAS_WC=1
-    if ! command -v wc >/dev/null 2>&1; then
-        HAS_WC=0
+    # A character count, not a byte count. `wc -m` only reports characters where
+    # the locale's charmap is multibyte: under LC_ALL=C and LC_ALL=POSIX it
+    # counts bytes, so the em dash in "Done — Maverick installed" is three
+    # columns wide and every row of the panel comes out two short. Pinning the
+    # child's locale takes the answer out of the caller's hands. The probe is
+    # not paranoia: a C library handed a locale it does not have falls back to
+    # counting bytes without a word, so the pinned locale is measured rather
+    # than trusted. One character, three bytes — 1 counts, 3 is a byte count.
+    # Nothing that can count characters means HAS_WC=0, and the caller says so.
+    WIDTH_LOCALE=""
+    HAS_WC=0
+    if command -v wc >/dev/null 2>&1; then
+        local probe=$'\xe2\x80\x94' seen
+        for seen in C.UTF-8 "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"; do
+            if [[ "$(printf '%s' "$probe" | LC_ALL="$seen" wc -m 2>/dev/null || true)" == 1 ]]; then
+                WIDTH_LOCALE="$seen"
+                HAS_WC=1
+                break
+            fi
+        done
     fi
     return 0
 }
@@ -78,9 +94,9 @@ ui_init() {
 _pad() {
     local str="$1"
     local width="$2"
-    local n
+    local n=""
     if [[ $HAS_WC -eq 1 ]]; then
-        n=$(printf '%s' "$str" | wc -m 2>/dev/null)
+        n=$(printf '%s' "$str" | LC_ALL="$WIDTH_LOCALE" wc -m 2>/dev/null || true)
         n="${n// /}"
     fi
     if [[ -z "$n" || ! "$n" =~ ^[0-9]+$ ]]; then
