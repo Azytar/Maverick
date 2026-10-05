@@ -781,10 +781,9 @@ test.
 
 The canonical version is declared once, in `[workspace.package]` in
 `Cargo.toml`, and every package inherits it. The tree currently carries
-**1.1.1**, which is not yet released and has no tag. Changes made since the
-last release are collected under `[Unreleased]` in
-[`CHANGELOG.md`](CHANGELOG.md). The most recent release is **1.1.0**; the full
-history is there too.
+**1.1.1**, which is the current release. Changes made since the last release
+are collected under `[Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md). The
+most recent release is **1.1.1**; the full history is there too.
 
 Maverick is in preview. It is not declared production-ready, and the integration
 scripts are regression checks rather than a certification of application
