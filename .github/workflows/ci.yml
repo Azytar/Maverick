@@ -20,6 +20,16 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Install X11 development libraries
+        # `cargo test --workspace --all-targets` links the root package's unit
+        # tests and maverick-x11's integration tests, so this job needs the same
+        # link interface as the release build rather than whatever the runner
+        # image happens to carry. `maverick` links `libX11` and `libX11-xcb`
+        # (see the `#[link]` attributes in maverick-x11), and Ubuntu ships the
+        # second in `libx11-xcb-dev`, which `libx11-dev` does not depend on.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libx11-xcb-dev libxcb1-dev
       - name: Format
         # Documented in README.md ("Building from source") and
         # docs/architecture.md ("Checking these claims") but never run here.
@@ -60,11 +70,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install isolated Xvfb test dependencies
+      - name: Install X11 test and development dependencies
         # `tests/xvfb-stacking.py` drives the window manager through `xdotool`,
         # which is its own Debian package rather than a member of x11-utils.
-        run: sudo apt-get update && sudo apt-get install -y \
-          xvfb x11-utils xdotool libx11-dev libxcb1-dev
+        # The three `-dev` packages are the same link interface the `wm` job
+        # needs: the build below links `libX11` and `libX11-xcb`, and Ubuntu
+        # provides the second through `libx11-xcb-dev`, which `libx11-dev` does
+        # not depend on.
+        #
+        # One package per argument, on a single uncontinued line. This `run`
+        # value used to be an unquoted YAML plain scalar spanning two source
+        # lines, and YAML folds such a break into a space; the trailing
+        # backslash then escaped that space rather than continuing the command,
+        # so apt received a single argument, " xvfb", and refused the install
+        # before anything was compiled.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils xdotool libx11-dev libx11-xcb-dev libxcb1-dev
       - name: Build release profile
         # `tests/xvfb-stacking.py` drives target/release/maverick, so build
         # that profile: it is the one `installer/install.sh` produces and
