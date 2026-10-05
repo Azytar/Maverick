@@ -1,0 +1,62 @@
+name: Feature request
+description: A capability Maverick should have, with the problem it solves.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Maverick is a focused X11 tiling window manager: it arranges windows and
+        publishes EWMH properties, and nothing else. A request is easier to accept
+        when the problem is clear and the proposal stays inside that scope.
+
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One line describing the capability.
+      placeholder: Expose the View a window belongs to in `maverickctl window list`
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: >-
+        What is difficult or impossible today, and what you are trying to do.
+        Concrete steps and expected output help most.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: >-
+        What Maverick should do. Keep it to the smallest thing that solves the
+        problem above.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >-
+        A configuration workaround, a keybinding, or another tool that already
+        does this.
+    validations:
+      required: false
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Why this fits Maverick
+      description: >-
+        How the proposal stays within a window manager — what it does not need a
+        compositor, a desktop shell, a new dependency or a second layout for. If
+        it needs any of those, that is worth saying plainly.
+    validations:
+      required: true

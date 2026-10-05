@@ -1,0 +1,117 @@
+name: Bug report
+description: Something Maverick does wrong, reported so it can be reproduced.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Maverick is a window manager for Linux and X11 only. Report what happens
+        on a real display, with the steps needed to reproduce it.
+
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One line describing what happens.
+      placeholder: Clicking a client button leaves the window unmoved
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Maverick version
+      description: >-
+        Output of `maverick --version`. Built from source, add the commit from
+        `git rev-parse --short HEAD`.
+      placeholder: "paste the output of `maverick --version`"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: X11 environment
+      description: >-
+        Distribution, X server and package version, and how the session was
+        started — `startx`, a display manager, or `maverickctl session`.
+      placeholder: |
+        Debian 13, Xorg 21.1.7, started with startx
+    validations:
+      required: true
+
+  - type: input
+    id: application
+    attributes:
+      label: Application
+      description: >-
+        Which client the problem involves, and its version. Leave empty if it is
+        not tied to one application.
+      placeholder: "Firefox 141.0"
+    validations:
+      required: false
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Start from a fresh Maverick and list the steps.
+      placeholder: |
+        1. Start Maverick with the default configuration.
+        2. Open two clients.
+        3. Focus the left client.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What should have happened.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What happened instead. Include the exact text of any error.
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: >-
+        A reduced `config.toml`, or `maverick --check-config <path>` and its
+        output when the configuration itself is in question. Say "defaults" if
+        none was changed.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and output
+      description: >-
+        Relevant log lines. `--debug` or `MAVERICK_LOG=debug` raises the level;
+        `maverickctl logs <session>` reads a session's own log.
+      placeholder: "[INFO]  …"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before reporting
+      description: What to confirm first.
+      options:
+        - label: >-
+            I searched the open issues and this is not a duplicate.
+        - label: >-
+            I can reproduce this from a fresh session with the steps above.
+    validations:
+      required: true
