@@ -228,7 +228,13 @@ fn workspaces_json(state: &State, cfg: &Cfg) -> String {
 }
 
 /// Serialize one window entry for the tree query.
-fn window_obj(s: &mut String, id: WindowId, state: &State) {
+///
+/// `ws_index` is the carousel position the entry is emitted under, and it is
+/// what `workspace` carries. Consumers read that field as an unsigned number, so
+/// it must be a bare JSON integer: a quoted `view#N` parses fine and then reads
+/// as absent, which silently substitutes the reader's own walk index for the
+/// real workspace.
+fn window_obj(s: &mut String, id: WindowId, ws_index: usize, state: &State) {
     use std::fmt::Write;
     let c = state.clients.get(&id);
     let (class, instance, title) = c
@@ -247,9 +253,14 @@ fn window_obj(s: &mut String, id: WindowId, state: &State) {
         maverick_sys::json::json_escape(instance)
     )
     .unwrap();
+    // The separator belongs to the client block below: a window with no `Client`
+    // has no field past `title`, and a trailing comma is not valid JSON. The tree
+    // still lists such a window — an id whose client has been reaped but whose
+    // placement has not been swept yet.
+    let sep = if c.is_some() { "," } else { "" };
     write!(
         s,
-        "\"title\":\"{}\",",
+        "\"title\":\"{}\"{sep}",
         maverick_sys::json::json_escape(title)
     )
     .unwrap();
@@ -262,7 +273,13 @@ fn window_obj(s: &mut String, id: WindowId, state: &State) {
             None => s.push_str("\"pid\":null,"),
         }
         write!(s, "\"monitor\":{},", c.monitor).unwrap();
-        write!(s, "\"workspace\":{},", c.workspace).unwrap();
+        // The carousel position, not the View identity: re-resolving
+        // `Client::workspace` through the monitor's carousel would be a second
+        // path to an index this walk already holds, and it would need a fallback
+        // for a View already removed — either a bogus index or a `null` where the
+        // reader requires a number. Taking the position makes a stale id unable
+        // to reach the output at all.
+        write!(s, "\"workspace\":{ws_index},").unwrap();
         write!(s, "\"float\":{},", c.is_float()).unwrap();
         write!(s, "\"fullscreen\":{},", c.is_fullscreen()).unwrap();
         write!(s, "\"maximized\":{},", c.is_maximized()).unwrap();
@@ -363,7 +380,7 @@ fn tree_json(state: &State) -> String {
                     if i > 0 {
                         s.push(',');
                     }
-                    window_obj(&mut s, *w, state);
+                    window_obj(&mut s, *w, wi, state);
                 }
                 s.push_str("]}");
             }
@@ -372,7 +389,7 @@ fn tree_json(state: &State) -> String {
                 if i > 0 {
                     s.push(',');
                 }
-                window_obj(&mut s, *w, state);
+                window_obj(&mut s, *w, wi, state);
             }
             s.push_str("]}");
         }

@@ -927,10 +927,27 @@ mod unit_tests {
         assert_eq!(engine.state.best_focus(0), Some(42));
     }
 
+    /// Every `query` topic must parse.
+    ///
+    /// Substring assertions cannot see malformed JSON — `"workspace":view#0`
+    /// still contains every key name this module used to grep for — so the
+    /// document is handed to `maverick_sys::json::parse`, the same parser
+    /// `maverickctl` uses to read the snapshot. A state with a managed client
+    /// inside a View is required: the interesting fields only exist for a
+    /// client, and a test over an empty tree would pass on a writer that mangles
+    /// every entry.
     #[test]
     fn test_query_json_topics_return_wellformed_documents() {
         use crate::core::ipc::query_json;
         let mut engine = setup_engine();
+
+        for topic in ["state", "workspaces", "tree", "focused", "inspect"] {
+            let doc = query_json(&engine.state, &engine.cfg, topic);
+            assert!(
+                maverick_sys::json::parse(&doc).is_some(),
+                "`query {topic}` is not well-formed JSON: {doc}"
+            );
+        }
 
         let workspaces = query_json(&engine.state, &engine.cfg, "workspaces");
         assert!(workspaces.starts_with('{'));
@@ -966,6 +983,151 @@ mod unit_tests {
         assert!(focused.contains("\"window\":9"));
         let workspaces = query_json(&engine.state, &engine.cfg, "workspaces");
         assert!(workspaces.contains("\"windows\":[9]"));
+
+        for topic in ["state", "workspaces", "tree", "focused", "inspect"] {
+            let doc = query_json(&engine.state, &engine.cfg, topic);
+            assert!(
+                maverick_sys::json::parse(&doc).is_some(),
+                "`query {topic}` is not well-formed JSON: {doc}"
+            );
+        }
+    }
+
+    /// `tree`'s `workspace` is the carousel index of the View the client sits in,
+    /// as a bare number — never the `view#N` the `ViewId` renders as.
+    ///
+    /// `maverickctl`'s `workspace_of` reads the field with `as_u64` and falls
+    /// back to the index its own walk reached, so a quoted string is not a
+    /// parse error but a silent substitution: the entry would be attributed to
+    /// whichever View the reader happened to be walking. Asserting the parsed
+    /// number is what makes that substitution impossible.
+    #[test]
+    fn query_tree_workspace_is_the_workspace_index() {
+        use crate::core::ipc::query_json;
+        use maverick_sys::json::Json;
+        let mut engine = setup_engine();
+
+        // View 3, so an index that happened to be 0 could not pass by luck.
+        let ws_i = 3;
+        let view = view_of(&engine.state, 0, ws_i);
+        engine.state.monitors[0].workspaces[ws_i].add_tiled(11, 1.0);
+        engine.state.clients.insert(11, Client::new(11, 0, view));
+
+        let doc = query_json(&engine.state, &engine.cfg, "tree");
+        let parsed = maverick_sys::json::parse(&doc)
+            .unwrap_or_else(|| panic!("`query tree` is not well-formed JSON: {doc}"));
+        let entry = find_window_entry(&parsed, 11).unwrap_or_else(|| {
+            panic!("window 11 missing from the tree: {doc}");
+        });
+        assert_eq!(
+            entry.get("workspace").and_then(Json::as_u64),
+            Some(ws_i as u64),
+            "workspace must be the carousel index of the client's View: {doc}"
+        );
+    }
+
+    /// One number per workspace, including for a floating client: the index is
+    /// the View's, never the column's and never the flag's.
+    #[test]
+    fn query_tree_workspace_tracks_each_clients_own_view() {
+        use crate::core::ipc::query_json;
+        use maverick_sys::json::Json;
+        let mut engine = setup_engine();
+
+        let placements = [
+            (0u32, 0usize, false),
+            (21, 0, true),
+            (22, 2, false),
+            (23, 8, true),
+        ];
+        for (win, ws_i, float) in placements {
+            let view = view_of(&engine.state, 0, ws_i);
+            if float {
+                engine.state.monitors[0].workspaces[ws_i].floats.push(win);
+            } else {
+                engine.state.monitors[0].workspaces[ws_i].add_tiled(win, 1.0);
+            }
+            engine.state.clients.insert(win, Client::new(win, 0, view));
+        }
+
+        let doc = query_json(&engine.state, &engine.cfg, "tree");
+        let parsed = maverick_sys::json::parse(&doc)
+            .unwrap_or_else(|| panic!("`query tree` is not well-formed JSON: {doc}"));
+        for (win, ws_i, _) in placements {
+            let entry = find_window_entry(&parsed, win)
+                .unwrap_or_else(|| panic!("window {win} missing from the tree: {doc}"));
+            assert_eq!(
+                entry.get("workspace").and_then(Json::as_u64),
+                Some(ws_i as u64),
+                "window {win} must report workspace {ws_i}: {doc}"
+            );
+        }
+    }
+
+    /// An entry with no `Client` has no placement facts to report, so
+    /// `workspace` is absent rather than invented — and the document must still
+    /// parse. Inventing an index here would be a claim about a window whose
+    /// View nobody knows.
+    #[test]
+    fn query_tree_without_clients_omits_workspace_and_still_parses() {
+        use crate::core::ipc::query_json;
+        let mut engine = setup_engine();
+
+        let doc = query_json(&engine.state, &engine.cfg, "tree");
+        assert!(
+            !doc.contains("\"workspace\":"),
+            "an empty tree must carry no placement fields: {doc}"
+        );
+        assert!(
+            maverick_sys::json::parse(&doc).is_some(),
+            "`query tree` is not well-formed JSON: {doc}"
+        );
+
+        // A window the tree still lists after its `Client` is gone.
+        engine.state.monitors[0].workspaces[0].floats.push(31);
+        let doc = query_json(&engine.state, &engine.cfg, "tree");
+        assert!(
+            doc.contains("\"id\":31"),
+            "an unmanaged window must still be listed: {doc}"
+        );
+        assert!(
+            !doc.contains("\"workspace\":"),
+            "a window with no Client has no workspace to report: {doc}"
+        );
+        assert!(
+            maverick_sys::json::parse(&doc).is_some(),
+            "`query tree` is not well-formed JSON: {doc}"
+        );
+    }
+
+    // The entry carrying `id` under `columns[].windows[]` or `floats[]`,
+    // located by walking the parsed document rather than by substring match — a
+    // caller must not be able to pass by matching an id that appears in some
+    // other field.
+    fn find_window_entry(
+        tree: &maverick_sys::json::Json,
+        id: u32,
+    ) -> Option<&maverick_sys::json::Json> {
+        fn is_window(entry: &maverick_sys::json::Json, id: u32) -> bool {
+            entry.get("id").and_then(maverick_sys::json::Json::as_u64) == Some(id as u64)
+        }
+        for mon in tree.get("monitors")?.as_array() {
+            for ws in mon.get("workspaces")?.as_array() {
+                for col in ws.get("columns")?.as_array() {
+                    for entry in col.get("windows")?.as_array() {
+                        if is_window(entry, id) {
+                            return Some(entry);
+                        }
+                    }
+                }
+                for entry in ws.get("floats")?.as_array() {
+                    if is_window(entry, id) {
+                        return Some(entry);
+                    }
+                }
+            }
+        }
+        None
     }
 
     #[test]
