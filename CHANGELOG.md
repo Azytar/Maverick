@@ -21,11 +21,27 @@ The tree is at **1.1.1-dev**. No `1.1.1` release has been opened.
   path.
 - `maverickctl` gained the `--version` it never had, derived from
   `CARGO_PKG_VERSION` exactly as `maverick`'s is.
+- The Debian and Ubuntu requirements list names `libx11-xcb-dev`. It is the
+  package that provides `libX11-xcb.so`, `libx11-dev` does not depend on it,
+  and the installer's own link probe requires it.
 
 ### Fixed
 
 - `maverickctl` terminates its help output with a newline, so the text is
   well-formed for terminals and for anything reading the last line.
+- The `tree` query writes a window's workspace as a JSON index instead of the
+  `view#N` spelling of a `ViewId`. The document was unparseable as a whole, so
+  `window list`, `inspect`, `focus`, `close`, `move`, `float` and `fullscreen`
+  could not read it.
+- A window in the `tree` query whose client record is gone no longer leaves a
+  trailing comma behind the last field, which made the document unparseable.
+- `maverickctl process` reads its arguments from after the verb, like every
+  other group. `process list`, `process inspect` and `process kill` reported a
+  missing session named after the verb, or refused a pid as a session name.
+- The installer's panel is laid out identically under `LC_ALL=C`, `LC_ALL=POSIX`
+  and a UTF-8 locale. Column padding was measured with `wc -m`, which returns a
+  byte count outside a multibyte charmap, so a panel containing an em dash came
+  out two columns short and did not close.
 
 ## [1.1.0] - 2026-10-02
 
@@ -98,7 +114,7 @@ had to configure one.
 
 ## [0.7.1] - 2026-09-28
 
-A correctness campaign, merged as seven review branches. No features are added.
+Corrections only; no features are added.
 
 ### Changed
 

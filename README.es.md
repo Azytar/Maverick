@@ -811,9 +811,10 @@ y un test de humo de apilado con Xvfb.
 
 La versión canónica se declara una sola vez, en `[workspace.package]` en
 `Cargo.toml`, y cada paquete la hereda. El árbol lleva actualmente **1.1.1-dev**,
-una versión de desarrollo: no es una release, no tiene tag ni sección de
-changelog. La release más reciente es **1.1.0**; el historial completo está en
-[`CHANGELOG.md`](CHANGELOG.md).
+una versión de desarrollo: no es una release y no tiene tag. Los cambios desde
+la última release están en `[Unreleased]` dentro de
+[`CHANGELOG.md`](CHANGELOG.md). La release más reciente es **1.1.0**; el
+historial completo está ahí también.
 
 Maverick está en preview. No se declara lista para producción, y los scripts de
 integración son comprobaciones de regresión y no una certificación de compatibilidad
