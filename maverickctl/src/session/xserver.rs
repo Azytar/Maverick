@@ -1384,22 +1384,58 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A display that is already claimed must be refused, not hijacked: this is    /// the check that stops two sessions landing on one display.
+    /// A display that is already claimed must be refused, not hijacked: this is
+    /// the check that stops two sessions landing on one display.
+    ///
+    /// The claim is manufactured here rather than borrowed from the console's
+    /// display. Display 0 is claimed on a developer's desktop and free on a
+    /// headless runner, so assuming it made this test pass or fail depending on
+    /// where it ran: with `:0` free the guard did not trip, the call fell
+    /// through to `Command::spawn`, and a runner without `Xephyr` turned the
+    /// assertion into `NotFound` — while a machine that *did* have `Xephyr`
+    /// started a real server on it, because `XServer` has no `Drop`.
+    ///
+    /// The lock file is what a server killed without cleanup leaves behind, and
+    /// it is the one claim artifact that needs nothing but `/tmp`: planting a
+    /// socket instead would require `/tmp/.X11-unix` to exist, which a headless
+    /// runner need not have.
     #[test]
     fn spawning_onto_a_claimed_display_is_refused() {
+        // Released however this test ends, a failed assertion included: a lock
+        // that outlived its test would make this number unavailable to every
+        // later test in the run.
+        struct Claim(Display);
+        impl Drop for Claim {
+            fn drop(&mut self) {
+                release_display(self.0);
+            }
+        }
+
         let dir = tempfile::tempdir().expect("tempdir");
+        let display = allocate_display(310).expect("a free display");
+        let _claim = Claim(display);
+        // A regular file at the lock path is exactly what an X server that died
+        // without cleaning up leaves, and it is what `display_is_free` reads.
+        std::fs::write(lock_path(display), format!("{}\n", std::process::id()))
+            .expect("claim the display");
+        assert!(
+            !display_is_free(display),
+            "the fixture must have claimed the display, or this test measures \
+             something other than the refusal"
+        );
+
         let xauth = dir.path().join("Xauthority");
-        write_xauth(&xauth, Display(0), &generate_cookie().expect("cookie")).expect("write");
+        write_xauth(&xauth, display, &generate_cookie().expect("cookie")).expect("write");
         let spec = XServerSpec {
             backend: Backend::Xephyr,
-            display: Display(0), // the console's display, always taken
+            display,
             resolution: Resolution::new(800, 600).expect("resolution"),
             refresh_rate: None,
             xauth_path: xauth,
             title: "t".into(),
             log_path: dir.path().join("x.log"),
         };
-        let err = spawn(&spec).expect_err("display 0 must be refused");
+        let err = spawn(&spec).expect_err("a claimed display must be refused");
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
     }
 
