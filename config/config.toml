@@ -235,12 +235,16 @@ action = "overview_enter"
 # Viewport zoom / page-snap. These can be bound by their real symbol names
 # (Mod4+equal, Mod4+minus, Mod4+bracketright, Mod4+bracketleft) or an XF86
 # name; the letter bindings below are just convenient alternatives.
+#
+# `viewport_zoom` takes a relative step, not a scale: the ribbon's zoom factor is
+# multiplied by `1.0 + <argument>`, so a positive value enlarges the ribbon and a
+# negative one shrinks it. Zooming out far enough returns the View to Normal.
 [[keybindings]]
 key = "Mod4+z"
-action = "viewport_zoom:0.2"     # zoom the ribbon in (alpha > 1)
+action = "viewport_zoom:0.2"     # enlarge the ribbon
 [[keybindings]]
 key = "Mod4+Shift+z"
-action = "viewport_zoom:-0.2"    # zoom out; reaching 1.0 returns to Normal
+action = "viewport_zoom:-0.2"    # shrink it again, back toward Normal
 [[keybindings]]
 key = "Mod4+b"
 action = "page_snap:right"       # scroll the camera one screen-width right

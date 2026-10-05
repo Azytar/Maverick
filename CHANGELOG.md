@@ -4,20 +4,10 @@ All notable changes to Maverick are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html); the format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-The versions below are the project's release history. They do not continue an
-earlier `0.16.x`–`0.18.x` numbering that this repository carried: that numbering
-began at `0.16.0` on the repository's second commit, which implies a release
-history the repository does not contain and cannot evidence. `1.0.0` is the first
-release of the reduced, compositor-free window manager, and it is the release
-that declares the supported contract; the `0.x` line before it promises no
-compatibility.
-
-A `CHANGELOG.md` did exist in this repository between 2026-07-03 and 2026-09-30
-and is still present in the trees of the commits from that period. It recorded
-the discarded `0.18.x` line, its headings do not correspond to any tag below, and
-it was removed during the compositor removal. It is left exactly as it was found
-rather than rewritten, because it is a genuine historical record; where it
-disagrees with the timeline below, the timeline below is the release history.
+The versions below are the project's release history; each has a matching
+`vX.Y.Z` tag. `1.0.0` is the first release of the reduced, compositor-free window
+manager, and the release that declares the supported contract. The `0.x` line
+before it makes no compatibility promise.
 
 ## [Unreleased]
 

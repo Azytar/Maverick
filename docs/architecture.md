@@ -69,10 +69,10 @@ server, a GPU, or a config file.
 
 Maverick draws through X11 and nothing else. There is no `default` feature, no
 optional renderer, and no second presentation path: `[features]` in
-`Cargo.toml:47-51` declares `input-trace` and `window-trace` and nothing else,
+`Cargo.toml:59-63` declares `input-trace` and `window-trace` and nothing else,
 neither is on by default, and both are empty feature sets that only turn on
 logging. `cargo build` and `cargo build --no-default-features` therefore select
-the same code, and the runtime dependency list is exactly `Cargo.toml:31-42`:
+the same code, and the runtime dependency list is exactly `Cargo.toml:43-54`:
 `maverick-core`, `maverick-sys`, `maverick-toml`, `maverick-x11`, `libc` and
 `x11rb`. No GL, Vulkan or graphics-library binding appears in any manifest.
 
@@ -238,7 +238,7 @@ The consequence: **the integer rectangle in X11 is the only rectangle.**
   presentation surface is a `Shape` mask and a set of `ConfigureWindow` calls.
 - **No Vulkan backend.** `maverick-vk` is not a member of the workspace, not a
   directory in the tree, and not named by any manifest. There is no
-  `compositor-vulkan` feature to select: `[features]` in `Cargo.toml:47-51` holds
+  `compositor-vulkan` feature to select: `[features]` in `Cargo.toml:59-63` holds
   exactly the two diagnostic trace features.
 - **No second layout.** `LayoutKind` (`maverick-core/src/types.rs:1584-1587`) has
   exactly one variant, `Column`, and `layout_from`

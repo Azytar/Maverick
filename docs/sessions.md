@@ -260,7 +260,7 @@ too, since `display_is_free` treats either file as a claim and neither the
 
 A creator killed part-way through `create` is covered by where the record is
 written: the record names the X server as soon as its pid is known, before the
-readiness wait (`maverickctl/src/session/lifecycle.rs:427-437`). A session is
+readiness wait (`maverickctl/src/session/lifecycle.rs:477-492`). A session is
 therefore findable and stoppable whatever kills the creator, because the next
 command that touches it already has the pid.
 
