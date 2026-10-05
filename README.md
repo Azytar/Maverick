@@ -301,10 +301,16 @@ Linux, an X11 server, a C linker and Rust 1.82 or newer (`rust-version` in
 # Arch Linux
 sudo pacman -S --needed base-devel rust libx11 libxcb
 # Debian / Ubuntu
-sudo apt install --no-install-recommends build-essential cargo libx11-dev libxcb1-dev
+sudo apt install --no-install-recommends build-essential cargo \
+  libx11-dev libx11-xcb-dev libxcb1-dev
 # Fedora
 sudo dnf install -y cargo gcc libX11-devel libxcb-devel
 ```
+
+`libX11-xcb` is a separate development package on Debian and Ubuntu:
+`libx11-dev` does not depend on it, so `-lX11-xcb` is missing without it. On
+Arch the single `libx11` package ships both `libX11.so` and `libX11-xcb.so`,
+which is why that line names neither.
 
 For an X11 session started with `startx`, `xorg-server` and `xorg-xinit` are
 also required (Arch: `xorg-server xorg-xinit`).

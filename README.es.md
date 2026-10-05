@@ -314,10 +314,16 @@ Linux, un servidor X11, un enlazador C y Rust 1.82 o posterior (`rust-version` e
 # Arch Linux
 sudo pacman -S --needed base-devel rust libx11 libxcb
 # Debian / Ubuntu
-sudo apt install --no-install-recommends build-essential cargo libx11-dev libxcb1-dev
+sudo apt install --no-install-recommends build-essential cargo \
+  libx11-dev libx11-xcb-dev libxcb1-dev
 # Fedora
 sudo dnf install -y cargo gcc libX11-devel libxcb-devel
 ```
+
+`libX11-xcb` es un paquete de desarrollo aparte en Debian y Ubuntu:
+`libx11-dev` no depende de él, así que sin él falta `-lX11-xcb`. En Arch el
+único paquete `libx11` incluye tanto `libX11.so` como `libX11-xcb.so`, y por eso
+esa línea no nombra ninguno de los dos.
 
 Para una sesión X11 arrancada con `startx` también hacen falta `xorg-server` y
 `xorg-xinit` (Arch: `xorg-server xorg-xinit`).
