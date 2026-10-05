@@ -11,7 +11,8 @@ before it makes no compatibility promise.
 
 ## [Unreleased]
 
-The tree is at **1.1.1-dev**. No `1.1.1` release has been opened.
+The tree is at **1.1.1**. No `1.1.1` release has been opened, and the version
+has no tag yet; the entries below are what that release would contain.
 
 ### Changed
 

@@ -110,7 +110,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "maverick"
-version = "1.1.1-dev"
+version = "1.1.1"
 dependencies = [
  "libc",
  "maverick-core",
@@ -123,14 +123,14 @@ dependencies = [
 
 [[package]]
 name = "maverick-core"
-version = "1.1.1-dev"
+version = "1.1.1"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "maverick-sys"
-version = "1.1.1-dev"
+version = "1.1.1"
 dependencies = [
  "libc",
  "proptest",
@@ -139,14 +139,14 @@ dependencies = [
 
 [[package]]
 name = "maverick-toml"
-version = "1.1.1-dev"
+version = "1.1.1"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "maverick-x11"
-version = "1.1.1-dev"
+version = "1.1.1"
 dependencies = [
  "proptest",
  "x11rb",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "maverickctl"
-version = "1.1.1-dev"
+version = "1.1.1"
 dependencies = [
  "libc",
  "maverick-sys",

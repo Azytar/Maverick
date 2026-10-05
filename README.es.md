@@ -810,9 +810,9 @@ y un test de humo de apilado con Xvfb.
 ## Estado
 
 La versión canónica se declara una sola vez, en `[workspace.package]` en
-`Cargo.toml`, y cada paquete la hereda. El árbol lleva actualmente **1.1.1-dev**,
-una versión de desarrollo: no es una release y no tiene tag. Los cambios desde
-la última release están en `[Unreleased]` dentro de
+`Cargo.toml`, y cada paquete la hereda. El árbol lleva actualmente **1.1.1**,
+que todavía no es una release y no tiene tag. Los cambios hechos desde la
+última release están en `[Unreleased]` dentro de
 [`CHANGELOG.md`](CHANGELOG.md). La release más reciente es **1.1.0**; el
 historial completo está ahí también.
 
