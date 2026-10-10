@@ -584,6 +584,10 @@ impl WindowManager {
             return Ok(());
         }
 
+        if self.engine.state.monitors[mon_idx].ws().overview {
+            return self.arrange_overview(mon_idx);
+        }
+        self.overviews.remove(&mon_idx);
         if do_hide && self.drag.is_none() {
             self.hide_offscreen(mon_idx)?;
         }
@@ -757,6 +761,9 @@ impl WindowManager {
     /// into `order` and compared with the cached `last_stack_order[mon_idx]`;
     /// `raise` is only re-issued when the order actually changed.
     fn stack_overlay(&mut self, mon_idx: usize) {
+        if self.engine.state.monitors[mon_idx].ws().overview {
+            return;
+        }
         let mon = &self.engine.state.monitors[mon_idx];
         let ws = mon.ws();
 
@@ -3665,6 +3672,8 @@ mod tests {
         #[test]
         fn prop_applied_geometry_is_what_the_next_cycle_wants(sc in prop_scenario()) {
             let (mut state, cfg) = scenario(sc);
+            // Overview pictures bypass the client-geometry reconciler.
+            prop_assume!(!state.monitors[0].ws().overview);
             let mut applied = AppliedState::default();
             let first = projected(&state, &cfg, 0);
             let placed = first.as_ref().map_or(0, Placements::len);

@@ -728,6 +728,9 @@ pub struct Workspace {
     /// ordinary session. `1.0` outside Overview (the settled view projects at
     /// exactly `1.0`).
     pub overview_scale: f32,
+    /// Logical client rectangles held while Overview projects their images.
+    /// These are never sent to X11 with the view scale applied.
+    pub overview_rects: HashMap<WindowId, (Rect, u32)>,
     /// Viewport display mode (normal vs zoomed-in inspection). Orthogonal to
     /// `overview` and to window fullscreen.
     pub viewport_mode: ViewportMode,
@@ -757,6 +760,7 @@ impl Workspace {
             layout: LayoutKind::Column,
             overview: false,
             overview_scale: 1.0,
+            overview_rects: HashMap::new(),
             viewport_mode: ViewportMode::Normal,
             page_zoom: 1.0,
             presented_maximize: None,
@@ -827,6 +831,7 @@ impl Workspace {
     }
 
     pub fn remove_window(&mut self, win: WindowId) {
+        self.overview_rects.remove(&win);
         if let Some(fi) = self.floats.iter().position(|&w| w == win) {
             self.floats.remove(fi);
             return;

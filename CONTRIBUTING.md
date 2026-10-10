@@ -20,7 +20,7 @@ security boundary.
 
 ## What does not fit
 
-- A desktop environment, compositor, renderer, GPU path, wallpaper subsystem,
+- A desktop environment, desktop compositor, GPU path, wallpaper subsystem,
   notification daemon, system tray, or animation system. These are out of scope
   and are listed under *What Maverick is not* in the README.
 - Wayland support.
@@ -29,6 +29,10 @@ security boundary.
   supports a subset of TOML, not the specification.
 - Large mechanical rewrites, renamed subsystems, or reformatting of files a
   change does not otherwise touch.
+
+Overview's temporary image presentation belongs in the existing X11 backend.
+It may use Composite, Render and Damage without owning the desktop compositor
+selection, redirecting the root, or adding a permanent rendering loop.
 
 Unrelated refactoring should not be mixed into a feature or bug-fix change. A
 reviewer has to be able to see whether the change is correct, and a rename
@@ -95,6 +99,12 @@ before running it and reserve the older ones for a disposable graphical session.
 CI (`.github/workflows/ci.yml`) runs three jobs: the workspace with strict
 Clippy and both feature sets, the installer checks, and the Xvfb stacking smoke
 test. All three must pass.
+
+`python3 tests/xvfb-overview.py` checks displayed pixels and client-side
+configure/map/unmap events across entry, navigation, repaint and exit. Its C
+probe needs `libxcomposite-dev` in addition to `libx11-dev`; `--compositor`
+checks Picom coexistence and `--without-composite` checks safe refusal.
+The Xephyr wrapper uses the same pixel/event regression on its own display.
 
 `python3 tests/overview-isolation.py` checks the Overview rig's startup and
 cleanup with tool doubles, without needing an X server. It verifies that the
