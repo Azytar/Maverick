@@ -106,6 +106,10 @@ probe needs `libxcomposite-dev` in addition to `libx11-dev`; `--compositor`
 checks Picom coexistence and `--without-composite` checks safe refusal.
 The Xephyr wrapper uses the same pixel/event regression on its own display.
 
+`python3 tests/xvfb-cursor.py` checks displayed cursor pixels before any client
+opens, after opening and closing a client, and after shutdown. Its C probe
+needs `libxfixes-dev` in addition to `libx11-dev`.
+
 `python3 tests/overview-isolation.py` checks the Overview rig's startup and
 cleanup with tool doubles, without needing an X server. It verifies that the
 rig uses only the display claimed by its child, reaps that child on failure,

@@ -8,7 +8,7 @@
 //! publishes `_NET_SUPPORTED`, sets `_NET_SUPPORTING_WM_CHECK`
 //! on `root+check_win`, sets the `b"maverick"` name, sets
 //! `net_number`/`current_desktop`, grabs keys, sets up XKB,
-//! and enables `RandR` `randr_select_input`.
+//! defines the root cursor and enables `RandR` `randr_select_input`.
 //!
 //! # XKB
 //!
@@ -70,6 +70,8 @@ impl WindowManager {
                 ),
             )?
             .check()?;
+
+        self.setup_root_cursor()?;
 
         let supported = a.supported_list();
         self.conn
@@ -148,6 +150,37 @@ impl WindowManager {
                 | u16::from(NotifyMask::OUTPUT_PROPERTY),
         );
         let _ = self.conn.randr_select_input(self.root, rr_mask);
+        Ok(())
+    }
+
+    fn setup_root_cursor(&self) -> Result<(), Box<dyn std::error::Error>> {
+        const LEFT_PTR: u16 = 68;
+        let font = self.conn.generate_id()?;
+        let cursor = self.conn.generate_id()?;
+        self.conn.open_font(font, b"cursor")?.check()?;
+        // The core cursor font pairs each shape with its mask in the next glyph.
+        let created = self.conn.create_glyph_cursor(
+            cursor,
+            font,
+            font,
+            LEFT_PTR,
+            LEFT_PTR + 1,
+            0,
+            0,
+            0,
+            u16::MAX,
+            u16::MAX,
+            u16::MAX,
+        );
+        let _ = self.conn.close_font(font);
+        created?.check()?;
+
+        let installed = self
+            .conn
+            .change_window_attributes(self.root, &ChangeWindowAttributesAux::new().cursor(cursor));
+        // The root keeps its own reference; the setup handles need not survive.
+        let _ = self.conn.free_cursor(cursor);
+        installed?.check()?;
         Ok(())
     }
 

@@ -34,6 +34,9 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Startup now defines a visible standard arrow on the root window, including
+  when the inherited cursor is transparent and no applications are open.
+  Client cursors remain independent; shutdown restores the server default.
 - An empty `[autostart].commands = []` (including the `apps` and `programs`
   aliases) no longer reports a type warning. It remains a valid way to disable
   the compiled autostart list; nonempty flat lists still report a warning.
