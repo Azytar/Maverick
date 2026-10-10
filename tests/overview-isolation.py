@@ -52,8 +52,9 @@ def run_case(source, mode):
         rig = root / "rig"
         rig.mkdir()
         shutil.copyfile(source, rig / "xephyr-overview.sh")
-        for helper in ("mgdwin", "winmove"):
-            (rig / helper).symlink_to("/bin/true")
+        regression = source.with_name("xvfb-overview.py")
+        if regression.exists():
+            (rig / "xvfb-overview.py").symlink_to(regression.resolve())
         tool_dir = root / "bin"
         tool_dir.mkdir()
         for name in ("Xephyr", "pkill", "xprop", "maverick"):

@@ -87,6 +87,7 @@ mod ewmh;
 mod hubevents;
 mod input;
 mod manage;
+mod overview;
 mod pointer;
 pub(crate) mod reconciler;
 mod render;
@@ -311,6 +312,7 @@ pub struct WindowManager {
     /// focus N columns but pay for one focus change and one arrange, not N.
     /// The direction list (not a net count) keeps edge clamping exact.
     wheel_steps: Vec<Dir>,
+    overviews: BTreeMap<usize, overview::Overview>,
 }
 
 /// The layout, stacking and pointer work owed by input, drained once per turn.
@@ -373,10 +375,40 @@ impl WindowManager {
         }
         let _dispatch_trace = trace::Span::new("event_dispatch");
         match ev {
-            Event::ButtonPress(e) => self.on_button_press(e)?,
+            Event::ButtonPress(e)
+                if e.detail >= 4 && self.overviews.values().any(|o| o.window == e.event) =>
+            {
+                if let Some((&mi, _)) = self.overviews.iter().find(|(_, o)| o.window == e.event) {
+                    self.engine.state.sel_mon = mi;
+                }
+                self.last_event_time = e.time;
+                if clean_mask(u16::from(e.state), self.numlock, self.scroll)
+                    == u16::from(ModMask::M4)
+                {
+                    self.scroll_camera_with_wheel(e.detail)?;
+                }
+            }
+            Event::ButtonPress(e) => {
+                if !self.overview_pointer(
+                    e.event,
+                    i32::from(e.root_x),
+                    i32::from(e.root_y),
+                    e.time,
+                    true,
+                )? {
+                    self.on_button_press(e)?;
+                }
+            }
             Event::ButtonRelease(e) => self.on_button_release(e)?,
             Event::ClientMessage(e) => self.on_client_message(e)?,
-            Event::ConfigureNotify(e) => self.on_configure_notify(e)?,
+            Event::ConfigureNotify(e) => {
+                for (&mi, overview) in &mut self.overviews {
+                    if overview.resized(&e) {
+                        self.pending.mark(mi, None);
+                    }
+                }
+                self.on_configure_notify(e)?;
+            }
             Event::ConfigureRequest(e) => self.on_configure_request(e)?,
             Event::DestroyNotify(e) => self.on_destroy(e)?,
             Event::EnterNotify(e) => self.on_enter(e)?,
@@ -408,7 +440,27 @@ impl WindowManager {
             }
             Event::MappingNotify(e) => self.on_mapping(&e),
             Event::MapRequest(e) => self.on_map_request(e)?,
-            Event::MotionNotify(e) => self.on_motion(e)?,
+            Event::MotionNotify(e) => {
+                if !self.overview_pointer(
+                    e.event,
+                    i32::from(e.root_x),
+                    i32::from(e.root_y),
+                    e.time,
+                    false,
+                )? {
+                    self.on_motion(e)?;
+                }
+            }
+            Event::Expose(e) => {
+                if let Some((&mi, _)) = self.overviews.iter().find(|(_, o)| o.window == e.window) {
+                    self.pending.mark(mi, None);
+                }
+            }
+            Event::DamageNotify(e) => {
+                if let Some((&mi, _)) = self.overviews.iter().find(|(_, o)| o.damaged(e.damage)) {
+                    self.pending.mark(mi, None);
+                }
+            }
             Event::PropertyNotify(e) => self.on_property(e)?,
             Event::UnmapNotify(e) => self.on_unmap(e)?,
             // RandR change events (config/grab selected in `setup_root`): both
@@ -583,6 +635,7 @@ impl WindowManager {
     /// function — on a dead connection it returns in 0 ms, and a `?` here would
     /// skip everything after it, which is the entire local half.
     fn teardown_x(&mut self, x: &LiveX<'_>) -> Result<(), Box<dyn std::error::Error>> {
+        self.overviews.clear();
         let conn = x.conn();
         let _ = conn.ungrab_key(0u8, self.root, ModMask::ANY);
 
@@ -720,6 +773,13 @@ impl WindowManager {
     /// it targets the geometry `arrange` just produced, not where the window was
     /// before it moved.
     fn flush_pending(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.overviews.retain(|mi, overview| {
+            self.engine
+                .state
+                .monitors
+                .get(*mi)
+                .is_some_and(|m| m.ws().overview && m.ws().id == overview.view)
+        });
         self.apply_wheel_steps()?;
         self.flush_layout()?;
         // After the layout work, so the probe compares the real X focus with
@@ -737,7 +797,7 @@ impl WindowManager {
         for (mon, focus) in self.pending.take() {
             self.arrange(mon)?;
             let Some(w) = focus else { continue };
-            if !self.engine.cfg.warp_cursor {
+            if self.engine.state.monitors[mon].ws().overview || !self.engine.cfg.warp_cursor {
                 continue;
             }
             // `arrange` above rewrote `client.geom` to the settled position, so
@@ -934,6 +994,7 @@ impl WindowManager {
             protocols: std::cell::RefCell::new(std::collections::HashMap::new()),
             focus_probe_due: false,
             wheel_steps: Vec::new(),
+            overviews: BTreeMap::new(),
         };
 
         let _ = (depth, visual);

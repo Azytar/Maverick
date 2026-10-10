@@ -3,7 +3,7 @@
 Maverick es un gestor de ventanas con mosaico para X11, escrito en Rust. Ordena
 ventanas en una pantalla X11, publica las propiedades EWMH que un escritorio
 espera, y hasta ahí llega. Sigue las convenciones de Unix y es deliberadamente
-estrecho de alcance: sin compositor, sin panel, sin lanzador, sin demonio de
+estrecho de alcance: sin compositor del escritorio, sin panel, sin lanzador, sin demonio de
 notificaciones, sin subsistema de wallpaper y sin sistema de animación.
 
 Su modelo se articula en torno a las **Views lógicas**. Cada View contiene un
@@ -114,12 +114,22 @@ que mantiene a la vista la columna enfocada.
   corto.
 - El zoom del viewport (`viewport_zoom`) agranda el ribbon para inspeccionarlo de
   cerca, y `page_snap` mueve la cámara una pantalla cada vez.
-- Overview (`toggle_overview`, `overview_nav`, `overview_enter`) es un viewport
-  de navegación de escala fija sobre la View actual para elegir una columna: al
-  entrar, los tiles se reducen visiblemente a la escala configurada
-  (`general.overview_scale`, `0.76` por defecto) y la navegación desplaza el
-  viewport en vez de reescalar. Cambia la proyección, no el layout ni la
-  pertenencia a una View: al salir, la geometría asentada se recupera exacta.
+- Overview (`Super+O`, `toggle_overview`, `overview_nav`, `overview_enter`)
+  muestra imágenes reducidas de las ventanas a una escala fija (`0.76` por
+  defecto). La cámara desplaza esas imágenes sin redimensionar, mover ni
+  desmapear los clientes: Firefox conserva su viewport lógico. Composite,
+  Render y Damage mantienen las imágenes actualizadas en una ventana temporal
+  del backend X11, sin tomar la selección del compositor del escritorio.
+  Si faltan las extensiones, se rechaza la entrada sin redimensionar ventanas.
+  Hover selecciona cuando `focus_mouse` está activo; los clics seleccionan y
+  se consumen, sin activar controles de las aplicaciones. Las flotantes también
+  tienen una imagen reducida, pero conservan su geometría y permanecen ancladas
+  mientras la cinta se desplaza. Al salir se aplica el layout normal para la
+  selección: la política habitual de foco/accordion puede redimensionar las
+  columnas si se eligió otra ventana. Los cambios explícitos de peso de columna
+  se aplican en ese momento.
+  Si una aplicación flotante solicita cambiar su tamaño, su imagen se actualiza
+  a la misma escala.
 - `grow_col` redimensiona la columna enfocada en píxeles; `maverickctl resize`
   expresa la misma operación como porcentaje. `new_column` y `collapse_column`
   añaden y quitan columnas.
@@ -137,7 +147,7 @@ que mantiene a la vista la columna enfocada.
   `Super+Shift+Space`.
 - Las ventanas flotantes se proyectan desde su propio `Client::geom` y el layout
   nunca las coloca. Desplazar el ribbon, redimensionar una columna y entrar en
-  Overview las dejan donde están, en coordenadas X11 globales.
+  Overview conservan su geometría lógica, en coordenadas X11 globales.
 - Los floats sticky permanecen visibles en todas las Views de su monitor. Los
   floats ordinarios siguen la visibilidad de la View a la que pertenecen.
 - `[[rules]]` puede forzar el tamaño y la posición de un float (relativos al
@@ -183,8 +193,8 @@ Maverick es un gestor de ventanas, no un entorno de escritorio. No contiene, no
 distribuye y no arranca:
 
 - ningún entorno de escritorio;
-- ningún compositor, renderer ni camino por GPU — no hay bucle de frames, ni GL,
-  ni Vulkan;
+- ningún compositor del escritorio ni camino por GPU — Overview solo presenta
+  imágenes X11 temporales; no hay bucle de frames, ni GL, ni Vulkan;
 - ningún subsistema de wallpaper — el fondo de la ventana raíz no es una ventana
   que gestionar;
 - ningún demonio de notificaciones;

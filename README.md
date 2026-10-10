@@ -3,7 +3,7 @@
 Maverick is a tiling window manager for X11, written in Rust. It arranges
 windows on an X11 display, publishes the EWMH properties a desktop expects, and
 stops there. It follows Unix conventions and is deliberately narrow in scope: no
-compositor, no panel, no launcher, no notifications daemon, no wallpaper
+desktop compositor, no panel, no launcher, no notifications daemon, no wallpaper
 subsystem, and no animation system.
 
 Its model is built around **logical Views**. Each View holds a set of tiled
@@ -110,8 +110,8 @@ focused column in view.
   the viewport panning as the selection moves; it never touches the layout or
   View membership. The scale is fixed once, on entry — navigation pans the
   viewport instead of shrinking the workspace further — so entering Overview
-  repeatedly and navigating between columns never rescales again, and leaving
-  it restores the settled view exactly. See "Overview is a navigation viewport"
+  repeatedly and navigating between columns never rescales again. Leaving
+  resumes the normal layout for the selection. See "Overview is a navigation viewport"
   below.
 - `grow_col` resizes the focused column by a pixel amount; `maverickctl resize`
   addresses the same operation as a percentage. `new_column` and
@@ -132,65 +132,37 @@ pans — plus a view scale (`alpha`) that is fixed once, on entry, from the
 focused tile (`overview_entry_scale_for`) and stored on the View
 (`overview_scale`). Neither one is stored per window; both are View state.
 
-The entry scale is the point of the mode, and it is a real one: `0.76` by
-default (`general.overview_scale`), so `Super+O` visibly shrinks the tiles
-instead of only moving a camera. The rule reads the *focused tile*, never the
-ribbon, and only ever moves the scale *down* from the configured target — when
-that tile would not fit even reduced, and never below `overview_zoom_min`. The
-client count therefore shapes the scrollable content but never the scale of a
-step: opening a twentieth window cannot shrink the nineteen already there.
+Overview presents reduced images of the existing windows. The scale starts
+at `general.overview_scale` (`0.76` by default), is fitted to the focused
+window when necessary, and never drops below `overview_zoom_min`. Entering,
+navigating and repainting this view do not resize, move, unmap or remap the
+existing clients. Firefox and other applications keep their logical viewport;
+only the camera's presentation changes.
 
-At that scale the focused tile is complete on screen with a useful sliver of
-the next one beside it, and entering with 1, 2, 3, 6 or 9 clients produces the
-same reduction — a lone window has no neighbour to reveal, and is still
-visibly not the settled view.
+The core captures the logical rectangles on entry. The X11 backend uses
+Composite pixmaps, Render transforms and Damage notifications to display their
+live images in one temporary window per active Overview monitor. It does not
+redirect the root or claim the desktop compositor selection, so an external
+compositor can keep running. Composite 0.2, Render 0.6 and Damage are required;
+if they are unavailable, entry is refused without falling back to client
+resizes. No OpenGL, GPU renderer, frame timer or new runtime crate is involved.
 
-Navigation then pans instead of rescaling:
+`focus left/right`, `overview_nav` and `Mod4+wheel` select columns and pan the
+camera at the stored scale. When `focus_mouse` is enabled, genuine pointer
+motion over a preview selects its window. A click selects the preview and is
+consumed by Overview: it does not activate a link or button in the application.
+Application interaction and float dragging resume after leaving the mode with
+`Super+O` or `Super+E`. Selecting a window already visible does not pan it.
 
-- `focus left` / `focus right` (and `overview_nav`) move the selection and pan
-  the viewport only when the new selection is not already visible — selecting
-  a visible tile never scrolls the ribbon under it;
-- repeated navigation in either direction, including at both ends of the
-  ribbon, never writes the scale;
-- a manual resize rewrites the logical column weight and adjusts visibility,
-  never a zoom on top;
-- new and closed clients join and leave the ribbon at the entry scale.
-
-Two properties follow from the scale being stored on entry rather than derived
-per projection:
-
-- **Entering Overview twice shows the same view, and navigating never
-  shrinks it.** No navigation, resize, map or unmap path writes the stored
-  scale — this is what stops `Super+O` from driving a workspace toward 1 px
-  tiles.
-- **Leaving it is exact.** The flag and the stored scale are cleared, the
-  camera parks on the selection, and the column weights, world geometry and
-  float rects were never written, so the settled view round-trips.
-
-The cursor has an explicit policy while Overview is on. Hovering a tiled
-client selects it (through the same focus-follows-mouse rule as outside
-Overview, when `focus_mouse` is set); a click selects and focuses it and is
-replayed to the application as usual. Neither motion nor click changes a
-tile's geometry, and neither converts a tiled window to floating: only an
-explicit `Mod4+Button` drag on an already-floating window moves or resizes,
-exactly as outside Overview. An `EnterNotify` that arrives without the
-pointer having moved — a pan slid another tile underneath it — carries no new
-intent and is ignored, so a selection can never cascade down the ribbon on
-its own. Leaving Overview restores the normal pointer behaviour and leaves
-no grab behind (every pointer grab is released on all exit paths by
-construction).
-
-Maverick has no compositor (`docs/architecture.md`), and that sets the honest
-limit of the effect: the view scale *is* written to `ConfigureWindow`, because
-there is nothing else that could render a client at another size. So the
-reduced Overview entry genuinely makes tiles smaller on screen — what it cannot
-do is make them illegible (the floor), and what it never does is change the
-layout, the column weights, a client's size hints, or the geometry it returns
-to. Floating clients live outside the ribbon: they are projected from their own
-`Client::geom`, never pan with the ribbon, and floating a tile during Overview
-starts from the *unscaled* tile, never from the projected rect. Fullscreen
-keeps priority: its flags and exclusive overlay survive entering, navigating
-and leaving the mode.
+Floating windows are also shown as reduced images, pinned relative to the
+workarea while the ribbon pans. Their logical rectangles remain untouched.
+Client-requested changes to a float's size update its image at the same scale.
+Fullscreen and maximize flags and their original client sizes survive the
+mode. New clients receive their initial logical layout and join the images;
+closing one does not resize the others. Explicit column-weight changes take
+effect in the normal layout on exit. Leaving Overview releases its pictures
+and redirects and applies the normal layout for the selected column; normal
+focus/accordion policy can then resize columns when the selection changed.
 
 ### Floating clients
 
@@ -198,7 +170,7 @@ and leaving the mode.
   floating-heuristic or a rule, or is toggled with `Super+Shift+Space`.
 - Floating windows are projected from their own `Client::geom` and are never
   placed by the layout. Scrolling the ribbon, resizing a column and entering
-  Overview leave them where they are, in global X11 coordinates.
+  Overview leave their logical geometry intact, in global X11 coordinates.
 - Sticky floats stay visible on every View of their monitor. Ordinary floats
   follow the visibility of the View they belong to.
 - `[[rules]]` can force a float's size and position (relative to the workarea
@@ -243,8 +215,8 @@ Maverick is a window manager, not a desktop environment. It does not contain,
 ship or start:
 
 - a desktop environment of any kind;
-- a compositor, renderer or GPU path — there is no frame loop, no GL and no
-  Vulkan;
+- a desktop compositor or GPU path — Overview only presents temporary X11
+  images; there is no frame loop, no GL and no Vulkan;
 - a wallpaper subsystem — the root window's background is not a window to
   manage;
 - a notification daemon;

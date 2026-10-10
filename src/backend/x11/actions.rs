@@ -46,6 +46,20 @@ impl WindowManager {
     /// carries them out. Fullscreen is presentation-only and tied to focus
     /// (see `core::present`), so every action is safe while fullscreen.
     pub(super) fn do_action(&mut self, action: Action) -> Result<(), Box<dyn std::error::Error>> {
+        if matches!(action, Action::ToggleOverview | Action::OverviewNav(_))
+            && self
+                .engine
+                .state
+                .monitors
+                .get(self.engine.state.sel_mon)
+                .is_some_and(|m| !m.ws().overview)
+        {
+            if let Err(error) = overview::Overview::check_extensions(&self.conn) {
+                log::warn!("Overview unavailable: {error}");
+                return Ok(());
+            }
+            self.flush_layout()?;
+        }
         let _action_trace = super::trace::Span::new("action");
         super::trace::trace!("action_input", "action={action:?}");
         let state_trace = super::trace::Span::new("state_action");

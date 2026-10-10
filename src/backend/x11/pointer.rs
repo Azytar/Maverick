@@ -751,7 +751,10 @@ impl WindowManager {
     /// the pointer is frozen until every one is handled, so applying them inline
     /// made the backlog grow for as long as the wheel spun. `flush_pending`
     /// applies whatever accumulated, once per turn, in `apply_wheel_steps`.
-    fn scroll_camera_with_wheel(&mut self, detail: u8) -> Result<(), Box<dyn std::error::Error>> {
+    pub(super) fn scroll_camera_with_wheel(
+        &mut self,
+        detail: u8,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Bound the queue: past this, extra notches in a single turn add nothing
         // a user could perceive and only lengthen the replay.
         const MAX_STEPS_PER_TURN: usize = 256;
