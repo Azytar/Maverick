@@ -578,6 +578,11 @@ fn int_pair(value: &Value<'_>) -> Option<[i64; 2]> {
 }
 
 fn grid_strings(value: &Value<'_>) -> Option<Vec<Vec<String>>> {
+    // The parser gives an untyped `[]` the StrList representation. In a
+    // command-list field it is also a valid empty grid, not a type error.
+    if matches!(value, Value::StrList(list) if list.is_empty()) {
+        return Some(Vec::new());
+    }
     Some(
         value
             .as_grid()?
@@ -1531,6 +1536,29 @@ n_tags = 3
         ));
         assert!(action_from_str("grow_col:abc").is_none());
         assert!(action_from_str("spawn:").is_none());
+    }
+
+    #[test]
+    fn empty_autostart_list_disables_compiled_commands_without_warnings() {
+        for key in ["commands", "apps", "programs"] {
+            let path = write_temp(&format!("[autostart]\n{key} = []\n"));
+            let (cfg, diag) = load_from_path(&path);
+            std::fs::remove_file(path).expect("remove config fixture");
+            assert!(
+                cfg.autostart.is_empty(),
+                "{key} must clear the compiled list"
+            );
+            assert!(diag.is_clean(), "valid empty {key} list: {diag:?}");
+        }
+    }
+
+    #[test]
+    fn nonempty_flat_autostart_lists_still_warn() {
+        let path = write_temp("[autostart]\ncommands = [\"example\"]\n");
+        let (_, diag) = load_from_path(&path);
+        std::fs::remove_file(path).expect("remove config fixture");
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(diag.errors.is_empty(), "{diag:?}");
     }
 
     #[test]
