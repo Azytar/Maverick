@@ -646,11 +646,12 @@ impl WindowManager {
             self.drag = None;
         }
 
-        // Restore root event mask: remove SUBSTRUCTURE_REDIRECT so that
-        // the next WM doesn't fail on startup.
+        // The next WM must inherit neither our redirect nor our root cursor.
         let _ = conn.change_window_attributes(
             self.root,
-            &ChangeWindowAttributesAux::new().event_mask(EventMask::NO_EVENT),
+            &ChangeWindowAttributesAux::new()
+                .event_mask(EventMask::NO_EVENT)
+                .cursor(x11rb::NONE),
         );
 
         for win in self.engine.state.clients.keys() {
