@@ -135,6 +135,7 @@ dependencies = [
  "libc",
  "proptest",
  "rustix",
+ "tempfile",
 ]
 
 [[package]]
