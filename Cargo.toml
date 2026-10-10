@@ -53,7 +53,7 @@ maverick-x11.workspace = true
 # `allow-unsafe-code` is set in `maverick-x11`, the only crate that names
 # `xcb_ffi`; cargo unifies the feature across the graph.
 x11rb = { version = "0.13", default-features = false, features = [
-    "randr", "shape", "xkb",
+    "randr", "shape", "xkb", "composite", "render", "damage",
 ] }
 
 [dev-dependencies]

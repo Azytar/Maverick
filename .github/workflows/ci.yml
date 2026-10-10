@@ -86,7 +86,7 @@ jobs:
         # before anything was compiled.
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils xdotool libx11-dev libx11-xcb-dev libxcb1-dev
+          sudo apt-get install -y xvfb x11-utils xdotool picom libxcomposite-dev libx11-dev libx11-xcb-dev libxcb1-dev
       - name: Build release profile
         # `tests/xvfb-stacking.py` drives target/release/maverick, so build
         # that profile: it is the one `installer/install.sh` produces and
@@ -99,3 +99,8 @@ jobs:
         run: python3 tests/xvfb-stacking.py
       - name: Overview rig isolation
         run: python3 tests/overview-isolation.py
+      - name: Overview client geometry and image regression
+        run: |
+          python3 tests/xvfb-overview.py
+          python3 tests/xvfb-overview.py --compositor
+          python3 tests/xvfb-overview.py --without-composite

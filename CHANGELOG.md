@@ -13,21 +13,16 @@ before it makes no compatibility promise.
 
 ### Changed
 
-- `Overview` (`Super+O`) visibly reduces the tiles on entry and stays at that
-  scale while it is on. The entry scale is a real reduction, not a no-op: it
-  starts from the new `general.overview_scale` (default `0.76`) and only ever
-  comes down from there — when the focused tile would not fit even reduced, and
-  never below `overview_zoom_min` — so `Mod+O` changes the composition whatever
-  the client count. The scale is computed once, on entry, and stored as
-  `Workspace::overview_scale`. Navigation (`focus left/right`, `overview_nav`,
-  pointer selection) pans the viewport through `overview_scroll` — keeping the
-  camera still when the selection is already visible — and never re-derives the
-  scale, so the client count shapes the scrollable content but never the scale
-  of a step. Entering repeatedly shows the same view, and leaving restores the
-  settled view exactly. (Supersedes the per-projection ribbon fit, which
-  re-scaled on every focus change, and the "full size whenever the tile fits"
-  entry rule, which left a fitting ribbon pixel-identical to the settled view —
-  an Overview nobody could see.)
+- Overview (`Super+O`) now scales live window images instead of configuring
+  smaller client windows. Entering, panning and repainting preserve existing
+  client geometry and avoid resize/map/unmap events. The core retains logical
+  rectangles; the X11 backend owns temporary Composite/Render/Damage resources.
+  Desktop compositor ownership is untouched, and missing extensions refuse
+  entry instead of falling back to resizing applications.
+- Overview pointer clicks select previews without replaying them to clients.
+  Float images are scaled but remain pinned during ribbon navigation. Normal
+  interaction and the selected column's layout resume on exit; explicit
+  column-weight changes are applied then.
 
 ### Added
 
@@ -50,10 +45,10 @@ before it makes no compatibility promise.
   the root). Previously each re-selection panned again, walking the
   selection to the end of the ribbon. Real motion, presses and warps all carry
   fresh coordinates and take the normal path.
-- Floating a tiled window while Overview is on no longer launders the
-  projected (scaled) rect into the float's persistent geometry: the transition
-  unscales the tile first (frame-aware) and the float rules settle the
-  full-size rect into the workarea.
+- Floating a tile during Overview uses its unchanged logical geometry; no
+  inverse-scale conversion is needed.
+- Overview navigation on a View without columns completes the mode transition,
+  resets viewport zoom and publishes the change.
 - `general.overview_zoom_min` is a floor, which is what its name always claimed.
   It was used as the Overview scale itself, so a value near the documented
   minimum of `0.05` projected every tiled client at a twentieth of its size.

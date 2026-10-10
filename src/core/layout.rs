@@ -10,9 +10,9 @@
 //! target (`ideal_scroll`) and the hit-test extents (`column_screen_extents`)
 //! all read the same table, so camera and hit-test cannot drift.
 //!
-//! There is one projection, not two. Geometry is never interpolated: a scroll
-//! or a zoom rewrites the camera or the zoom factor and the next `arrange` is
-//! the final geometry.
+//! Normal placements configure clients. Overview placements describe images
+//! of captured logical rectangles and must bypass the client reconciler.
+//! Camera values are applied directly; geometry is never interpolated.
 //!
 //! Not owned here: the presentation overlay (`present::present_into` rewrites
 //! placements after layout), the reconciler and `AppliedState`, and the X11
@@ -25,8 +25,8 @@ use crate::types::{
     Client, LayoutKind, Monitor, Rect, SizeHints, State, ViewportMode, WindowId, Workspace,
 };
 
-/// Scratch tuple-vec `(WindowId, Rect, border_w)` that `arrange` fills before
-/// `DesiredState::from_placements` makes it explicit. Cleared on every call.
+/// Scratch placements cleared on every call. Normal rectangles become
+/// DesiredState; Overview rectangles describe images and never configure clients.
 pub type Placements = Vec<(WindowId, Rect, u32)>; // (win, geom, border_w)
 
 /// Reusable scratch for the per-monitor column projection.
@@ -232,7 +232,103 @@ pub fn arrange(
     // — a fullscreen window on the previously active View would reappear
     // covering the current one.
     out.clear();
-    arrange_columns(state, mon, mon.ws(), cfg, out, scratch);
+    if mon.ws().overview {
+        arrange_overview(state, mon_idx, cfg, out, scratch);
+    } else {
+        arrange_columns(state, mon, mon.ws(), cfg, out, scratch);
+    }
+}
+
+/// Computes layout sizes for newly mapped clients without changing the viewport.
+pub(crate) fn arrange_logical(
+    state: &State,
+    mi: usize,
+    cfg: &Cfg,
+    out: &mut Placements,
+    scratch: &mut RibbonScratch,
+) {
+    out.clear();
+    let Some(mon) = state.monitors.get(mi) else {
+        return;
+    };
+    // A normal projection is needed only on entry or when a new client joins.
+    // Keep its alternate focus/zoom policy local rather than mutating the live View.
+    let mut ws = mon.ws().clone();
+    ws.overview = false;
+    ws.overview_rects.clear();
+    ws.viewport_mode = ViewportMode::Normal;
+    ws.page_zoom = 1.0;
+    arrange_columns(state, mon, &ws, cfg, out, scratch);
+}
+
+/// Projects client images; these placements must never configure the clients.
+fn arrange_overview(
+    state: &State,
+    mi: usize,
+    cfg: &Cfg,
+    out: &mut Placements,
+    scratch: &mut RibbonScratch,
+) {
+    let mon = &state.monitors[mi];
+    let ws = mon.ws();
+    let mut logical = Vec::new();
+    if ws
+        .columns
+        .iter()
+        .flat_map(|c| &c.windows)
+        .any(|win| !ws.overview_rects.contains_key(win))
+    {
+        arrange_logical(state, mi, cfg, &mut logical, scratch);
+    }
+    let g = scratch.ribbon_geom(ws, cfg, mon.workarea, &FsCtx::default());
+    let project = |rect: Rect, border: u32, x: f32| {
+        Rect::new(
+            (g.wa.x as f32 + x * g.alpha + g.cx).round() as i32,
+            (g.wa.y as f32 + (rect.y.saturating_sub(g.wa.y)) as f32 * g.alpha + g.cy).round()
+                as i32,
+            ((rect.w.saturating_add(border.saturating_mul(2))) as f32 * g.alpha)
+                .round()
+                .max(1.0) as u32,
+            ((rect.h.saturating_add(border.saturating_mul(2))) as f32 * g.alpha)
+                .round()
+                .max(1.0) as u32,
+        )
+    };
+    for (i, col) in ws.columns.iter().enumerate() {
+        for &win in &col.windows {
+            let Some(c) = state.clients.get(&win) else {
+                continue;
+            };
+            let (rect, border) = ws
+                .overview_rects
+                .get(&win)
+                .copied()
+                .or_else(|| {
+                    logical
+                        .iter()
+                        .find(|(w, _, _)| *w == win)
+                        .map(|(_, r, b)| (*r, *b))
+                })
+                .unwrap_or((c.geom, c.border_w));
+            out.push((
+                win,
+                project(rect, border, g.cols[i].0 - ws.camera.position),
+                0,
+            ));
+        }
+    }
+    for (&win, c) in &state.clients {
+        if c.monitor != mi || !c.is_float() || (c.workspace != ws.id && !c.is_sticky()) {
+            continue;
+        }
+        // Floats own their logical geometry, including client-requested resizes.
+        // Scaling their image must neither freeze nor rewrite that authority.
+        out.push((
+            win,
+            project(c.geom, c.border_w, c.geom.x.saturating_sub(g.wa.x) as f32),
+            0,
+        ));
+    }
 }
 
 // Each column sits at a fixed x position (derived from the sum of prior column
@@ -383,8 +479,8 @@ pub fn sanitized_overview_scales(cfg: &Cfg) -> (f32, f32) {
 ///
 /// # Inputs
 ///
-/// `focused_world_w` must be the focused column's *world* width — its base
-/// weight share of the workarea before any view scale, boost off — and
+/// `focused_world_w` is the focused column's logical frame width before the
+/// camera scale, captured on entry or derived from the initial layout, and
 /// `workarea_w` the gap-inset workarea width. Both come from the same table
 /// [`ribbon_geom_into`] builds; see [`overview_entry_scale_for`].
 pub fn overview_entry_scale(cfg: &Cfg, workarea_w: u32, focused_world_w: f32) -> f32 {
@@ -430,19 +526,10 @@ fn sanitize_overview_target(scale: f32) -> f32 {
 
 /// Compute the entry scale for `ws` from its own focused column.
 ///
-/// Mirrors the width computation in [`ribbon_geom_into`] — base weight share
-/// of the gap-inset workarea, boost off (the boost is dropped in Overview so
-/// the tile sits at the width it will actually be projected at), a fullscreen
-/// ribbon column measuring `screen.w` — so the scale is derived from the tile
-/// the viewport will open on rather than from a caller-supplied number. `fs`
-/// is the descriptor for the projection that is about to run (empty under
-/// Overview, where non-exclusive fullscreen columns are ordinary ribbon
-/// participants).
-///
-/// A workspace with no columns has no tile to measure, so the target stands on
-/// its own: the result is the configured entry scale, never the settled view.
-///
-/// Pure over `(&Workspace, &Cfg, Rect, &FsCtx)`: no X11, writes nothing.
+/// Measures the captured logical frame of the focused column, so fitting
+/// changes the camera scale rather than the application's viewport. With no
+/// captured rectangle, the column weight supplies the initial layout width.
+/// Empty Views use the configured scale. This function performs no X11 work.
 pub fn overview_entry_scale_for(ws: &Workspace, cfg: &Cfg, workarea: Rect, fs: &FsCtx) -> f32 {
     // Same inset as `ribbon_geom_into`: the tile is fitted into the area the
     // projection anchors geometry to, not the area that area was derived from.
@@ -459,7 +546,13 @@ pub fn overview_entry_scale_for(ws: &Workspace, cfg: &Cfg, workarea: Rect, fs: &
     let world_w = match ws.columns.get(i) {
         None => 0.0,
         Some(_) if fs.cols.contains(&i) => fs.screen.w as f32,
-        Some(col) => col.weight.min(1.0) * usable_w,
+        Some(col) => col
+            .windows
+            .iter()
+            .filter_map(|win| ws.overview_rects.get(win))
+            .map(|(rect, border)| rect.w.saturating_add(border.saturating_mul(2)) as f32)
+            .reduce(f32::max)
+            .unwrap_or(col.weight.min(1.0) * usable_w),
     };
     overview_entry_scale(cfg, wa_w, world_w)
 }
@@ -552,8 +645,8 @@ pub(crate) fn ribbon_geom_into<'s>(
 
     // Per-column accordion boost: the focused column is worth 1.0 and every
     // other column 0.0, so changing focus widens the focused column on the next
-    // projection. In Overview the boost is forced to 0 so every column sits at
-    // its base width and navigation pans a stable ribbon instead of reflowing it.
+    // projection. Overview uses captured frame widths instead, so changing
+    // its selection cannot resize applications or reflow their images.
     let total_boost = cfg.accordion_boost.clamp(0.0, 0.9);
     let focus_i = ws.focus.column_idx;
 
@@ -573,7 +666,18 @@ pub(crate) fn ribbon_geom_into<'s>(
         // A fullscreen column in the scrolling ribbon is exactly `mon.screen`
         // wide — already at maximum width — so the accordion boost does not
         // apply and its world width is independent of the workarea width.
-        let w = if fs.cols.contains(&i) {
+        let snapshot_w = if ws.overview {
+            c.windows
+                .iter()
+                .filter_map(|win| ws.overview_rects.get(win))
+                .map(|(rect, border)| rect.w.saturating_add(border.saturating_mul(2)) as f32)
+                .reduce(f32::max)
+        } else {
+            None
+        };
+        let w = if let Some(width) = snapshot_w {
+            width
+        } else if fs.cols.contains(&i) {
             fs.screen.w as f32
         } else {
             let boosted = (c.weight + total_boost * boost).min(1.0);
@@ -850,7 +954,7 @@ pub(crate) fn column_screen_extents_into(
         // with the `client.geom` X11 hit-tests against (invariant A). A
         // fullscreen column is drawn with border 0, so it contributes no
         // border to subtract; tiled columns reserve [`effective_border_w`].
-        let bw = if fs.cols.contains(&i) {
+        let bw = if ws.overview || fs.cols.contains(&i) {
             0.0
         } else {
             effective_border_w(cfg) as f32
@@ -932,7 +1036,7 @@ pub fn overview_scroll(ws: &Workspace, cfg: &Cfg, workarea: Rect, fs: FsCtx) -> 
     // Screen-space edges of the focused tile, exactly as `arrange_columns`
     // draws them: the left edge from the camera mapping, the right edge from
     // the inner (border-exclusive) width the tile is configured with.
-    let bw = if fs.cols.contains(&i) {
+    let bw = if ws.overview || fs.cols.contains(&i) {
         0.0
     } else {
         effective_border_w(cfg) as f32
@@ -2671,6 +2775,8 @@ mod proptests {
     #[test]
     fn every_accepted_border_width_preserves_the_geometry_contract() {
         proptest!(|(r in ribbon())| {
+            // These assertions describe client rectangles, not image placements.
+            prop_assume!(!r.overview);
             // The viewport zoom enlarges the ribbon past the workarea on
             // purpose; the border contract is about the tiling path.
             prop_assume!(!r.zoomed);
@@ -2724,6 +2830,8 @@ mod proptests {
     #[test]
     fn tiles_stay_within_the_gap_inset_workarea_on_the_vertical_axis() {
         proptest!(|(r in ribbon())| {
+            // These assertions describe client rectangles, not image placements.
+            prop_assume!(!r.overview);
             // `ViewportMode::Zoomed` with `page_zoom > 1` exists to enlarge the
             // ribbon past the workarea, so containment is a property of the
             // tiling path this module owns.
@@ -3134,6 +3242,8 @@ mod proptests {
     #[test]
     fn the_hit_test_extents_agree_with_the_drawn_placement() {
         proptest!(|(r in ribbon())| {
+            // These assertions describe client rectangles, not image placements.
+            prop_assume!(!r.overview);
             let state = r.state();
             let cfg = r.cfg();
             let placements = project(&state, &cfg);

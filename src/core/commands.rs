@@ -605,6 +605,7 @@ impl Command for ViewportZoom {
             // view.
             ws.overview = false;
             ws.overview_scale = 1.0;
+            ws.overview_rects.clear();
         } else {
             ws.viewport_mode = ViewportMode::Zoomed;
             ws.page_zoom = new;
@@ -613,6 +614,7 @@ impl Command for ViewportZoom {
             // asked for.
             ws.overview = false;
             ws.overview_scale = 1.0;
+            ws.overview_rects.clear();
         }
         // Keep the focused column centered under the new zoom.
         if ws.layout == LayoutKind::Column {
@@ -1012,59 +1014,6 @@ impl Command for KillWindow {
     }
 }
 
-/// Undo the Overview entry scale on a tiled window's `Client::geom` before it
-/// becomes a float's persistent geometry.
-///
-/// A tiled window's `geom` is the *projected* rect: the backend writes the wire
-/// rect back, so under Overview it carries the stored entry scale. Floating
-/// that rect as-is would launder a temporary view scale into the float's own
-/// geometry — a window shrunk by the viewport it was selected in, which no
-/// later arrange would ever grow back. The fix divides the scale back out,
-/// keeping the tile's center so the float appears where the tile was, and lets
-/// the settle that follows clamp the full-size rect into the workarea.
-///
-/// Bounded on purpose rather than a logical/geometry split: the only writer
-/// that can observe a projected rect is this transition, so correcting the
-/// rect at the transition keeps the single `Client::geom` field honest without
-/// a second geometry store. No-op outside Overview and at a `1.0` entry scale.
-fn unscale_overview_tile_for_float(state: &mut State, mi: usize, ws_i: usize, win: WindowId) {
-    let scale = state
-        .monitors
-        .get(mi)
-        .and_then(|m| m.workspaces.get(ws_i))
-        .map(|ws| ws.overview_scale)
-        .unwrap_or(1.0);
-    if !scale.is_finite() || scale <= 0.0 || scale >= 1.0 {
-        return;
-    }
-    let Some(c) = state.clients.get_mut(&win) else {
-        return;
-    };
-    // The projected tile rect is border-exclusive (`inner_w = col_w * alpha -
-    // 2 * bw`), so dividing the scale back out of the bare width would come up
-    // short by the frame the projection reserved: re-add it before unscaling
-    // and reserve it again after, or every float born in Overview would lose
-    // `2 * bw * (1/alpha - 1)` px it never gets back (the settle below only
-    // ever shrinks).
-    let frame = 2.0 * c.border_w as f32;
-    let g = c.geom;
-    let nw = (((g.w as f32 + frame) / scale - frame)
-        .round()
-        .clamp(1.0, 16_384.0)) as u32;
-    let nh = (((g.h as f32 + frame) / scale - frame)
-        .round()
-        .clamp(1.0, 16_384.0)) as u32;
-    let cx = g.x as f32 + (g.w as f32 + frame) / 2.0;
-    let cy = g.y as f32 + (g.h as f32 + frame) / 2.0;
-    let nx = ((cx - (nw as f32 + frame) / 2.0)
-        .round()
-        .clamp(-16_384.0, 16_384.0)) as i32;
-    let ny = ((cy - (nh as f32 + frame) / 2.0)
-        .round()
-        .clamp(-16_384.0, 16_384.0)) as i32;
-    c.geom = Rect::new(nx, ny, nw, nh);
-}
-
 /// Toggle floating for `Some(win)`, or for the selected monitor's focused
 /// window when `None`.
 ///
@@ -1180,11 +1129,6 @@ impl Command for ToggleFloat {
                 c.flags.clear(WinFlags::STICKY);
             }
         } else {
-            // A tile floated while Overview is on carries the entry scale in
-            // its `Client::geom` (the backend wrote the projected rect back).
-            // Undo it before the float list adopts the rect, or the viewport
-            // leaks into persistent geometry.
-            unscale_overview_tile_for_float(state, mi, ws_i, win);
             state.monitors[mi].workspaces[ws_i].remove_window(win);
             state.monitors[mi].workspaces[ws_i].floats.push(win);
             // The FLOAT flag must move with the window: `settle_float_in_workarea`
@@ -2255,26 +2199,51 @@ impl Command for Restart {
     }
 }
 
-/// Toggle the Overview mode on the active workspace: enter a fixed-scale
-/// spatial-navigation viewport, or leave it again.
-///
-/// Overview is a **viewport** operation, not a client resize, and this command
-/// is the whole of what entering does: it flips the View's flag, fixes the
-/// entry scale **once** from the focused tile
-/// ([`overview_entry_scale_for`]), clears the viewport-zoom axis it is
-/// mutually exclusive with, and positions the camera. It never writes
-/// *layout* geometry — the column weights, the world ribbon and a float's own
-/// rect are untouched — but the scale it fixes is a real one, because without a
-/// compositor the projected rectangles *are* what X11 draws: entering Overview
-/// visibly shrinks the tiles and leaving it restores them. Navigation
-/// afterwards pans the camera at that stored scale; the scale is not
-/// re-derived while the mode is on, so the client count shapes the scrollable
-/// content but never the scale of a step. Leaving clears the flag and the
-/// stored scale, restoring the settled view exactly.
-///
-/// See [`overview_entry_scale_for`] for the sizing policy the entry applies,
-/// and for why a window manager without a compositor cannot do better than
-/// write the scale to the tile rectangles.
+fn enter_overview(state: &mut State, cfg: &Cfg, mi: usize) {
+    if state.monitors[mi].ws().overview {
+        return;
+    }
+    let mut placements = Vec::new();
+    crate::core::layout::arrange(
+        state,
+        mi,
+        cfg,
+        &mut placements,
+        &mut crate::core::layout::RibbonScratch::default(),
+    );
+    crate::core::present::present_into(state, &state.monitors[mi], &mut placements);
+    let mut rects = std::collections::HashMap::new();
+    for (win, rect, border) in placements {
+        let client = &state.clients[&win];
+        let logical = if client.last_desired.is_some() {
+            client.geom
+        } else {
+            rect
+        };
+        rects.insert(win, (logical, border));
+    }
+    for (&win, c) in &state.clients {
+        if c.monitor == mi && c.is_sticky() && c.is_float() {
+            rects.insert(win, (c.geom, c.border_w));
+        }
+    }
+    let workarea = state.monitors[mi].workarea;
+    let ws = state.monitors[mi].ws_mut();
+    ws.overview_rects = rects;
+    ws.overview = true;
+    ws.viewport_mode = ViewportMode::Normal;
+    ws.page_zoom = 1.0;
+    ws.overview_scale = crate::core::layout::overview_entry_scale_for(
+        ws,
+        cfg,
+        workarea,
+        &crate::core::layout::FsCtx::default(),
+    );
+}
+
+/// Enters or leaves the image viewport, preserving logical client geometry.
+/// Entry captures the current rectangles and fixes the scale; navigation only
+/// changes the selection and camera. The backend owns the temporary images.
 #[derive(Debug, Clone, Copy)]
 pub struct ToggleOverview;
 
@@ -2290,24 +2259,11 @@ impl Command for ToggleOverview {
         let wa = state.monitors[mi].workarea;
         let enter = !state.monitors[mi].workspaces[ws_i].overview;
         if enter {
-            // Fix the scale once, from the tile the viewport opens on. Read
-            // after the flip: `fs_ctx` returns an empty descriptor for an
-            // Overview workspace — non-exclusive fullscreen columns are
-            // ordinary ribbon participants there — and both the entry scale
-            // and the camera target have to be derived from the projection
-            // that is about to run, not from the one that just ended.
-            state.monitors[mi].workspaces[ws_i].overview = true;
-            let fs = fs_of(state, mi, ws_i);
-            let scale = crate::core::layout::overview_entry_scale_for(
-                &state.monitors[mi].workspaces[ws_i],
-                cfg,
-                wa,
-                &fs,
-            );
-            state.monitors[mi].workspaces[ws_i].overview_scale = scale;
+            enter_overview(state, cfg, mi);
         } else {
             state.monitors[mi].workspaces[ws_i].overview = false;
             state.monitors[mi].workspaces[ws_i].overview_scale = 1.0;
+            state.monitors[mi].workspaces[ws_i].overview_rects.clear();
         }
         // Mutually exclusive with Viewport Zoom: toggling Overview must reset
         // the page-zoom state, or a lingering `Zoomed` mode would keep `alpha` on
@@ -2363,21 +2319,17 @@ impl Command for OverviewNav {
         // fullscreen columns to ordinary ribbon participants under Overview,
         // and that is the projection the entry scale and the camera target
         // must follow.
-        if !state.monitors[mi].workspaces[ws_i].overview {
-            state.monitors[mi].workspaces[ws_i].overview = true;
-            let fs = fs_of(state, mi, ws_i);
-            let scale = crate::core::layout::overview_entry_scale_for(
-                &state.monitors[mi].workspaces[ws_i],
-                cfg,
-                wa,
-                &fs,
-            );
-            state.monitors[mi].workspaces[ws_i].overview_scale = scale;
-        }
+        enter_overview(state, cfg, mi);
         let fs = fs_of(state, mi, ws_i);
         let n = state.monitors[mi].workspaces[ws_i].columns.len();
         if n == 0 {
-            return CommandReport::new(cmds);
+            return CommandReport::with_event(
+                vec![Effect::ArrangeMonitor(mi)],
+                Event::LayoutChanged {
+                    monitor: mi,
+                    workspace: ws_i,
+                },
+            );
         }
         let ws = &mut state.monitors[mi].workspaces[ws_i];
         let cur = ws.focus.column_idx.min(n - 1);
@@ -2439,6 +2391,7 @@ impl Command for OverviewEnter {
         let ws = &mut state.monitors[mi].workspaces[ws_i];
         ws.overview = false;
         ws.overview_scale = 1.0;
+        ws.overview_rects.clear();
         // Mutually exclusive with Viewport Zoom: leaving Overview must also
         // drop any pending viewport zoom so the state stays consistent.
         ws.viewport_mode = ViewportMode::Normal;

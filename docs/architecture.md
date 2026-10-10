@@ -65,10 +65,10 @@ server, a GPU, or a config file.
 
 ---
 
-## There is no compositor
+## Desktop composition stays external
 
 Maverick draws through X11 and nothing else. There is no `default` feature, no
-optional renderer, and no second presentation path: `[features]` in
+optional GPU renderer: `[features]` in
 `Cargo.toml:59-63` declares `input-trace` and `window-trace` and nothing else,
 neither is on by default, and both are empty feature sets that only turn on
 logging. `cargo build` and `cargo build --no-default-features` therefore select
@@ -76,14 +76,14 @@ the same code, and the runtime dependency list is exactly `Cargo.toml:43-54`:
 `maverick-core`, `maverick-sys`, `maverick-toml`, `maverick-x11`, `libc` and
 `x11rb`. No GL, Vulkan or graphics-library binding appears in any manifest.
 
-Every state change therefore reaches the server as one configure at its final
-position. The properties that govern *presentation* are the window manager's
-protocol surface, not a drawing layer:
+Client geometry changes reach the server as one configure at their final
+position. Overview changes only the temporary image presentation. The properties
+that govern fullscreen *presentation* are the window manager's protocol surface:
 
 - `render::emit_geometry` (`src/backend/x11/render.rs:924`) is the single X11
-  geometry sink, and `reconciler::wire_geometry`
+  client geometry sink, and `reconciler::wire_geometry`
   (`src/backend/x11/reconciler.rs:100`) is the single clamping function. No other
-  code positions a window.
+  code positions a managed client.
 - The camera is a plain `f32` scroll offset (`maverick-core/src/types.rs:367-370`)
   and `Workspace::overview_scale` / `Workspace::page_zoom` are plain `f32`
   values that a mutator assigns outright. Nothing eases toward a target, so
@@ -230,35 +230,35 @@ accumulation in the pipeline.
 
 Rearranged, that line is a camera: `screen = (wa.x + wa.w/2) + alpha * (world -
 (cam + wa.w/2))`. `Camera::position` is the pan and `alpha` is the scale, both
-View state and neither per window. The consequence on X11: **the camera's scale
-is necessarily written to `ConfigureWindow`.** There is no compositor to render
-a client at a size the server does not hold, so "zoom the view out" and "make
-every tile's rectangle smaller" are the same physical operation here. That is
-what makes Overview the one view that changes geometry visibly: the entry scale
-is a real reduction (`Cfg::overview_scale`, `0.76` by default) taken once on
-entry, never derived per projection. What keeps it from degenerating is that
-rule — the scale reads the *focused tile*, never the ribbon, so the client count
-shapes the scrollable content and not the size of a step — plus the two floors
-(`overview_zoom_min` at the entry, `ALPHA_MIN` at the read-back) and the fact
-that navigation pans the camera through `overview_scroll` without ever writing
-the scale again. There is no "real" graphical camera that pans over unscaled
-pixels; the viewport is a WM-native approximation: reduced tiles plus a camera
-that scrolls the ribbon, and leaving the mode restores the settled rectangles
-exactly because the layout's own geometry was never written.
+View state and neither per window. Overview captures logical client rectangles
+in `Workspace::overview_rects`, derives image placements from them, and leaves
+`Client::geom` unchanged. `render::arrange_full` routes those placements to
+`backend/x11/overview.rs` instead of the client reconciler. Named Composite
+pixmaps retain the full-size window image; Render applies the inverse camera
+transform; Damage schedules repaint in the existing event loop. Each active
+Overview monitor owns one temporary window and its pictures. Exit, View
+switches, monitor removal and shutdown release those resources. New clients
+receive one initial logical layout; camera navigation never configures existing
+clients. The backend does not redirect the root or claim `_NET_WM_CM_Sn`.
+Missing Composite/Render/Damage support refuses entry, preserving geometry.
+Normal column layout and focus policy resume on exit.
 
-The consequence: **the integer rectangle in X11 is the only rectangle.**
+The client rectangle remains authoritative for application geometry. Overview
+image rectangles belong to the camera presentation and are never written back
+to clients.
 
 ---
 
 ## Deliberate non-goals
 
-- **No compositor.** Stated above, with the file and line behind each part of it.
+- **No desktop compositor.** Overview owns only temporary window images;
+  desktop compositor ownership remains external.
 - **No renderer abstraction.** No manifest in the workspace declares a graphics
   backend, no `Renderer` or `Texture` trait is defined anywhere in the tree, and
   the six local crates listed above are the whole of what can be built. Where a
-  source comment says "the renderer", it means `src/backend/x11/render.rs` — the
-  module that writes geometry to X11 — not a graphics backend. Its whole
-  presentation surface is a `Shape` mask and a set of `ConfigureWindow` calls.
+  source comment says "the renderer", it refers to the concrete X11 geometry
+  module or Overview's temporary image presentation. Both stay in the existing
+  backend; neither introduces a renderer trait or a selectable graphics backend.
 - **No Vulkan backend.** `maverick-vk` is not a member of the workspace, not a
   directory in the tree, and not named by any manifest. There is no
   `compositor-vulkan` feature to select: `[features]` in `Cargo.toml:59-63` holds
