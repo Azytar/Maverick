@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 description = "Pure core state and logic for Maverick (types, layout, commands) — no X11/GL"
 categories = ["os::unix-apis"]
-keywords = ["window-manager", "tiling", "core"]
+keywords = ["linux", "unix", "window-manager", "tiling", "core"]
 
 [dependencies]
 

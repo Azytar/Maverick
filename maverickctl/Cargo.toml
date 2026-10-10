@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 description = "maverickctl — external Unix control tool for the Maverick window manager: CLI parsing, control-socket IPC client, and session/discovery operations. It drives a running Maverick over the control socket and never links the window manager itself."
 categories = ["command-line-utilities"]
-keywords = ["window-manager", "ipc", "cli"]
+keywords = ["linux", "unix", "window-manager", "ipc", "cli"]
 
 [dependencies]
 maverick-sys.workspace = true

@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 description = "Maverick's X11 bootstrap: the Xlib display and the XCB connection the window manager uses"
 categories = ["os::unix-apis"]
-keywords = ["x11", "window-manager"]
+keywords = ["linux", "unix", "rust", "x11", "window-manager"]
 
 [dependencies]
 # `allow-unsafe-code` gates `xcb_ffi::XCBConnection`, the only way to adopt the

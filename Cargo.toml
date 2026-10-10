@@ -14,7 +14,7 @@ edition = "2021"
 rust-version = "1.82"
 authors = ["azytar"]
 license = "GPL-3.0"
-repository = "https://github.com/azytar/Maverick"
+repository = "https://github.com/Azytar/Maverick"
 
 [workspace.dependencies]
 proptest = "1"
@@ -33,8 +33,11 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "maverick — columnar tiling WM with niri-style layout"
+# The keywords mirror the repository's GitHub topics (linux, rust, unix,
+# window-manager, x11) so the published metadata and the repo describe the same
+# project; crates.io allows at most five keywords.
 categories = ["command-line-utilities", "gui"]
-keywords = ["window-manager", "tiling", "x11"]
+keywords = ["linux", "rust", "unix", "window-manager", "x11"]
 
 [[bin]]
 name = "maverick"

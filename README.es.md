@@ -354,7 +354,7 @@ La instalación es desde código fuente. El instalador compila ambos binarios de
 este workspace con `cargo build --release -p maverick -p maverickctl`.
 
 ```bash
-git clone https://github.com/azytar/Maverick.git
+git clone https://github.com/Azytar/Maverick.git
 cd Maverick
 ./installer/install.sh
 ```

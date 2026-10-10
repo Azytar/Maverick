@@ -413,7 +413,7 @@ Installation is source-based. The installer builds both binaries from this
 workspace with `cargo build --release -p maverick -p maverickctl`.
 
 ```bash
-git clone https://github.com/azytar/Maverick.git
+git clone https://github.com/Azytar/Maverick.git
 cd Maverick
 ./installer/install.sh
 ```

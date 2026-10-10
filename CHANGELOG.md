@@ -63,6 +63,10 @@ before it makes no compatibility promise.
   `layout::DEFAULT_OVERVIEW_SCALE` and a negative or zero stored scale falls
   back to the configured one, so a poisoned value cannot make `Mod+O` a silent
   no-op.
+- The published package metadata names the repository that actually hosts this
+  tree (`Azytar/Maverick`, previously a lower-case owner that no longer
+  resolves), and the keywords of every workspace package carry the repository's
+  own topics (`linux`, `rust`, `unix`, `window-manager`, `x11`).
 
 ## [1.1.1] - 2026-10-05
 

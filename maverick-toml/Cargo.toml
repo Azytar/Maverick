@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 description = "Ultra-light, zero-dependency TOML-subset parser for Maverick's optional config"
 categories = ["parsing"]
-keywords = ["toml", "parser", "window-manager"]
+keywords = ["linux", "unix", "window-manager", "toml", "parser"]
 
 [dependencies]
 

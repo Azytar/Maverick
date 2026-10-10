@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 description = "Maverick's OS/control boundary: libc FFI (signals, poll, uid/gid), instance identity, the Unix-socket control protocol server, and minimal JSON helpers. Session orchestration and the maverickctl CLI live in the maverickctl crate."
 categories = ["os::unix-apis"]
-keywords = ["window-manager", "ipc", "ffi"]
+keywords = ["linux", "unix", "window-manager", "ipc", "ffi"]
 
 [dependencies]
 # rustix has no `sigaction` (`src/not_implemented.rs`), so signal disposition
