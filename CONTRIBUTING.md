@@ -96,6 +96,11 @@ CI (`.github/workflows/ci.yml`) runs three jobs: the workspace with strict
 Clippy and both feature sets, the installer checks, and the Xvfb stacking smoke
 test. All three must pass.
 
+`python3 tests/overview-isolation.py` checks the Overview rig's startup and
+cleanup with tool doubles, without needing an X server. It verifies that the
+rig uses only the display claimed by its child, reaps that child on failure,
+and never requests global process kills. CI runs it alongside the Xvfb smoke.
+
 ## Reporting bugs and proposing features
 
 Use the issue templates. A bug report is reproducible from the description
