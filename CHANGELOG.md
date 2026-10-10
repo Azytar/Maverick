@@ -39,6 +39,9 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- An empty `[autostart].commands = []` (including the `apps` and `programs`
+  aliases) no longer reports a type warning. It remains a valid way to disable
+  the compiled autostart list; nonempty flat lists still report a warning.
 - Hover selection can no longer cascade down the ribbon on its own: an
   `EnterNotify` that arrives with the pointer exactly where the last motion
   or press left it (a camera pan slid another tile underneath a stationary

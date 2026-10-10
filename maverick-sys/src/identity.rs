@@ -102,14 +102,21 @@ impl InstanceInfo {
 /// the login session normally provides) — **never** `/tmp`, which is purged
 /// mid-session and would silently lose the session.
 pub fn runtime_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+    runtime_dir_for(
+        std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
+        current_uid(),
+    )
+}
+
+fn runtime_dir_for(xdg: Option<&str>, uid: u32) -> PathBuf {
+    if let Some(xdg) = xdg {
         if !xdg.is_empty() {
             return Path::new(&xdg).join("maverick");
         }
     }
     // No XDG_RUNTIME_DIR: never fall back to /tmp (it's purged). Use the
     // standard /run/user/$UID, which the login session normally provides.
-    PathBuf::from(format!("/run/user/{}/maverick", current_uid()))
+    PathBuf::from(format!("/run/user/{uid}/maverick"))
 }
 
 /// The real user id of this process, as the kernel reports it.
@@ -704,11 +711,17 @@ mod tests {
 
     #[test]
     fn runtime_dir_never_tmp() {
-        crate::prop_support::runtime_root();
-        let dir = runtime_dir();
-        assert!(
-            !dir.starts_with("/tmp"),
-            "runtime_dir must not be /tmp: {dir:?}"
+        // The fallback must never choose /tmp. An explicit XDG path is the
+        // caller's choice, including the private root our fixtures create.
+        for xdg in [None, Some("")] {
+            assert_eq!(
+                runtime_dir_for(xdg, 1234),
+                PathBuf::from("/run/user/1234/maverick")
+            );
+        }
+        assert_eq!(
+            runtime_dir_for(Some("/tmp/test-runtime"), 1234),
+            PathBuf::from("/tmp/test-runtime/maverick")
         );
     }
 
