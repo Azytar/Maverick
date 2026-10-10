@@ -827,6 +827,15 @@ impl WindowManager {
         if e.mode != NotifyMode::NORMAL || e.detail == NotifyDetail::INFERIOR {
             return Ok(());
         }
+        // No new pointer position, no new user intent: the pointer is exactly
+        // where the last motion or press left it, so a window moved underneath
+        // it (see `pointer::PointerTruth`). Focusing here would select whatever
+        // slid under the cursor — and, after a camera pan, that selection pans
+        // again, cascading to the end of the ribbon. A real motion, a press
+        // and a warp all carry fresh coordinates and take the normal path.
+        if !self.ptr_truth.enter_carries_intent(e.root_x, e.root_y) {
+            return Ok(());
+        }
         self.last_event_time = e.time;
         if self.engine.cfg.focus_mouse {
             // Guard: a key navigation that just ran must not be undone by an

@@ -459,6 +459,7 @@ impl WindowManager {
                 .border_pixel(self.engine.cfg.col_normal)
                 .event_mask(
                     EventMask::ENTER_WINDOW
+                        | EventMask::POINTER_MOTION
                         | EventMask::FOCUS_CHANGE
                         | EventMask::PROPERTY_CHANGE
                         | EventMask::STRUCTURE_NOTIFY,

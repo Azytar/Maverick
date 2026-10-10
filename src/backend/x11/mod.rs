@@ -100,6 +100,7 @@ use trace::TraceEnd;
 #[cfg(test)]
 mod tests;
 use pointer::DragState;
+use pointer::PointerTruth;
 
 /// How long a keyboard-change notification waits for its siblings before the
 /// keymap is re-read and every grab rebuilt. A single `setxkbmap` produces a
@@ -273,6 +274,10 @@ pub struct WindowManager {
     /// changes so the pointer — parked over a tile edge — can't instantly undo
     /// the key-driven switch. Cleared by the first real `MotionNotify`.
     pointer_guard_until: Option<std::time::Instant>,
+    /// The last genuine pointer observation, feeding `on_enter`'s
+    /// stationary check (see `pointer::PointerTruth`). Updated by
+    /// `MotionNotify` and `ButtonPress`; read (never written) by `EnterNotify`.
+    ptr_truth: PointerTruth,
     /// Server time of the most recent input event (key/button/enter). Used to
     /// stamp ICCCM `WM_TAKE_FOCUS` messages with a real timestamp instead of
     /// `CurrentTime`, which a few strict toolkits (some Java/Emacs builds)
@@ -921,6 +926,7 @@ impl WindowManager {
             last_state_json: String::new(),
             docks: std::collections::HashMap::new(),
             pointer_guard_until: None,
+            ptr_truth: PointerTruth::default(),
             last_event_time: 0,
             last_stack_order: std::collections::HashMap::new(),
             fs_covering: std::collections::HashMap::new(),

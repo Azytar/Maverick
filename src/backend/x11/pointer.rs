@@ -26,6 +26,37 @@
 //! (50 ms after a keypress to avoid conflicting with
 //! keyboard focus).
 //!
+//! # Pointer policy while Overview is on
+//!
+//! Overview adds no grab and no new gesture; the rules below are what the
+//! existing paths do when the active workspace is in Overview, stated here so
+//! selection is never confused with dragging:
+//!
+//! - *Motion* (hover) selects through the same `EnterNotify` focus path as
+//!   outside Overview (and only when `focus_mouse` is set). It moves the
+//!   logical focus and pans the viewport only if the selected tile is not
+//!   already visible (`retarget_focus_to_window` → `overview_scroll`); it
+//!   never writes geometry, never changes the stored entry scale, and never
+//!   converts a tiled window to floating. `EnterNotify` fires once per window
+//!   entry rather than per motion event, so repeated motion cannot pan
+//!   unstably; an `Enter` that arrives without the pointer having moved (a
+//!   pan slid another tile underneath it) carries no new intent and is
+//!   ignored (`PointerTruth`), which is what stops a selection from
+//!   cascading down the ribbon on its own. The 50 ms post-keypress guard
+//!   keeps keyboard navigation from being undone by a parked pointer.
+//! - *Click* selects and focuses through the same focus-on-click path, and the
+//!   press is replayed to the client as usual, so application interaction is
+//!   untouched. A click never floats a tile on its own.
+//! - *Drag* (move/resize) starts only as `Mod4+Button` on an already-floating
+//!   window — a `Mod4` drag on a tile is a no-op that can never detach it as a
+//!   float, and a float drag can never drop back into a column. Selection and
+//!   dragging therefore cannot be confused: the drag needs the modifier plus
+//!   the floating state, selection needs neither.
+//! - *Exit* restores the normal behaviour by clearing the mode; there is no
+//!   Overview grab to release (no button, pointer or keyboard grab is taken on
+//!   entry) and no drag state to complete — `SyncGrabGuard` still guards every
+//!   handler exit as usual.
+//!
 //! # Scroll wheel
 //!
 //! `Mod4+wheel` scrolls the camera by stepping the focused column (reuses the
@@ -109,6 +140,48 @@ impl Drop for SyncGrabGuard {
     }
 }
 
+/// Root coordinates of the last genuine pointer observation (`MotionNotify`
+/// or `ButtonPress`), or `None` before the first one. This is the whole of
+/// what `on_enter` needs to tell a real pointer movement apart from a window
+/// that moved underneath a stationary cursor.
+///
+/// An `EnterNotify` that arrives with exactly these coordinates means the
+/// pointer did not move: an arrange re-projected the ribbon after a camera
+/// pan, or a client mapped/unmapped there. There is no new user intent in such
+/// an event, so `on_enter` ignores it for focus — acting on it re-selects
+/// whatever slid under the cursor, and in Overview each re-selection pans
+/// again, which slides the next tile under the cursor: a runaway that walks
+/// the selection to the end of the ribbon.
+///
+/// The truth stays fresh because every managed window selects
+/// `POINTER_MOTION` (see `manage`), so `on_motion` observes motion over tiles
+/// as well as over the root — without that subscription it would only ever
+/// see the root, and the comparison would run on a stale position. A warp
+/// (including `xdotool mousemove --sync`, which the Xephyr suite uses for its
+/// hover probes) is observed the same way: the server delivers the warp's own
+/// `EnterNotify` *before* its trailing `MotionNotify`, so the entering event
+/// still differs from the recorded position and takes the normal path, and
+/// the trailing motion then records the parked position for the next check.
+/// Focusing a newly mapped window is `manage()`'s own decision, never this
+/// path's.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PointerTruth {
+    last: Option<(i32, i32)>,
+}
+
+impl PointerTruth {
+    /// Record a genuine pointer observation: the pointer is observably here.
+    pub(super) fn note(&mut self, x: i32, y: i32) {
+        self.last = Some((x, y));
+    }
+
+    /// Whether an `EnterNotify` at root `(x, y)` carries new user intent: true
+    /// unless the pointer is exactly where it was last observed.
+    pub(super) fn enter_carries_intent(&self, x: i16, y: i16) -> bool {
+        self.last != Some((i32::from(x), i32::from(y)))
+    }
+}
+
 /// Live drag/resize state for the window currently grabbed by `Mod4+Button`.
 /// Owned by `WindowManager::drag`; `None` when no drag is active.
 #[derive(Debug)]
@@ -148,8 +221,7 @@ impl WindowManager {
 
         // Scroll buttons (4=up,5=down,6=left,7=right). With no modifier they are
         // just delivered to the application (REPLAY_POINTER). With Mod4 held they
-        // scroll the ribbon camera left/right (and, in Overview, also
-        // vertically).
+        // step the ribbon camera left/right through the focused column.
         if e.detail >= 4 {
             let sup: u16 = ModMask::M4.into();
             let clean = clean_mask(u16::from(e.state), self.numlock, self.scroll);
@@ -171,6 +243,11 @@ impl WindowManager {
             return Ok(());
         }
         self.last_event_time = e.time;
+        // A press is fresh pointer truth just like a motion (see `on_motion`):
+        // the pointer is observably here, so a later `Enter` at other
+        // coordinates still carries intent while one at these does not.
+        self.ptr_truth
+            .note(i32::from(e.root_x), i32::from(e.root_y));
 
         #[cfg(feature = "window-trace")]
         wtrace!(
@@ -542,6 +619,11 @@ impl WindowManager {
         // A real pointer movement lifts the keyboard-navigation guard so
         // focus-follows-mouse resumes normally (see on_enter/on_key).
         self.pointer_guard_until = None;
+        // Fresh pointer truth for `on_enter`'s stationary check: motion is
+        // what moves the pointer, so this is the position a later `Enter`
+        // must differ from to carry new intent.
+        self.ptr_truth
+            .note(i32::from(e.root_x), i32::from(e.root_y));
         let drag_snapshot = self.drag.as_ref().map(|d| {
             (
                 d.win,
@@ -660,8 +742,9 @@ impl WindowManager {
     /// Mod4 + scroll wheel: drive the column-ribbon camera. We don't free-scroll
     /// the raw camera (that would leave it between columns, breaking the
     /// accordion target); instead we step the *focused column* one slot per
-    /// notch, which recenters the camera via `ideal_scroll` — exactly like
-    /// `OverviewNav`, just continuous.
+    /// notch, which follows the selection through the same overview-aware
+    /// scroll policy as the keybinding — exactly like `OverviewNav`, just
+    /// continuous.
     ///
     /// This only *records* the notch. A wheel delivers notches faster than a
     /// focus change can be applied (each is X requests plus a re-arrange), and
@@ -715,5 +798,145 @@ impl WindowManager {
         effects.extend(rest);
         effects.extend(last_focus.map(Effect::FocusWindow));
         self.run_effects(effects)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PointerTruth;
+
+    // Drive a scripted `(observation, enter)` sequence through the same two
+    // operations the handlers perform — `note` on `MotionNotify`/`ButtonPress`
+    // (`on_motion`/`on_button_press`), `enter_carries_intent` on `EnterNotify`
+    // (`on_enter`) — and return the intent verdict per `Enter`.
+    fn run(script: &[(char, i16, i16)]) -> Vec<bool> {
+        let mut truth = PointerTruth::default();
+        let mut out = Vec::new();
+        for &(kind, x, y) in script {
+            match kind {
+                'm' | 'p' => truth.note(i32::from(x), i32::from(y)),
+                'e' => out.push(truth.enter_carries_intent(x, y)),
+                _ => panic!("unknown script step {kind}"),
+            }
+        }
+        out
+    }
+
+    // 1. A stationary pointer while geometry produces window entries: every
+    // one of them is intent-free, so focus can never walk the ribbon on its
+    // own no matter how many pans in a row slide tiles underneath.
+    #[test]
+    fn stationary_pointer_geometry_enters_carry_no_intent() {
+        // Parked by a motion, then five entries at the parked position (five
+        // pans, five tiles sliding under the cursor).
+        assert_eq!(
+            run(&[
+                ('m', 900, 500),
+                ('e', 900, 500),
+                ('e', 900, 500),
+                ('e', 900, 500),
+                ('e', 900, 500),
+                ('e', 900, 500),
+            ]),
+            [false, false, false, false, false]
+        );
+        // Same when the parked position was established by a press instead.
+        assert_eq!(
+            run(&[('p', 900, 500), ('e', 900, 500), ('e', 900, 500)]),
+            [false, false]
+        );
+    }
+
+    // 2. A real movement from one window to another carries intent: the entry
+    // reports coordinates the pointer was never observed at, because the last
+    // motion sample sits just before the window boundary.
+    #[test]
+    fn real_movement_to_another_window_carries_intent() {
+        assert_eq!(
+            run(&[
+                ('m', 100, 500),
+                ('m', 300, 500),
+                ('m', 590, 500),
+                ('e', 610, 500),
+            ]),
+            [true]
+        );
+    }
+
+    // 3. Motion without click keeps the filter's position fresh: after motion
+    // to a new spot, an entry at the *old* spot still carries intent (the
+    // pointer really was there last), while an entry at the new spot does
+    // not — the record followed the pointer without any button involved.
+    #[test]
+    fn motion_without_click_refreshes_the_recorded_position() {
+        assert_eq!(
+            run(&[
+                ('m', 100, 500),
+                ('e', 100, 500),
+                ('m', 700, 500),
+                ('e', 700, 500),
+                ('e', 100, 500),
+            ]),
+            // Enter at the parked spot: no intent. Enter back at the old
+            // spot: the pointer is not there either — but it is also not
+            // where it was last seen, and only the no-intent case may be
+            // suppressed, so this stays intent (a stale suppression here
+            // would swallow a legitimate revisit).
+            [false, false, true]
+        );
+    }
+
+    // 4. Click and focus: a press records the position exactly like a motion,
+    // so the press path (`on_button_press`, which focuses through its own
+    // logic) owns the activation while the trailing `Enter` at the same spot
+    // stays quiet instead of refocusing.
+    #[test]
+    fn press_records_truth_and_quietens_the_trailing_enter() {
+        assert_eq!(run(&[('p', 400, 300), ('e', 400, 300)]), [false]);
+        // ... while an entry anywhere else still carries intent.
+        assert_eq!(run(&[('p', 400, 300), ('e', 401, 300)]), [true]);
+    }
+
+    // 5. Map/unmap with a stationary pointer: entries at the parked position
+    // are intent-free, so appearing or disappearing clients never steal focus
+    // through this path — that decision belongs to `manage`/`unmanage`.
+    #[test]
+    fn map_and_unmap_under_a_stationary_pointer_carry_no_intent() {
+        assert_eq!(
+            run(&[
+                ('m', 960, 540),
+                ('e', 960, 540),
+                ('e', 960, 540),
+                ('m', 961, 540),
+                ('e', 960, 540),
+            ]),
+            // The first two entries coincide with the parked pointer.
+            // The 1 px nudge is a real movement, so the entry back at the old
+            // spot carries intent again.
+            [false, false, true]
+        );
+    }
+
+    // 6. The tracker holds no mode, grab or scale state: entering, navigating
+    // and leaving Overview cannot leave a stale filter behind, because there
+    // is nothing overview-scoped to go stale — only the last observed
+    // position, which the next motion or press refreshes.
+    #[test]
+    fn tracker_holds_no_overview_state() {
+        let mut truth = PointerTruth::default();
+        truth.note(200, 200);
+        assert!(!truth.enter_carries_intent(200, 200));
+        // A motion after the mode is gone refreshes the record as usual.
+        truth.note(800, 200);
+        assert!(!truth.enter_carries_intent(800, 200));
+        assert!(truth.enter_carries_intent(200, 200));
+    }
+
+    // Before the very first observation there is no position to coincide
+    // with, so nothing is suppressed: a parked pointer the WM never saw must
+    // not start by dropping entries.
+    #[test]
+    fn no_observation_suppresses_nothing() {
+        assert_eq!(run(&[('e', 10, 10)]), [true]);
     }
 }

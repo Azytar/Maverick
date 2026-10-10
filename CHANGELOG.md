@@ -39,6 +39,14 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Hover selection can no longer cascade down the ribbon on its own: an
+  `EnterNotify` that arrives with the pointer exactly where the last motion
+  or press left it (a camera pan slid another tile underneath a stationary
+  cursor) carries no new user intent and is ignored for focus
+  (`PointerTruth`, fed by `MotionNotify` over every managed window as well as
+  the root). Previously each re-selection panned again, walking the
+  selection to the end of the ribbon. Real motion, presses and warps all carry
+  fresh coordinates and take the normal path.
 - Floating a tiled window while Overview is on no longer launders the
   projected (scaled) rect into the float's persistent geometry: the transition
   unscales the tile first (frame-aware) and the float rules settle the
