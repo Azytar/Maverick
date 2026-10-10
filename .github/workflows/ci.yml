@@ -97,3 +97,5 @@ jobs:
         run: cargo build --release -p maverick -p maverickctl --locked
       - name: Xvfb stacking regression
         run: python3 tests/xvfb-stacking.py
+      - name: Overview rig isolation
+        run: python3 tests/overview-isolation.py
