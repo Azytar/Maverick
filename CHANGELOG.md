@@ -11,6 +11,51 @@ before it makes no compatibility promise.
 
 ## [Unreleased]
 
+### Changed
+
+- `Overview` (`Super+O`) visibly reduces the tiles on entry and stays at that
+  scale while it is on. The entry scale is a real reduction, not a no-op: it
+  starts from the new `general.overview_scale` (default `0.76`) and only ever
+  comes down from there — when the focused tile would not fit even reduced, and
+  never below `overview_zoom_min` — so `Mod+O` changes the composition whatever
+  the client count. The scale is computed once, on entry, and stored as
+  `Workspace::overview_scale`. Navigation (`focus left/right`, `overview_nav`,
+  pointer selection) pans the viewport through `overview_scroll` — keeping the
+  camera still when the selection is already visible — and never re-derives the
+  scale, so the client count shapes the scrollable content but never the scale
+  of a step. Entering repeatedly shows the same view, and leaving restores the
+  settled view exactly. (Supersedes the per-projection ribbon fit, which
+  re-scaled on every focus change, and the "full size whenever the tile fits"
+  entry rule, which left a fitting ribbon pixel-identical to the settled view —
+  an Overview nobody could see.)
+
+### Added
+
+- `general.overview_scale` (`0.05`–`1.0`, default `0.76`): the scale Overview is
+  entered at. It is the design point of the mode — the one view that visibly
+  shrinks the tiles — and is read once, on entry, by
+  `layout::overview_entry_scale_for`. `general.overview_zoom_min` keeps its
+  documented meaning as the floor below which the entry scale does not go.
+
+### Fixed
+
+- Floating a tiled window while Overview is on no longer launders the
+  projected (scaled) rect into the float's persistent geometry: the transition
+  unscales the tile first (frame-aware) and the float rules settle the
+  full-size rect into the workarea.
+- `general.overview_zoom_min` is a floor, which is what its name always claimed.
+  It was used as the Overview scale itself, so a value near the documented
+  minimum of `0.05` projected every tiled client at a twentieth of its size.
+- A contradictory `overview_scale` / `overview_zoom_min` pair (floor above the
+  target) is diagnosed at config load and the floor is normalized toward the
+  target, instead of the floor silently widening the entry back to the settled
+  view. Only an explicit `1.0 / 1.0` pair enters at full size.
+- A degenerate or out-of-range entry scale can no longer read as the settled
+  view: a non-finite `overview_scale` falls back to
+  `layout::DEFAULT_OVERVIEW_SCALE` and a negative or zero stored scale falls
+  back to the configured one, so a poisoned value cannot make `Mod+O` a silent
+  no-op.
+
 ## [1.1.1] - 2026-10-05
 
 ### Changed

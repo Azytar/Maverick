@@ -41,11 +41,11 @@
 use crate::config::Cfg;
 use crate::core::effect::Effect;
 use crate::core::event::{CommandReport, Event};
-use crate::core::layout::{fs_ctx, ideal_scroll, ribbon_geom, FsCtx};
+use crate::core::layout::{fs_ctx, ideal_scroll, overview_scroll, ribbon_geom, FsCtx};
 
 use crate::types::{
     Column, Dir, FullscreenPolicy, FullscreenSnapshot, LayoutKind, Rect, State, ViewportMode,
-    WinFlags, WindowId, WindowMode,
+    WinFlags, WindowId, WindowMode, Workspace,
 };
 
 /// Ceiling on Views per monitor, for `CreateView`.
@@ -67,6 +67,11 @@ pub struct ToggleMaximize(pub Option<WindowId>);
 /// past the new one, stranding the workspace scrolled off its own content. Kept
 /// as a single helper so the invariant "after any column change the camera
 /// follows the focus" lives in one place.
+///
+/// In Overview this keeps the camera where it is when the focused column is
+/// already visible ([`overview_scroll`]): a structural change must adjust
+/// *visibility*, never the stored entry scale, and a re-centering on every
+/// change would scroll the viewport under a selection that had not moved.
 fn scroll_to_focused(state: &mut State, cfg: &Cfg, mi: usize, ws_i: usize) {
     let Some(mon) = state.monitors.get(mi) else {
         return;
@@ -75,7 +80,7 @@ fn scroll_to_focused(state: &mut State, cfg: &Cfg, mi: usize, ws_i: usize) {
         return;
     };
     let wa = mon.workarea;
-    let scroll = ideal_scroll(ws, cfg, wa, fs_of(state, mi, ws_i));
+    let scroll = follow_scroll(ws, cfg, wa, fs_of(state, mi, ws_i));
     // Re-borrow after the shared reads above.
     if let Some(mon) = state.monitors.get_mut(mi) {
         if let Some(ws) = mon.workspaces.get_mut(ws_i) {
@@ -84,11 +89,31 @@ fn scroll_to_focused(state: &mut State, cfg: &Cfg, mi: usize, ws_i: usize) {
     }
 }
 
+/// The scroll target after a focus or content change on one View: the
+/// Overview pan policy while Overview is on, the centering target otherwise.
+///
+/// Split out from the normal path on purpose — Overview navigation pans an
+/// existing viewport instead of re-centering it — so the two policies cannot
+/// drift: every command that moves focus or content on the *same* View goes
+/// through here, while a View *switch* still snaps to `ideal_scroll` (the
+/// camera of the View switched to may be stale, and there is no viewport to
+/// preserve yet).
+fn follow_scroll(ws: &Workspace, cfg: &Cfg, wa: Rect, fs: FsCtx) -> f32 {
+    if ws.overview {
+        overview_scroll(ws, cfg, wa, fs)
+    } else {
+        ideal_scroll(ws, cfg, wa, fs)
+    }
+}
+
 /// Point the workspace focus (column + row) at `win` and retarget its camera so
 /// the column `win` lives in comes to rest in view — the *logical* half of a
 /// pointer/EWMH focus change.
 ///
-/// Only the camera moves; nothing is re-projected. `client.geom` — the rect
+/// In Overview the camera only moves when the newly selected column is not
+/// already visible: a click or hover on a visible tile must select it without
+/// shoving the viewport, and the scale is never touched — it was fixed on
+/// entry. Only the camera moves; nothing is re-projected. `client.geom` — the rect
 /// X11 hit-tests clicks against and the pointer warp reads — is refreshed only
 /// by a settled `arrange` of the returned monitor. That is why the return value
 /// is `#[must_use]`: the `Some(mi)` names the monitor whose settled projection
@@ -120,7 +145,7 @@ pub fn retarget_focus_to_window(state: &mut State, cfg: &Cfg, win: WindowId) -> 
             ws.columns[ci].focused = ri;
         }
         let fs = fs_ctx(clients, ws, screen);
-        ws.camera.retarget(ideal_scroll(ws, cfg, wa, fs));
+        ws.camera.retarget(follow_scroll(ws, cfg, wa, fs));
     }
     Some(mi)
 }
@@ -575,19 +600,19 @@ impl Command for ViewportZoom {
             ws.viewport_mode = ViewportMode::Normal;
             ws.page_zoom = 1.0;
             // Mutually exclusive with Overview: leaving viewport zoom must also
-            // clear any Overview state, otherwise a stale `overview_zoom_min`
-            // would surface as a phantom zoom-out once `alpha` is handed back to
-            // `zoom`.
+            // clear any Overview state, otherwise a workspace left in Overview
+            // would project at the stored entry scale rather than the settled
+            // view.
             ws.overview = false;
-            ws.zoom = 1.0;
+            ws.overview_scale = 1.0;
         } else {
             ws.viewport_mode = ViewportMode::Zoomed;
             ws.page_zoom = new;
-            // Same mutual exclusion on the way in: clearing Overview stops its
-            // zoom-out factor from corrupting `zoom` while `alpha` is driven by
-            // `page_zoom`.
+            // Same mutual exclusion on the way in: Overview is cleared so its
+            // stored entry scale cannot fight the enlargement this command just
+            // asked for.
             ws.overview = false;
-            ws.zoom = 1.0;
+            ws.overview_scale = 1.0;
         }
         // Keep the focused column centered under the new zoom.
         if ws.layout == LayoutKind::Column {
@@ -756,7 +781,7 @@ impl Command for FocusDirection {
                     ws.columns[new_ci].focused = old_row.min(rows - 1);
                 }
                 let wa = state.monitors[mi].workarea;
-                let scroll = ideal_scroll(
+                let scroll = follow_scroll(
                     &state.monitors[mi].workspaces[ws_i],
                     cfg,
                     wa,
@@ -785,7 +810,7 @@ impl Command for FocusDirection {
                 state.monitors[mi].workspaces[ws_i].columns[ci].focused = new_ri;
                 let target = state.monitors[mi].workspaces[ws_i].columns[ci].windows[new_ri];
                 let wa = state.monitors[mi].workarea;
-                let scroll = ideal_scroll(
+                let scroll = follow_scroll(
                     &state.monitors[mi].workspaces[ws_i],
                     cfg,
                     wa,
@@ -846,7 +871,7 @@ impl Command for FocusDirection {
                 }
                 state.monitors[mi].focused = Some(target);
                 let wa = state.monitors[mi].workarea;
-                let scroll = ideal_scroll(
+                let scroll = follow_scroll(
                     &state.monitors[mi].workspaces[ws_i],
                     cfg,
                     wa,
@@ -944,7 +969,7 @@ impl Command for MoveWindow {
             return CommandReport::new(cmds);
         }
         let wa = state.monitors[mi].workarea;
-        let scroll = ideal_scroll(
+        let scroll = follow_scroll(
             &state.monitors[mi].workspaces[ws_i],
             cfg,
             wa,
@@ -985,6 +1010,59 @@ impl Command for KillWindow {
         cmds.push(Effect::KillWindow(self.0));
         CommandReport::with_event(cmds, Event::WindowUnmapped(self.0))
     }
+}
+
+/// Undo the Overview entry scale on a tiled window's `Client::geom` before it
+/// becomes a float's persistent geometry.
+///
+/// A tiled window's `geom` is the *projected* rect: the backend writes the wire
+/// rect back, so under Overview it carries the stored entry scale. Floating
+/// that rect as-is would launder a temporary view scale into the float's own
+/// geometry — a window shrunk by the viewport it was selected in, which no
+/// later arrange would ever grow back. The fix divides the scale back out,
+/// keeping the tile's center so the float appears where the tile was, and lets
+/// the settle that follows clamp the full-size rect into the workarea.
+///
+/// Bounded on purpose rather than a logical/geometry split: the only writer
+/// that can observe a projected rect is this transition, so correcting the
+/// rect at the transition keeps the single `Client::geom` field honest without
+/// a second geometry store. No-op outside Overview and at a `1.0` entry scale.
+fn unscale_overview_tile_for_float(state: &mut State, mi: usize, ws_i: usize, win: WindowId) {
+    let scale = state
+        .monitors
+        .get(mi)
+        .and_then(|m| m.workspaces.get(ws_i))
+        .map(|ws| ws.overview_scale)
+        .unwrap_or(1.0);
+    if !scale.is_finite() || scale <= 0.0 || scale >= 1.0 {
+        return;
+    }
+    let Some(c) = state.clients.get_mut(&win) else {
+        return;
+    };
+    // The projected tile rect is border-exclusive (`inner_w = col_w * alpha -
+    // 2 * bw`), so dividing the scale back out of the bare width would come up
+    // short by the frame the projection reserved: re-add it before unscaling
+    // and reserve it again after, or every float born in Overview would lose
+    // `2 * bw * (1/alpha - 1)` px it never gets back (the settle below only
+    // ever shrinks).
+    let frame = 2.0 * c.border_w as f32;
+    let g = c.geom;
+    let nw = (((g.w as f32 + frame) / scale - frame)
+        .round()
+        .clamp(1.0, 16_384.0)) as u32;
+    let nh = (((g.h as f32 + frame) / scale - frame)
+        .round()
+        .clamp(1.0, 16_384.0)) as u32;
+    let cx = g.x as f32 + (g.w as f32 + frame) / 2.0;
+    let cy = g.y as f32 + (g.h as f32 + frame) / 2.0;
+    let nx = ((cx - (nw as f32 + frame) / 2.0)
+        .round()
+        .clamp(-16_384.0, 16_384.0)) as i32;
+    let ny = ((cy - (nh as f32 + frame) / 2.0)
+        .round()
+        .clamp(-16_384.0, 16_384.0)) as i32;
+    c.geom = Rect::new(nx, ny, nw, nh);
 }
 
 /// Toggle floating for `Some(win)`, or for the selected monitor's focused
@@ -1102,6 +1180,11 @@ impl Command for ToggleFloat {
                 c.flags.clear(WinFlags::STICKY);
             }
         } else {
+            // A tile floated while Overview is on carries the entry scale in
+            // its `Client::geom` (the backend wrote the projected rect back).
+            // Undo it before the float list adopts the rect, or the viewport
+            // leaks into persistent geometry.
+            unscale_overview_tile_for_float(state, mi, ws_i, win);
             state.monitors[mi].workspaces[ws_i].remove_window(win);
             state.monitors[mi].workspaces[ws_i].floats.push(win);
             // The FLOAT flag must move with the window: `settle_float_in_workarea`
@@ -1817,7 +1900,7 @@ impl Command for GrowColumn {
         let max_w = 1.0;
         ws.columns[ci].weight = (old_weight + delta_weight).clamp(0.05, max_w);
 
-        let scroll = ideal_scroll(ws, cfg, wa, fs);
+        let scroll = follow_scroll(ws, cfg, wa, fs);
         ws.camera.retarget(scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
         CommandReport::new(cmds)
@@ -1905,7 +1988,7 @@ impl Command for NewColumn {
 
         ws.rebalance_weights();
 
-        let scroll = ideal_scroll(ws, cfg, wa, fs);
+        let scroll = follow_scroll(ws, cfg, wa, fs);
         ws.camera.retarget(scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
         cmds.push(Effect::FocusWindow(Some(win)));
@@ -1955,7 +2038,7 @@ impl Command for CollapseColumn {
             ws.focus.column_idx = target.min(ws.columns.len().saturating_sub(1));
             ws.rebalance_weights();
         }
-        let scroll = ideal_scroll(
+        let scroll = follow_scroll(
             &state.monitors[mi].workspaces[ws_i],
             cfg,
             state.monitors[mi].workarea,
@@ -2172,8 +2255,26 @@ impl Command for Restart {
     }
 }
 
-/// Toggle the Overview mode on the active workspace: zooms the whole ribbon out
-/// so every column is visible, and back in.
+/// Toggle the Overview mode on the active workspace: enter a fixed-scale
+/// spatial-navigation viewport, or leave it again.
+///
+/// Overview is a **viewport** operation, not a client resize, and this command
+/// is the whole of what entering does: it flips the View's flag, fixes the
+/// entry scale **once** from the focused tile
+/// ([`overview_entry_scale_for`]), clears the viewport-zoom axis it is
+/// mutually exclusive with, and positions the camera. It never writes
+/// *layout* geometry — the column weights, the world ribbon and a float's own
+/// rect are untouched — but the scale it fixes is a real one, because without a
+/// compositor the projected rectangles *are* what X11 draws: entering Overview
+/// visibly shrinks the tiles and leaving it restores them. Navigation
+/// afterwards pans the camera at that stored scale; the scale is not
+/// re-derived while the mode is on, so the client count shapes the scrollable
+/// content but never the scale of a step. Leaving clears the flag and the
+/// stored scale, restoring the settled view exactly.
+///
+/// See [`overview_entry_scale_for`] for the sizing policy the entry applies,
+/// and for why a window manager without a compositor cannot do better than
+/// write the scale to the tile rectangles.
 #[derive(Debug, Clone, Copy)]
 pub struct ToggleOverview;
 
@@ -2187,22 +2288,37 @@ impl Command for ToggleOverview {
         let ws_i = state.monitors[mi].active_index();
         let layout = state.monitors[mi].workspaces[ws_i].layout;
         let wa = state.monitors[mi].workarea;
-        let fs = fs_of(state, mi, ws_i);
-        let ws = &mut state.monitors[mi].workspaces[ws_i];
-        ws.overview = !ws.overview;
-        ws.zoom = if ws.overview {
-            cfg.overview_zoom_min
+        let enter = !state.monitors[mi].workspaces[ws_i].overview;
+        if enter {
+            // Fix the scale once, from the tile the viewport opens on. Read
+            // after the flip: `fs_ctx` returns an empty descriptor for an
+            // Overview workspace — non-exclusive fullscreen columns are
+            // ordinary ribbon participants there — and both the entry scale
+            // and the camera target have to be derived from the projection
+            // that is about to run, not from the one that just ended.
+            state.monitors[mi].workspaces[ws_i].overview = true;
+            let fs = fs_of(state, mi, ws_i);
+            let scale = crate::core::layout::overview_entry_scale_for(
+                &state.monitors[mi].workspaces[ws_i],
+                cfg,
+                wa,
+                &fs,
+            );
+            state.monitors[mi].workspaces[ws_i].overview_scale = scale;
         } else {
-            1.0
-        };
+            state.monitors[mi].workspaces[ws_i].overview = false;
+            state.monitors[mi].workspaces[ws_i].overview_scale = 1.0;
+        }
         // Mutually exclusive with Viewport Zoom: toggling Overview must reset
         // the page-zoom state, or a lingering `Zoomed` mode would keep `alpha` on
         // `page_zoom` (and leave `overview` ignored) — making Overview a silent
         // no-op or leaving a zoom factor no reader expects.
-        ws.viewport_mode = ViewportMode::Normal;
-        ws.page_zoom = 1.0;
+        state.monitors[mi].workspaces[ws_i].viewport_mode = ViewportMode::Normal;
+        state.monitors[mi].workspaces[ws_i].page_zoom = 1.0;
+        let fs = fs_of(state, mi, ws_i);
+        let ws = &mut state.monitors[mi].workspaces[ws_i];
         let scroll = if layout == LayoutKind::Column {
-            ideal_scroll(ws, cfg, wa, fs)
+            follow_scroll(ws, cfg, wa, fs)
         } else {
             0.0
         };
@@ -2220,6 +2336,11 @@ impl Command for ToggleOverview {
 
 /// Navigate the column selection while in Overview (also enters Overview if not
 /// already active). Only left/right are meaningful; up/down are ignored.
+///
+/// Navigation pans the viewport and never touches the scale: when this enters
+/// the mode it fixes the entry scale exactly like [`ToggleOverview`]; when the
+/// mode is already on the stored scale is left alone and only the focus and
+/// the camera move. Repeated navigation therefore cannot shrink the workspace.
 #[derive(Debug, Clone, Copy)]
 pub struct OverviewNav(pub Dir);
 
@@ -2233,12 +2354,32 @@ impl Command for OverviewNav {
         let ws_i = state.monitors[mi].active_index();
         let layout = state.monitors[mi].workspaces[ws_i].layout;
         let wa = state.monitors[mi].workarea;
+        // Entering Overview (it may already be on — this doubles as "show the
+        // viewport"). The entry scale is fixed only on the entering half:
+        // re-deriving it here would shrink the workspace on every navigation
+        // step, which is exactly the walk-down this mode exists to prevent.
+        // Reading the fullscreen descriptor after the flip matters for the
+        // reason `ToggleOverview` documents: `fs_ctx` demotes non-exclusive
+        // fullscreen columns to ordinary ribbon participants under Overview,
+        // and that is the projection the entry scale and the camera target
+        // must follow.
+        if !state.monitors[mi].workspaces[ws_i].overview {
+            state.monitors[mi].workspaces[ws_i].overview = true;
+            let fs = fs_of(state, mi, ws_i);
+            let scale = crate::core::layout::overview_entry_scale_for(
+                &state.monitors[mi].workspaces[ws_i],
+                cfg,
+                wa,
+                &fs,
+            );
+            state.monitors[mi].workspaces[ws_i].overview_scale = scale;
+        }
         let fs = fs_of(state, mi, ws_i);
-        let ws = &mut state.monitors[mi].workspaces[ws_i];
-        let n = ws.columns.len();
+        let n = state.monitors[mi].workspaces[ws_i].columns.len();
         if n == 0 {
             return CommandReport::new(cmds);
         }
+        let ws = &mut state.monitors[mi].workspaces[ws_i];
         let cur = ws.focus.column_idx.min(n - 1);
         let new = match self.0 {
             Dir::Left => cur.saturating_sub(1),
@@ -2246,15 +2387,12 @@ impl Command for OverviewNav {
             _ => cur,
         };
         ws.focus.column_idx = new;
-        // Force Overview on: `OverviewNav` doubles as "show the strip".
-        ws.overview = true;
-        ws.zoom = cfg.overview_zoom_min;
         // Mutually exclusive with Viewport Zoom: entering Overview must reset
         // the page-zoom state or the zoom-out won't take effect.
         ws.viewport_mode = ViewportMode::Normal;
         ws.page_zoom = 1.0;
         let scroll = if layout == LayoutKind::Column {
-            ideal_scroll(ws, cfg, wa, fs)
+            follow_scroll(ws, cfg, wa, fs)
         } else {
             0.0
         };
@@ -2280,8 +2418,10 @@ impl Command for OverviewNav {
     }
 }
 
-/// Drop into the selected column: leave Overview and zoom back to 1.0, keeping
-/// the current selection as the focused column.
+/// Drop into the selected column: leave Overview, keeping the current selection
+/// as the focused column. Clears the stored entry scale, so the settled view
+/// projects at exactly `1.0` and no view state survives inside a client's
+/// geometry.
 #[derive(Debug, Clone, Copy)]
 pub struct OverviewEnter;
 
@@ -2298,7 +2438,7 @@ impl Command for OverviewEnter {
         let fs = fs_of(state, mi, ws_i);
         let ws = &mut state.monitors[mi].workspaces[ws_i];
         ws.overview = false;
-        ws.zoom = 1.0;
+        ws.overview_scale = 1.0;
         // Mutually exclusive with Viewport Zoom: leaving Overview must also
         // drop any pending viewport zoom so the state stays consistent.
         ws.viewport_mode = ViewportMode::Normal;

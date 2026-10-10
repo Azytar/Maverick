@@ -705,16 +705,35 @@ pub struct Workspace {
     pub floats: Vec<WindowId>,
     /// Layout mode for this specific View — independent of every other View.
     pub layout: LayoutKind,
-    /// Semantic-zoom factor for the Overview film-strip (1.0 = normal, <1 = zoomed out).
-    pub zoom: f32,
-    /// Overview (film-strip zoom-out) mode active for this View.
+    /// Overview (spatial-navigation viewport) mode active for this View.
+    ///
+    /// A flag plus the scale the mode was entered at. The scale is computed
+    /// **once**, on entry (`layout::overview_entry_scale_for`), and the
+    /// projection reads it back verbatim (`layout::view_alpha`): navigating
+    /// between columns pans the camera, it never re-derives a smaller scale to
+    /// fit the whole ribbon. The client count therefore shapes the *content*
+    /// that can be scrolled through, never the scale of each navigation step.
+    /// Leaving the mode restores the settled view (`1.0`) because the stored
+    /// value is cleared on exit.
     pub overview: bool,
+    /// The view scale Overview was entered at (`1.0` = full-size tiles).
+    ///
+    /// Written exactly once per Overview session, by the entering command, and
+    /// read by the projection on every pass while `overview` is set. No
+    /// navigation, resize, map or unmap path writes it: that single-writer rule
+    /// is what keeps the scale fixed while the viewport moves. Entering at
+    /// `1.0` would leave the desktop pixel-identical to the settled view, so
+    /// the entry scale is a real reduction (`Cfg::overview_scale`,
+    /// `layout::DEFAULT_OVERVIEW_SCALE`) and this field never holds it for an
+    /// ordinary session. `1.0` outside Overview (the settled view projects at
+    /// exactly `1.0`).
+    pub overview_scale: f32,
     /// Viewport display mode (normal vs zoomed-in inspection). Orthogonal to
     /// `overview` and to window fullscreen.
     pub viewport_mode: ViewportMode,
     /// Page-zoom factor when `viewport_mode == Zoomed` (1.0 = no zoom, >1 = the
     /// ribbon is enlarged). Fed into `ribbon_geom`'s `alpha` so columns grow;
-    /// there is deliberately no upper clamp (unlike `zoom`'s lower one), so a
+    /// there is deliberately no upper clamp (unlike Overview's lower one), so a
     /// value > 1 enlarges instead of shrinking.
     pub page_zoom: f32,
     /// The window currently presented as the **maximize** overlay on this
@@ -736,8 +755,8 @@ impl Workspace {
             camera: Camera::new(0.0),
             floats: Vec::new(),
             layout: LayoutKind::Column,
-            zoom: 1.0,
             overview: false,
+            overview_scale: 1.0,
             viewport_mode: ViewportMode::Normal,
             page_zoom: 1.0,
             presented_maximize: None,
@@ -1588,7 +1607,7 @@ pub enum LayoutKind {
 
 /// Workspace viewport display mode — a *display-state* axis of the workspace,
 /// orthogonal to both window fullscreen (`WinFlags::FULLSCREEN`, an EWMH window
-/// state) and the Overview film-strip zoom-out. `Zoomed` enlarges the ribbon
+/// state) and the Overview navigation viewport. `Zoomed` enlarges the ribbon
 /// (`alpha > 1` in `core::layout::ribbon_geom`) so a column can be inspected up
 /// close, and `Action::PageSnap` then scrolls the camera by one screen-width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1683,11 +1702,12 @@ pub enum Action {
     /// `Mod4+Shift+Q` by default; also reachable over the control socket
     /// (`dispatch quit`) and from the TOML config.
     Quit,
-    /// Toggle the Overview (semantic-zoom film-strip) mode for the active workspace.
+    /// Toggle the Overview navigation viewport for the active workspace: the
+    /// scale is fixed once, on entry, and navigation pans the viewport.
     ToggleOverview,
     /// Move the selection left/right while in Overview (enters Overview if not active).
     OverviewNav(Dir),
-    /// Drop into the currently selected column, leaving Overview (zoom back to 1.0).
+    /// Drop into the currently selected column, leaving Overview (scale back to 1.0).
     OverviewEnter,
     /// Enlarge/shrink the workspace viewport (zoom in/out). Positive `f32` zooms
     /// in, negative zooms out; enters `ViewportMode::Zoomed` and rescales

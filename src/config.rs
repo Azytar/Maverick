@@ -57,8 +57,35 @@ pub struct Cfg {
     /// previously focused neighbor visibly shrink on every focus change, which
     /// reads as jitter rather than polish.
     pub accordion_boost: f32,
-    /// Minimum zoom factor for the Overview film-strip.
+    /// Floor for the Overview entry scale. The scale itself is fixed on entry
+    /// ([`crate::core::layout::overview_entry_scale_for`]) at
+    /// [`Cfg::overview_scale`], and this is the smallest it may go when the
+    /// focused tile would not fit even at that scale: past it the tile is shown
+    /// at the floor and the camera scrolls the remainder, rather than every
+    /// client being scaled down to an illegible rectangle.
+    ///
+    /// Pair invariant with [`Cfg::overview_scale`]: `ALPHA_MIN <= floor <=
+    /// target <= 1.0` (see [`crate::core::layout::sanitized_overview_scales`]).
+    /// A floor above the target is contradictory and normalizes to the target
+    /// with a diagnostic — it never silently cancels the reduction. Ask for an
+    /// explicit full-size Overview with `overview_scale = 1.0` *and*
+    /// `overview_zoom_min = 1.0` together.
     pub overview_zoom_min: f32,
+    /// The scale Overview is entered at, fixed once per session and read back
+    /// verbatim while the mode is on
+    /// ([`crate::core::layout::overview_entry_scale_for`]).
+    ///
+    /// Overview is the one view that changes geometry visibly: without a
+    /// compositor the entry scale *is* the `ConfigureWindow`, so a mode that
+    /// entered at `1.0` would leave the desktop pixel-identical. The default
+    /// ([`crate::core::layout::DEFAULT_OVERVIEW_SCALE`]) shows the focused tile
+    /// complete with a useful sliver of its neighbour beside it. The value is
+    /// only ever reduced below this target when the focused tile would not fit
+    /// even here, and never below [`Cfg::overview_zoom_min`]; it never depends
+    /// on how many clients exist, and nothing but the entry writes the scale,
+    /// so navigating, mapping, closing or resizing cannot shrink the workspace
+    /// further.
+    pub overview_scale: f32,
 
     // Catppuccin Mocha; also the `Default` baseline below and the values
     // `theme_palette` returns for the same preset. Stored as 0xRRGGBB.
@@ -103,6 +130,7 @@ impl Default for Cfg {
             warp_cursor: false,
             accordion_boost: 0.0,
             overview_zoom_min: 0.25,
+            overview_scale: crate::core::layout::DEFAULT_OVERVIEW_SCALE,
             col_normal: 0x45475a,
             col_focused: 0x89b4fa,
             col_urgent: 0xf38ba8,
@@ -274,7 +302,7 @@ pub fn compiled_config() -> Cfg {
         (sup, XK_F5, Action::Restart),
         (sup, XK_TAB, Action::FocusMon(Dir::Next)),
         (shs, XK_TAB, Action::MoveMon(Dir::Next)),
-        // overview (semantic-zoom film strip)
+        // overview (fixed-scale navigation viewport)
         (sup, k!(b'o'), Action::ToggleOverview),
         (sup, k!(b'n'), Action::OverviewNav(Dir::Right)),
         (shs, k!(b'o'), Action::OverviewNav(Dir::Left)),

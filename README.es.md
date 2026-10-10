@@ -114,9 +114,12 @@ que mantiene a la vista la columna enfocada.
   corto.
 - El zoom del viewport (`viewport_zoom`) agranda el ribbon para inspeccionarlo de
   cerca, y `page_snap` mueve la cámara una pantalla cada vez.
-- Overview (`toggle_overview`, `overview_nav`, `overview_enter`) es una
-  proyección reducida de la View actual para elegir una columna. Cambia la
-  proyección, no el layout ni la pertenencia a una View.
+- Overview (`toggle_overview`, `overview_nav`, `overview_enter`) es un viewport
+  de navegación de escala fija sobre la View actual para elegir una columna: al
+  entrar, los tiles se reducen visiblemente a la escala configurada
+  (`general.overview_scale`, `0.76` por defecto) y la navegación desplaza el
+  viewport en vez de reescalar. Cambia la proyección, no el layout ni la
+  pertenencia a una View: al salir, la geometría asentada se recupera exacta.
 - `grow_col` redimensiona la columna enfocada en píxeles; `maverickctl resize`
   expresa la misma operación como porcentaje. `new_column` y `collapse_column`
   añaden y quitan columnas.
@@ -487,7 +490,7 @@ maverick --help
 | Reiniciar | `Super+Shift+R`, `Super+F5` | se reejecuta en el sitio con los mismos argumentos |
 | Enfocar el monitor siguiente | `Super+Tab` | cicla por el orden de enumeración de monitores |
 | Mover la ventana al monitor siguiente | `Super+Shift+Tab` | cicla por el orden de enumeración de monitores |
-| Overview: alternar / entrar / siguiente / anterior | `Super+O` / `Super+E` / `Super+N` / `Super+Shift+O` | proyección reducida para elegir columna |
+| Overview: alternar / entrar / siguiente / anterior | `Super+O` / `Super+E` / `Super+N` / `Super+Shift+O` | viewport de escala fija para elegir columna |
 | Zoom del viewport dentro / fuera | `Super+=` / `Super+-` | agranda o restaura el ribbon |
 | Page-snap derecha / izquierda | `Super+]` / `Super+[` | mueve la cámara una pantalla |
 | Seleccionar View | `Super+1` … `Super+9` | generados por View, hasta `n_tags` |
@@ -548,7 +551,11 @@ Defaults compilados de las claves `[general]` más relevantes:
 | `tag_names` | `["1"]` … `["9"]` | etiquetas de View publicadas como `_NET_DESKTOP_NAMES` |
 
 Otras claves `[general]` aceptadas: `gaps`, `accordion_boost`,
-`overview_zoom_min` y `warp_cursor`. `border_w` es un alias de `border_width`.
+`overview_scale`, `overview_zoom_min` y `warp_cursor`. `border_w` es un alias de
+`border_width`. `overview_scale` es la escala a la que se entra en Overview
+(`0.05`–`1.0`, por defecto `0.76`); `overview_zoom_min` es el suelo por debajo
+del cual esa escala no baja cuando el tile enfocado no cabría ni siquiera
+reducido.
 
 Dos claves son alias obsoletos conservados por compatibilidad. Ambas se siguen
 cargando, y ambas emiten un aviso:

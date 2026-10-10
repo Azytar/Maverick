@@ -3,7 +3,7 @@ mod unit_tests {
     use crate::config::Cfg;
     use crate::core::commands::Command as CommandTrait;
     use crate::core::desired::DesiredState;
-    use crate::core::layout::{FsCtx, RibbonScratch};
+    use crate::core::layout::{ribbon_geom, FsCtx, RibbonScratch, DEFAULT_OVERVIEW_SCALE};
     use crate::core::Engine;
     use crate::types::{
         Action, Client, FullscreenPolicy, LayoutKind, Monitor, Rect, State, ViewId, WinFlags,
@@ -445,16 +445,14 @@ mod unit_tests {
         assert_eq!(engine.state.monitors[0].workspaces[0].columns.len(), 1);
     }
 
-    // Viewport zoom and overview are mutually exclusive: both scale the whole
-    // workspace through `alpha`, so whichever was entered last owns that scalar
-    // and the other axis must be reset to 1.0 — otherwise one mode is a silent
-    // no-op or a later scale is pulled from a phantom value.
+    // Viewport zoom and overview are mutually exclusive: both drive `alpha`, so
+    // whichever was entered last owns the scalar and the other axis must be
+    // cleared — otherwise one mode is a silent no-op or the projection reads a
+    // scale nobody asked for.
     //
     // The `== 1.0` compares below are exact on purpose, not approximate: both
-    // commands *assign* the literal `1.0` on the reset path (`ViewportZoom`
-    // writes it in both the "back to normal" and the "stay zoomed" arms,
-    // `ToggleOverview` writes it on every toggle), so 1.0 is the contract and a
-    // tolerance would hide a command that reset to 1.0000001 instead.
+    // commands *assign* the literal `1.0` on the reset path, so 1.0 is the
+    // contract and a tolerance would hide a command that reset to 1.0000001.
     #[test]
     fn b1_viewport_then_overview_resets_viewport() {
         use crate::core::commands::{ToggleOverview, ViewportZoom};
@@ -486,7 +484,9 @@ mod unit_tests {
         let ws = &engine.state.monitors[0].workspaces[0];
         assert_eq!(ws.viewport_mode, ViewportMode::Zoomed);
         assert!(!ws.overview, "viewport zoom must clear overview (bug B1)");
-        assert_eq!(ws.zoom, 1.0, "viewport zoom must reset the overview zoom");
+        // Nothing is stored for the Overview scale any more, so there is no
+        // field left to corrupt: the projection derives it from `overview`
+        // alone, and clearing the flag is the whole of the reset.
     }
 
     #[test]
@@ -496,9 +496,11 @@ mod unit_tests {
         let mut engine = setup_two_columns();
         engine.execute(ViewportZoom(1.0));
         // Entering Overview after a viewport zoom must clear the viewport axis:
-        // the two are mutually exclusive, so `alpha` follows `zoom` alone and
-        // the enlargement does not leak into the film-strip.
+        // the two are mutually exclusive, so `alpha` follows the stored
+        // Overview entry scale alone and the enlargement does not leak into
+        // the navigation viewport.
         engine.execute(ToggleOverview);
+        let mi = engine.state.sel_mon;
         let ws = &engine.state.monitors[0].workspaces[0];
         assert!(ws.overview);
         assert_eq!(ws.viewport_mode, ViewportMode::Normal);
@@ -507,11 +509,1331 @@ mod unit_tests {
             "entering Overview must reset the viewport zoom, got {}",
             ws.page_zoom
         );
-        assert!(
-            (ws.zoom - engine.cfg.overview_zoom_min).abs() < 0.01,
-            "Overview zooms out to the configured minimum, got {}",
-            ws.zoom
+        // The projection must now be at the fixed entry scale and nowhere near
+        // the enlargement the viewport axis had been driving.
+        let g = ribbon_geom(
+            ws,
+            &engine.cfg,
+            engine.state.monitors[mi].workarea,
+            &FsCtx::default(),
         );
+        assert_eq!(
+            ws.overview_scale, DEFAULT_OVERVIEW_SCALE,
+            "an ordinary tile enters at the configured reduction, not at full size"
+        );
+        assert!(
+            (g.alpha - DEFAULT_OVERVIEW_SCALE).abs() < 1e-4,
+            "entering Overview must project at the entry scale, got alpha={}",
+            g.alpha
+        );
+    }
+
+    // ── Overview: a fixed-scale navigation viewport ───────────────────────────
+    //
+    // `Mod+O` opens a spatial-navigation mode over the workspace. The camera is
+    // the only mechanism a window manager without a compositor has for it:
+    // `Camera::position` pans, and the view scale is fixed once, on entry, from
+    // the focused tile (`layout::overview_entry_scale_for`). Navigation then
+    // moves the viewport — it never re-derives a smaller scale to fit the whole
+    // ribbon, so the client count shapes the scrollable content but never the
+    // scale of a step.
+    //
+    // What these tests pin down is what that buys:
+    //
+    // - entering is a *visible* change: the tiles come out reduced no matter
+    //   how many of them there are or whether they already fit (a mode that
+    //   entered at `1.0` would be a flag flip nobody can see);
+    // - the scale is identical after 1, 5 and 20 navigation steps, in both
+    //   directions and at both ends of the ribbon;
+    // - navigation pans to reveal the selection and stays still when the
+    //   selection is already visible;
+    // - the mode is exactly reversible, because leaving clears the flag and the
+    //   stored scale — the *logical* geometry (column weights, the world ribbon
+    //   width, a float's own `Client::geom`) is never written, which is the
+    //   line between "the view moved" and "the window was resized".
+
+    /// Place every window of the selected monitor at its current view state, as
+    /// `(win, rect, border_w)`, in column order.
+    fn project(engine: &Engine) -> Vec<(u32, Rect, u32)> {
+        use crate::core::layout::{arrange, Placements};
+        let mut out = Placements::new();
+        arrange(
+            &engine.state,
+            engine.state.sel_mon,
+            &engine.cfg,
+            &mut out,
+            &mut RibbonScratch::default(),
+        );
+        out
+    }
+
+    /// Park the camera on `ideal_scroll`, the state every mutator leaves a
+    /// workspace in. A projection taken from an unsettled camera is not the view
+    /// the window manager would show, so any fixture that compares geometry
+    /// across a zoom has to settle first.
+    fn settle(engine: &mut Engine) {
+        use crate::core::layout::ideal_scroll;
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        let wa = engine.state.monitors[mi].workarea;
+        let scroll = ideal_scroll(
+            &engine.state.monitors[mi].workspaces[ws_i],
+            &engine.cfg,
+            wa,
+            FsCtx::default(),
+        );
+        engine.state.monitors[mi].workspaces[ws_i]
+            .camera
+            .retarget(scroll);
+    }
+
+    /// `n` single-window columns on the selected monitor's active View, every
+    /// client registered so the projection has no stale references to filter.
+    /// The Overview floor is set to `overview_zoom_min` so a test can pin the
+    /// bound independently of the compiled default.
+    fn ribbon_engine(n: usize, overview_zoom_min: f32) -> Engine {
+        let mut engine = setup_engine();
+        engine.cfg.overview_zoom_min = overview_zoom_min;
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        for i in 0..n {
+            let win = (i + 1) as u32;
+            engine
+                .state
+                .add_client(Client::new(win, mi, view_of(&engine.state, mi, ws_i)));
+            engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, engine.cfg.column_width);
+        }
+        settle(&mut engine);
+        engine
+    }
+
+    /// The width of `win`'s tile in a projection, for the tests that have to
+    /// name a number rather than compare whole rects.
+    fn width_of(p: &[(u32, Rect, u32)], win: u32) -> u32 {
+        p.iter()
+            .find(|e| e.0 == win)
+            .expect("window must be placed")
+            .1
+            .w
+    }
+
+    /// The scale the active View currently projects at, read through the same
+    /// `ribbon_geom` the arrange loop uses — never from the stored field, so
+    /// the assertion pins the projection, not the bookkeeping.
+    fn alpha_of(engine: &Engine) -> f32 {
+        use crate::core::layout::ribbon_geom;
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        let ws = &engine.state.monitors[mi].workspaces[ws_i];
+        let wa = engine.state.monitors[mi].workarea;
+        ribbon_geom(ws, &engine.cfg, wa, &FsCtx::default()).alpha
+    }
+
+    /// The camera of the active View.
+    fn cam_of(engine: &Engine) -> f32 {
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        engine.state.monitors[mi].workspaces[ws_i].camera.position
+    }
+
+    /// True when the focused tile is fully inside the gap-inset workarea in
+    /// the current projection — the visibility half of the pan contract.
+    fn focused_is_visible(engine: &Engine) -> bool {
+        use crate::core::layout::ribbon_geom;
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        let ws = &engine.state.monitors[mi].workspaces[ws_i];
+        let g = ribbon_geom(
+            ws,
+            &engine.cfg,
+            engine.state.monitors[mi].workarea,
+            &FsCtx::default(),
+        );
+        if g.cols.is_empty() {
+            return true;
+        }
+        let i = ws.focus.column_idx.min(g.cols.len() - 1);
+        let (x, w) = g.cols[i];
+        let l = g.wa.x as f32 + (x - ws.camera.position) * g.alpha + g.cx;
+        let bw = engine.cfg.border_w as f32;
+        let r = l + (w * g.alpha - 2.0 * bw).max(1.0);
+        l >= g.wa.x as f32 - 1.0 && r <= g.wa.right() as f32 + 1.0
+    }
+
+    /// The entry scale reads only the focused tile, never the ribbon: an
+    /// ordinary tile already fits at full size, and Overview *still* enters
+    /// reduced, because the whole point of the mode is a view that is visibly
+    /// not the settled one. The client count therefore shapes the scrollable
+    /// content, not the scale of a step.
+    #[test]
+    fn overview_entry_scale_reduces_an_ordinary_ribbon() {
+        use crate::core::commands::ToggleOverview;
+        let mut engine = ribbon_engine(4, 0.25);
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        engine.execute(ToggleOverview);
+        let ws = &engine.state.monitors[mi].workspaces[ws_i];
+        assert!(ws.overview);
+        assert_eq!(
+            ws.overview_scale, DEFAULT_OVERVIEW_SCALE,
+            "a fitting focused tile still enters reduced, got {}",
+            ws.overview_scale
+        );
+        assert!(
+            (alpha_of(&engine) - DEFAULT_OVERVIEW_SCALE).abs() < 1e-5,
+            "the projection must read the stored entry scale"
+        );
+    }
+
+    /// The entry-scale rule as units: a tile that fits is reduced to the
+    /// configured entry scale (the mode has to be visible), a tile that does
+    /// not fit even reduced is fitted exactly, the floor binds below that, and
+    /// degenerate inputs leave the target standing rather than reaching a
+    /// `ConfigureWindow` at `1.0`.
+    #[test]
+    fn overview_entry_scale_units() {
+        use crate::core::layout::{overview_entry_scale, ALPHA_MIN};
+        let mut cfg = default_cfg();
+        cfg.overview_zoom_min = 0.25;
+        cfg.overview_scale = DEFAULT_OVERVIEW_SCALE;
+        // A fitting tile — and an empty or degenerate measurement — is the
+        // target: Overview is never a no-op view.
+        assert_eq!(
+            overview_entry_scale(&cfg, 1908, 1144.0),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        assert_eq!(
+            overview_entry_scale(&cfg, 1908, 1908.0),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        assert_eq!(
+            overview_entry_scale(&cfg, 1908, 0.0),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        assert_eq!(
+            overview_entry_scale(&cfg, 1908, -40.0),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        assert_eq!(
+            overview_entry_scale(&cfg, 1908, f32::NAN),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        assert_eq!(
+            overview_entry_scale(&cfg, 1908, f32::INFINITY),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        assert_eq!(
+            overview_entry_scale(&cfg, 0, 2500.0),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        // The fit rule only bites below the target: a tile needing 0.94 to fit
+        // still enters at the target, one needing 0.625 is fitted exactly (the
+        // least reduction that shows the tile the viewport opens on), and the
+        // floor binds below that instead of the scale going lower.
+        assert_eq!(
+            overview_entry_scale(&cfg, 1800, 1920.0),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        assert!((overview_entry_scale(&cfg, 1200, 1920.0) - 1200.0 / 1920.0).abs() < 1e-6);
+        assert_eq!(overview_entry_scale(&cfg, 220, 1920.0), 0.25);
+        // A floor above the target is contradictory: it normalizes to the
+        // target instead of widening the entry back to the settled view, so a
+        // `1.0` floor with the default `0.76` target still enters reduced.
+        cfg.overview_zoom_min = 1.0;
+        assert_eq!(
+            overview_entry_scale(&cfg, 220, 1920.0),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        assert_eq!(
+            overview_entry_scale(&cfg, 1908, 1144.0),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        // The explicit full-size pair (`1.0 / 1.0`) is the only way to enter
+        // at the settled scale: the target stands and the floor binds to it.
+        cfg.overview_scale = 1.0;
+        assert_eq!(overview_entry_scale(&cfg, 220, 1920.0), 1.0);
+        assert_eq!(overview_entry_scale(&cfg, 1908, 1908.0), 1.0);
+        // A poisoned floor reads as the structural minimum, not as "no
+        // zoom-out": the fit value stands, and only a fit below `ALPHA_MIN`
+        // would be clamped.
+        cfg.overview_zoom_min = f32::NAN;
+        assert!((overview_entry_scale(&cfg, 220, 1920.0) - 220.0 / 1920.0).abs() < 1e-6);
+        assert_eq!(overview_entry_scale(&cfg, 20, 1920.0), ALPHA_MIN);
+        // A poisoned target falls back to the design point, never to the settled
+        // view, and out-of-range values are clamped rather than trusted.
+        cfg.overview_scale = f32::NAN;
+        assert_eq!(
+            overview_entry_scale(&cfg, 1908, 1144.0),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        cfg.overview_scale = 0.0;
+        assert_eq!(
+            overview_entry_scale(&cfg, 1908, 1144.0),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        cfg.overview_scale = 3.0;
+        assert_eq!(overview_entry_scale(&cfg, 1908, 1144.0), 1.0);
+    }
+
+    /// The pair invariant `ALPHA_MIN <= floor <= target <= 1.0`, pinned
+    /// directly on the centralizer: valid pairs pass through, a floor above
+    /// the target normalizes to it, and degenerate values fall back to the
+    /// structural bounds rather than widening the entry toward the settled
+    /// view.
+    #[test]
+    fn overview_scale_pair_invariant() {
+        use crate::core::layout::{sanitized_overview_scales, ALPHA_MIN};
+        let mut cfg = default_cfg();
+        // The shipped default is already a valid pair.
+        cfg.overview_scale = DEFAULT_OVERVIEW_SCALE;
+        cfg.overview_zoom_min = 0.25;
+        assert_eq!(
+            sanitized_overview_scales(&cfg),
+            (DEFAULT_OVERVIEW_SCALE, 0.25)
+        );
+        // Target 0.76 with the default floor: unchanged.
+        // A floor above the target normalizes toward it — the reduction the
+        // target asked for survives a contradictory file.
+        cfg.overview_zoom_min = 1.0;
+        assert_eq!(
+            sanitized_overview_scales(&cfg),
+            (DEFAULT_OVERVIEW_SCALE, DEFAULT_OVERVIEW_SCALE)
+        );
+        // The explicit full-size pair passes through untouched.
+        cfg.overview_scale = 1.0;
+        assert_eq!(sanitized_overview_scales(&cfg), (1.0, 1.0));
+        // A floor below the target binds as documented.
+        cfg.overview_scale = DEFAULT_OVERVIEW_SCALE;
+        cfg.overview_zoom_min = 0.1;
+        assert_eq!(
+            sanitized_overview_scales(&cfg),
+            (DEFAULT_OVERVIEW_SCALE, 0.1)
+        );
+        // Degenerate values never escape the structural bounds: non-finite
+        // inputs read as the design point / structural minimum, and
+        // out-of-range ones clamp into `[ALPHA_MIN, 1.0]`.
+        cfg.overview_scale = f32::NAN;
+        cfg.overview_zoom_min = f32::NAN;
+        assert_eq!(
+            sanitized_overview_scales(&cfg),
+            (DEFAULT_OVERVIEW_SCALE, ALPHA_MIN)
+        );
+        cfg.overview_scale = 0.0;
+        cfg.overview_zoom_min = -2.0;
+        assert_eq!(
+            sanitized_overview_scales(&cfg),
+            (DEFAULT_OVERVIEW_SCALE, ALPHA_MIN)
+        );
+        cfg.overview_scale = 3.0;
+        cfg.overview_zoom_min = 9.0;
+        assert_eq!(sanitized_overview_scales(&cfg), (1.0, 1.0));
+    }
+
+    /// A floor below the target keeps its documented meaning end to end: the
+    /// entry fits the focused tile exactly down to the floor, and the floor
+    /// binds below that instead of the scale going lower.
+    #[test]
+    fn overview_floor_below_target_binds() {
+        use crate::core::commands::ToggleOverview;
+        use crate::core::layout::overview_entry_scale;
+        let mut cfg = default_cfg();
+        cfg.overview_scale = DEFAULT_OVERVIEW_SCALE;
+        cfg.overview_zoom_min = 0.1;
+        // Fitting tile: the target stands.
+        assert_eq!(
+            overview_entry_scale(&cfg, 1908, 1144.0),
+            DEFAULT_OVERVIEW_SCALE
+        );
+        // Tile needing 0.625: fitted exactly, above the floor.
+        assert!((overview_entry_scale(&cfg, 1200, 1920.0) - 1200.0 / 1920.0).abs() < 1e-6);
+        // Tile needing less than the floor: the floor binds.
+        assert_eq!(overview_entry_scale(&cfg, 100, 1920.0), 0.1);
+        // And through the entering command the stored scale is that same
+        // value while navigation keeps it: the effective scale does not drift
+        // when the focus changes.
+        let mut engine = ribbon_engine(4, 0.1);
+        engine.execute(ToggleOverview);
+        let ws = &engine.state.monitors[engine.state.sel_mon].workspaces[0];
+        assert_eq!(ws.overview_scale, DEFAULT_OVERVIEW_SCALE);
+        assert!((alpha_of(&engine) - DEFAULT_OVERVIEW_SCALE).abs() < 1e-5);
+    }
+
+    /// The entry scale reads the tile the viewport opens on, and a fullscreen
+    /// tile is demoted to an ordinary ribbon participant under Overview
+    /// (`fs_ctx`) — so even a screen-wide tile under a side dock is reduced like
+    /// any other, keeps its flags, and is simply panned to: fullscreen keeps its
+    /// priority, the viewport keeps its scale.
+    #[test]
+    fn overview_entry_scale_reduces_a_demoted_fullscreen_tile() {
+        use crate::core::commands::ToggleOverview;
+        use crate::types::{Column, Focus};
+        let mut engine = setup_engine();
+        let mi = engine.state.sel_mon;
+        engine.state.monitors[mi].set_reserved_region(0xDEAD, crate::types::Edge::Left, 120);
+        let ws_i = engine.state.monitors[mi].active_index();
+        {
+            let ws = &mut engine.state.monitors[mi].workspaces[ws_i];
+            ws.columns.push(Column {
+                windows: vec![1],
+                focused: 0,
+                weight: 1.0,
+            });
+            ws.focus = Focus { column_idx: 0 };
+        }
+        let mut c = Client::new(1, mi, view_of(&engine.state, mi, ws_i));
+        c.border_w = 0;
+        c.flags.set(WinFlags::FULLSCREEN);
+        engine.state.add_client(c);
+        settle(&mut engine);
+        engine.execute(ToggleOverview);
+        let ws = &engine.state.monitors[mi].workspaces[ws_i];
+        assert_eq!(
+            ws.overview_scale, DEFAULT_OVERVIEW_SCALE,
+            "a screen-wide tile is reduced like any other ribbon participant"
+        );
+        assert!(engine.state.clients[&1].is_fullscreen());
+        assert!(focused_is_visible(&engine));
+    }
+
+    /// The acceptance criterion, spelled out: entering Overview is a visible
+    /// change even when the ribbon already fits the workarea. A mode that left
+    /// a fitting ribbon pixel-identical would be a flag flip nobody can see —
+    /// the one thing `Mod+O` must not do. Every tile shrinks by the same
+    /// factor, keeps its proportions, and the whole ribbon keeps its structure.
+    #[test]
+    fn overview_scales_a_ribbon_that_already_fits() {
+        use crate::core::commands::ToggleOverview;
+        let mut engine = ribbon_engine(1, 0.25);
+        let before = project(&engine);
+        let (_, set_rect, _) = before[0];
+        engine.execute(ToggleOverview);
+        let after = project(&engine);
+        let (_, ov_rect, _) = after[0];
+        let ws = &engine.state.monitors[engine.state.sel_mon].workspaces[0];
+        assert!(
+            ws.overview,
+            "the mode is on; the scale is what makes it visible"
+        );
+        assert_eq!(ws.overview_scale, DEFAULT_OVERVIEW_SCALE);
+        assert_ne!(
+            after, before,
+            "entering Overview must change the projection, not only a flag"
+        );
+        assert!(
+            ov_rect.w < set_rect.w && ov_rect.h < set_rect.h,
+            "the tile must come out smaller on both axes: {set_rect:?} -> {ov_rect:?}"
+        );
+        // Proportions and tile structure survive: the reduction is uniform, and
+        // the tile is centered in the gap-inset workarea rather than shoved to
+        // the origin or left where the full-size tile started.
+        let ratio_w = ov_rect.w as f32 / set_rect.w as f32;
+        let ratio_h = ov_rect.h as f32 / set_rect.h as f32;
+        assert!(
+            (ratio_w - ratio_h).abs() < 0.02,
+            "the reduction must be uniform, got {ratio_w} vs {ratio_h}"
+        );
+        let wa = engine.state.monitors[engine.state.sel_mon].workarea;
+        let bw = engine.cfg.gaps_outer as i32;
+        let cx_ok = (ov_rect.x + ov_rect.w as i32 / 2 - (wa.x + bw + (wa.w as i32 - 2 * bw) / 2))
+            .abs()
+            <= 3;
+        let cy_ok = (ov_rect.y + ov_rect.h as i32 / 2 - (wa.y + bw + (wa.h as i32 - 2 * bw) / 2))
+            .abs()
+            <= 3;
+        assert!(
+            cx_ok && cy_ok,
+            "the reduced tile must stay centered in the workarea, got {ov_rect:?} in {wa:?}"
+        );
+    }
+
+    /// The failure mode this redesign exists to prevent, spelled out: widths
+    /// that walk down the screen with every navigation step. The scale is
+    /// stored on entry and no navigation path writes it, so re-entering
+    /// Overview reproduces the same projection — and the whole round trip
+    /// still lands on the settled geometry exactly.
+    #[test]
+    fn overview_is_idempotent_and_exactly_reversible() {
+        use crate::core::commands::ToggleOverview;
+        let mut engine = ribbon_engine(8, 0.25);
+        engine.cfg.accordion_boost = 0.0;
+        settle(&mut engine);
+        let settled = project(&engine);
+        engine.execute(ToggleOverview);
+        let first = project(&engine);
+        assert_ne!(
+            first, settled,
+            "entering Overview must rescale the tiles, not only the camera"
+        );
+        assert!(
+            first
+                .iter()
+                .zip(settled.iter())
+                .all(|((_, o, _), (_, s, _))| o.w < s.w && o.h < s.h),
+            "every tile must come out smaller on both axes: {first:?} vs {settled:?}"
+        );
+        for _ in 0..5 {
+            engine.execute(ToggleOverview);
+            engine.execute(ToggleOverview);
+            let again = project(&engine);
+            assert_eq!(
+                again, first,
+                "re-entering Overview changed the projection — the scale is not fixed on entry"
+            );
+        }
+        engine.execute(ToggleOverview);
+        assert_eq!(
+            project(&engine),
+            settled,
+            "leaving Overview must restore the settled geometry exactly"
+        );
+    }
+
+    /// The ribbon shape the mode exists for: at the entry scale the focused
+    /// tile is complete on screen and its neighbour has started beside it, with
+    /// a sliver useful enough to click. A scale fitted to the *whole* ribbon
+    /// would show every tile squeezed onto one screen — nothing to navigate —
+    /// and a scale of `1.0` would show the settled view, which is not Overview
+    /// at all.
+    #[test]
+    fn overview_entry_shows_a_full_tile_and_a_peek_of_the_next() {
+        use crate::core::commands::ToggleOverview;
+        let mut engine = ribbon_engine(3, 0.25);
+        engine.cfg.accordion_boost = 0.0;
+        settle(&mut engine);
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        // Park the selection on the middle column so it has a right-hand
+        // neighbour to reveal.
+        engine.state.monitors[mi].workspaces[ws_i].focus.column_idx = 1;
+        settle(&mut engine);
+        engine.execute(ToggleOverview);
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        let g = ribbon_geom(
+            &engine.state.monitors[mi].workspaces[ws_i],
+            &engine.cfg,
+            engine.state.monitors[mi].workarea,
+            &FsCtx::default(),
+        );
+        assert!((g.alpha - DEFAULT_OVERVIEW_SCALE).abs() < 1e-5);
+        let cam = engine.state.monitors[mi].workspaces[ws_i].camera.position;
+        let bw = engine.cfg.border_w as f32;
+        let (fx, fw) = g.cols[1];
+        let (nx, _nw) = g.cols[2];
+        let fl = g.wa.x as f32 + (fx - cam) * g.alpha + g.cx;
+        let fr = fl + (fw * g.alpha - 2.0 * bw).max(1.0);
+        let nl = g.wa.x as f32 + (nx - cam) * g.alpha + g.cx;
+        // The focused tile is completely on screen ...
+        assert!(
+            fl >= g.wa.x as f32 - 1.0,
+            "the focused tile starts off the left edge: {fl}"
+        );
+        assert!(
+            fr <= g.wa.right() as f32 + 1.0,
+            "the focused tile runs off the right edge: {fr}"
+        );
+        // ... and the next one has started, with a useful sliver visible.
+        assert!(
+            nl > fr,
+            "the neighbour must start after the focused tile: {nl} vs {fr}"
+        );
+        assert!(
+            g.wa.right() as f32 - nl > 100.0,
+            "the neighbour's peek must be useful, got {} px",
+            g.wa.right() as f32 - nl
+        );
+    }
+
+    /// The entry scale is the same for 1, 2, 3, 6 and 9 clients: the client
+    /// count shapes the scrollable content, never the scale of a step, and even
+    /// a lone client — which has no neighbour to reveal — still gets a view
+    /// that is visibly not the settled one.
+    #[test]
+    fn overview_entry_reduces_whatever_the_client_count() {
+        use crate::core::commands::ToggleOverview;
+        for n in [1usize, 2, 3, 6, 9] {
+            let mut engine = ribbon_engine(n, 0.25);
+            engine.cfg.accordion_boost = 0.0;
+            settle(&mut engine);
+            let mi = engine.state.sel_mon;
+            let ws_i = engine.state.monitors[mi].active_index();
+            let settled: Vec<(u32, u32)> =
+                project(&engine).iter().map(|e| (e.1.w, e.1.h)).collect();
+            engine.execute(ToggleOverview);
+            let ws = &engine.state.monitors[mi].workspaces[ws_i];
+            assert_eq!(
+                ws.overview_scale, DEFAULT_OVERVIEW_SCALE,
+                "n={n}: the entry scale must not depend on the client count"
+            );
+            let after: Vec<(u32, u32)> = project(&engine).iter().map(|e| (e.1.w, e.1.h)).collect();
+            assert_eq!(after.len(), settled.len(), "n={n}: a client went missing");
+            assert!(
+                after
+                    .iter()
+                    .zip(settled.iter())
+                    .all(|(o, s)| o.0 < s.0 && o.1 < s.1),
+                "n={n}: every tile must come out smaller: {after:?} vs {settled:?}"
+            );
+            assert!(
+                focused_is_visible(&engine),
+                "n={n}: the selection must be fully visible on entry"
+            );
+            // The whole ribbon keeps its structure: the tiles stay in column
+            // order, left to right, with the same gaps between them.
+            let rects = project(&engine);
+            for pair in rects.windows(2) {
+                assert!(
+                    pair[0].1.x < pair[1].1.x,
+                    "n={n}: column order changed: {:?}",
+                    rects.iter().map(|e| e.1.x).collect::<Vec<_>>()
+                );
+            }
+            engine.execute(ToggleOverview);
+            assert_eq!(
+                project(&engine)
+                    .iter()
+                    .map(|e| (e.1.w, e.1.h))
+                    .collect::<Vec<_>>(),
+                settled,
+                "n={n}: leaving Overview must restore the settled sizes exactly"
+            );
+        }
+    }
+
+    /// The scale is fixed on entry, so it is identical after 1, 5 and 20
+    /// navigation steps — in both directions and at both ends of the ribbon.
+    /// Only the focus and the camera move; the tile widths never do.
+    #[test]
+    fn overview_scale_is_fixed_across_navigation() {
+        use crate::core::commands::{OverviewNav, ToggleOverview};
+        use crate::types::Dir;
+        let mut engine = ribbon_engine(8, 0.25);
+        engine.cfg.accordion_boost = 0.0;
+        settle(&mut engine);
+        engine.execute(ToggleOverview);
+        let entry_scale = engine.state.monitors[engine.state.sel_mon].workspaces[0].overview_scale;
+        let entry_widths: Vec<u32> = project(&engine).iter().map(|e| e.1.w).collect();
+        // ribbon_engine leaves focus on the last column; walk left to the far
+        // end, sampling the scale at 1, 5 and 7 steps, then walk back right.
+        for (step, n) in [(1usize, 1usize), (5, 4), (20, 15)] {
+            for _ in 0..n {
+                engine.execute(OverviewNav(Dir::Left));
+            }
+            let ws = &engine.state.monitors[engine.state.sel_mon].workspaces[0];
+            assert_eq!(
+                ws.overview_scale, entry_scale,
+                "after {step} nav steps the scale moved: {} -> {}",
+                entry_scale, ws.overview_scale
+            );
+            assert!(
+                (alpha_of(&engine) - entry_scale).abs() < 1e-5,
+                "after {step} nav steps the projection left the entry scale"
+            );
+            let widths: Vec<u32> = project(&engine).iter().map(|e| e.1.w).collect();
+            assert_eq!(
+                widths, entry_widths,
+                "after {step} nav steps a tile changed width — navigation resized"
+            );
+        }
+        // At the far left end, and saturated there.
+        let ws = &engine.state.monitors[engine.state.sel_mon].workspaces[0];
+        assert_eq!(ws.focus.column_idx, 0);
+        engine.execute(OverviewNav(Dir::Left));
+        assert_eq!(
+            engine.state.monitors[engine.state.sel_mon].workspaces[0]
+                .focus
+                .column_idx,
+            0,
+            "navigation past the first column must saturate, not wrap"
+        );
+        // Twenty steps back right: same scale, ends saturated at the far end.
+        for _ in 0..20 {
+            engine.execute(OverviewNav(Dir::Right));
+        }
+        let ws = &engine.state.monitors[engine.state.sel_mon].workspaces[0];
+        assert_eq!(ws.focus.column_idx, 7);
+        assert_eq!(ws.overview_scale, entry_scale);
+        assert!((alpha_of(&engine) - entry_scale).abs() < 1e-5);
+        engine.execute(OverviewNav(Dir::Right));
+        assert_eq!(
+            engine.state.monitors[engine.state.sel_mon].workspaces[0]
+                .focus
+                .column_idx,
+            7,
+            "navigation past the last column must saturate, not wrap"
+        );
+    }
+
+    /// Navigation pans the viewport: walking the whole ribbon keeps the
+    /// selection visible at every step, and the camera actually travels to do
+    /// it. The scale is the stored one throughout.
+    #[test]
+    fn overview_nav_pans_to_reveal_the_selection() {
+        use crate::core::commands::{OverviewNav, ToggleOverview};
+        use crate::types::Dir;
+        let mut engine = ribbon_engine(8, 0.25);
+        engine.cfg.accordion_boost = 0.0;
+        settle(&mut engine);
+        engine.execute(ToggleOverview);
+        let entry_scale = engine.state.monitors[engine.state.sel_mon].workspaces[0].overview_scale;
+        let cam_entry = cam_of(&engine);
+        // From the last column (where the fixture rests) to the first.
+        for _ in 0..7 {
+            engine.execute(OverviewNav(Dir::Left));
+            assert!(
+                focused_is_visible(&engine),
+                "the selection left the viewport while panning left"
+            );
+            assert!((alpha_of(&engine) - entry_scale).abs() < 1e-5);
+        }
+        assert!(
+            (cam_of(&engine) - cam_entry).abs() > 1.0,
+            "crossing the ribbon must move the camera, or nothing panned"
+        );
+        // And back right again, every step visible.
+        for _ in 0..7 {
+            engine.execute(OverviewNav(Dir::Right));
+            assert!(
+                focused_is_visible(&engine),
+                "the selection left the viewport while panning right"
+            );
+        }
+        let ws = &engine.state.monitors[engine.state.sel_mon].workspaces[0];
+        assert_eq!(ws.focus.column_idx, 7);
+    }
+
+    /// The other half of the pan contract: when the newly selected column is
+    /// already fully visible, the camera stays where it is. Recentering on
+    /// every step would scroll the viewport under a selection that had not
+    /// moved off screen.
+    #[test]
+    fn overview_keeps_an_already_visible_selection_still() {
+        use crate::core::commands::{OverviewNav, ToggleOverview};
+        use crate::types::{Client, Column, Dir, Focus};
+        let mut engine = setup_engine();
+        engine.cfg.accordion_boost = 0.0;
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        // Two narrow columns: the whole ribbon fits, so both tiles are visible
+        // at once from any camera the mode settles on.
+        for win in [1u32, 2] {
+            engine.state.monitors[mi].workspaces[ws_i]
+                .columns
+                .push(Column {
+                    windows: vec![win],
+                    focused: 0,
+                    weight: 0.3,
+                });
+            engine
+                .state
+                .add_client(Client::new(win, mi, view_of(&engine.state, mi, ws_i)));
+        }
+        engine.state.monitors[mi].workspaces[ws_i].focus = Focus { column_idx: 0 };
+        settle(&mut engine);
+        engine.execute(ToggleOverview);
+        assert!(focused_is_visible(&engine));
+        let cam = cam_of(&engine);
+        engine.execute(OverviewNav(Dir::Right));
+        let ws = &engine.state.monitors[mi].workspaces[ws_i];
+        assert_eq!(ws.focus.column_idx, 1, "the selection must still move");
+        assert!(
+            (cam_of(&engine) - cam).abs() < 1e-4,
+            "a visible selection must not move the camera: {cam} -> {}",
+            cam_of(&engine)
+        );
+        assert_eq!(ws.overview_scale, DEFAULT_OVERVIEW_SCALE);
+    }
+
+    /// A `1.0 / 1.0` pair asks for the smallest possible zoom-out, which is
+    /// none: the entry scale stays 1.0, so no width or height changes. The
+    /// camera may still move — dropping the accordion boost changes the
+    /// ribbon's width, and so changes where the scroll puts the focused
+    /// column. This is the documented escape hatch ("never reduce"), asked
+    /// for explicitly through *both* the target and the floor: a `1.0` floor
+    /// alone, above a lower target, is contradictory and normalizes to the
+    /// target instead of cancelling the reduction by accident.
+    #[test]
+    fn overview_at_floor_one_does_not_scale() {
+        use crate::core::commands::ToggleOverview;
+        let mut engine = ribbon_engine(20, 1.0);
+        engine.cfg.overview_scale = 1.0;
+        // The boost follows focus and is dropped in Overview, so a boosted
+        // fixture changes width for a reason that has nothing to do with the
+        // scale. Taking it out isolates the scale.
+        engine.cfg.accordion_boost = 0.0;
+        settle(&mut engine);
+        let before = project(&engine);
+        let sizes: Vec<(u32, u32)> = before.iter().map(|e| (e.1.w, e.1.h)).collect();
+        engine.execute(ToggleOverview);
+        let after = project(&engine);
+        let after_sizes: Vec<(u32, u32)> = after.iter().map(|e| (e.1.w, e.1.h)).collect();
+        assert_eq!(after_sizes, sizes, "no scale means no resize");
+        assert_eq!(
+            engine.state.monitors[engine.state.sel_mon].workspaces[0].overview_scale,
+            1.0
+        );
+    }
+
+    /// The line between "the view moved" and "the window was resized". Only
+    /// the flag and the stored entry scale may change: the column weights, the
+    /// world ribbon width, a float's own `Client::geom`, the focus pointer and
+    /// the monitor's focus slot all survive the round trip untouched.
+    #[test]
+    fn overview_writes_only_the_view_state() {
+        use crate::core::commands::ToggleOverview;
+        use crate::core::layout::ribbon_geom;
+        let mut engine = ribbon_engine(5, 0.25);
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        // A float on the same View, so the test can also prove the two lists
+        // are treated differently.
+        engine
+            .state
+            .add_client(Client::new(90, mi, view_of(&engine.state, mi, ws_i)));
+        {
+            let c = engine.state.clients.get_mut(&90).expect("just added");
+            c.flags.set(WinFlags::FLOAT);
+            c.geom = Rect::new(400, 300, 320, 240);
+        }
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(90);
+
+        let weights: Vec<f32> = engine.state.monitors[mi].workspaces[ws_i]
+            .columns
+            .iter()
+            .map(|c| c.weight)
+            .collect();
+        let wa = engine.state.monitors[mi].workarea;
+        // Measured through a probe with Overview forced on at the entry scale,
+        // so the "before" and "after" numbers are taken from the same
+        // projection rather than from two views of the ribbon (the accordion
+        // boost alone makes them differ).
+        let mut probe = engine.state.monitors[mi].workspaces[ws_i].clone();
+        probe.overview = true;
+        probe.overview_scale = DEFAULT_OVERVIEW_SCALE;
+        let world_w = ribbon_geom(&probe, &engine.cfg, wa, &FsCtx::default()).total_w;
+        let focus_col = engine.state.monitors[mi].workspaces[ws_i].focus;
+        let focused = engine.state.monitors[mi].focused;
+        let float_geom = engine.state.clients[&90].geom;
+
+        engine.execute(ToggleOverview);
+        let ws = &engine.state.monitors[mi].workspaces[ws_i];
+        assert!(ws.overview);
+        assert_eq!(ws.overview_scale, DEFAULT_OVERVIEW_SCALE);
+        assert_eq!(
+            ws.columns.iter().map(|c| c.weight).collect::<Vec<_>>(),
+            weights,
+            "Overview must not touch the layout's own geometry"
+        );
+        assert_eq!(
+            ribbon_geom(ws, &engine.cfg, wa, &FsCtx::default()).total_w,
+            world_w,
+            "the world ribbon width is layout geometry, not view state"
+        );
+        assert_eq!(ws.focus, focus_col, "Overview must not move focus");
+        assert_eq!(
+            engine.state.monitors[mi].focused, focused,
+            "the monitor's focus slot must not move"
+        );
+        assert_eq!(
+            engine.state.clients[&90].geom, float_geom,
+            "a float's own geometry is not the layout's to rewrite"
+        );
+    }
+
+    /// Floats live outside the ribbon and are projected from `Client::geom`, so
+    /// the view must reach neither their rect nor their position — on entry,
+    /// across navigation, and on exit. The exemption is also pinned under a
+    /// reduced stored scale, where tiles genuinely shrink and a leak would
+    /// show.
+    #[test]
+    fn overview_does_not_scale_a_float() {
+        use crate::core::commands::{OverviewNav, ToggleOverview};
+        use crate::types::Dir;
+        let mut engine = ribbon_engine(3, 0.25);
+        engine.cfg.accordion_boost = 0.0;
+        settle(&mut engine);
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        engine
+            .state
+            .add_client(Client::new(90, mi, view_of(&engine.state, mi, ws_i)));
+        {
+            let c = engine.state.clients.get_mut(&90).expect("just added");
+            c.flags.set(WinFlags::FLOAT);
+            c.geom = Rect::new(400, 300, 320, 240);
+        }
+        engine.state.monitors[mi].workspaces[ws_i].floats.push(90);
+        let float_rect = |e: &Engine| {
+            project(e)
+                .iter()
+                .find(|x| x.0 == 90)
+                .expect("the float must still be placed")
+                .1
+        };
+        let settled = float_rect(&engine);
+        engine.execute(ToggleOverview);
+        assert_eq!(
+            float_rect(&engine),
+            settled,
+            "entry must not move the float"
+        );
+        for _ in 0..6 {
+            engine.execute(OverviewNav(Dir::Left));
+            engine.execute(OverviewNav(Dir::Right));
+        }
+        assert_eq!(
+            float_rect(&engine),
+            settled,
+            "navigation must not move the float"
+        );
+        engine.execute(ToggleOverview);
+        assert_eq!(float_rect(&engine), settled, "exit must not move the float");
+
+        // Under a genuinely reduced scale the tiles shrink and the float still
+        // does not: that is what makes the exemption real rather than vacuous.
+        engine.state.monitors[mi].workspaces[ws_i].overview = true;
+        engine.state.monitors[mi].workspaces[ws_i].overview_scale = 0.5;
+        let shrunk = project(&engine);
+        assert_eq!(float_rect(&engine), settled);
+        assert!(
+            width_of(&shrunk, 3)
+                < width_of(
+                    &project(&{
+                        let mut e2 = ribbon_engine(3, 0.25);
+                        e2.cfg.accordion_boost = 0.0;
+                        settle(&mut e2);
+                        e2
+                    }),
+                    3
+                ),
+            "at a 0.5 entry scale the tiles shrink while the float does not"
+        );
+    }
+
+    /// The mode and its scale are View state, so a switch away and back keeps
+    /// them — and the View switched to is untouched by the other one's
+    /// Overview.
+    #[test]
+    fn overview_scale_is_per_view_and_survives_a_switch() {
+        use crate::core::commands::{ToggleOverview, ViewWorkspace};
+        let mut engine = ribbon_engine(6, 0.25);
+        let mi = engine.state.sel_mon;
+        let ws0 = engine.state.monitors[mi].active_index();
+        engine.execute(ToggleOverview);
+        let entered = engine.state.monitors[mi].workspaces[ws0].overview_scale;
+        assert!(engine.state.monitors[mi].workspaces[ws0].overview);
+
+        engine.execute(ViewWorkspace(1));
+        let ws1 = engine.state.monitors[mi].active_index();
+        assert_ne!(ws0, ws1);
+        assert!(
+            !engine.state.monitors[mi].workspaces[ws1].overview,
+            "a View's Overview must not leak into the View switched to"
+        );
+        assert_eq!(
+            engine.state.monitors[mi].workspaces[ws1].overview_scale,
+            1.0
+        );
+
+        engine.execute(ViewWorkspace(ws0));
+        let ws = &engine.state.monitors[mi].workspaces[ws0];
+        assert!(ws.overview, "Overview must survive a workspace round trip");
+        assert_eq!(
+            ws.overview_scale, entered,
+            "the stored scale must not drift across a View switch"
+        );
+        assert!((alpha_of(&engine) - entered).abs() < 1e-5);
+    }
+
+    /// A window that appears while Overview is on joins the same projection at
+    /// the same entry scale, and leaving still restores the settled geometry
+    /// with it included.
+    #[test]
+    fn a_window_opened_during_overview_keeps_the_entry_scale() {
+        use crate::core::commands::ToggleOverview;
+        let mut engine = ribbon_engine(3, 0.25);
+        // The accordion boost follows focus, and `add_tiled` moves focus to the
+        // new column below — so a boosted fixture has no peer of equal width to
+        // compare against. Taking the boost out leaves every 0.6 column the same
+        // width.
+        engine.cfg.accordion_boost = 0.0;
+        settle(&mut engine);
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        let settled = project(&engine);
+        engine.execute(ToggleOverview);
+        let peer = width_of(&project(&engine), 2);
+
+        let win = 99u32;
+        engine
+            .state
+            .add_client(Client::new(win, mi, view_of(&engine.state, mi, ws_i)));
+        engine.state.monitors[mi].workspaces[ws_i].add_tiled(win, engine.cfg.column_width);
+        assert_eq!(
+            engine.state.monitors[mi].workspaces[ws_i].overview_scale, DEFAULT_OVERVIEW_SCALE,
+            "a new client must not re-derive the entry scale"
+        );
+        let after = project(&engine);
+        assert!(
+            (width_of(&after, win) as i32 - peer as i32).abs() <= 1,
+            "the new column must enter at the entry scale: {} vs {}",
+            width_of(&after, win),
+            peer
+        );
+        engine.execute(ToggleOverview);
+        let again = project(&engine);
+        assert_eq!(
+            again.len(),
+            after.len(),
+            "leaving Overview must not drop the window opened during it"
+        );
+        assert!(
+            (width_of(&again, win) as i32 - width_of(&settled, 2) as i32).abs() <= 1,
+            "the new column must settle at its full logical width, got {} vs {}",
+            width_of(&again, win),
+            width_of(&settled, 2)
+        );
+    }
+
+    /// A poisoned floor must not cancel the reduction. The floor only binds
+    /// when the focused tile needs a smaller scale than the target to fit, so
+    /// with an ordinary ribbon it changes nothing at all — and a non-finite one
+    /// is read as the structural minimum rather than as "no zoom-out", which
+    /// would make `Mod+O` a silent no-op.
+    #[test]
+    fn overview_survives_a_non_finite_floor() {
+        use crate::core::commands::ToggleOverview;
+        let mut engine = ribbon_engine(4, f32::NAN);
+        engine.execute(ToggleOverview);
+        let ws = &engine.state.monitors[engine.state.sel_mon].workspaces[0];
+        assert_eq!(
+            ws.overview_scale, DEFAULT_OVERVIEW_SCALE,
+            "a non-finite floor must not cancel the reduction, got {}",
+            ws.overview_scale
+        );
+        assert!((alpha_of(&engine) - DEFAULT_OVERVIEW_SCALE).abs() < 1e-5);
+    }
+
+    /// A degenerate stored scale can never reach a `ConfigureWindow` unchecked:
+    /// a non-finite or non-positive one reads as the configured entry scale
+    /// (the mode is on, so it must still look like Overview), a positive one
+    /// below the floor clamps to it, and the enlargement axis keeps its own
+    /// floor with no upper clamp.
+    #[test]
+    fn view_alpha_floors_a_degenerate_scale() {
+        use crate::core::layout::{view_alpha, ALPHA_MIN};
+        use crate::types::{ViewportMode, Workspace};
+        let cfg = Cfg {
+            overview_zoom_min: 0.25,
+            ..default_cfg()
+        };
+        let mut ws = Workspace::new(ViewId::new(0));
+        ws.overview = true;
+        ws.overview_scale = 0.0;
+        assert_eq!(
+            view_alpha(&ws, &cfg, 1908, 4000.0),
+            DEFAULT_OVERVIEW_SCALE,
+            "a zero Overview scale must read as the entry scale, not as the settled view"
+        );
+        ws.overview_scale = f32::NAN;
+        assert_eq!(
+            view_alpha(&ws, &cfg, 1908, 4000.0),
+            DEFAULT_OVERVIEW_SCALE,
+            "a NaN Overview scale must not propagate"
+        );
+        ws.overview_scale = 0.01;
+        assert_eq!(
+            view_alpha(&ws, &cfg, 1908, 4000.0),
+            ALPHA_MIN,
+            "a positive scale below the floor must clamp to it"
+        );
+        ws.overview_scale = 0.5;
+        assert_eq!(
+            view_alpha(&ws, &cfg, 1908, 4000.0),
+            0.5,
+            "a healthy stored scale projects verbatim"
+        );
+        ws.overview = false;
+        ws.viewport_mode = ViewportMode::Zoomed;
+        ws.page_zoom = -3.0;
+        assert_eq!(
+            view_alpha(&ws, &cfg, 1908, 4000.0),
+            ALPHA_MIN,
+            "a negative page zoom must floor"
+        );
+        ws.page_zoom = 2.5;
+        assert_eq!(
+            view_alpha(&ws, &cfg, 1908, 4000.0),
+            2.5,
+            "the enlargement axis has no upper clamp"
+        );
+    }
+
+    /// A manual resize during Overview rewrites the logical layout and adjusts
+    /// visibility — it never adds a zoom on top of the entry scale.
+    #[test]
+    fn overview_resize_adjusts_visibility_not_scale() {
+        use crate::core::commands::{GrowColumn, ToggleOverview};
+        let mut engine = ribbon_engine(4, 0.25);
+        engine.cfg.accordion_boost = 0.0;
+        settle(&mut engine);
+        engine.execute(ToggleOverview);
+        let entry_scale = engine.state.monitors[engine.state.sel_mon].workspaces[0].overview_scale;
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        let ci = engine.state.monitors[mi].workspaces[ws_i].focus.column_idx;
+        let before_w = engine.state.monitors[mi].workspaces[ws_i].columns[ci].weight;
+        engine.execute(GrowColumn(200));
+        let ws = &engine.state.monitors[mi].workspaces[ws_i];
+        assert_eq!(
+            ws.overview_scale, entry_scale,
+            "a resize must not touch the entry scale"
+        );
+        assert!(
+            ws.columns[ci].weight > before_w,
+            "a resize must rewrite the logical weight: {before_w} -> {}",
+            ws.columns[ci].weight
+        );
+        assert!((alpha_of(&engine) - entry_scale).abs() < 1e-5);
+        assert!(
+            focused_is_visible(&engine),
+            "the resized column must end up visible"
+        );
+    }
+
+    /// Floating a tile during a reduced-scale session must not launder the view
+    /// scale into the float's persistent geometry: the new float starts from
+    /// the unscaled tile, settled into the workarea by the float rules.
+    #[test]
+    fn overview_float_toggle_unscales_the_tile() {
+        use crate::core::commands::ToggleFloat;
+        let mut engine = ribbon_engine(3, 0.25);
+        engine.cfg.accordion_boost = 0.0;
+        settle(&mut engine);
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        // The logical tile width, measured at the settled view before Overview.
+        let logical_w = width_of(&project(&engine), 3);
+        // A reduced-scale session over ordinary tiles: the projected tile is
+        // half the logical one. `Client::geom` is seeded with the projected
+        // rect, exactly what the backend's write-back holds by the time the
+        // user can float the tile.
+        engine.state.monitors[mi].workspaces[ws_i].overview = true;
+        engine.state.monitors[mi].workspaces[ws_i].overview_scale = 0.5;
+        let tiled = project(&engine);
+        let tile = tiled.iter().find(|e| e.0 == 3).expect("tile 3 placed").1;
+        let tile_w = tile.w;
+        assert!(
+            tile_w < logical_w,
+            "the fixture must actually project small, got {tile_w} vs {logical_w}"
+        );
+        engine.state.clients.get_mut(&3).expect("client 3").geom = tile;
+        engine.execute(ToggleFloat(Some(3)));
+        let c = &engine.state.clients[&3];
+        assert!(c.is_float(), "the window must actually be floating now");
+        assert!(
+            (c.geom.w as i32 - logical_w as i32).abs() <= 2,
+            "the float must start from the unscaled tile ({} px), not the {} px projection: {:?}",
+            logical_w,
+            tile_w,
+            c.geom
+        );
+        let wa = engine.state.monitors[mi].workarea;
+        assert!(
+            c.geom.w <= wa.w && c.geom.h <= wa.h,
+            "the unscaled float must still settle into the workarea: {:?} in {wa:?}",
+            c.geom
+        );
+        // And back to tiled: the ribbon takes it back at the entry scale.
+        engine.execute(ToggleFloat(Some(3)));
+        let c = &engine.state.clients[&3];
+        assert!(!c.is_float());
+        assert_eq!(width_of(&project(&engine), 3), tile_w);
+    }
+
+    /// Fullscreen keeps priority over Overview: entering, navigating and
+    /// leaving the mode preserves the flags, the policy and the exclusive
+    /// overlay — and a demoted Normal-policy tile keeps its flag too.
+    #[test]
+    fn overview_fullscreen_keeps_priority() {
+        use crate::core::commands::{OverviewNav, ToggleFullscreen, ToggleOverview};
+        use crate::types::Dir;
+        let mut engine = ribbon_engine(3, 0.25);
+        let mi = engine.state.sel_mon;
+        // Overlay ownership is focus-stack scoped: window 2 must be the most
+        // recent focus for the exclusive overlay to be presented.
+        engine.state.monitors[mi].focused = Some(2);
+        engine.state.monitors[mi].focus_stack = vec![1, 2, 3];
+        engine.execute(ToggleFullscreen(Some(2)));
+        assert_eq!(engine.state.presented_overlay_owner(mi), Some(2));
+        engine.execute(ToggleOverview);
+        assert!(
+            engine.state.clients[&2].is_fullscreen(),
+            "entering Overview must not drop fullscreen"
+        );
+        assert_eq!(
+            engine.state.presented_overlay_owner(mi),
+            Some(2),
+            "the exclusive overlay stays presented under Overview"
+        );
+        for _ in 0..4 {
+            engine.execute(OverviewNav(Dir::Left));
+            engine.execute(OverviewNav(Dir::Right));
+        }
+        assert!(engine.state.clients[&2].is_fullscreen());
+        assert_eq!(engine.state.presented_overlay_owner(mi), Some(2));
+        engine.execute(ToggleOverview);
+        assert!(engine.state.clients[&2].is_fullscreen());
+        assert_eq!(engine.state.presented_overlay_owner(mi), Some(2));
+        engine.execute(ToggleFullscreen(Some(2)));
+        assert!(!engine.state.clients[&2].is_fullscreen());
+    }
+
+    /// The cursor policy at unit level: selecting a visible tile (the hover and
+    /// click path through `retarget_focus_to_window`) moves the logical focus
+    /// without moving the camera, changing the scale, or touching floating
+    /// state. Selecting an off-screen tile pans exactly far enough to reveal
+    /// it.
+    #[test]
+    fn overview_pointer_selection_keeps_a_visible_viewport() {
+        use crate::core::commands::{retarget_focus_to_window, ToggleOverview};
+        use crate::types::{Client, Column, Focus};
+        let mut engine = setup_engine();
+        engine.cfg.accordion_boost = 0.0;
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        // Six narrow columns: neighbours of the first are visible at once, the
+        // far end is a full viewport away.
+        for win in 1..=6u32 {
+            engine.state.monitors[mi].workspaces[ws_i]
+                .columns
+                .push(Column {
+                    windows: vec![win],
+                    focused: 0,
+                    weight: 0.3,
+                });
+            engine
+                .state
+                .add_client(Client::new(win, mi, view_of(&engine.state, mi, ws_i)));
+        }
+        engine.state.monitors[mi].workspaces[ws_i].focus = Focus { column_idx: 0 };
+        settle(&mut engine);
+        engine.execute(ToggleOverview);
+        assert!(focused_is_visible(&engine));
+        let cam = cam_of(&engine);
+        let scale = engine.state.monitors[engine.state.sel_mon].workspaces[0].overview_scale;
+        // Hover/click the visible neighbour: focus moves, viewport does not.
+        let target = engine.state.monitors[engine.state.sel_mon].workspaces[0].columns[1]
+            .focused_win()
+            .expect("column 1 has a window");
+        let ret = retarget_focus_to_window(&mut engine.state, &engine.cfg, target);
+        assert!(ret.is_some());
+        let ws = &engine.state.monitors[engine.state.sel_mon].workspaces[0];
+        assert_eq!(ws.focus.column_idx, 1);
+        assert!(
+            (cam_of(&engine) - cam).abs() < 1e-4,
+            "selecting a visible tile must not move the camera"
+        );
+        assert_eq!(ws.overview_scale, scale);
+        assert!(!engine.state.clients[&target].is_float());
+        // Select the far end: the camera pans, the selection becomes visible.
+        let far = engine.state.monitors[engine.state.sel_mon].workspaces[0].columns[5]
+            .focused_win()
+            .expect("column 5 has a window");
+        let _ = retarget_focus_to_window(&mut engine.state, &engine.cfg, far);
+        assert_eq!(
+            engine.state.monitors[engine.state.sel_mon].workspaces[0]
+                .focus
+                .column_idx,
+            5
+        );
+        assert!(
+            focused_is_visible(&engine),
+            "an off-screen selection must be panned into view"
+        );
+        assert_eq!(
+            engine.state.monitors[engine.state.sel_mon].workspaces[0].overview_scale,
+            scale
+        );
+    }
+
+    /// Leaving through `OverviewEnter` clears the stored scale and restores the
+    /// settled tile sizes at the navigated-to selection: the camera follows
+    /// the selection (that is what navigation is for), while the scale, the
+    /// weights and the membership are exactly what they were.
+    #[test]
+    fn overview_exit_clears_the_stored_scale() {
+        use crate::core::commands::{OverviewEnter, OverviewNav, ToggleOverview};
+        use crate::core::layout::ideal_scroll;
+        use crate::types::Dir;
+        let mut engine = ribbon_engine(4, 0.25);
+        engine.cfg.accordion_boost = 0.0;
+        settle(&mut engine);
+        let settled_sizes: Vec<(u32, u32)> =
+            project(&engine).iter().map(|e| (e.1.w, e.1.h)).collect();
+        engine.execute(ToggleOverview);
+        engine.execute(OverviewNav(Dir::Left));
+        engine.execute(OverviewNav(Dir::Left));
+        let col = engine.state.monitors[engine.state.sel_mon].workspaces[0]
+            .focus
+            .column_idx;
+        engine.execute(OverviewEnter);
+        let mi = engine.state.sel_mon;
+        let ws_i = engine.state.monitors[mi].active_index();
+        let ws = &engine.state.monitors[mi].workspaces[ws_i];
+        assert!(!ws.overview);
+        assert_eq!(ws.overview_scale, 1.0, "exit must clear the stored scale");
+        assert_eq!(ws.focus.column_idx, col, "exit keeps the selection");
+        let sizes: Vec<(u32, u32)> = project(&engine).iter().map(|e| (e.1.w, e.1.h)).collect();
+        assert_eq!(
+            sizes, settled_sizes,
+            "exit must restore the settled tile sizes exactly"
+        );
+        let want = ideal_scroll(
+            ws,
+            &engine.cfg,
+            engine.state.monitors[mi].workarea,
+            FsCtx::default(),
+        );
+        assert!(
+            (ws.camera.position - want).abs() < 1e-4,
+            "exit must park the camera on the selection, not leave it stale"
+        );
+    }
+
+    /// The ordinary `focus left/right` keys keep working inside Overview: they
+    /// move the selection and pan when needed, and they never write the scale.
+    #[test]
+    fn focus_direction_in_overview_keeps_the_scale_and_pans() {
+        use crate::core::commands::{FocusDirection, ToggleOverview};
+        use crate::types::Dir;
+        let mut engine = ribbon_engine(6, 0.25);
+        engine.cfg.accordion_boost = 0.0;
+        settle(&mut engine);
+        // Start on the first column so every step travels.
+        {
+            let mi = engine.state.sel_mon;
+            let ws_i = engine.state.monitors[mi].active_index();
+            engine.state.monitors[mi].workspaces[ws_i].focus.column_idx = 0;
+        }
+        settle(&mut engine);
+        engine.execute(ToggleOverview);
+        let entry_scale = engine.state.monitors[engine.state.sel_mon].workspaces[0].overview_scale;
+        for _ in 0..5 {
+            engine.execute(FocusDirection(Dir::Right));
+            let ws = &engine.state.monitors[engine.state.sel_mon].workspaces[0];
+            assert_eq!(ws.overview_scale, entry_scale);
+            assert!((alpha_of(&engine) - entry_scale).abs() < 1e-5);
+            assert!(focused_is_visible(&engine));
+        }
+        let ws = &engine.state.monitors[engine.state.sel_mon].workspaces[0];
+        assert_eq!(ws.focus.column_idx, 5);
+        for _ in 0..5 {
+            engine.execute(FocusDirection(Dir::Left));
+        }
+        let ws = &engine.state.monitors[engine.state.sel_mon].workspaces[0];
+        assert_eq!(ws.focus.column_idx, 0);
+        assert_eq!(ws.overview_scale, entry_scale);
     }
 
     // Next/Prev must leave `column.focused` on the row the focus actually moved
@@ -1422,7 +2744,8 @@ mod unit_tests {
 
     /// Build a workspace on monitor 0 with `n` single-window columns of weight
     /// `[1.0, 0.6, 0.6, …]`, focused at `focus_ci`. `overview` drives the
-    /// Overview (zoom-out) state.
+    /// Overview (zoom-out) state, at the configured entry scale the entering
+    /// command would fix.
     fn build_ribbon(n: usize, focus_ci: usize, overview: bool) -> Engine {
         use crate::types::{Client, Column, Focus};
         let mut engine = setup_engine();
@@ -1443,7 +2766,7 @@ mod unit_tests {
             };
             if overview {
                 ws.overview = true;
-                ws.zoom = 0.25;
+                ws.overview_scale = DEFAULT_OVERVIEW_SCALE;
             }
         }
         for i in 0..n {
@@ -1619,7 +2942,7 @@ mod unit_tests {
     }
 
     #[test]
-    fn overview_centers_whole_ribbon() {
+    fn overview_centers_focused_column_at_the_stored_scale() {
         use crate::core::layout::{arrange, ideal_scroll, Placements};
         let cfg = default_cfg();
         let n = 5usize;
@@ -1642,27 +2965,45 @@ mod unit_tests {
             &mut RibbonScratch::default(),
         );
 
-        let min_l = placements
+        // The selection — not the whole ribbon — is what the viewport centers:
+        // navigation pans a fixed-scale view, it does not fit everything.
+        let fw = engine.state.monitors[mi].workspaces[0]
+            .focused_win()
+            .expect("focused window must exist");
+        let (_, geom, bw) = placements
             .iter()
-            .map(|(_, g, _)| g.x as f32)
-            .fold(f32::INFINITY, f32::min);
-        let max_r = placements
-            .iter()
-            .map(|(_, g, b)| (g.x + g.w as i32 + 2 * *b as i32) as f32)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let mid = (min_l + max_r) / 2.0;
-        let wac = wa.x as f32 + wa.w as f32 / 2.0;
+            .find(|e| e.0 == fw)
+            .expect("focused window must be placed");
+        let bw = *bw as i32;
         assert!(
-            (mid - wac).abs() <= 2.0,
-            "overview ribbon midpoint {mid} not centered on workarea center {wac}"
+            geom.x >= wa.x - 1,
+            "overview: focused tile off left ({})",
+            geom.x
         );
         assert!(
-            min_l >= wa.x as f32 - 1.0,
-            "overview: first column off left ({min_l})"
+            geom.x + geom.w as i32 + 2 * bw <= wa.x + wa.w as i32 + 1,
+            "overview: focused tile off right"
+        );
+        // And it projects at the stored entry scale, not at a ribbon fit: the
+        // reduction is uniform across the ribbon, so the focused tile is its
+        // world width times the stored scale, minus the frame the projection
+        // reserves — strictly narrower than the settled tile.
+        let ws = &engine.state.monitors[mi].workspaces[0];
+        assert_eq!(ws.overview_scale, DEFAULT_OVERVIEW_SCALE);
+        let g = ribbon_geom(ws, &cfg, wa, &FsCtx::default());
+        assert!((g.alpha - DEFAULT_OVERVIEW_SCALE).abs() < 1e-5);
+        let (_, world_w) = g.cols[ws.focus.column_idx.min(g.cols.len() - 1)];
+        let frame = 2.0 * cfg.border_w as f32;
+        assert_eq!(
+            geom.w,
+            (world_w * g.alpha - frame).max(1.0) as u32,
+            "the tile must be projected at the entry scale"
         );
         assert!(
-            max_r <= wa.x as f32 + wa.w as f32 + 1.0,
-            "overview: last column off right ({max_r})"
+            geom.w < (world_w - frame) as u32,
+            "the entry projection must be a real reduction: {} vs settled {}",
+            geom.w,
+            (world_w - frame) as u32
         );
     }
 
@@ -3488,13 +4829,13 @@ mod unit_tests {
 
         // Start in Overview: the branch a rejected request must not reach.
         engine.state.monitors[mi].workspaces[ws_i].overview = true;
-        engine.state.monitors[mi].workspaces[ws_i].zoom = 0.4;
+        engine.state.monitors[mi].workspaces[ws_i].overview_scale = 0.4;
 
         let snapshot = |e: &Engine| {
             let ws = &e.state.monitors[mi].workspaces[ws_i];
             format!(
-                "overview={} zoom={} page_zoom={} mode={:?} cam={}",
-                ws.overview, ws.zoom, ws.page_zoom, ws.viewport_mode, ws.camera.position
+                "overview={} scale={} page_zoom={} mode={:?} cam={}",
+                ws.overview, ws.overview_scale, ws.page_zoom, ws.viewport_mode, ws.camera.position
             )
         };
         let before = snapshot(&engine);
@@ -3531,12 +4872,12 @@ mod unit_tests {
 
         let before = {
             let ws = &engine.state.monitors[mi].workspaces[ws_i];
-            (ws.overview, ws.zoom, ws.page_zoom)
+            (ws.overview, ws.overview_scale, ws.page_zoom)
         };
         let effects = engine.dispatch(Action::ViewportZoom(1e30));
         let ws = &engine.state.monitors[mi].workspaces[ws_i];
         assert_eq!(
-            (ws.overview, ws.zoom, ws.page_zoom),
+            (ws.overview, ws.overview_scale, ws.page_zoom),
             before,
             "an out-of-range delta must leave the workspace untouched"
         );
@@ -10076,11 +11417,11 @@ mod unit_tests {
                 for (wi, ws) in mon.workspaces.iter().enumerate() {
                     let _ = writeln!(
                         d,
-                        "  ws{wi} id={} layout={:?} overview={} zoom={:.4} vz={:?} pz={:.4} pmax={:?} cam={:.4} floats={:?}",
+                        "  ws{wi} id={} layout={:?} overview={} oscale={:.4} vz={:?} pz={:.4} pmax={:?} cam={:.4} floats={:?}",
                         ws.id,
                         ws.layout,
                         ws.overview,
-                        ws.zoom,
+                        ws.overview_scale,
                         ws.viewport_mode,
                         ws.page_zoom,
                         ws.presented_maximize,

@@ -85,10 +85,15 @@ protocol surface, not a drawing layer:
   (`src/backend/x11/reconciler.rs:100`) is the single clamping function. No other
   code positions a window.
 - The camera is a plain `f32` scroll offset (`maverick-core/src/types.rs:367-370`)
-  and `Workspace::zoom` / `Workspace::page_zoom` are plain `f32` values
-  (`maverick-core/src/types.rs:709,718`) that a mutator assigns outright
-  (`maverick-core/src/types.rs:383,392`). Nothing eases toward a target, so there
-  is no second projection for a window's size to differ between.
+  and `Workspace::overview_scale` / `Workspace::page_zoom` are plain `f32`
+  values that a mutator assigns outright. Nothing eases toward a target, so
+  there is no second projection for a window's size to differ between.
+  `overview_scale` is *fixed* when Overview is entered —
+  `layout::overview_entry_scale_for` takes `Cfg::overview_scale` as the target
+  (reducing it only when the focused tile would not fit even there, never below
+  `Cfg::overview_zoom_min`) — and no navigation, resize, map or unmap path
+  writes it again, so the scale cannot accumulate across presses; navigation
+  only pans the camera.
 - `Column` carries `windows`, `weight` and `focused` and nothing else
   (`maverick-core/src/types.rs:300-307`); a column's focus status is read off
   those fields rather than tracked as a separate boost.
@@ -211,7 +216,7 @@ Two spaces, and the boundary between them is a single `round()`:
 | screen / X11 | `i32` | `render::emit_geometry` |
 
 World coordinates stay fractional through the whole layout pass. The conversion
-happens once, at the X11 boundary, at `src/core/layout.rs:532`:
+happens once, at the X11 boundary, at `src/core/layout.rs:602`:
 
 ```rust
 let screen_col_x = (wa.x as f32 + (world_x - cam) * alpha + cx).round() as i32;
@@ -219,9 +224,27 @@ let screen_col_x = (wa.x as f32 + (world_x - cam) * alpha + cx).round() as i32;
 
 `Camera` holds a plain `f32` that is rounded exactly once, here, so
 quantisation cannot accumulate in the camera. The one running `f32` sum is
-the per-column `x += w + gap_f` (`src/core/layout.rs:369`); it measures 0.028 px
+the per-column `x += w + gap_f` (`src/core/layout.rs:439`); it measures 0.028 px
 at 50 columns, 0.41 px at 200 and 0.93 px at 500, and it is the only
 accumulation in the pipeline.
+
+Rearranged, that line is a camera: `screen = (wa.x + wa.w/2) + alpha * (world -
+(cam + wa.w/2))`. `Camera::position` is the pan and `alpha` is the scale, both
+View state and neither per window. The consequence on X11: **the camera's scale
+is necessarily written to `ConfigureWindow`.** There is no compositor to render
+a client at a size the server does not hold, so "zoom the view out" and "make
+every tile's rectangle smaller" are the same physical operation here. That is
+what makes Overview the one view that changes geometry visibly: the entry scale
+is a real reduction (`Cfg::overview_scale`, `0.76` by default) taken once on
+entry, never derived per projection. What keeps it from degenerating is that
+rule — the scale reads the *focused tile*, never the ribbon, so the client count
+shapes the scrollable content and not the size of a step — plus the two floors
+(`overview_zoom_min` at the entry, `ALPHA_MIN` at the read-back) and the fact
+that navigation pans the camera through `overview_scroll` without ever writing
+the scale again. There is no "real" graphical camera that pans over unscaled
+pixels; the viewport is a WM-native approximation: reduced tiles plus a camera
+that scrolls the ribbon, and leaving the mode restores the settled rectangles
+exactly because the layout's own geometry was never written.
 
 The consequence: **the integer rectangle in X11 is the only rectangle.**
 

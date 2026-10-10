@@ -136,8 +136,12 @@ struct GeneralCfg {
     split_bias: Option<f32>,
     /// Accordion focus-expansion factor (0.0–0.9), see `Cfg::accordion_boost`.
     accordion_boost: Option<f32>,
-    /// Overview film-strip minimum zoom (0.05–1.0), see `Cfg::overview_zoom_min`.
+    /// Overview zoom-out floor (0.05–1.0): the smallest scale Overview may use,
+    /// see `Cfg::overview_zoom_min`.
     overview_zoom_min: Option<f32>,
+    /// Overview entry scale (0.05–1.0): the scale the mode is entered at, see
+    /// `Cfg::overview_scale`.
+    overview_scale: Option<f32>,
     /// Auto-generate `Super+1..n` / `Super+Shift+1..n` workspace binds.
     /// Defaults to `true`; when `false` no workspace binds are added.
     auto_workspace_binds: Option<bool>,
@@ -479,6 +483,7 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         "split_bias" => set_f32(&mut g.split_bias, key, value, diag),
         "accordion_boost" => set_f32(&mut g.accordion_boost, key, value, diag),
         "overview_zoom_min" => set_f32(&mut g.overview_zoom_min, key, value, diag),
+        "overview_scale" => set_f32(&mut g.overview_scale, key, value, diag),
         "auto_workspace_binds" => set_bool(&mut g.auto_workspace_binds, key, value, diag),
         "focus_mouse" => set_bool(&mut g.focus_mouse, key, value, diag),
         "warp_cursor" => set_bool(&mut g.warp_cursor, key, value, diag),
@@ -800,6 +805,29 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
                 "general.overview_zoom_min must be between 0.05 and 1.0; ignoring {v}"
             ));
         }
+    }
+    if let Some(v) = general.overview_scale {
+        if (0.05..=1.0).contains(&v) {
+            cfg.overview_scale = v;
+        } else {
+            diag.errors.push(format!(
+                "general.overview_scale must be between 0.05 and 1.0; ignoring {v}"
+            ));
+        }
+    }
+    // The pair invariant `ALPHA_MIN <= floor <= target <= 1.0` (see
+    // `layout::sanitized_overview_scales`, the runtime backstop for a `Cfg`
+    // assembled in code): a floor above the target would widen the entry back
+    // toward the settled view the target asked to leave, silently cancelling
+    // the reduction. Diagnose it and normalize the floor toward the target
+    // instead of pretending the combination is valid.
+    if cfg.overview_zoom_min > cfg.overview_scale {
+        diag.errors.push(format!(
+            "general.overview_zoom_min ({}) must not exceed general.overview_scale ({}); \
+             using {} as the floor",
+            cfg.overview_zoom_min, cfg.overview_scale, cfg.overview_scale
+        ));
+        cfg.overview_zoom_min = cfg.overview_scale;
     }
     if let Some(v) = general.focus_mouse {
         cfg.focus_mouse = v;
@@ -1669,6 +1697,45 @@ theme = "not-a-real-theme"
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert_eq!(cfg.col_normal, baseline.col_normal);
         assert_eq!(cfg.col_focused, baseline.col_focused);
+    }
+
+    /// A floor above the target is contradictory: the parser diagnoses it and
+    /// normalizes the floor toward the target, so the file cannot silently
+    /// cancel the reduction the target asked for. Valid pairs — including the
+    /// explicit full-size `1.0 / 1.0` — merge untouched and stay
+    /// diagnostic-clean.
+    #[test]
+    fn overview_floor_above_target_is_diagnosed_and_normalized() {
+        // Contradictory: floor 1.0 above the default 0.76 target.
+        let user = parse_string("[general]\noverview_zoom_min = 1.0\n");
+        let mut diag = Diagnostics::default();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(cfg.overview_scale, 0.76);
+        assert_eq!(
+            cfg.overview_zoom_min, cfg.overview_scale,
+            "the floor must normalize toward the target, not cancel the reduction"
+        );
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.contains("overview_zoom_min") && e.contains("overview_scale")),
+            "the contradiction must be diagnosed: {:?}",
+            diag.errors
+        );
+        // Explicit full-size pair: valid, silent.
+        let user = parse_string("[general]\noverview_scale = 1.0\noverview_zoom_min = 1.0\n");
+        let mut diag = Diagnostics::default();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(cfg.overview_scale, 1.0);
+        assert_eq!(cfg.overview_zoom_min, 1.0);
+        assert!(diag.is_clean(), "{diag:?}");
+        // Ordinary valid pair: silent.
+        let user = parse_string("[general]\noverview_scale = 0.76\noverview_zoom_min = 0.25\n");
+        let mut diag = Diagnostics::default();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(cfg.overview_scale, 0.76);
+        assert_eq!(cfg.overview_zoom_min, 0.25);
+        assert!(diag.is_clean(), "{diag:?}");
     }
 
     #[test]

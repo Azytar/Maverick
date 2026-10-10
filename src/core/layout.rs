@@ -246,7 +246,11 @@ pub fn arrange(
 pub(crate) struct RibbonGeom<'a> {
     /// Workarea inset by `gaps_outer` on all four edges.
     pub wa: Rect,
-    /// Semantic-zoom factor applied, clamped to >= 0.05.
+    /// The scale the world table below is projected at: the enlargement factor
+    /// of the viewport zoom, the stored entry scale of Overview, or `1.0`. See
+    /// [`view_alpha`]. It is read from the View, not derived from the table:
+    /// the Overview scale was fixed when the mode was entered and must not
+    /// follow the ribbon's width afterwards.
     pub alpha: f32,
     /// `wa.w * (1 - alpha) / 2` — horizontal zoom-around offset.
     pub cx: f32,
@@ -292,6 +296,224 @@ pub(crate) fn ribbon_geom(
     }
 }
 
+/// Floor for the view scale (`alpha`).
+///
+/// Below this the projection's own `.max(1.0)` floors take over: every tile
+/// collapses to a 1 px block, which describes nothing about the layout and
+/// cannot be clicked. Both the Overview zoom-out and the viewport zoom read
+/// this floor through [`view_alpha`], so the two axes cannot disagree about how
+/// small the workspace may be projected.
+pub(crate) const ALPHA_MIN: f32 = 0.05;
+
+/// The scale Overview is entered at unless the configuration says otherwise.
+///
+/// This is the default of `Cfg::overview_scale` and the fallback a poisoned
+/// configuration value reads as. It is a *target*, not a floor: it is the
+/// number the entry tries for first, and the only thing that may move it is a
+/// focused tile that would not fit even at this scale.
+///
+/// `0.76` is chosen so the entry projection is unmistakably not the settled
+/// view while still showing the focused tile complete with a useful sliver of
+/// its neighbour: a column is a fraction of the workarea, so at `0.76` a tile
+/// occupies roughly three quarters of the height and less than half the width,
+/// which leaves the next column visible beside it. That is the "ribbon" the
+/// mode exists to navigate.
+pub const DEFAULT_OVERVIEW_SCALE: f32 = 0.76;
+
+/// The validated Overview scale pair `(target, floor)`, enforcing the
+/// invariant `ALPHA_MIN <= floor <= target <= 1.0`.
+///
+/// This is the single place the pair rule lives: the config parser
+/// (`userconfig::apply_general`) diagnoses a contradictory file and normalizes
+/// it toward this same outcome, while a `Cfg` assembled in code — which never
+/// crossed the parser — is normalized here, silently. Either way an invalid
+/// combination (`overview_zoom_min` above `overview_scale`) can never cancel
+/// the reduction the target asked for: the floor is pulled down to the target
+/// instead of the entry clamping up to the floor. A valid `1.0 / 1.0` pair
+/// still yields `(1.0, 1.0)` — the explicit way to ask for no reduction.
+pub fn sanitized_overview_scales(cfg: &Cfg) -> (f32, f32) {
+    let target = sanitize_overview_target(cfg.overview_scale);
+    let floor = if cfg.overview_zoom_min.is_finite() {
+        cfg.overview_zoom_min.clamp(ALPHA_MIN, 1.0)
+    } else {
+        ALPHA_MIN
+    };
+    (target, floor.min(target))
+}
+
+/// The scale an Overview session is entered at, for a focused tile of
+/// `focused_world_w` px against `workarea_w` px of gap-inset workarea.
+///
+/// Overview is a *viewport*, and on a window manager without a compositor a
+/// viewport is written into `ConfigureWindow` — there is nothing else that
+/// could render a client at another size (`docs/architecture.md`, "There is no
+/// compositor"). So the entry scale has to be a real, visible reduction: a mode
+/// that entered at `1.0` would flip a flag, move a camera, and leave the
+/// desktop pixel-identical, which is exactly what Overview must not do.
+///
+/// The rule therefore starts from [`DEFAULT_OVERVIEW_SCALE`] (configurable as
+/// `Cfg::overview_scale`) and only ever moves it *down*:
+///
+/// ```text
+/// target                       ->  Cfg::overview_scale        the design point
+/// target, if the tile fits     ->  the tile fits at `target`, use it unchanged
+/// workarea / focused           ->  the tile does not: just enough for that one
+/// below that                  ->  `Cfg::overview_zoom_min`, and the camera
+///                                  scrolls the remainder
+/// ```
+///
+/// The pair itself is validated by [`sanitized_overview_scales`]: a floor
+/// configured above the target is contradictory (it would widen the entry
+/// back toward the settled view the target asked to leave) and normalizes to
+/// the target. Only an explicit `1.0 / 1.0` pair enters at full size.
+///
+/// Two things the rule deliberately does not do:
+///
+/// - It never *raises* the scale to `1.0`. A focused tile that already fits at
+///   full size still enters reduced: the point of the mode is a reduced,
+///   navigable ribbon, not "recentre the settled view".
+/// - It never reads the *ribbon*. The scale of one tile cannot depend on how
+///   many of them there are, or opening a twentieth window would shrink the
+///   nineteen already on screen.
+///
+/// Whatever the entry returns is stored on the View once
+/// ([`overview_entry_scale_for`]) and read back verbatim ([`view_alpha`]), and
+/// the layout's own geometry — column weights, the world ribbon, a float's
+/// `Client::geom` — is never written by any of it.
+///
+/// # Inputs
+///
+/// `focused_world_w` must be the focused column's *world* width — its base
+/// weight share of the workarea before any view scale, boost off — and
+/// `workarea_w` the gap-inset workarea width. Both come from the same table
+/// [`ribbon_geom_into`] builds; see [`overview_entry_scale_for`].
+pub fn overview_entry_scale(cfg: &Cfg, workarea_w: u32, focused_world_w: f32) -> f32 {
+    // The target is the point of the mode, so a value that cannot be used at
+    // all falls back to the design point rather than to the settled view: an
+    // Overview that silently entered at `1.0` would be invisible.
+    let (target, floor) = sanitized_overview_scales(cfg);
+    let mut scale = target;
+    // The fit rule is the only thing allowed below the target, and it needs a
+    // measurable tile: a non-finite or non-positive width describes nothing a
+    // division can use, and projecting "to fit it" would be a guess.
+    if focused_world_w.is_finite() && focused_world_w > 0.0 && workarea_w > 0 {
+        let fit = workarea_w as f32 / focused_world_w;
+        if fit.is_finite() && fit < scale {
+            scale = fit;
+        }
+    }
+    // The floor is the validated one from `sanitized_overview_scales` (a NaN
+    // floor reads as the structural minimum, and a floor above the target
+    // normalizes to it), so `clamp` never sees a NaN bound and a contradictory
+    // configuration cannot widen the entry back to the settled view.
+    // Clamp in one place, to the same `[ALPHA_MIN, 1.0]` the read-back enforces
+    // (`sanitize_overview_scale`), so what the entry stores is exactly what the
+    // projection uses and a scale the fit rule drove below the floor is not
+    // silently widened again by `view_alpha`.
+    scale.clamp(floor, 1.0)
+}
+
+/// The configured Overview entry scale, made safe to project at.
+///
+/// A non-finite or non-positive value — a hand-edited config crossing the
+/// parser, or a `Cfg` assembled in code — reads as [`DEFAULT_OVERVIEW_SCALE`]
+/// rather than as the settled view, and anything outside `[ALPHA_MIN, 1.0]` is
+/// clamped into it. A user who really wants full-size tiles can ask for `1.0`
+/// explicitly; a broken value cannot ask for it by accident.
+fn sanitize_overview_target(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
+        scale.clamp(ALPHA_MIN, 1.0)
+    } else {
+        DEFAULT_OVERVIEW_SCALE
+    }
+}
+
+/// Compute the entry scale for `ws` from its own focused column.
+///
+/// Mirrors the width computation in [`ribbon_geom_into`] — base weight share
+/// of the gap-inset workarea, boost off (the boost is dropped in Overview so
+/// the tile sits at the width it will actually be projected at), a fullscreen
+/// ribbon column measuring `screen.w` — so the scale is derived from the tile
+/// the viewport will open on rather than from a caller-supplied number. `fs`
+/// is the descriptor for the projection that is about to run (empty under
+/// Overview, where non-exclusive fullscreen columns are ordinary ribbon
+/// participants).
+///
+/// A workspace with no columns has no tile to measure, so the target stands on
+/// its own: the result is the configured entry scale, never the settled view.
+///
+/// Pure over `(&Workspace, &Cfg, Rect, &FsCtx)`: no X11, writes nothing.
+pub fn overview_entry_scale_for(ws: &Workspace, cfg: &Cfg, workarea: Rect, fs: &FsCtx) -> f32 {
+    // Same inset as `ribbon_geom_into`: the tile is fitted into the area the
+    // projection anchors geometry to, not the area that area was derived from.
+    // `gaps_outer` is user config crossing the u32→i32 boundary, so it takes
+    // the same ceiling and the same clamp that keeps the inset inside the
+    // workarea.
+    let gap_outer = (cfg.gaps_outer.min(MAX_CFG_GAP as u32) as i32)
+        .min(workarea.w as i32 / 2)
+        .min(workarea.h as i32 / 2)
+        .max(0);
+    let wa_w = workarea.w.saturating_sub((2 * gap_outer) as u32);
+    let usable_w = wa_w as f32;
+    let i = ws.focus.column_idx.min(ws.columns.len().saturating_sub(1));
+    let world_w = match ws.columns.get(i) {
+        None => 0.0,
+        Some(_) if fs.cols.contains(&i) => fs.screen.w as f32,
+        Some(col) => col.weight.min(1.0) * usable_w,
+    };
+    overview_entry_scale(cfg, wa_w, world_w)
+}
+
+/// The scale this View projects at.
+///
+/// Three cases, never multiplied:
+///
+/// - `viewport_mode == Zoomed` — the *enlargement* axis, for close inspection
+///   of one column. Reads `page_zoom`, which the user drives directly.
+/// - `overview` — the *stored entry* scale, fixed when the mode was entered
+///   ([`overview_entry_scale_for`]) and read back verbatim here, sanitized to
+///   `[ALPHA_MIN, 1.0]`. Navigation pans the camera; it never writes this.
+/// - neither — the settled view, at exactly `1.0`.
+///
+/// Keeping the two zoom axes as alternatives rather than a product is what lets
+/// `ViewportZoom` and `ToggleOverview` enforce their mutual exclusion as a
+/// total: whichever was entered last owns the scalar and the other axis is
+/// cleared. Reading the Overview scale from the View — instead of deriving it
+/// from the ribbon on every pass — is what keeps navigation from shrinking the
+/// workspace: a column added, closed or resized while Overview is on changes
+/// the scrollable content, and the camera follows, but the scale stays where
+/// the entry put it.
+///
+/// There is no upper clamp. An enlargement past the workarea is legitimate —
+/// the ribbon scrolls — so only the lower bound is enforced, and once. A
+/// stored scale that is non-finite or non-positive (a poisoned session
+/// restore, since nothing else can write one) reads as the configured entry
+/// scale, not as the settled view: the mode is on, so it must still look like
+/// Overview.
+pub(crate) fn view_alpha(ws: &Workspace, cfg: &Cfg, _workarea_w: u32, _world_w: f32) -> f32 {
+    if ws.viewport_mode == ViewportMode::Zoomed {
+        ws.page_zoom.max(ALPHA_MIN)
+    } else if ws.overview {
+        sanitize_overview_scale(
+            ws.overview_scale,
+            sanitize_overview_target(cfg.overview_scale),
+        )
+    } else {
+        1.0
+    }
+}
+
+/// The single sanitizer for the stored Overview scale: `[ALPHA_MIN, 1.0]`,
+/// with a non-finite or non-positive value falling back to `fallback` — the
+/// configured entry scale — rather than to the settled view.
+fn sanitize_overview_scale(scale: f32, fallback: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
+        scale.clamp(ALPHA_MIN, 1.0)
+    } else {
+        fallback.clamp(ALPHA_MIN, 1.0)
+    }
+}
+
 /// Like [`ribbon_geom`] but writes the per-column table into `cols` (a reused
 /// buffer supplied by the caller) and borrows it back, so the per-frame
 /// projection allocates nothing. `cols` is cleared first, so a buffer grown to
@@ -322,19 +544,6 @@ pub(crate) fn ribbon_geom_into<'s>(
         workarea.h.saturating_sub((2 * gap_outer) as u32),
     );
 
-    let alpha = ws.zoom.max(0.05);
-    // Viewport zoom: when the workspace is in `Zoomed` mode the zoom factor is
-    // `page_zoom` (which may be > 1 to *enlarge* the ribbon), not the Overview
-    // `zoom`. They are kept separate on purpose — Overview zooms out
-    // (`alpha < 1`), Viewport zooms in (`alpha > 1`). `ribbon_geom` has no
-    // upper clamp on `alpha`, so the enlargement falls out for free.
-    let alpha = if ws.viewport_mode == ViewportMode::Zoomed {
-        ws.page_zoom.max(0.05)
-    } else {
-        alpha
-    };
-    let cx = (wa.w as f32 * (1.0 - alpha)) / 2.0;
-    let cy = (wa.h as f32 * (1.0 - alpha)) / 2.0;
     let gap_f = gap as f32;
     // Each column's width is a fraction of the FULL workarea width, *independent
     // of how many columns exist*: adding a column must not shrink the others.
@@ -344,10 +553,15 @@ pub(crate) fn ribbon_geom_into<'s>(
     // Per-column accordion boost: the focused column is worth 1.0 and every
     // other column 0.0, so changing focus widens the focused column on the next
     // projection. In Overview the boost is forced to 0 so every column sits at
-    // its base width and the strip fits all of them.
+    // its base width and navigation pans a stable ribbon instead of reflowing it.
     let total_boost = cfg.accordion_boost.clamp(0.0, 0.9);
     let focus_i = ws.focus.column_idx;
 
+    // The world table comes first because it carries no view state, and the
+    // view scale is read from the View itself (`view_alpha` below): Overview
+    // fixed it on entry, so the tiles, the camera target and the hit-test
+    // extents are all computed against the same stored scale no matter what
+    // changed the ribbon since the mode was entered.
     cols.clear();
     let mut x: f32 = 0.0;
     for (i, c) in ws.columns.iter().enumerate() {
@@ -369,6 +583,14 @@ pub(crate) fn ribbon_geom_into<'s>(
         x += w + gap_f;
     }
     let total_w = (x - gap_f).max(0.0);
+
+    // Read once, from the View. In Overview this is the stored entry scale,
+    // so the tiles, the camera target (`ideal_scroll`/`overview_scroll`) and
+    // the hit-test extents are all computed against the same scale whatever
+    // changed the ribbon since the mode was entered.
+    let alpha = view_alpha(ws, cfg, wa.w, total_w);
+    let cx = (wa.w as f32 * (1.0 - alpha)) / 2.0;
+    let cy = (wa.h as f32 * (1.0 - alpha)) / 2.0;
 
     RibbonGeom {
         wa,
@@ -678,6 +900,54 @@ pub fn ideal_scroll(ws: &Workspace, cfg: &Cfg, workarea: Rect, fs: FsCtx) -> f32
         } else {
             want.clamp(cam_min, cam_max)
         }
+    }
+}
+
+/// The Overview pan policy: keep the camera where it is when the focused
+/// column is already fully visible, otherwise fall back to [`ideal_scroll`].
+///
+/// This is what makes Overview navigation a *viewport* move rather than a
+/// re-centering on every step. `ideal_scroll` unconditionally centers the
+/// focused column, so using it for every navigation would scroll the ribbon
+/// even when the selection was already on screen — every step would move, and
+/// a pointer selection (click/hover) of a visible tile would shove the very
+/// tile the user just pointed at. The scale is never touched here: it was
+/// fixed on entry and is read by the projection, not by the camera.
+///
+/// The visibility test runs against the projection that will actually be
+/// drawn — the same `ribbon_geom` table `arrange_columns` reads, at the stored
+/// Overview scale and the current camera — so "visible" means visible on
+/// screen, not visible in world space. A column wider than the workarea can
+/// never be fully visible; the fallback centers it, which still overlaps it.
+///
+/// Pure over `(&Workspace, &Cfg, Rect, FsCtx)`: no X11, writes nothing. The
+/// caller retargets the camera with the answer.
+pub fn overview_scroll(ws: &Workspace, cfg: &Cfg, workarea: Rect, fs: FsCtx) -> f32 {
+    let g = ribbon_geom(ws, cfg, workarea, &fs);
+    if g.cols.is_empty() {
+        return ws.camera.position;
+    }
+    let i = ws.focus.column_idx.min(g.cols.len() - 1);
+    let (x, w) = g.cols[i];
+    // Screen-space edges of the focused tile, exactly as `arrange_columns`
+    // draws them: the left edge from the camera mapping, the right edge from
+    // the inner (border-exclusive) width the tile is configured with.
+    let bw = if fs.cols.contains(&i) {
+        0.0
+    } else {
+        effective_border_w(cfg) as f32
+    };
+    let l = g.wa.x as f32 + (x - ws.camera.position) * g.alpha + g.cx;
+    let r = l + (w * g.alpha - 2.0 * bw).max(1.0);
+    let vl = g.wa.x as f32;
+    let vr = g.wa.right() as f32;
+    // 1 px of slack absorbs the projection's own rounding: without it a tile
+    // that `arrange_columns` rounded exactly onto the edge would read as
+    // outside and every selection would recenter by a pixel.
+    if l >= vl - 1.0 && r <= vr + 1.0 {
+        ws.camera.position
+    } else {
+        ideal_scroll(ws, cfg, workarea, fs)
     }
 }
 
@@ -2092,15 +2362,19 @@ mod proptests {
         columns: Vec<(f32, usize)>,
         focus_col: usize,
         cam: f32,
-        /// Overview zoom. The documented range is `<= 1.0` — Overview zooms
-        /// *out*, and 1.0 is "not zoomed".
-        zoom: f32,
         overview: bool,
-        /// The viewport zoom axis, orthogonal to `zoom`: `Zoomed` feeds
+        /// The viewport zoom axis, orthogonal to Overview: `Zoomed` feeds
         /// `page_zoom` into `alpha` and a value above 1 deliberately enlarges
         /// the ribbon past the workarea.
         zoomed: bool,
         page_zoom: f32,
+        /// The stored Overview entry scale, projected verbatim while `overview`
+        /// is set. Generated across the whole legal range so the properties
+        /// cover reduced scales as well as the full-size one.
+        oscale: f32,
+        /// The Overview floor, which bounds the entry scale a command computes;
+        /// the projection itself only ever reads the stored `oscale`.
+        floor: f32,
     }
 
     /// A column tree that is *always* a legal `Workspace`: weights inside the
@@ -2120,10 +2394,14 @@ mod proptests {
             columns,
             (camera_offset(), camera_offset()),
             (
-                prop_oneof![0.05f32..=1.0, Just(1.0)],
                 any::<bool>(),
                 any::<bool>(),
                 1.0f32..=4.0,
+                0.05f32..=1.0,
+                // The floor across its whole legal range plus both ends, so
+                // the property tests cover "no reduction allowed" and "reduce
+                // as far as legal" as well as the interior.
+                prop_oneof![0.05f32..=1.0, Just(1.0), Just(0.05)],
             ),
         )
             .prop_map(
@@ -2137,7 +2415,7 @@ mod proptests {
                     accordion_boost,
                     columns,
                     (cam, focus_seed),
-                    (zoom, overview, zoomed, page_zoom),
+                    (overview, zoomed, page_zoom, oscale, floor),
                 )| {
                     // Derive the focus pointer from a generated value so it is
                     // not correlated with the column count the shrinker also
@@ -2154,10 +2432,11 @@ mod proptests {
                         columns,
                         focus_col,
                         cam,
-                        zoom,
                         overview,
                         zoomed,
                         page_zoom,
+                        oscale,
+                        floor,
                     }
                 },
             )
@@ -2191,8 +2470,8 @@ mod proptests {
                     column_idx: self.effective_focus(),
                 };
                 ws.camera.position = self.cam;
-                ws.zoom = self.zoom;
                 ws.overview = self.overview;
+                ws.overview_scale = if self.overview { self.oscale } else { 1.0 };
                 ws.viewport_mode = if self.zoomed {
                     ViewportMode::Zoomed
                 } else {
@@ -2216,6 +2495,7 @@ mod proptests {
                 border_w: self.border_w,
                 smart_gaps: self.smart_gaps,
                 accordion_boost: self.accordion_boost,
+                overview_zoom_min: self.floor,
                 ..Cfg::default()
             }
         }
@@ -2707,10 +2987,11 @@ mod proptests {
             columns: vec![(1.0, 1); 12],
             focus_col: 11,
             cam: 0.0,
-            zoom: 1.0,
             overview: false,
             zoomed: false,
             page_zoom: 1.0,
+            oscale: 1.0,
+            floor: 0.25,
         };
         let mut state = r.state();
         let cfg = r.cfg();

@@ -104,9 +104,15 @@ focused column in view.
   camera cannot be stranded past the end of a shorter ribbon.
 - Viewport zoom (`viewport_zoom`) enlarges the ribbon for close inspection, and
   `page_snap` scrolls the camera one screen-width at a time.
-- Overview (`toggle_overview`, `overview_nav`, `overview_enter`) is a zoomed-out
-  projection of the current View for picking a column. It changes the
-  projection, not the layout and not View membership.
+- Overview (`toggle_overview`, `overview_nav`, `overview_enter`) is a
+  fixed-scale navigation viewport over the current View for picking a column.
+  Entering it visibly reduces the tiles to the configured entry scale, with
+  the viewport panning as the selection moves; it never touches the layout or
+  View membership. The scale is fixed once, on entry — navigation pans the
+  viewport instead of shrinking the workspace further — so entering Overview
+  repeatedly and navigating between columns never rescales again, and leaving
+  it restores the settled view exactly. See "Overview is a navigation viewport"
+  below.
 - `grow_col` resizes the focused column by a pixel amount; `maverickctl resize`
   addresses the same operation as a percentage. `new_column` and
   `collapse_column` add and remove columns.
@@ -116,6 +122,75 @@ focused column in view.
   external compositor steps aside for it.
 - `LayoutKind` has a single variant, `Column`. `set_layout` accepts only
   `column`, and no second layout exists in this repository.
+
+### Overview is a navigation viewport
+
+`Super+O` opens a spatial-navigation mode over the workspace: one whole tile
+plus a peek of its neighbour at a reduced, fixed scale, with the viewport
+panning as the selection moves. The mechanism is the camera — `Camera::position`
+pans — plus a view scale (`alpha`) that is fixed once, on entry, from the
+focused tile (`overview_entry_scale_for`) and stored on the View
+(`overview_scale`). Neither one is stored per window; both are View state.
+
+The entry scale is the point of the mode, and it is a real one: `0.76` by
+default (`general.overview_scale`), so `Super+O` visibly shrinks the tiles
+instead of only moving a camera. The rule reads the *focused tile*, never the
+ribbon, and only ever moves the scale *down* from the configured target — when
+that tile would not fit even reduced, and never below `overview_zoom_min`. The
+client count therefore shapes the scrollable content but never the scale of a
+step: opening a twentieth window cannot shrink the nineteen already there.
+
+At that scale the focused tile is complete on screen with a useful sliver of
+the next one beside it, and entering with 1, 2, 3, 6 or 9 clients produces the
+same reduction — a lone window has no neighbour to reveal, and is still
+visibly not the settled view.
+
+Navigation then pans instead of rescaling:
+
+- `focus left` / `focus right` (and `overview_nav`) move the selection and pan
+  the viewport only when the new selection is not already visible — selecting
+  a visible tile never scrolls the ribbon under it;
+- repeated navigation in either direction, including at both ends of the
+  ribbon, never writes the scale;
+- a manual resize rewrites the logical column weight and adjusts visibility,
+  never a zoom on top;
+- new and closed clients join and leave the ribbon at the entry scale.
+
+Two properties follow from the scale being stored on entry rather than derived
+per projection:
+
+- **Entering Overview twice shows the same view, and navigating never
+  shrinks it.** No navigation, resize, map or unmap path writes the stored
+  scale — this is what stops `Super+O` from driving a workspace toward 1 px
+  tiles.
+- **Leaving it is exact.** The flag and the stored scale are cleared, the
+  camera parks on the selection, and the column weights, world geometry and
+  float rects were never written, so the settled view round-trips.
+
+The cursor has an explicit policy while Overview is on. Hovering a tiled
+client selects it (through the same focus-follows-mouse rule as outside
+Overview, when `focus_mouse` is set); a click selects and focuses it and is
+replayed to the application as usual. Neither motion nor click changes a
+tile's geometry, and neither converts a tiled window to floating: only an
+explicit `Mod4+Button` drag on an already-floating window moves or resizes,
+exactly as outside Overview. An `EnterNotify` that arrives without the
+pointer having moved — a pan slid another tile underneath it — carries no new
+intent and is ignored, so a selection can never cascade down the ribbon on
+its own. Leaving Overview restores the normal pointer behaviour and leaves
+no grab behind (every pointer grab is released on all exit paths by
+construction).
+
+Maverick has no compositor (`docs/architecture.md`), and that sets the honest
+limit of the effect: the view scale *is* written to `ConfigureWindow`, because
+there is nothing else that could render a client at another size. So the
+reduced Overview entry genuinely makes tiles smaller on screen — what it cannot
+do is make them illegible (the floor), and what it never does is change the
+layout, the column weights, a client's size hints, or the geometry it returns
+to. Floating clients live outside the ribbon: they are projected from their own
+`Client::geom`, never pan with the ribbon, and floating a tile during Overview
+starts from the *unscaled* tile, never from the projected rect. Fullscreen
+keeps priority: its flags and exclusive overlay survive entering, navigating
+and leaving the mode.
 
 ### Floating clients
 
@@ -466,7 +541,7 @@ default** binding set: 33 explicit bindings plus one `Super+<digit>` and one
 | Restart | `Super+Shift+R`, `Super+F5` | re-executes in place with the same arguments |
 | Focus the next monitor | `Super+Tab` | cycles monitor enumeration order |
 | Move window to the next monitor | `Super+Shift+Tab` | cycles monitor enumeration order |
-| Overview toggle / enter / next / previous | `Super+O` / `Super+E` / `Super+N` / `Super+Shift+O` | zoomed-out projection for picking a column |
+| Overview toggle / enter / next / previous | `Super+O` / `Super+E` / `Super+N` / `Super+Shift+O` | fixed-scale navigation viewport for picking a column |
 | Viewport zoom in / out | `Super+=` / `Super+-` | enlarges or restores the ribbon |
 | Page-snap right / left | `Super+]` / `Super+[` | scrolls the camera one screen-width |
 | Select View | `Super+1` … `Super+9` | generated per View, up to `n_tags` |
@@ -522,9 +597,16 @@ Compiled defaults for the most relevant `[general]` keys:
 | `corner_radius` | `0` | tile corner radius in pixels |
 | `theme` | `catppuccin-mocha` | built-in theme name |
 | `tag_names` | `["1"]` … `["9"]` | View labels published as `_NET_DESKTOP_NAMES` |
+| `overview_scale` | `0.76` | the scale Overview is entered at; the one view that visibly shrinks the tiles |
+| `overview_zoom_min` | `0.25` | floor for the Overview entry scale: the smallest it may go when the focused tile would not fit even reduced |
 
-Other accepted `[general]` keys: `gaps`, `accordion_boost`, `overview_zoom_min`
-and `warp_cursor`. `border_w` is an alias for `border_width`.
+Other accepted `[general]` keys: `gaps`, `accordion_boost` and `warp_cursor`.
+`border_w` is an alias for `border_width`. Both `overview_scale` and
+`overview_zoom_min` take a value between `0.05` and `1.0`; a value outside that
+range is ignored with a diagnostic, as is a floor above the target (the floor
+then normalizes to the target instead of silently cancelling the reduction).
+`overview_scale = 1.0` together with `overview_zoom_min = 1.0` is the
+documented way to ask for a full-size Overview with no reduction at all.
 
 Two keys are deprecated aliases kept for compatibility. Both still load, and both
 emit a warning:

@@ -2785,11 +2785,13 @@ mod tests {
         screen: Rect,
         workarea: Rect,
         wins: Vec<WinSpec>,
-        /// Camera offset, zoom factor and page zoom are the three scalars the
-        /// projection multiplies a column width by.
+        /// Camera offset, page zoom and the stored Overview entry scale are the
+        /// scalars the projection multiplies a column width by. The entry scale
+        /// is fixed when the mode is entered, so it is a scenario input like
+        /// the camera — not derived from the ribbon.
         cam: f32,
-        zoom: f32,
         page_zoom: f32,
+        oscale: f32,
         overview: bool,
         /// Inner and outer gap, in that order.
         gaps: (u32, u32),
@@ -2805,7 +2807,7 @@ mod tests {
             proptest::collection::vec(prop_win(), 0..=8),
             -4000.0f32..4000.0,
             0.05f32..=2.0,
-            0.05f32..=2.0,
+            0.05f32..=1.0,
             any::<bool>(),
             (0u32..=200, 0u32..=200),
             0u32..=8,
@@ -2818,8 +2820,8 @@ mod tests {
                     workarea,
                     wins,
                     cam,
-                    zoom,
                     page_zoom,
+                    oscale,
                     overview,
                     gaps,
                     border,
@@ -2830,8 +2832,8 @@ mod tests {
                     workarea,
                     wins,
                     cam,
-                    zoom,
                     page_zoom,
+                    oscale,
                     overview,
                     gaps,
                     border,
@@ -2851,8 +2853,8 @@ mod tests {
             workarea,
             wins,
             cam,
-            zoom,
             page_zoom,
+            oscale,
             overview,
             gaps,
             border,
@@ -2873,9 +2875,9 @@ mod tests {
         {
             let ws = &mut mon.workspaces[0];
             ws.camera.position = cam;
-            ws.zoom = zoom;
             ws.page_zoom = page_zoom;
             ws.overview = overview;
+            ws.overview_scale = if overview { oscale } else { 1.0 };
         }
         let mut state = State::new();
         let mut focus: Option<WindowId> = None;

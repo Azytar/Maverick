@@ -50,7 +50,19 @@ column_width = 0.6
 # column only resizes via GrowColumn/ShrinkColumn.
 accordion_boost = 0.0
 
-# Minimum zoom factor for the Overview film-strip (0.05–1.0).
+# The scale Overview is entered at (0.05–1.0), fixed once on entry and kept for
+# the whole session. This is what makes `Mod4+o` a visible change instead of a
+# flag flip: 0.76 leaves the focused tile complete on screen with a useful peek
+# of its neighbour beside it, whatever the client count. Navigation pans the
+# viewport at this scale; it never shrinks the tiles again.
+overview_scale = 0.76
+
+# Floor for the Overview entry scale (0.05–1.0). The scale itself is fixed on
+# entry at `overview_scale` and only ever comes down from it — when the focused
+# tile would not fit even reduced — and never below this. Past it the tile is
+# shown at the floor and the camera scrolls the remainder, instead of every
+# window being scaled down to a rectangle nobody can read. Set to 1.0 together
+# with `overview_scale = 1.0` for a full-size Overview with no reduction.
 overview_zoom_min = 0.25
 
 # Auto-generate the Super+1..9 / Super+Shift+1..9 workspace binds. Set to false
@@ -218,7 +230,7 @@ action = "focus_mon:next"
 key = "Mod4+Shift+Tab"
 action = "move_mon:next"
 
-# Overview (semantic-zoom film-strip)
+# Overview (fixed-scale navigation viewport)
 [[keybindings]]
 key = "Mod4+o"
 action = "toggle_overview"
