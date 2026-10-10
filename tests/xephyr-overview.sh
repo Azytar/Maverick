@@ -59,7 +59,6 @@ set -u
 unset MAVERICK_INSTANCE
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-DISP=":96"
 SCREEN_W=1920
 SCREEN_H=1080
 MAVERICK_BIN="${MAVERICK_BIN:-./target/debug/maverick}"
@@ -67,7 +66,7 @@ MAVERICK_CTL="${MAVERICK_CTL:-./target/debug/maverickctl}"
 RT="$(mktemp -d /tmp/mvov.XXXXXX)"
 export XDG_RUNTIME_DIR="$RT"
 LOG="$RT/maverick.log"
-SPIDS_FILE="$RT/pids"
+declare -A WPID=()
 # Xephyr is itself an X client of the *host* server: launch it with the host
 # DISPLAY, then switch the shell to the nested one.
 HOST_DISPLAY="${DISPLAY:-}"
@@ -80,27 +79,23 @@ bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
 info(){ echo "INFO: $*"; }
 
 cleanup() {
-    [ -f "$SPIDS_FILE" ] && xargs -r kill -9 <"$SPIDS_FILE" 2>/dev/null
-    rm -f "$SPIDS_FILE"
+    local pid
+    for pid in "${WPID[@]}"; do
+        kill -9 "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+    done
     [ -n "${MAV_PID:-}" ] && kill "$MAV_PID" 2>/dev/null
+    [ -n "${MAV_PID:-}" ] && wait "$MAV_PID" 2>/dev/null
     [ -n "${XEPHYR_PID:-}" ] && kill "$XEPHYR_PID" 2>/dev/null
-    pkill -9 -f "tests/mgdwi[n]" 2>/dev/null
+    [ -n "${XEPHYR_PID:-}" ] && wait "$XEPHYR_PID" 2>/dev/null
     rm -rf "$RT"
 }
 trap cleanup EXIT
 
 # ── preflight ─────────────────────────────────────────────────────────────────
-# The same set `tests/common.sh` clears, and deliberately no wider: a broader
-# pattern would reach a window manager an operator is actually using.
-pkill -9 -f "tests/mgdwi[n]" 2>/dev/null
-pkill -9 -x Xephyr 2>/dev/null
-pkill -9 -f "target/debug/maveri[c]ck" 2>/dev/null
-sleep 0.3
-
 [ -x "$HERE/mgdwin" ] || cc -O2 -o "$HERE/mgdwin" "$HERE/mgdwin.c" -lX11 2>/dev/null \
     || { echo "FAIL: could not build tests/mgdwin"; exit 1; }
 [ -x "$HERE/winmove" ] || cc -O2 -o "$HERE/winmove" "$HERE/winmove.c" -lX11 2>/dev/null
-: >"$SPIDS_FILE"
 
 cat >"$RT/rig.toml" <<'EOF'
 [autostart]
@@ -115,17 +110,26 @@ commands = []
 focus_mouse = true
 EOF
 
-DISPLAY="$HOST_DISPLAY" Xephyr "$DISP" -screen "${SCREEN_W}x${SCREEN_H}" -ac \
+# Let our server claim a free display atomically. A fixed number can already
+# belong to another session; neither its readiness nor its teardown is ours.
+DISPLAY="$HOST_DISPLAY" Xephyr -displayfd 3 -screen "${SCREEN_W}x${SCREEN_H}" -ac \
     +extension RANDR +extension GLX +extension Composite +extension DAMAGE \
-    >"$RT/xephyr.log" 2>&1 &
+    3>"$RT/display" >"$RT/xephyr.log" 2>&1 &
 XEPHYR_PID=$!
 up=0
 for _ in $(seq 1 60); do
-    if DISPLAY="$DISP" xprop -root >/dev/null 2>&1; then up=1; break; fi
+    kill -0 "$XEPHYR_PID" 2>/dev/null || break
+    if [ -s "$RT/display" ]; then
+        read -r display_number <"$RT/display"
+        if [[ "$display_number" =~ ^[0-9]+$ ]]; then
+            DISP=":$display_number"
+            if DISPLAY="$DISP" xprop -root >/dev/null 2>&1; then up=1; break; fi
+        fi
+    fi
     sleep 0.1
 done
 if [ "$up" != 1 ]; then
-    bad "Xephyr did not come up on $DISP ($(tail -2 "$RT/xephyr.log"))"; exit 1
+    bad "Xephyr did not claim a ready display ($(tail -2 "$RT/xephyr.log"))"; exit 1
 fi
 export DISPLAY="$DISP"
 
@@ -138,7 +142,6 @@ fi
 ok "maverick started on $DISP (log $LOG)"
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-declare -A WPID=()
 
 # Echo the XID of the client titled $1, non-zero when there is none. The exit
 # status matters as much as the value: a pipeline ending in `head` succeeds on
@@ -155,14 +158,17 @@ spawn_win() {
     # suite's own output; it fires when the client is later killed.
     { MGDTITLE="$1" "$HERE/mgdwin" >/dev/null 2>&1 & } 2>/dev/null
     WPID["$1"]=$!
-    echo "$!" >>"$SPIDS_FILE"
     local i=0
     while [ $i -lt 50 ]; do win_of "$1" >/dev/null 2>&1 && return 0; sleep 0.1; i=$((i+1)); done
     return 1
 }
 
 close_win() {
-    [ -n "${WPID[$1]:-}" ] && kill -9 "${WPID[$1]}" 2>/dev/null
+    if [ -n "${WPID[$1]:-}" ]; then
+        kill -9 "${WPID[$1]}" 2>/dev/null
+        wait "${WPID[$1]}" 2>/dev/null
+        unset 'WPID[$1]'
+    fi
     local i=0
     while [ $i -lt 50 ]; do win_of "$1" >/dev/null 2>&1 || return 0; sleep 0.1; i=$((i+1)); done
     return 1
@@ -372,14 +378,16 @@ assert_isolated() {
 }
 
 MGDTITLE=__guard__ "$HERE/mgdwin" >/dev/null 2>&1 &
-echo "$!" >>"$SPIDS_FILE"
 GUARD_PID=$!
+WPID[__guard__]=$GUARD_PID
 for _ in $(seq 1 50); do
     "$MAVERICK_CTL" query tree 2>/dev/null | grep -q '"instance":"mgdwin"' && break
     sleep 0.1
 done
 assert_isolated
 kill -9 "$GUARD_PID" 2>/dev/null
+wait "$GUARD_PID" 2>/dev/null
+unset 'WPID[__guard__]'
 sleep 0.4
 ok "the rig manages only its own clients"
 
