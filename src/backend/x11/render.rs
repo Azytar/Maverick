@@ -1110,6 +1110,7 @@ impl WindowManager {
 
     pub(super) fn focus(&mut self, win: Option<Window>) -> Result<(), Box<dyn std::error::Error>> {
         let valid_win = win.filter(|w| self.engine.state.clients.contains_key(w));
+        self.take_focus_pending = None;
 
         #[cfg(feature = "input-trace")]
         itrace!(
@@ -1220,7 +1221,7 @@ impl WindowManager {
                 self.root_focus_pending = Some(w);
             }
             if self.has_protocol(w, self.atoms.wm_take_focus)? {
-                self.send_proto(w, self.atoms.wm_take_focus, stamp)?;
+                self.offer_take_focus(w)?;
             }
             // Commit the logical focus to `State` *before* reconciling against
             // the real X input focus below. `reconcile_focus()` compares the real
@@ -1634,7 +1635,7 @@ impl WindowManager {
                     self.root_focus_pending = Some(w);
                 }
                 if self.has_protocol(w, self.atoms.wm_take_focus)? {
-                    self.send_proto(w, self.atoms.wm_take_focus, stamp)?;
+                    self.offer_take_focus(w)?;
                 }
                 let urgent = self
                     .engine

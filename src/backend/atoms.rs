@@ -71,6 +71,7 @@ pub struct Atoms {
     // existing window tree returns windows to exactly where they were.
     pub maverick_float: u32,
     pub maverick_geom: u32,
+    pub maverick_timestamp: u32,
 
     // Property type for `WM_NAME`/`_NET_WM_NAME` values, which ICCCM/EWMH
     // require to be encoded in it.
@@ -95,6 +96,7 @@ impl Atoms {
         let r_wm_state = intern!("WM_STATE")?;
         let r_wm_focus = intern!("WM_TAKE_FOCUS")?;
         let r_wm_hints = intern!("WM_HINTS")?;
+        let r_timestamp = intern!("_MAVERICK_TIMESTAMP")?;
 
         let r_net_supported = intern!("_NET_SUPPORTED")?;
         let r_net_client_list = intern!("_NET_CLIENT_LIST")?;
@@ -176,6 +178,7 @@ impl Atoms {
             net_wm_pid: r_net_wm_pid.reply()?.atom,
             maverick_float: r_maverick_float.reply()?.atom,
             maverick_geom: r_maverick_geom.reply()?.atom,
+            maverick_timestamp: r_timestamp.reply()?.atom,
             utf8_string: r_utf8_string.reply()?.atom,
         })
     }

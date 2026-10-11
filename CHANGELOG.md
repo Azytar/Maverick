@@ -34,6 +34,9 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- `WM_TAKE_FOCUS` always carries a fresh server timestamp, including startup
+  and repair after external focus changes. Pending offers are superseded by
+  newer selections; queued X11 requests are flushed before waiting for replies.
 - Startup now defines a visible standard arrow on the root window, including
   when the inherited cursor is transparent and no applications are open.
   Client cursors remain independent; shutdown restores the server default.

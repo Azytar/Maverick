@@ -705,6 +705,12 @@ impl WindowManager {
         if self.root_focus_pending == Some(win) {
             self.root_focus_pending = None;
         }
+        if self
+            .take_focus_pending
+            .is_some_and(|(pending, _)| pending == win)
+        {
+            self.take_focus_pending = None;
+        }
 
         // The monitor — or the View the window was placed in — may no longer exist
         // after a hotplug.

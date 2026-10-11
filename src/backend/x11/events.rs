@@ -562,6 +562,25 @@ impl WindowManager {
         &mut self,
         e: PropertyNotifyEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if e.window == self.check_win && e.atom == self.atoms.maverick_timestamp {
+            trace!(
+                "focus_clock",
+                "sequence={} time={} pending={:?}",
+                e.sequence,
+                e.time,
+                self.take_focus_pending
+            );
+            if let Some((win, sequence)) = self.take_focus_pending {
+                if e.sequence == sequence && e.state == Property::NEW_VALUE && e.time != 0 {
+                    self.take_focus_pending = None;
+                    let logical = self.engine.state.monitors[self.engine.state.sel_mon].focused;
+                    if logical == Some(win) && self.has_protocol(win, self.atoms.wm_take_focus)? {
+                        self.send_proto(win, self.atoms.wm_take_focus, e.time)?;
+                    }
+                }
+            }
+            return Ok(());
+        }
         if e.window == self.root && e.atom == u32::from(AtomEnum::WM_NAME) {
             self.update_status()?;
             return Ok(());

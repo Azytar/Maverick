@@ -323,12 +323,10 @@ impl WindowManager {
         proto: u32,
         time: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // ICCCM 4.1.4: `WM_TAKE_FOCUS` must carry a real server timestamp
-        // (the latest key/button event) rather than `CurrentTime`; some strict
-        // toolkits (Java Swing, some Emacs builds) discard CurrentTime-based
-        // focus messages. Fall back to `CurrentTime` only when no input event
-        // has been recorded yet.
-        let time = if time != 0 { time } else { x11rb::CURRENT_TIME };
+        // ICCCM forbids CurrentTime in WM_TAKE_FOCUS, even at startup.
+        if proto == self.atoms.wm_take_focus && time == x11rb::CURRENT_TIME {
+            return Err("WM_TAKE_FOCUS requires a server timestamp".into());
+        }
         let ev = ClientMessageEvent {
             response_type: CLIENT_MESSAGE_EVENT,
             format: 32,
@@ -338,6 +336,28 @@ impl WindowManager {
             data: ClientMessageData::from([proto, time, 0, 0, 0]),
         };
         let _ = self.conn.send_event(false, win, EventMask::NO_EVENT, ev);
+        Ok(())
+    }
+
+    pub(super) fn offer_take_focus(
+        &mut self,
+        win: Window,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cookie = self.conn.change_property8(
+            PropMode::REPLACE,
+            self.check_win,
+            self.atoms.maverick_timestamp,
+            AtomEnum::INTEGER,
+            &[0],
+        )?;
+        // PropertyNotify is stamped after the preceding focus request. Match
+        // the request sequence so a superseded offer cannot use an older reply.
+        self.take_focus_pending = Some((win, cookie.sequence_number() as u16));
+        trace!(
+            "focus_offer_pending",
+            "window={win:#x} sequence={}",
+            cookie.sequence_number()
+        );
         Ok(())
     }
 }

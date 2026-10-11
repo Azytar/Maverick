@@ -280,9 +280,8 @@ pub struct WindowManager {
     /// `MotionNotify` and `ButtonPress`; read (never written) by `EnterNotify`.
     ptr_truth: PointerTruth,
     /// Server time of the most recent input event (key/button/motion/enter).
-    /// Used to stamp `set_input_focus` requests and ICCCM `WM_TAKE_FOCUS`
-    /// messages with a real timestamp instead of `CurrentTime`, which a few
-    /// strict toolkits (some Java/Emacs builds) refuse to act on.
+    /// Used by direct SetInputFocus requests. Protocol offers obtain their
+    /// own server timestamp through the internal window's PropertyNotify.
     last_event_time: u32,
     /// Whether a focus change has been observed since `last_event_time` was
     /// recorded. X11 focus events carry no timestamp, so after one the stored
@@ -308,6 +307,8 @@ pub struct WindowManager {
     /// the client takes the focus (`real == window`), when the logical focus
     /// moves elsewhere, or when the window is unmanaged.
     root_focus_pending: Option<Window>,
+    /// Only the latest focus offer may consume its server timestamp reply.
+    take_focus_pending: Option<(Window, u16)>,
     /// Per-monitor cached stacking order (top-to-bottom) so `stack_overlay`
     /// only re-issues `raise()` when the order actually changed, instead of
     /// re-raising every float/popup on every arrange.
@@ -532,8 +533,7 @@ impl WindowManager {
         }
     }
 
-    /// Timestamp for the next focus request (`set_input_focus`) or focus
-    /// protocol message (`WM_TAKE_FOCUS`).
+    /// Timestamp for a direct SetInputFocus request, not a protocol offer.
     ///
     /// A stored stamp older than the server's last-focus-change time makes the
     /// server silently ignore the request, so after any observed focus change
@@ -758,6 +758,10 @@ impl WindowManager {
         // it until a pass runs.
         self.flush_pending()?;
 
+        // Drained events can enqueue requests whose replies are the next wakeup.
+        // Send them before waiting, including the timestamp for a focus offer.
+        self.conn.flush()?;
+
         // Block on X11 plus the control self-pipe. There is no frame deadline:
         // no heartbeat, no timer, no frame loop. Every other bound the
         // loop owns lives in `wait_timeout` — never sleep past a pending
@@ -960,7 +964,7 @@ impl WindowManager {
             0,
             WindowClass::INPUT_OUTPUT,
             0,
-            &CreateWindowAux::new(),
+            &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
         )?
         .check()?;
 
@@ -1031,6 +1035,7 @@ impl WindowManager {
             last_event_time: 0,
             event_time_suspect: false,
             root_focus_pending: None,
+            take_focus_pending: None,
             last_stack_order: std::collections::HashMap::new(),
             fs_covering: std::collections::HashMap::new(),
             pending: PendingReconcile::default(),
