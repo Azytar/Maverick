@@ -68,6 +68,15 @@ before it makes no compatibility promise.
   tree (`Azytar/Maverick`, previously a lower-case owner that no longer
   resolves), and the keywords of every workspace package carry the repository's
   own topics (`linux`, `rust`, `unix`, `window-manager`, `x11`).
+- The focus repair no longer steals the X input focus back from windows the
+  window manager does not manage. A client-driven focus move to an
+  override-redirect capture/popup (Wine/Proton relative-mouse capture, menus,
+  tooltips), a not-yet-managed window or a client child window used to be
+  treated as focus theft and answered with a counter-`XSetInputFocus` plus a
+  spurious `WM_TAKE_FOCUS`, flapping the keyboard between the two windows and
+  breaking the client's grabs. The logical selection is kept and the X focus
+  is left alone; only a divergence between two managed clients, or a focus
+  lost to the root, is still repaired.
 
 ## [1.1.1] - 2026-10-05
 

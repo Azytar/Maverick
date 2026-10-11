@@ -1458,6 +1458,34 @@ impl WindowManager {
             return Ok(());
         }
 
+        // Unmanaged real focus: the X focus sits on a window this WM does not
+        // manage — an override-redirect capture/popup (Wine/Proton relative-
+        // mouse capture, menus, tooltips), a not-yet-managed new window, a
+        // dock/desktop, or a client child window. That move was the client's
+        // own doing (`XSetInputFocus`, a grab, or a map), not a desync among
+        // managed windows, so there is nothing to repair and stealing the
+        // focus back would fight the client: each client `XSetInputFocus`
+        // would be answered with a WM counter-`XSetInputFocus` plus a
+        // `WM_TAKE_FOCUS` message, flapping the keyboard between the two
+        // windows and breaking grabs (measured with a Wine-style OR capture
+        // window: the settle repaired the game window right after the client
+        // focused its capture window). Keep the logical selection (borders,
+        // focus stack, `_NET_ACTIVE_WINDOW` stay as they are) and leave the
+        // X focus alone; the client's own release (re-focus, unmap, grab end)
+        // settles through the ordinary `FocusIn`/managed path. Only a
+        // divergence where *both* sides are managed clients — or where the
+        // focus was lost to root/`None` — is repaired below.
+        if let Some(r) = real {
+            if !self.engine.state.clients.contains_key(&r) {
+                #[cfg(feature = "input-trace")]
+                itrace!(
+                    "reconcile_focus BAIL unmanaged: real={:#x} is not a managed client, leaving X focus alone (logical={:?})",
+                    r, logical
+                );
+                return Ok(());
+            }
+        }
+
         // ICCCM 4.1.7 counterpart of `focus()` needs no guard of its own any
         // more. `focus()` refuses a window whose `WM_HINTS.input` is false, and
         // the repair below re-asserts `PointerRoot` rather than the window, so
@@ -1505,10 +1533,13 @@ impl WindowManager {
             }
         }
 
-        // Divergence: re-assert the logical focus on X. This is exactly the
-        // recovery path for the silent-focus-loss bug — an external
-        // XSetInputFocus (popup/dialog/Wine/`_NET_ACTIVE_WINDOW` from another
-        // tool) left real focus somewhere other than where the WM thinks it is.
+        // Divergence between two managed clients: re-assert the logical focus
+        // on X. This is exactly the recovery path for the silent-focus-loss
+        // bug — the real focus moved to a *managed* window other than the one
+        // the WM selected (stale timestamp, competing pager tool), leaving
+        // the borders and `_NET_ACTIVE_WINDOW` out of sync with the server.
+        // Focus moves to unmanaged windows (override-redirect popups/capture,
+        // not-yet-managed clients) bail out above and never reach here.
         #[cfg(feature = "input-trace")]
         itrace!(
             "reconcile_focus REPAIR: re-asserting logical={:?} onto X (was real={:?}) on sel_mon={}",
