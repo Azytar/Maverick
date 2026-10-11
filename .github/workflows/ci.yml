@@ -86,7 +86,7 @@ jobs:
         # before anything was compiled.
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils xdotool picom libxcomposite-dev libxfixes-dev libx11-dev libx11-xcb-dev libxcb1-dev
+          sudo apt-get install -y xvfb x11-utils xdotool picom libxcomposite-dev libxfixes-dev libxi-dev libxtst-dev libx11-dev libx11-xcb-dev libxcb1-dev
       - name: Build release profile
         # `tests/xvfb-stacking.py` drives target/release/maverick, so build
         # that profile: it is the one `installer/install.sh` produces and
@@ -99,11 +99,14 @@ jobs:
         run: python3 tests/xvfb-stacking.py
       - name: Root cursor startup and ownership
         run: python3 tests/xvfb-cursor.py
-      - name: ICCCM focus protocol regression
+      - name: X11 focus and input regressions
         run: |
           python3 tests/xvfb-input.py --case protocol
           python3 tests/xvfb-input.py --case ownership
           python3 tests/xvfb-input.py --case child
+          python3 tests/xvfb-input.py --case capture
+          python3 tests/xvfb-input.py --case capture --exclusive
+          python3 tests/xvfb-wine-focus.py --wm target/release/maverick
       - name: Overview rig isolation
         run: python3 tests/overview-isolation.py
       - name: Overview client geometry and image regression

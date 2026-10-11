@@ -4,9 +4,8 @@
 #include <string.h>
 #include <unistd.h>
 
-// Wine-style focus probe: a managed "game" window plus an override-redirect
-// "capture" window (Wine/Proton relative-mouse capture). Reports focus
-// stability as JSON RESULT lines for tests/xvfb-wine-focus.py.
+// A managed client and an override-redirect auxiliary input window. Pointer
+// clipping uses a separate InputOnly/XGrabPointer regression in input-probe.c.
 //
 // While the client holds the X input focus on its capture window, the WM must
 // leave it alone: no counter-SetInputFocus (no FocusIn flap on the game
@@ -85,8 +84,7 @@ int main(void) {
     XEvent e;
     XNextEvent(d, &e);
   }
-  // The game captures the input the way Wine/Proton does for relative mouse:
-  // the X focus moves to the game's own override-redirect window. Hold it
+  // The client transfers X focus to its own auxiliary window. Hold it
   // there for ~3s with realistic pointer motion (boundary-crossing warps, so
   // the server keeps delivering EnterNotify with fresh timestamps) and one
   // mid-hold re-capture, the way a game re-asserts its capture after every
@@ -245,5 +243,6 @@ int main(void) {
   XDestroyWindow(d, game2);
   XDestroyWindow(d, game);
   XCloseDisplay(d);
+  puts("COMPLETE wine-focus");
   return 0;
 }
