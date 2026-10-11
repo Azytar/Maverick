@@ -57,9 +57,8 @@
 //! `focus` validates the window, refuses one whose `WM_HINTS.input`
 //! is false (unless it offers `WM_TAKE_FOCUS`, which is then sent while the
 //! X focus goes to `PointerRoot`), unfocuses the previous window, sets `sel_mon`, calls
-//! `set_input_focus` with `focus_time()` (a real stamp, or `CurrentTime`
-//! after an intervening focus change made the stored one suspect), writes
-//! `WM_TAKE_FOCUS`,
+//! `set_input_focus` with `CurrentTime` and offers `WM_TAKE_FOCUS` with a
+//! separately acquired server timestamp,
 //! updates the focus stack *before* `reconcile_focus` (return-to-workspace
 //! bug fix), and calls `stack_overlay`.
 //!
@@ -1110,6 +1109,7 @@ impl WindowManager {
 
     pub(super) fn focus(&mut self, win: Option<Window>) -> Result<(), Box<dyn std::error::Error>> {
         let valid_win = win.filter(|w| self.engine.state.clients.contains_key(w));
+        self.take_focus_pending = None;
 
         #[cfg(feature = "input-trace")]
         itrace!(
@@ -1186,23 +1186,11 @@ impl WindowManager {
 
             self.engine.state.sel_mon = mon_i;
 
-            // Set the X11 input focus. Use the real last-input timestamp, not
-            // `CURRENT_TIME`: a `CurrentTime` focus request is silently ignored
-            // by the server when a newer focus change has occurred, which is
-            // exactly what desyncs logical vs real focus (the red-border bug).
-            //
-            // The target depends on the input model (ICCCM 4.1.7): a window
-            // that wants input is focused directly, while a *Globally Active*
-            // window (`input = False` + `WM_TAKE_FOCUS`, which passed the gate
-            // above) leaves the X focus on `PointerRoot` and is offered the
-            // protocol below, so it can take the focus itself. Either way the
-            // logical selection moves to `w` in the block that follows.
-            //
-            // The stamp is `focus_time()`, not the raw last input time: after
-            // an intervening focus change the stored stamp predates the
-            // server's last-focus-change time and the request would be
-            // silently ignored, leaving the focus stuck.
-            let stamp = self.focus_time();
+            // Apply the WM's current intent, not a cached input timestamp:
+            // child-window focus moves can make that timestamp stale without
+            // any top-level Normal event. Protocol offers use a separate clock.
+            let stamp = x11rb::CURRENT_TIME;
+            trace!("focus_request", "window={w:#x} direct={wants_input}");
             if wants_input {
                 let _ = self.conn.set_input_focus(InputFocus::PARENT, w, stamp);
                 // A direct request supersedes any outstanding root offer.
@@ -1220,7 +1208,7 @@ impl WindowManager {
                 self.root_focus_pending = Some(w);
             }
             if self.has_protocol(w, self.atoms.wm_take_focus)? {
-                self.send_proto(w, self.atoms.wm_take_focus, stamp)?;
+                self.offer_take_focus(w)?;
             }
             // Commit the logical focus to `State` *before* reconciling against
             // the real X input focus below. `reconcile_focus()` compares the real
@@ -1371,7 +1359,7 @@ impl WindowManager {
             }
             let _ =
                 self.conn
-                    .set_input_focus(InputFocus::POINTER_ROOT, self.root, self.focus_time());
+                    .set_input_focus(InputFocus::POINTER_ROOT, self.root, x11rb::CURRENT_TIME);
             // No logical target owns the root focus here: drop any
             // outstanding offer with it.
             self.root_focus_pending = None;
@@ -1447,14 +1435,98 @@ impl WindowManager {
         self.settle_focus(probed)
     }
 
+    fn accept_client_focus(
+        &mut self,
+        from: Window,
+        to: Window,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let clients = &self.engine.state.clients;
+        let (Some(source), Some(target)) = (clients.get(&from), clients.get(&to)) else {
+            return Ok(false);
+        };
+        let mi = self.engine.state.sel_mon;
+        let Some(mon) = self.engine.state.monitors.get(mi) else {
+            return Ok(false);
+        };
+        if source.monitor != mi
+            || target.monitor != mi
+            || source.workspace != mon.ws().id
+            || target.workspace != mon.ws().id
+            || target.wm_hidden
+        {
+            return Ok(false);
+        }
+        let mut family = vec![from];
+        for _ in 0..MAX_TRANSIENT_DEPTH {
+            let Some(parent) = family
+                .last()
+                .and_then(|w| clients.get(w))
+                .and_then(|c| c.transient_parent)
+            else {
+                break;
+            };
+            if !clients.contains_key(&parent) || family.contains(&parent) {
+                break;
+            }
+            family.push(parent);
+        }
+        let transient = family.contains(&to) || transient_chain_reaches(clients, to, &family);
+        if let Some(owner) = self.engine.state.presented_overlay_owner(mi) {
+            if owner != to && !transient_chain_reaches(clients, to, &[owner]) {
+                return Ok(false);
+            }
+        }
+        if !transient && !self.shares_focus_group(from, to)? {
+            return Ok(false);
+        }
+        if !target.wants_input && !self.has_protocol(to, self.atoms.wm_take_focus)? {
+            return Ok(false);
+        }
+        self.unfocus(from)?;
+        crate::core::commands::focus_logical_on(&mut self.engine.state, mi, to);
+        if self.engine.state.pending_focus.is_some()
+            && !self.engine.state.pending_focus_owner_presented()
+        {
+            self.engine.state.pending_focus = None;
+        }
+        self.root_focus_pending = None;
+        self.take_focus_pending = None;
+        if let Some(client) = self.engine.state.clients.get_mut(&to) {
+            if client.flags.has(WinFlags::URGENT) {
+                client.flags.clear(WinFlags::URGENT);
+                self.write_net_wm_state(to);
+            }
+        }
+        self.conn.change_window_attributes(
+            to,
+            &ChangeWindowAttributesAux::new().border_pixel(self.engine.cfg.col_focused),
+        )?;
+        self.conn.change_property32(
+            PropMode::REPLACE,
+            self.root,
+            self.atoms.net_active_window,
+            AtomEnum::WINDOW,
+            &[to],
+        )?;
+        let retargeted = retarget_focus_to_window(&mut self.engine.state, &self.engine.cfg, to);
+        self.pending.mark(retargeted.unwrap_or(mi), Some(to));
+        self.engine.notify(crate::core::event::Event::FocusChanged {
+            from: Some(from),
+            to: Some(to),
+        });
+        self.publish_state();
+        #[cfg(debug_assertions)]
+        self.engine.state.assert_invariants();
+        trace!("client_focus_accepted", "from={from:#x} to={to:#x}");
+        Ok(true)
+    }
+
     /// Settle the WM's logical focus against a real focus the caller already
     /// holds.
     ///
-    /// Every `FocusIn` names the window that took the focus, so a handler that
-    /// has one already knows what `GetInputFocus` would answer — and knows it
-    /// more accurately, since a probe issued afterwards reports where focus has
-    /// since *moved*, not where it was when the event was generated. Asking
-    /// anyway costs a blocking round trip on the single event-loop thread.
+    /// A matching FocusIn acknowledges the current selection without another
+    /// round trip. Divergent notifications require the caller to probe the
+    /// server after draining the batch, since they can already be obsolete.
     pub(super) fn settle_focus(
         &mut self,
         real: Option<Window>,
@@ -1501,23 +1573,18 @@ impl WindowManager {
             return Ok(());
         }
 
-        // Unmanaged real focus: the X focus sits on a window this WM does not
-        // manage — an override-redirect capture/popup (Wine/Proton relative-
-        // mouse capture, menus, tooltips), a not-yet-managed new window, a
-        // dock/desktop, or a client child window. That move was the client's
-        // own doing (`XSetInputFocus`, a grab, or a map), not a desync among
-        // managed windows, so there is nothing to repair and stealing the
-        // focus back would fight the client: each client `XSetInputFocus`
-        // would be answered with a WM counter-`XSetInputFocus` plus a
-        // `WM_TAKE_FOCUS` message, flapping the keyboard between the two
-        // windows and breaking grabs (measured with a Wine-style OR capture
-        // window: the settle repaired the game window right after the client
-        // focused its capture window). Keep the logical selection (borders,
-        // focus stack, `_NET_ACTIVE_WINDOW` stay as they are) and leave the
-        // X focus alone; the client's own release (re-focus, unmap, grab end)
-        // settles through the ordinary `FocusIn`/managed path. Only a
-        // divergence where *both* sides are managed clients — or where the
-        // focus was lost to root/`None` — is repaired below.
+        if let (Some(from), Some(to)) = (logical, real) {
+            if self.accept_client_focus(from, to)? {
+                return Ok(());
+            }
+        }
+
+        // Children, override-redirect popups and other unmanaged windows can
+        // legitimately hold X focus while the logical owner stays selected.
+        // Counter-focus would interrupt their keyboard delivery. Pointer
+        // capture is separately owned by the grabbing client. Its release or
+        // refocus settles through the normal managed path; managed divergence
+        // and focus lost to root/None remain subject to repair below.
         if let Some(r) = real {
             if !self.engine.state.clients.contains_key(&r) {
                 #[cfg(feature = "input-trace")]
@@ -1615,12 +1682,9 @@ impl WindowManager {
                     Some(c) => c.wants_input,
                     None => true,
                 };
-                // ICCCM 4.1.7 (same rule as `focus()`): never put the X
-                // input focus on an `input == False` window — re-assert to
-                // the root instead. Stamped with `focus_time()`: the probe
-                // that led here observed a focus change, so a stored stamp
-                // may already be older than it.
-                let stamp = self.focus_time();
+                // A Globally Active client takes focus through its protocol;
+                // the WM must not focus that top-level window directly.
+                let stamp = x11rb::CURRENT_TIME;
                 if wants {
                     let _ = self.conn.set_input_focus(InputFocus::PARENT, w, stamp);
                     // A direct request supersedes any outstanding root offer.
@@ -1634,7 +1698,7 @@ impl WindowManager {
                     self.root_focus_pending = Some(w);
                 }
                 if self.has_protocol(w, self.atoms.wm_take_focus)? {
-                    self.send_proto(w, self.atoms.wm_take_focus, stamp)?;
+                    self.offer_take_focus(w)?;
                 }
                 let urgent = self
                     .engine
@@ -1655,7 +1719,7 @@ impl WindowManager {
         } else {
             let _ =
                 self.conn
-                    .set_input_focus(InputFocus::POINTER_ROOT, self.root, self.focus_time());
+                    .set_input_focus(InputFocus::POINTER_ROOT, self.root, x11rb::CURRENT_TIME);
             // No logical target owns the root focus here: drop any
             // outstanding offer with it.
             self.root_focus_pending = None;

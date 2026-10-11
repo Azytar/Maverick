@@ -34,6 +34,17 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Direct focus requests apply the WM's current selection without reusing a
+  timestamp that an internal child-window focus change can silently invalidate.
+  Focus diagnostics now record X11 mode/detail and protocol timestamps.
+- Related clients can transfer input focus through transient relationships,
+  `WM_HINTS.window_group` or `WM_CLIENT_LEADER` within the current monitor and
+  View without counter-focus requests or duplicate focus offers. Unrelated,
+  hidden and No Input targets remain protected. Removed input and transient
+  hints no longer leave stale focus eligibility or ownership behind.
+- `WM_TAKE_FOCUS` always carries a fresh server timestamp, including startup
+  and repair after external focus changes. Pending offers are superseded by
+  newer selections; queued X11 requests are flushed before waiting for replies.
 - Startup now defines a visible standard arrow on the root window, including
   when the inherited cursor is transparent and no applications are open.
   Client cursors remain independent; shutdown restores the server default.
@@ -75,23 +86,17 @@ before it makes no compatibility promise.
   treated as focus theft and answered with a counter-`XSetInputFocus` plus a
   spurious `WM_TAKE_FOCUS`, flapping the keyboard between the two windows and
   breaking the client's grabs. The logical selection is kept and the X focus
-  is left alone; only a divergence between two managed clients, or a focus
-  lost to the root, is still repaired.
+  is left alone; unrelated managed divergence, or focus lost to the root,
+  remains subject to repair.
 - A window using the ICCCM 4.1.7 *Globally Active* input model
-  (`WM_HINTS.input = False` with `WM_TAKE_FOCUS`, exactly what Wine/Proton
-  game windows declare) can now receive the focus at all. Such requests used
+  (`WM_HINTS.input = False` with `WM_TAKE_FOCUS`) can now receive the focus
+  at all. Such requests used
   to be refused outright, so no `WM_TAKE_FOCUS` was ever offered and the
   client — waiting for the offer to take the focus itself — never got the
   keyboard, with no focus event left to repair through. The X focus now goes
   to the root while the protocol is offered, and the echo of that offer
   settles quietly instead of repairing a second time (which could land after
   the client's self-take and yank the focus back off it).
-- Focus requests are no longer stamped with an input timestamp that a silent
-  intervening focus change has made older than the server's
-  last-focus-change time (such requests are ignored by the server, leaving
-  the focus stuck). Any observed focus change — which itself carries no
-  timestamp — marks the stored stamp suspect until fresh key, button, motion
-  or enter input arrives; while suspect, `CurrentTime` is used instead.
 
 ## [1.1.1] - 2026-10-05
 

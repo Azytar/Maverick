@@ -323,12 +323,13 @@ impl WindowManager {
         proto: u32,
         time: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // ICCCM 4.1.4: `WM_TAKE_FOCUS` must carry a real server timestamp
-        // (the latest key/button event) rather than `CurrentTime`; some strict
-        // toolkits (Java Swing, some Emacs builds) discard CurrentTime-based
-        // focus messages. Fall back to `CurrentTime` only when no input event
-        // has been recorded yet.
-        let time = if time != 0 { time } else { x11rb::CURRENT_TIME };
+        // ICCCM forbids CurrentTime in WM_TAKE_FOCUS, even at startup.
+        if proto == self.atoms.wm_take_focus && time == x11rb::CURRENT_TIME {
+            return Err("WM_TAKE_FOCUS requires a server timestamp".into());
+        }
+        if proto == self.atoms.wm_take_focus {
+            trace!("focus_offer", "window={win:#x} x_time_ms={time}");
+        }
         let ev = ClientMessageEvent {
             response_type: CLIENT_MESSAGE_EVENT,
             format: 32,
@@ -339,6 +340,70 @@ impl WindowManager {
         };
         let _ = self.conn.send_event(false, win, EventMask::NO_EVENT, ev);
         Ok(())
+    }
+
+    pub(super) fn offer_take_focus(
+        &mut self,
+        win: Window,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cookie = self.conn.change_property8(
+            PropMode::REPLACE,
+            self.check_win,
+            self.atoms.maverick_timestamp,
+            AtomEnum::INTEGER,
+            &[0],
+        )?;
+        // PropertyNotify is stamped after the preceding focus request. Match
+        // the request sequence so a superseded offer cannot use an older reply.
+        self.take_focus_pending = Some((win, cookie.sequence_number() as u16));
+        trace!(
+            "focus_offer_pending",
+            "window={win:#x} sequence={}",
+            cookie.sequence_number()
+        );
+        Ok(())
+    }
+
+    fn declared_focus_group(
+        &self,
+        win: Window,
+    ) -> Result<Option<Window>, Box<dyn std::error::Error>> {
+        let hints =
+            self.conn
+                .get_property(false, win, self.atoms.wm_hints, self.atoms.wm_hints, 0, 9)?;
+        let leader = self.conn.get_property(
+            false,
+            win,
+            self.atoms.wm_client_leader,
+            AtomEnum::WINDOW,
+            0,
+            1,
+        )?;
+        let Ok(hints) = hints.reply() else {
+            return Ok(None);
+        };
+        let words: Vec<u32> = hints.value32().map(Iterator::collect).unwrap_or_default();
+        if words.first().is_some_and(|flags| flags & 64 != 0) {
+            if let Some(&group) = words.get(8).filter(|&&group| group != x11rb::NONE) {
+                return Ok(Some(group));
+            }
+        }
+        Ok(leader
+            .reply()
+            .ok()
+            .and_then(|reply| reply.value32().and_then(|mut values| values.next()))
+            .filter(|&group| group != x11rb::NONE))
+    }
+
+    pub(super) fn shares_focus_group(
+        &self,
+        from: Window,
+        to: Window,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        // These ICCCM declarations describe an application family, not an
+        // authenticated identity. PID and WM_CLASS are not focus authority.
+        let from = self.declared_focus_group(from)?;
+        Ok(from.is_some() && from == self.declared_focus_group(to)?)
     }
 }
 

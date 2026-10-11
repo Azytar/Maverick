@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""Regression: the WM must not steal X input focus back from unmanaged windows.
+"""Regression for unmanaged focus and Globally Active protocol offers.
 
-A Wine/Proton game doing relative-mouse capture points the X input focus at
-its own override-redirect capture window (`XSetInputFocus`). That move is the
-client's own doing, not a desync among managed windows, so the focus repair
-(`settle_focus`/`reconcile_focus`) must leave the X focus alone: no
-counter-`XSetInputFocus` to the game window, no FocusIn flap on it. When the
-capture window is destroyed, the focus returns to the game window through the
-normal revert/repair path.
+This models a client that focuses an auxiliary override-redirect window.
+InputOnly pointer clipping, XI2 and keyboard delivery are tested separately
+by xvfb-input.py; a pointer grab does not imply a keyboard focus transfer.
 
 Uses tests/wine-focus-probe.c. Starts its own Xvfb, config and runtime dir;
 never touches a live session. Run after `cargo build -p maverick`:
@@ -58,7 +54,7 @@ def main():
             "DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY"
         ):
             del env[name]
-    for name in ("HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
+    for name in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
                  "XDG_STATE_HOME", "XDG_CACHE_HOME"):
         path = out / name
         path.mkdir(mode=0o700)
@@ -100,11 +96,16 @@ def main():
             time.sleep(0.5)
             run = subprocess.run([str(helper)], env=env, capture_output=True,
                                  text=True, timeout=60)
+            if wm.poll() is not None:
+                failures.append("wm-exit-status")
             print(run.stdout, flush=True)
             print(run.stderr, file=sys.stderr, flush=True)
-            if run.returncode not in (0,):
+            if run.returncode != 0:
                 print(f"probe exited with status {run.returncode}",
                       file=sys.stderr, flush=True)
+                failures.append("probe-exit-status")
+            if "COMPLETE wine-focus" not in run.stdout.splitlines():
+                failures.append("probe-incomplete")
             for raw in run.stdout.splitlines():
                 if not raw.startswith("RESULT "):
                     continue

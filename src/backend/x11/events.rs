@@ -562,6 +562,25 @@ impl WindowManager {
         &mut self,
         e: PropertyNotifyEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if e.window == self.check_win && e.atom == self.atoms.maverick_timestamp {
+            trace!(
+                "focus_clock",
+                "sequence={} time={} pending={:?}",
+                e.sequence,
+                e.time,
+                self.take_focus_pending
+            );
+            if let Some((win, sequence)) = self.take_focus_pending {
+                if e.sequence == sequence && e.state == Property::NEW_VALUE && e.time != 0 {
+                    self.take_focus_pending = None;
+                    let logical = self.engine.state.monitors[self.engine.state.sel_mon].focused;
+                    if logical == Some(win) && self.has_protocol(win, self.atoms.wm_take_focus)? {
+                        self.send_proto(win, self.atoms.wm_take_focus, e.time)?;
+                    }
+                }
+            }
+            return Ok(());
+        }
         if e.window == self.root && e.atom == u32::from(AtomEnum::WM_NAME) {
             self.update_status()?;
             return Ok(());
@@ -611,6 +630,44 @@ impl WindowManager {
             return Ok(());
         }
 
+        if e.atom == u32::from(AtomEnum::WM_TRANSIENT_FOR)
+            && self.engine.state.clients.contains_key(&e.window)
+        {
+            let parent = if e.state == Property::DELETE {
+                None
+            } else {
+                self.conn
+                    .get_property(
+                        false,
+                        e.window,
+                        AtomEnum::WM_TRANSIENT_FOR,
+                        AtomEnum::WINDOW,
+                        0,
+                        1,
+                    )?
+                    .reply()
+                    .ok()
+                    .and_then(|reply| reply.value32().and_then(|mut words| words.next()))
+                    .filter(|&parent| parent != x11rb::NONE && parent != self.root)
+            };
+            if let Some(client) = self.engine.state.clients.get_mut(&e.window) {
+                client.transient_parent = parent;
+            }
+            return Ok(());
+        }
+
+        if e.atom == self.atoms.wm_hints && self.engine.state.clients.contains_key(&e.window) {
+            // Removing WM_HINTS restores the ICCCM default input model.
+            if e.state == Property::DELETE {
+                if let Some(client) = self.engine.state.clients.get_mut(&e.window) {
+                    client.wants_input = true;
+                }
+            } else {
+                self.refresh_hints(e.window)?;
+            }
+            return Ok(());
+        }
+
         if e.state == Property::DELETE {
             return Ok(());
         }
@@ -619,8 +676,6 @@ impl WindowManager {
             let win = e.window;
             if e.atom == self.atoms.net_wm_name || e.atom == u32::from(AtomEnum::WM_NAME) {
                 self.refresh_title(win)?;
-            } else if e.atom == u32::from(AtomEnum::WM_HINTS) {
-                self.refresh_hints(win)?;
             }
             // `WM_NORMAL_HINTS` is handled by its own early arm above (fresh
             // `client.hints` for the float snap); anything else just flows to
@@ -758,7 +813,6 @@ impl WindowManager {
 
     pub(super) fn on_key(&mut self, e: KeyPressEvent) -> Result<(), Box<dyn std::error::Error>> {
         self.last_event_time = e.time;
-        self.event_time_suspect = false;
         // Notches queued earlier in this turn happened before this key; apply
         // them first so the key acts on the state the user had already reached.
         self.apply_wheel_steps()?;
@@ -838,7 +892,6 @@ impl WindowManager {
             return Ok(());
         }
         self.last_event_time = e.time;
-        self.event_time_suspect = false;
         if self.engine.cfg.focus_mouse {
             // Guard: a key navigation that just ran must not be undone by an
             // EnterNotify caused by the pointer sitting over a tile edge (see
@@ -899,6 +952,13 @@ impl WindowManager {
         if e.detail == NotifyDetail::INFERIOR || e.detail == NotifyDetail::POINTER {
             return Ok(());
         }
+        let logical = self.engine.state.monitors[self.engine.state.sel_mon].focused;
+        if logical != Some(e.event) {
+            // A queued notification can precede a newer selection or a client
+            // handoff. Reconcile once against the server after draining both.
+            self.focus_probe_due = true;
+            return Ok(());
+        }
         self.engine.state.x11_input_focus = if e.event == self.root {
             None
         } else {
@@ -908,20 +968,9 @@ impl WindowManager {
                 .contains_key(&e.event)
                 .then_some(e.event)
         };
-        // Focus events carry no timestamp, so any stored input stamp may now
-        // predate the server's last-focus-change time (see
-        // `event_time_suspect`): the next focus request stamps with
-        // `CurrentTime` until fresh input arrives.
-        self.event_time_suspect = true;
-        // The event names the window that took the focus, which is the answer
-        // `reconcile_focus` would spend a blocking round trip to obtain — and
-        // would obtain less accurately, since a probe issued now reports where
-        // focus has moved to since this event was generated.
         self.settle_focus(Some(e.event))?;
-        // This event *is* the answer a deferred probe would fetch (and a more
-        // accurate one, see above), so a `FocusOut` queued earlier in the turn
-        // no longer needs its `GetInputFocus`. Order matters and is preserved:
-        // a `FocusOut` arriving after this re-arms the flag.
+        // A matching acknowledgement consumes an earlier FocusOut probe;
+        // a later FocusOut still re-arms it in event order.
         self.focus_probe_due = false;
         Ok(())
     }
@@ -950,9 +999,6 @@ impl WindowManager {
         if self.engine.state.x11_input_focus == Some(e.event) {
             self.engine.state.x11_input_focus = None;
         }
-        // As in `on_focus_in`: the stored input stamp may now be older than
-        // the focus change that just happened.
-        self.event_time_suspect = true;
         // No inline `GetInputFocus`: a `FocusOut` names where focus *left*, not
         // where it went, so the probe is the only way to learn the destination.
         // Taking it here paid a round trip per event — and our own focus moves

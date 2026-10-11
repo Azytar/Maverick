@@ -24,6 +24,7 @@ pub struct Atoms {
     pub wm_state: u32,
     pub wm_take_focus: u32,
     pub wm_hints: u32,
+    pub wm_client_leader: u32,
 
     // EWMH _NET atoms
     pub net_supported: u32,
@@ -71,6 +72,7 @@ pub struct Atoms {
     // existing window tree returns windows to exactly where they were.
     pub maverick_float: u32,
     pub maverick_geom: u32,
+    pub maverick_timestamp: u32,
 
     // Property type for `WM_NAME`/`_NET_WM_NAME` values, which ICCCM/EWMH
     // require to be encoded in it.
@@ -95,6 +97,8 @@ impl Atoms {
         let r_wm_state = intern!("WM_STATE")?;
         let r_wm_focus = intern!("WM_TAKE_FOCUS")?;
         let r_wm_hints = intern!("WM_HINTS")?;
+        let r_wm_leader = intern!("WM_CLIENT_LEADER")?;
+        let r_timestamp = intern!("_MAVERICK_TIMESTAMP")?;
 
         let r_net_supported = intern!("_NET_SUPPORTED")?;
         let r_net_client_list = intern!("_NET_CLIENT_LIST")?;
@@ -141,6 +145,7 @@ impl Atoms {
             wm_state: r_wm_state.reply()?.atom,
             wm_take_focus: r_wm_focus.reply()?.atom,
             wm_hints: r_wm_hints.reply()?.atom,
+            wm_client_leader: r_wm_leader.reply()?.atom,
             net_supported: r_net_supported.reply()?.atom,
             net_client_list: r_net_client_list.reply()?.atom,
             net_client_list_stacking: r_net_client_list_stacking.reply()?.atom,
@@ -176,6 +181,7 @@ impl Atoms {
             net_wm_pid: r_net_wm_pid.reply()?.atom,
             maverick_float: r_maverick_float.reply()?.atom,
             maverick_geom: r_maverick_geom.reply()?.atom,
+            maverick_timestamp: r_timestamp.reply()?.atom,
             utf8_string: r_utf8_string.reply()?.atom,
         })
     }

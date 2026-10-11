@@ -243,7 +243,6 @@ impl WindowManager {
             return Ok(());
         }
         self.last_event_time = e.time;
-        self.event_time_suspect = false;
         // A press is fresh pointer truth just like a motion (see `on_motion`):
         // the pointer is observably here, so a later `Enter` at other
         // coordinates still carries intent while one at these does not.
@@ -625,7 +624,6 @@ impl WindowManager {
         // intervening focus change), which matters because in a live session
         // the pointer is nearly always moving.
         self.last_event_time = e.time;
-        self.event_time_suspect = false;
         // Fresh pointer truth for `on_enter`'s stationary check: motion is
         // what moves the pointer, so this is the position a later `Enter`
         // must differ from to carry new intent.

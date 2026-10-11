@@ -4,9 +4,8 @@
 #include <string.h>
 #include <unistd.h>
 
-// Wine-style focus probe: a managed "game" window plus an override-redirect
-// "capture" window (Wine/Proton relative-mouse capture). Reports focus
-// stability as JSON RESULT lines for tests/xvfb-wine-focus.py.
+// A managed client and an override-redirect auxiliary input window. Pointer
+// clipping uses a separate InputOnly/XGrabPointer regression in input-probe.c.
 //
 // While the client holds the X input focus on its capture window, the WM must
 // leave it alone: no counter-SetInputFocus (no FocusIn flap on the game
@@ -85,8 +84,7 @@ int main(void) {
     XEvent e;
     XNextEvent(d, &e);
   }
-  // The game captures the input the way Wine/Proton does for relative mouse:
-  // the X focus moves to the game's own override-redirect window. Hold it
+  // The client transfers X focus to its own auxiliary window. Hold it
   // there for ~3s with realistic pointer motion (boundary-crossing warps, so
   // the server keeps delivering EnterNotify with fresh timestamps) and one
   // mid-hold re-capture, the way a game re-asserts its capture after every
@@ -168,12 +166,7 @@ int main(void) {
   XGetInputFocus(d, &f, &r);
   ok("focus-returns-to-game", back, "focus=%lx game=%lx", (unsigned long)f, (unsigned long)game);
 
-  // Phase 2: a *Globally Active* window (`WM_HINTS.input = False` with
-  // `WM_TAKE_FOCUS` in `WM_PROTOCOLS`) — exactly what Wine/Proton game
-  // windows declare. Mapping it must make the WM offer the protocol: the X
-  // focus goes to the root and a `WM_TAKE_FOCUS` message goes to the window.
-  // The client then takes the focus itself (as Wine answers take-focus) and
-  // that must stick: the WM's logical selection already moved there.
+  // A Globally Active client must answer using the timestamp in the offer.
   Window game2 = XCreateSimpleWindow(d, root, 60, 60, 640, 480, 2,
       BlackPixel(d, s), WhitePixel(d, s));
   XStoreName(d, game2, "wine-game-ga");
@@ -194,6 +187,7 @@ int main(void) {
   // thrown away before the poll starts. A slow WM under load may take
   // seconds to manage, so poll generously.
   int offered = 0, extra_takefocus = 0;
+  Time offered_time = CurrentTime;
   for (int i = 0; i < 1000 && !offered; i++) {
     while (XPending(d)) {
       XEvent e;
@@ -201,11 +195,14 @@ int main(void) {
       if (e.type == ClientMessage && e.xclient.message_type == protoA
           && (Atom)e.xclient.data.l[0] == takeA && e.xclient.window == game2) {
         offered = 1;
+        offered_time = (Time)e.xclient.data.l[1];
       }
     }
     if (!offered) usleep(10000);
   }
   ok("globally-active-take-focus-offered", offered, "offered=%d", offered);
+  ok("globally-active-valid-timestamp", offered_time != CurrentTime,
+      "timestamp=%lu", offered_time);
   // The X focus must be on the root: it must never be parked on a window
   // that declared it does not want it, nor left wherever it happened to be.
   // Poll: the offer above proves focus() ran, but its SetInputFocus request
@@ -221,7 +218,7 @@ int main(void) {
       (unsigned long)f, (unsigned long)root);
   // The client answers take-focus the way Wine does and takes the focus
   // itself. It must stick, with no further protocol storm.
-  XSetInputFocus(d, game2, RevertToParent, CurrentTime);
+  XSetInputFocus(d, game2, RevertToParent, offered_time);
   XSync(d, False);
   int ga_stable = 0, ga_landed = 0;
   for (int i = 0; i < 150; i++) {
@@ -246,5 +243,6 @@ int main(void) {
   XDestroyWindow(d, game2);
   XDestroyWindow(d, game);
   XCloseDisplay(d);
+  puts("COMPLETE wine-focus");
   return 0;
 }
