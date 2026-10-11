@@ -968,15 +968,9 @@ impl WindowManager {
                 .contains_key(&e.event)
                 .then_some(e.event)
         };
-        // The event names the window that took the focus, which is the answer
-        // `reconcile_focus` would spend a blocking round trip to obtain — and
-        // would obtain less accurately, since a probe issued now reports where
-        // focus has moved to since this event was generated.
         self.settle_focus(Some(e.event))?;
-        // This event *is* the answer a deferred probe would fetch (and a more
-        // accurate one, see above), so a `FocusOut` queued earlier in the turn
-        // no longer needs its `GetInputFocus`. Order matters and is preserved:
-        // a `FocusOut` arriving after this re-arms the flag.
+        // A matching acknowledgement consumes an earlier FocusOut probe;
+        // a later FocusOut still re-arms it in event order.
         self.focus_probe_due = false;
         Ok(())
     }

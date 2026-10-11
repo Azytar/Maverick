@@ -110,6 +110,16 @@ The Xephyr wrapper uses the same pixel/event regression on its own display.
 opens, after opening and closing a client, and after shutdown. Its C probe
 needs `libxfixes-dev` in addition to `libx11-dev`.
 
+`python3 tests/xvfb-input.py --case protocol` validates ICCCM timestamps;
+`--case ownership` checks transfers and activation protections; `--case child`
+checks cached-time desynchronization; `--case capture` checks core/XI2 keys,
+InputOnly confinement and mode changes. `--exclusive` selects true fullscreen;
+`--server xephyr` runs the same checks in a private nested Xephyr. The probe
+needs `libxi-dev` and `libxtst-dev` in addition to `libx11-dev`. CI runs every
+Xvfb case and `tests/xvfb-wine-focus.py` against the release binary.
+See [docs/x11-input.md](docs/x11-input.md) for real-session diagnostics and
+the distinction between protocol regressions and testing actual games.
+
 `python3 tests/overview-isolation.py` checks the Overview rig's startup and
 cleanup with tool doubles, without needing an X server. It verifies that the
 rig uses only the display claimed by its child, reaps that child on failure,

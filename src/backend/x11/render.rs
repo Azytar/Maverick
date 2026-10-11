@@ -1524,11 +1524,9 @@ impl WindowManager {
     /// Settle the WM's logical focus against a real focus the caller already
     /// holds.
     ///
-    /// Every `FocusIn` names the window that took the focus, so a handler that
-    /// has one already knows what `GetInputFocus` would answer — and knows it
-    /// more accurately, since a probe issued afterwards reports where focus has
-    /// since *moved*, not where it was when the event was generated. Asking
-    /// anyway costs a blocking round trip on the single event-loop thread.
+    /// A matching FocusIn acknowledges the current selection without another
+    /// round trip. Divergent notifications require the caller to probe the
+    /// server after draining the batch, since they can already be obsolete.
     pub(super) fn settle_focus(
         &mut self,
         real: Option<Window>,
@@ -1581,23 +1579,12 @@ impl WindowManager {
             }
         }
 
-        // Unmanaged real focus: the X focus sits on a window this WM does not
-        // manage — an override-redirect capture/popup (Wine/Proton relative-
-        // mouse capture, menus, tooltips), a not-yet-managed new window, a
-        // dock/desktop, or a client child window. That move was the client's
-        // own doing (`XSetInputFocus`, a grab, or a map), not a desync among
-        // managed windows, so there is nothing to repair and stealing the
-        // focus back would fight the client: each client `XSetInputFocus`
-        // would be answered with a WM counter-`XSetInputFocus` plus a
-        // `WM_TAKE_FOCUS` message, flapping the keyboard between the two
-        // windows and breaking grabs (measured with a Wine-style OR capture
-        // window: the settle repaired the game window right after the client
-        // focused its capture window). Keep the logical selection (borders,
-        // focus stack, `_NET_ACTIVE_WINDOW` stay as they are) and leave the
-        // X focus alone; the client's own release (re-focus, unmap, grab end)
-        // settles through the ordinary `FocusIn`/managed path. Only a
-        // divergence where *both* sides are managed clients — or where the
-        // focus was lost to root/`None` — is repaired below.
+        // Children, override-redirect popups and other unmanaged windows can
+        // legitimately hold X focus while the logical owner stays selected.
+        // Counter-focus would interrupt their keyboard delivery. Pointer
+        // capture is separately owned by the grabbing client. Its release or
+        // refocus settles through the normal managed path; managed divergence
+        // and focus lost to root/None remain subject to repair below.
         if let Some(r) = real {
             if !self.engine.state.clients.contains_key(&r) {
                 #[cfg(feature = "input-trace")]

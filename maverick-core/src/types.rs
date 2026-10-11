@@ -1071,21 +1071,23 @@ pub struct Client {
     /// True when the client wants input focus — the ICCCM `WM_HINTS` `input`
     /// field (ICCCM 4.1.2.4), re-read on every rewrite of that property.
     ///
-    /// This is the single authority on focus eligibility: a cached mirror of
+    /// This is the single authority on the input hint: a cached mirror of
     /// it cannot be kept honest, because ICCCM 4.1.2 requires the WM to
     /// "retain no memory of the old value" of a client property, while a
     /// flag word can only be OR-ed in and never taken back out.
     ///
     /// `false` is the client's request that the WM not set the X input focus
     /// on its top-level window — the *No Input* and *Globally Active* models
-    /// of ICCCM 4.1.7. Maverick honours it by not offering such a window the
-    /// focus at all, which ICCCM permits: it constrains the *X input focus*,
-    /// and leaves "the method by which the user commands the window manager to
-    /// set the focus to a window" to the window manager. Where a window is
+    /// of ICCCM 4.1.7. A Globally Active client may receive WM_TAKE_FOCUS and
+    /// become the logical selection while taking X focus itself. A No Input
+    /// client without that protocol is ineligible for a focus offer.
+    /// ICCCM constrains the *X input focus* and leaves "the method by which
+    /// the user commands the window manager to set the focus to a window"
+    /// to the window manager. Where a window is
     /// already the focus target when it makes the request — a client that
     /// rewrites the property under the focus it holds — the reconcile path
     /// applies the other half of the rule and points the X input focus at
-    /// `PointerRoot` while still offering `WM_TAKE_FOCUS`.
+    /// `PointerRoot`, offering `WM_TAKE_FOCUS` when supported.
     ///
     /// `true` is also the documented WM default for a client that sends no
     /// `WM_HINTS` at all, or sends one with `InputHint` clear (ICCCM 4.1.2.4:
