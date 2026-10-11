@@ -350,6 +350,26 @@ pub(super) fn input(event: &x11rb::protocol::Event) {
         Event::MotionNotify(e) => ("motion", e.time, e.event, 0, u16::from(e.state)),
         Event::EnterNotify(e) => ("enter", e.time, e.event, 0, u16::from(e.state)),
         Event::LeaveNotify(e) => ("leave", e.time, e.event, 0, u16::from(e.state)),
+        Event::FocusIn(e) => {
+            record(
+                "focus_receipt",
+                format_args!(
+                    "kind=in win={} mode={:?} detail={:?} sequence={}",
+                    e.event, e.mode, e.detail, e.sequence
+                ),
+            );
+            return;
+        }
+        Event::FocusOut(e) => {
+            record(
+                "focus_receipt",
+                format_args!(
+                    "kind=out win={} mode={:?} detail={:?} sequence={}",
+                    e.event, e.mode, e.detail, e.sequence
+                ),
+            );
+            return;
+        }
         _ => {
             record(
                 "event_receipt",

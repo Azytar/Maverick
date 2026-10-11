@@ -14,6 +14,7 @@ static Atom protocols, take_focus, active_window, clock_atom;
 static unsigned offers, invalid_offers;
 static Time offer_time;
 static int answer_offers;
+static Time motion_time;
 
 static double now(void) {
     struct timespec t;
@@ -56,6 +57,7 @@ static void pump(void) {
     while (XPending(d)) {
         XEvent e;
         XNextEvent(d, &e);
+        if (e.type == MotionNotify) motion_time = e.xmotion.time;
         if (e.type == ClientMessage && e.xclient.message_type == protocols &&
             (Atom)e.xclient.data.l[0] == take_focus) {
             offers++;
@@ -106,7 +108,7 @@ static Window window(int input, int protocol) {
     hints.input = input;
     XSetWMHints(d, win, &hints);
     if (protocol) XSetWMProtocols(d, win, &take_focus, 1);
-    XSelectInput(d, win, FocusChangeMask | StructureNotifyMask | KeyPressMask | KeyReleaseMask);
+    XSelectInput(d, win, FocusChangeMask | StructureNotifyMask | KeyPressMask | KeyReleaseMask | PointerMotionMask);
     XStoreName(d, win, "input-probe");
     return win;
 }
@@ -268,6 +270,33 @@ static void ownership_test(void) {
     XDestroyWindow(d, game);
 }
 
+static void child_focus_test(void) {
+    Window game = window(True, False);
+    XMapWindow(d, game);
+    wait_focus(game);
+    XWarpPointer(d, None, game, 0, 0, 0, 0, 20, 20);
+    XFlush(d);
+    double deadline = now() + 5;
+    while (!motion_time && now() < deadline) { pump(); pause_events(); }
+    check(motion_time != 0, "WM receives input before an internal focus transition");
+    Time stamp;
+    do { stamp = server_time(); pause_events(); }
+    while ((int32_t)((uint32_t)stamp - (uint32_t)motion_time) <= 0 && now() < deadline);
+    Window child = XCreateSimpleWindow(d, game, 10, 10, 100, 100, 0, 0, 0);
+    XMapWindow(d, child);
+    XSetInputFocus(d, child, RevertToParent, stamp);
+    XSync(d, False);
+    XSetInputFocus(d, game, RevertToParent, server_time());
+    XSync(d, False);
+    Window other = window(True, False);
+    XMapWindow(d, other);
+    wait_focus(other);
+    check(focused() == other && selected() == other, "internal child focus cannot leave the next WM request silently stale");
+    XDestroyWindow(d, other);
+    XDestroyWindow(d, game);
+}
+
+
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -282,6 +311,7 @@ int main(int argc, char **argv) {
     XSelectInput(d, clock_window, PropertyChangeMask);
     if (!strcmp(argv[1], "protocol")) protocol_test();
     else if (!strcmp(argv[1], "ownership")) ownership_test();
+    else if (!strcmp(argv[1], "child")) child_focus_test();
     else return 2;
     XCloseDisplay(d);
     return 0;

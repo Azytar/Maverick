@@ -280,18 +280,9 @@ pub struct WindowManager {
     /// `MotionNotify` and `ButtonPress`; read (never written) by `EnterNotify`.
     ptr_truth: PointerTruth,
     /// Server time of the most recent input event (key/button/motion/enter).
-    /// Used by direct SetInputFocus requests. Protocol offers obtain their
-    /// own server timestamp through the internal window's PropertyNotify.
+    /// Used by client close protocols; focus offers obtain a server timestamp
+    /// through the internal window's PropertyNotify.
     last_event_time: u32,
-    /// Whether a focus change has been observed since `last_event_time` was
-    /// recorded. X11 focus events carry no timestamp, so after one the stored
-    /// stamp may predate the server's last-focus-change time — and a
-    /// `set_input_focus` stamped older than that is silently ignored by the
-    /// server, leaving the focus stuck wherever it is. While set, focus paths
-    /// stamp with `CurrentTime` (evaluated at server processing time, so
-    /// never stale) instead; the next key/button/motion/enter clears it with
-    /// a real stamp.
-    event_time_suspect: bool,
     /// The window whose *Globally Active* focus offer is still outstanding.
     ///
     /// Offering means pointing the X focus at the root and sending
@@ -530,21 +521,6 @@ impl WindowManager {
     pub(super) fn schedule_keyboard_refresh(&mut self) {
         if self.kbd_refresh_due.is_none() {
             self.kbd_refresh_due = Some(Instant::now() + KBD_REFRESH_DELAY);
-        }
-    }
-
-    /// Timestamp for a direct SetInputFocus request, not a protocol offer.
-    ///
-    /// A stored stamp older than the server's last-focus-change time makes the
-    /// server silently ignore the request, so after any observed focus change
-    /// (which carries no timestamp of its own) the stored stamp is suspect
-    /// and `CurrentTime` — evaluated by the server at processing time — is
-    /// used instead, until fresh input clears the suspicion.
-    pub(super) fn focus_time(&self) -> u32 {
-        if self.event_time_suspect {
-            x11rb::CURRENT_TIME
-        } else {
-            self.last_event_time
         }
     }
 
@@ -1033,7 +1009,6 @@ impl WindowManager {
             pointer_guard_until: None,
             ptr_truth: PointerTruth::default(),
             last_event_time: 0,
-            event_time_suspect: false,
             root_focus_pending: None,
             take_focus_pending: None,
             last_stack_order: std::collections::HashMap::new(),

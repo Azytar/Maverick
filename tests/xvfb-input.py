@@ -23,7 +23,7 @@ def display(server):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--wm", type=Path, default=ROOT / "target/release/maverick")
-    parser.add_argument("--case", choices=["protocol", "ownership"], default="protocol")
+    parser.add_argument("--case", choices=["protocol", "ownership", "child"], default="protocol")
     parser.add_argument("--trace", type=Path)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="maverick-input-") as temp:

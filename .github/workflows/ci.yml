@@ -103,6 +103,7 @@ jobs:
         run: |
           python3 tests/xvfb-input.py --case protocol
           python3 tests/xvfb-input.py --case ownership
+          python3 tests/xvfb-input.py --case child
       - name: Overview rig isolation
         run: python3 tests/overview-isolation.py
       - name: Overview client geometry and image regression

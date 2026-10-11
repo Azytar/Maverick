@@ -34,6 +34,9 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Direct focus requests apply the WM's current selection without reusing a
+  timestamp that an internal child-window focus change can silently invalidate.
+  Focus diagnostics now record X11 mode/detail and protocol timestamps.
 - Related clients can transfer input focus through transient relationships,
   `WM_HINTS.window_group` or `WM_CLIENT_LEADER` within the current monitor and
   View without counter-focus requests or duplicate focus offers. Unrelated,

@@ -327,6 +327,9 @@ impl WindowManager {
         if proto == self.atoms.wm_take_focus && time == x11rb::CURRENT_TIME {
             return Err("WM_TAKE_FOCUS requires a server timestamp".into());
         }
+        if proto == self.atoms.wm_take_focus {
+            trace!("focus_offer", "window={win:#x} x_time_ms={time}");
+        }
         let ev = ClientMessageEvent {
             response_type: CLIENT_MESSAGE_EVENT,
             format: 32,

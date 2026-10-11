@@ -57,9 +57,8 @@
 //! `focus` validates the window, refuses one whose `WM_HINTS.input`
 //! is false (unless it offers `WM_TAKE_FOCUS`, which is then sent while the
 //! X focus goes to `PointerRoot`), unfocuses the previous window, sets `sel_mon`, calls
-//! `set_input_focus` with `focus_time()` (a real stamp, or `CurrentTime`
-//! after an intervening focus change made the stored one suspect), writes
-//! `WM_TAKE_FOCUS`,
+//! `set_input_focus` with `CurrentTime` and offers `WM_TAKE_FOCUS` with a
+//! separately acquired server timestamp,
 //! updates the focus stack *before* `reconcile_focus` (return-to-workspace
 //! bug fix), and calls `stack_overlay`.
 //!
@@ -1187,23 +1186,11 @@ impl WindowManager {
 
             self.engine.state.sel_mon = mon_i;
 
-            // Set the X11 input focus. Use the real last-input timestamp, not
-            // `CURRENT_TIME`: a `CurrentTime` focus request is silently ignored
-            // by the server when a newer focus change has occurred, which is
-            // exactly what desyncs logical vs real focus (the red-border bug).
-            //
-            // The target depends on the input model (ICCCM 4.1.7): a window
-            // that wants input is focused directly, while a *Globally Active*
-            // window (`input = False` + `WM_TAKE_FOCUS`, which passed the gate
-            // above) leaves the X focus on `PointerRoot` and is offered the
-            // protocol below, so it can take the focus itself. Either way the
-            // logical selection moves to `w` in the block that follows.
-            //
-            // The stamp is `focus_time()`, not the raw last input time: after
-            // an intervening focus change the stored stamp predates the
-            // server's last-focus-change time and the request would be
-            // silently ignored, leaving the focus stuck.
-            let stamp = self.focus_time();
+            // Apply the WM's current intent, not a cached input timestamp:
+            // child-window focus moves can make that timestamp stale without
+            // any top-level Normal event. Protocol offers use a separate clock.
+            let stamp = x11rb::CURRENT_TIME;
+            trace!("focus_request", "window={w:#x} direct={wants_input}");
             if wants_input {
                 let _ = self.conn.set_input_focus(InputFocus::PARENT, w, stamp);
                 // A direct request supersedes any outstanding root offer.
@@ -1372,7 +1359,7 @@ impl WindowManager {
             }
             let _ =
                 self.conn
-                    .set_input_focus(InputFocus::POINTER_ROOT, self.root, self.focus_time());
+                    .set_input_focus(InputFocus::POINTER_ROOT, self.root, x11rb::CURRENT_TIME);
             // No logical target owns the root focus here: drop any
             // outstanding offer with it.
             self.root_focus_pending = None;
@@ -1495,12 +1482,6 @@ impl WindowManager {
         if !target.wants_input && !self.has_protocol(to, self.atoms.wm_take_focus)? {
             return Ok(false);
         }
-        // Queued FocusIn can precede a newer WM selection. Read only on this
-        // exceptional path so an old notification cannot undo that request.
-        if self.conn.get_input_focus()?.reply()?.focus != to {
-            return Ok(false);
-        }
-
         self.unfocus(from)?;
         crate::core::commands::focus_logical_on(&mut self.engine.state, mi, to);
         if self.engine.state.pending_focus.is_some()
@@ -1714,12 +1695,9 @@ impl WindowManager {
                     Some(c) => c.wants_input,
                     None => true,
                 };
-                // ICCCM 4.1.7 (same rule as `focus()`): never put the X
-                // input focus on an `input == False` window — re-assert to
-                // the root instead. Stamped with `focus_time()`: the probe
-                // that led here observed a focus change, so a stored stamp
-                // may already be older than it.
-                let stamp = self.focus_time();
+                // A Globally Active client takes focus through its protocol;
+                // the WM must not focus that top-level window directly.
+                let stamp = x11rb::CURRENT_TIME;
                 if wants {
                     let _ = self.conn.set_input_focus(InputFocus::PARENT, w, stamp);
                     // A direct request supersedes any outstanding root offer.
@@ -1754,7 +1732,7 @@ impl WindowManager {
         } else {
             let _ =
                 self.conn
-                    .set_input_focus(InputFocus::POINTER_ROOT, self.root, self.focus_time());
+                    .set_input_focus(InputFocus::POINTER_ROOT, self.root, x11rb::CURRENT_TIME);
             // No logical target owns the root focus here: drop any
             // outstanding offer with it.
             self.root_focus_pending = None;
