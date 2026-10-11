@@ -168,6 +168,82 @@ int main(void) {
   XGetInputFocus(d, &f, &r);
   ok("focus-returns-to-game", back, "focus=%lx game=%lx", (unsigned long)f, (unsigned long)game);
 
+  // Phase 2: a *Globally Active* window (`WM_HINTS.input = False` with
+  // `WM_TAKE_FOCUS` in `WM_PROTOCOLS`) — exactly what Wine/Proton game
+  // windows declare. Mapping it must make the WM offer the protocol: the X
+  // focus goes to the root and a `WM_TAKE_FOCUS` message goes to the window.
+  // The client then takes the focus itself (as Wine answers take-focus) and
+  // that must stick: the WM's logical selection already moved there.
+  Window game2 = XCreateSimpleWindow(d, root, 60, 60, 640, 480, 2,
+      BlackPixel(d, s), WhitePixel(d, s));
+  XStoreName(d, game2, "wine-game-ga");
+  XClassHint *ch2 = XAllocClassHint();
+  ch2->res_name = "wine-game-ga"; ch2->res_class = "Wine";
+  XSetClassHint(d, game2, ch2);
+  XFree(ch2);
+  XWMHints *h2 = XAllocWMHints();
+  h2->flags = InputHint; h2->input = False;
+  XSetWMHints(d, game2, h2);
+  XFree(h2);
+  XSetWMProtocols(d, game2, &take, 1);
+  XSelectInput(d, game2, FocusChangeMask | KeyPressMask | StructureNotifyMask);
+  XMapWindow(d, game2);
+  XSync(d, False);
+  // Poll for the offer the manage-time focus sends; count (never blindly
+  // drain) from the very first drain so a fast WM's immediate offer cannot be
+  // thrown away before the poll starts. A slow WM under load may take
+  // seconds to manage, so poll generously.
+  int offered = 0, extra_takefocus = 0;
+  for (int i = 0; i < 1000 && !offered; i++) {
+    while (XPending(d)) {
+      XEvent e;
+      XNextEvent(d, &e);
+      if (e.type == ClientMessage && e.xclient.message_type == protoA
+          && (Atom)e.xclient.data.l[0] == takeA && e.xclient.window == game2) {
+        offered = 1;
+      }
+    }
+    if (!offered) usleep(10000);
+  }
+  ok("globally-active-take-focus-offered", offered, "offered=%d", offered);
+  // The X focus must be on the root: it must never be parked on a window
+  // that declared it does not want it, nor left wherever it happened to be.
+  // Poll: the offer above proves focus() ran, but its SetInputFocus request
+  // may still be in flight to the server.
+  int on_root = 0;
+  for (int i = 0; i < 300 && !on_root; i++) {
+    XGetInputFocus(d, &f, &r);
+    if (f == root) { on_root = 1; break; }
+    usleep(10000);
+  }
+  XGetInputFocus(d, &f, &r);
+  ok("globally-active-x-focus-on-root", on_root, "focus=%lx root=%lx",
+      (unsigned long)f, (unsigned long)root);
+  // The client answers take-focus the way Wine does and takes the focus
+  // itself. It must stick, with no further protocol storm.
+  XSetInputFocus(d, game2, RevertToParent, CurrentTime);
+  XSync(d, False);
+  int ga_stable = 0, ga_landed = 0;
+  for (int i = 0; i < 150; i++) {
+    while (XPending(d)) {
+      XEvent e;
+      XNextEvent(d, &e);
+      if (e.type == ClientMessage && e.xclient.message_type == protoA
+          && (Atom)e.xclient.data.l[0] == takeA && e.xclient.window == game2) {
+        extra_takefocus++;
+      }
+    }
+    XGetInputFocus(d, &f, &r);
+    if (f == game2) { ga_landed = 1; }
+    else if (ga_landed) { ga_landed = 2; break; }
+    usleep(10000);
+  }
+  ga_stable = (ga_landed == 1);
+  XGetInputFocus(d, &f, &r);
+  ok("globally-active-self-taken-focus-sticks", ga_stable && extra_takefocus == 0,
+      "focus=%lx game2=%lx extra_takefocus=%d", (unsigned long)f, (unsigned long)game2, extra_takefocus);
+
+  XDestroyWindow(d, game2);
   XDestroyWindow(d, game);
   XCloseDisplay(d);
   return 0;
