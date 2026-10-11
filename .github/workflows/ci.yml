@@ -100,7 +100,9 @@ jobs:
       - name: Root cursor startup and ownership
         run: python3 tests/xvfb-cursor.py
       - name: ICCCM focus protocol regression
-        run: python3 tests/xvfb-input.py
+        run: |
+          python3 tests/xvfb-input.py --case protocol
+          python3 tests/xvfb-input.py --case ownership
       - name: Overview rig isolation
         run: python3 tests/overview-isolation.py
       - name: Overview client geometry and image regression

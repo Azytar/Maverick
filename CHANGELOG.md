@@ -34,6 +34,11 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Related clients can transfer input focus through transient relationships,
+  `WM_HINTS.window_group` or `WM_CLIENT_LEADER` within the current monitor and
+  View without counter-focus requests or duplicate focus offers. Unrelated,
+  hidden and No Input targets remain protected. Removed input and transient
+  hints no longer leave stale focus eligibility or ownership behind.
 - `WM_TAKE_FOCUS` always carries a fresh server timestamp, including startup
   and repair after external focus changes. Pending offers are superseded by
   newer selections; queued X11 requests are flushed before waiting for replies.

@@ -1448,6 +1448,98 @@ impl WindowManager {
         self.settle_focus(probed)
     }
 
+    fn accept_client_focus(
+        &mut self,
+        from: Window,
+        to: Window,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let clients = &self.engine.state.clients;
+        let (Some(source), Some(target)) = (clients.get(&from), clients.get(&to)) else {
+            return Ok(false);
+        };
+        let mi = self.engine.state.sel_mon;
+        let Some(mon) = self.engine.state.monitors.get(mi) else {
+            return Ok(false);
+        };
+        if source.monitor != mi
+            || target.monitor != mi
+            || source.workspace != mon.ws().id
+            || target.workspace != mon.ws().id
+            || target.wm_hidden
+        {
+            return Ok(false);
+        }
+        let mut family = vec![from];
+        for _ in 0..MAX_TRANSIENT_DEPTH {
+            let Some(parent) = family
+                .last()
+                .and_then(|w| clients.get(w))
+                .and_then(|c| c.transient_parent)
+            else {
+                break;
+            };
+            if !clients.contains_key(&parent) || family.contains(&parent) {
+                break;
+            }
+            family.push(parent);
+        }
+        let transient = family.contains(&to) || transient_chain_reaches(clients, to, &family);
+        if let Some(owner) = self.engine.state.presented_overlay_owner(mi) {
+            if owner != to && !transient_chain_reaches(clients, to, &[owner]) {
+                return Ok(false);
+            }
+        }
+        if !transient && !self.shares_focus_group(from, to)? {
+            return Ok(false);
+        }
+        if !target.wants_input && !self.has_protocol(to, self.atoms.wm_take_focus)? {
+            return Ok(false);
+        }
+        // Queued FocusIn can precede a newer WM selection. Read only on this
+        // exceptional path so an old notification cannot undo that request.
+        if self.conn.get_input_focus()?.reply()?.focus != to {
+            return Ok(false);
+        }
+
+        self.unfocus(from)?;
+        crate::core::commands::focus_logical_on(&mut self.engine.state, mi, to);
+        if self.engine.state.pending_focus.is_some()
+            && !self.engine.state.pending_focus_owner_presented()
+        {
+            self.engine.state.pending_focus = None;
+        }
+        self.root_focus_pending = None;
+        self.take_focus_pending = None;
+        if let Some(client) = self.engine.state.clients.get_mut(&to) {
+            if client.flags.has(WinFlags::URGENT) {
+                client.flags.clear(WinFlags::URGENT);
+                self.write_net_wm_state(to);
+            }
+        }
+        self.conn.change_window_attributes(
+            to,
+            &ChangeWindowAttributesAux::new().border_pixel(self.engine.cfg.col_focused),
+        )?;
+        self.conn.change_property32(
+            PropMode::REPLACE,
+            self.root,
+            self.atoms.net_active_window,
+            AtomEnum::WINDOW,
+            &[to],
+        )?;
+        let retargeted = retarget_focus_to_window(&mut self.engine.state, &self.engine.cfg, to);
+        self.pending.mark(retargeted.unwrap_or(mi), Some(to));
+        self.engine.notify(crate::core::event::Event::FocusChanged {
+            from: Some(from),
+            to: Some(to),
+        });
+        self.publish_state();
+        #[cfg(debug_assertions)]
+        self.engine.state.assert_invariants();
+        trace!("client_focus_accepted", "from={from:#x} to={to:#x}");
+        Ok(true)
+    }
+
     /// Settle the WM's logical focus against a real focus the caller already
     /// holds.
     ///
@@ -1500,6 +1592,12 @@ impl WindowManager {
                 }
             }
             return Ok(());
+        }
+
+        if let (Some(from), Some(to)) = (logical, real) {
+            if self.accept_client_focus(from, to)? {
+                return Ok(());
+            }
         }
 
         // Unmanaged real focus: the X focus sits on a window this WM does not

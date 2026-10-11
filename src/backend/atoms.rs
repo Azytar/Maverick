@@ -24,6 +24,7 @@ pub struct Atoms {
     pub wm_state: u32,
     pub wm_take_focus: u32,
     pub wm_hints: u32,
+    pub wm_client_leader: u32,
 
     // EWMH _NET atoms
     pub net_supported: u32,
@@ -96,6 +97,7 @@ impl Atoms {
         let r_wm_state = intern!("WM_STATE")?;
         let r_wm_focus = intern!("WM_TAKE_FOCUS")?;
         let r_wm_hints = intern!("WM_HINTS")?;
+        let r_wm_leader = intern!("WM_CLIENT_LEADER")?;
         let r_timestamp = intern!("_MAVERICK_TIMESTAMP")?;
 
         let r_net_supported = intern!("_NET_SUPPORTED")?;
@@ -143,6 +145,7 @@ impl Atoms {
             wm_state: r_wm_state.reply()?.atom,
             wm_take_focus: r_wm_focus.reply()?.atom,
             wm_hints: r_wm_hints.reply()?.atom,
+            wm_client_leader: r_wm_leader.reply()?.atom,
             net_supported: r_net_supported.reply()?.atom,
             net_client_list: r_net_client_list.reply()?.atom,
             net_client_list_stacking: r_net_client_list_stacking.reply()?.atom,

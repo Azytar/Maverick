@@ -165,6 +165,109 @@ static void protocol_test(void) {
     XDestroyWindow(d, global);
 }
 
+static void transfer(Window to) {
+    XSetInputFocus(d, to, RevertToParent, server_time());
+    XFlush(d);
+    wait_focus(to);
+    stable_focus(to, 0.05);
+}
+
+static void ownership_test(void) {
+    Window game = window(True, False);
+    XMapWindow(d, game);
+    wait_focus(game);
+    Window dialog = window(True, True);
+    XSetTransientForHint(d, dialog, game);
+    XMapWindow(d, dialog);
+    wait_focus(dialog);
+    activate(game);
+    pump();
+    unsigned before = offers;
+    for (int i = 0; i < 5; i++) { transfer(dialog); transfer(game); }
+    check(offers == before, "transient transfers update selection without WM_TAKE_FOCUS or repairs");
+
+    Window nested = window(True, False);
+    XSetTransientForHint(d, nested, dialog);
+    XMapWindow(d, nested);
+    wait_focus(nested);
+    transfer(game);
+    transfer(nested);
+    transfer(dialog);
+    check(offers == before, "nested and sibling transient focus remains within the application family");
+
+    activate(game);
+    XDeleteProperty(d, dialog, XA_WM_TRANSIENT_FOR);
+    XSetInputFocus(d, dialog, RevertToParent, server_time());
+    XFlush(d);
+    wait_focus(game);
+    stable_focus(game, 0.1);
+    check(selected() == game, "removing WM_TRANSIENT_FOR revokes the old focus relationship");
+    XSetTransientForHint(d, dialog, game);
+    transfer(dialog);
+    transfer(game);
+
+    Window sibling = window(True, False);
+    XWMHints hints = {0};
+    hints.flags = InputHint | WindowGroupHint;
+    hints.input = True;
+    hints.window_group = game;
+    XSetWMHints(d, game, &hints);
+    XSetWMHints(d, sibling, &hints);
+    XMapWindow(d, sibling);
+    wait_focus(sibling);
+    transfer(game);
+    transfer(sibling);
+    check(offers == before, "WM_HINTS window groups authorize related top-level transfers");
+
+    hints.flags = InputHint;
+    XSetWMHints(d, sibling, &hints);
+    Atom leader = XInternAtom(d, "WM_CLIENT_LEADER", False);
+    XChangeProperty(d, game, leader, XA_WINDOW, 32, PropModeReplace, (unsigned char *)&game, 1);
+    XChangeProperty(d, sibling, leader, XA_WINDOW, 32, PropModeReplace, (unsigned char *)&game, 1);
+    transfer(game);
+    transfer(sibling);
+    check(offers == before, "WM_CLIENT_LEADER supports clients without a window group hint");
+
+    Window stranger = window(True, True);
+    XMapWindow(d, stranger);
+    wait_focus(stranger);
+    activate(game);
+    pump();
+    before = offers;
+    XSetInputFocus(d, stranger, RevertToParent, server_time());
+    XFlush(d);
+    wait_focus(game);
+    stable_focus(game, 0.2);
+    check(selected() == game && offers == before, "an unrelated managed window cannot take the logical selection");
+
+    Window no_input = window(False, False);
+    XMapWindow(d, no_input);
+    XFlush(d);
+    double deadline = now() + 5;
+    XWindowAttributes attrs;
+    do {
+        pump();
+        XGetWindowAttributes(d, no_input, &attrs);
+        if (attrs.map_state == IsViewable) break;
+        pause_events();
+    } while (now() < deadline);
+    activate(game);
+    XSetInputFocus(d, no_input, RevertToParent, server_time());
+    XFlush(d);
+    wait_focus(game);
+    stable_focus(game, 0.1);
+    check(selected() == game, "No Input clients cannot become the selection through self-focus");
+    XDeleteProperty(d, no_input, XA_WM_HINTS);
+    activate(no_input);
+    check(focused() == no_input, "deleting WM_HINTS restores default input eligibility");
+    XDestroyWindow(d, no_input);
+    XDestroyWindow(d, stranger);
+    XDestroyWindow(d, sibling);
+    XDestroyWindow(d, nested);
+    XDestroyWindow(d, dialog);
+    XDestroyWindow(d, game);
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -178,6 +281,7 @@ int main(int argc, char **argv) {
     clock_window = XCreateSimpleWindow(d, root, 0, 0, 1, 1, 0, 0, 0);
     XSelectInput(d, clock_window, PropertyChangeMask);
     if (!strcmp(argv[1], "protocol")) protocol_test();
+    else if (!strcmp(argv[1], "ownership")) ownership_test();
     else return 2;
     XCloseDisplay(d);
     return 0;

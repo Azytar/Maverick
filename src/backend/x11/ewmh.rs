@@ -360,6 +360,48 @@ impl WindowManager {
         );
         Ok(())
     }
+
+    fn declared_focus_group(
+        &self,
+        win: Window,
+    ) -> Result<Option<Window>, Box<dyn std::error::Error>> {
+        let hints =
+            self.conn
+                .get_property(false, win, self.atoms.wm_hints, self.atoms.wm_hints, 0, 9)?;
+        let leader = self.conn.get_property(
+            false,
+            win,
+            self.atoms.wm_client_leader,
+            AtomEnum::WINDOW,
+            0,
+            1,
+        )?;
+        let Ok(hints) = hints.reply() else {
+            return Ok(None);
+        };
+        let words: Vec<u32> = hints.value32().map(Iterator::collect).unwrap_or_default();
+        if words.first().is_some_and(|flags| flags & 64 != 0) {
+            if let Some(&group) = words.get(8).filter(|&&group| group != x11rb::NONE) {
+                return Ok(Some(group));
+            }
+        }
+        Ok(leader
+            .reply()
+            .ok()
+            .and_then(|reply| reply.value32().and_then(|mut values| values.next()))
+            .filter(|&group| group != x11rb::NONE))
+    }
+
+    pub(super) fn shares_focus_group(
+        &self,
+        from: Window,
+        to: Window,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        // These ICCCM declarations describe an application family, not an
+        // authenticated identity. PID and WM_CLASS are not focus authority.
+        let from = self.declared_focus_group(from)?;
+        Ok(from.is_some() && from == self.declared_focus_group(to)?)
+    }
 }
 
 #[cfg(test)]

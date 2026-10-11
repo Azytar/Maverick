@@ -630,6 +630,44 @@ impl WindowManager {
             return Ok(());
         }
 
+        if e.atom == u32::from(AtomEnum::WM_TRANSIENT_FOR)
+            && self.engine.state.clients.contains_key(&e.window)
+        {
+            let parent = if e.state == Property::DELETE {
+                None
+            } else {
+                self.conn
+                    .get_property(
+                        false,
+                        e.window,
+                        AtomEnum::WM_TRANSIENT_FOR,
+                        AtomEnum::WINDOW,
+                        0,
+                        1,
+                    )?
+                    .reply()
+                    .ok()
+                    .and_then(|reply| reply.value32().and_then(|mut words| words.next()))
+                    .filter(|&parent| parent != x11rb::NONE && parent != self.root)
+            };
+            if let Some(client) = self.engine.state.clients.get_mut(&e.window) {
+                client.transient_parent = parent;
+            }
+            return Ok(());
+        }
+
+        if e.atom == self.atoms.wm_hints && self.engine.state.clients.contains_key(&e.window) {
+            // Removing WM_HINTS restores the ICCCM default input model.
+            if e.state == Property::DELETE {
+                if let Some(client) = self.engine.state.clients.get_mut(&e.window) {
+                    client.wants_input = true;
+                }
+            } else {
+                self.refresh_hints(e.window)?;
+            }
+            return Ok(());
+        }
+
         if e.state == Property::DELETE {
             return Ok(());
         }
@@ -638,8 +676,6 @@ impl WindowManager {
             let win = e.window;
             if e.atom == self.atoms.net_wm_name || e.atom == u32::from(AtomEnum::WM_NAME) {
                 self.refresh_title(win)?;
-            } else if e.atom == u32::from(AtomEnum::WM_HINTS) {
-                self.refresh_hints(win)?;
             }
             // `WM_NORMAL_HINTS` is handled by its own early arm above (fresh
             // `client.hints` for the float snap); anything else just flows to
