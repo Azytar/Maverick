@@ -279,11 +279,35 @@ pub struct WindowManager {
     /// stationary check (see `pointer::PointerTruth`). Updated by
     /// `MotionNotify` and `ButtonPress`; read (never written) by `EnterNotify`.
     ptr_truth: PointerTruth,
-    /// Server time of the most recent input event (key/button/enter). Used to
-    /// stamp ICCCM `WM_TAKE_FOCUS` messages with a real timestamp instead of
-    /// `CurrentTime`, which a few strict toolkits (some Java/Emacs builds)
-    /// refuse to act on.
+    /// Server time of the most recent input event (key/button/motion/enter).
+    /// Used to stamp `set_input_focus` requests and ICCCM `WM_TAKE_FOCUS`
+    /// messages with a real timestamp instead of `CurrentTime`, which a few
+    /// strict toolkits (some Java/Emacs builds) refuse to act on.
     last_event_time: u32,
+    /// Whether a focus change has been observed since `last_event_time` was
+    /// recorded. X11 focus events carry no timestamp, so after one the stored
+    /// stamp may predate the server's last-focus-change time — and a
+    /// `set_input_focus` stamped older than that is silently ignored by the
+    /// server, leaving the focus stuck wherever it is. While set, focus paths
+    /// stamp with `CurrentTime` (evaluated at server processing time, so
+    /// never stale) instead; the next key/button/motion/enter clears it with
+    /// a real stamp.
+    event_time_suspect: bool,
+    /// The window whose *Globally Active* focus offer is still outstanding.
+    ///
+    /// Offering means pointing the X focus at the root and sending
+    /// `WM_TAKE_FOCUS`, after which the server reports the transition to the
+    /// root as a `FocusOut` — and the deferred probe then reads back
+    /// root/`None` while the logical focus names the offered window. Without
+    /// a record of the outstanding offer that read is indistinguishable from
+    /// genuine focus loss, so the repair would point the X focus at the root
+    /// *again* (plus a duplicate `WM_TAKE_FOCUS`): when that duplicate lands
+    /// after the client's own self-take it yanks the focus right back off
+    /// the client. While this names the logical window, a root/`None` probe
+    /// result is the echo of our own offer and settles quietly. Cleared when
+    /// the client takes the focus (`real == window`), when the logical focus
+    /// moves elsewhere, or when the window is unmanaged.
+    root_focus_pending: Option<Window>,
     /// Per-monitor cached stacking order (top-to-bottom) so `stack_overlay`
     /// only re-issues `raise()` when the order actually changed, instead of
     /// re-raising every float/popup on every arrange.
@@ -505,6 +529,22 @@ impl WindowManager {
     pub(super) fn schedule_keyboard_refresh(&mut self) {
         if self.kbd_refresh_due.is_none() {
             self.kbd_refresh_due = Some(Instant::now() + KBD_REFRESH_DELAY);
+        }
+    }
+
+    /// Timestamp for the next focus request (`set_input_focus`) or focus
+    /// protocol message (`WM_TAKE_FOCUS`).
+    ///
+    /// A stored stamp older than the server's last-focus-change time makes the
+    /// server silently ignore the request, so after any observed focus change
+    /// (which carries no timestamp of its own) the stored stamp is suspect
+    /// and `CurrentTime` — evaluated by the server at processing time — is
+    /// used instead, until fresh input clears the suspicion.
+    pub(super) fn focus_time(&self) -> u32 {
+        if self.event_time_suspect {
+            x11rb::CURRENT_TIME
+        } else {
+            self.last_event_time
         }
     }
 
@@ -989,6 +1029,8 @@ impl WindowManager {
             pointer_guard_until: None,
             ptr_truth: PointerTruth::default(),
             last_event_time: 0,
+            event_time_suspect: false,
+            root_focus_pending: None,
             last_stack_order: std::collections::HashMap::new(),
             fs_covering: std::collections::HashMap::new(),
             pending: PendingReconcile::default(),

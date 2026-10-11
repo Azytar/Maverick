@@ -698,6 +698,13 @@ impl WindowManager {
         if let Some(order) = self.last_stack_order.get_mut(&mon_i) {
             order.retain(|&w| w != win);
         }
+        // An outstanding root offer dies with its window: without this, a
+        // later probe reading root/`None` for a recycled logical slot could
+        // mistake itself for the dead offer's echo and stay quiet instead of
+        // repairing. (`ViewId`s are never reused, but X11 ids are.)
+        if self.root_focus_pending == Some(win) {
+            self.root_focus_pending = None;
+        }
 
         // The monitor — or the View the window was placed in — may no longer exist
         // after a hotplug.

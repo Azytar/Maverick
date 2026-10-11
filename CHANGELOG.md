@@ -77,6 +77,21 @@ before it makes no compatibility promise.
   breaking the client's grabs. The logical selection is kept and the X focus
   is left alone; only a divergence between two managed clients, or a focus
   lost to the root, is still repaired.
+- A window using the ICCCM 4.1.7 *Globally Active* input model
+  (`WM_HINTS.input = False` with `WM_TAKE_FOCUS`, exactly what Wine/Proton
+  game windows declare) can now receive the focus at all. Such requests used
+  to be refused outright, so no `WM_TAKE_FOCUS` was ever offered and the
+  client — waiting for the offer to take the focus itself — never got the
+  keyboard, with no focus event left to repair through. The X focus now goes
+  to the root while the protocol is offered, and the echo of that offer
+  settles quietly instead of repairing a second time (which could land after
+  the client's self-take and yank the focus back off it).
+- Focus requests are no longer stamped with an input timestamp that a silent
+  intervening focus change has made older than the server's
+  last-focus-change time (such requests are ignored by the server, leaving
+  the focus stuck). Any observed focus change — which itself carries no
+  timestamp — marks the stored stamp suspect until fresh key, button, motion
+  or enter input arrives; while suspect, `CurrentTime` is used instead.
 
 ## [1.1.1] - 2026-10-05
 

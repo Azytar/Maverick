@@ -55,9 +55,11 @@
 //! # Focus
 //!
 //! `focus` validates the window, refuses one whose `WM_HINTS.input`
-//! is false, unfocuses the previous window, sets `sel_mon`, calls
-//! `set_input_focus` (PARENT — the only direction left once that
-//! gate has passed) with `last_event_time`, writes `WM_TAKE_FOCUS`,
+//! is false (unless it offers `WM_TAKE_FOCUS`, which is then sent while the
+//! X focus goes to `PointerRoot`), unfocuses the previous window, sets `sel_mon`, calls
+//! `set_input_focus` with `focus_time()` (a real stamp, or `CurrentTime`
+//! after an intervening focus change made the stored one suspect), writes
+//! `WM_TAKE_FOCUS`,
 //! updates the focus stack *before* `reconcile_focus` (return-to-workspace
 //! bug fix), and calls `stack_overlay`.
 //!
@@ -1132,23 +1134,40 @@ impl WindowManager {
         if let Some(w) = valid_win {
             // One scoped lookup: ends the immutable borrow of `clients` before
             // the mutations below re-borrow the map.
-            let (mon_i, geom, urgent) = {
+            let (mon_i, geom, urgent, wants_input) = {
                 let c = match self.engine.state.clients.get(&w) {
                     Some(c) => c,
                     None => return self.focus(None),
                 };
                 // Focus eligibility, read from the client's *current*
                 // `WM_HINTS.input` declaration (ICCCM 4.1.2.4): a window that
-                // declared `input = False` is not offered the focus at all, so
-                // clicking it, naming it from a tool, or reaching it with
-                // `focus-left` leaves the keyboard where it is. Reading the
-                // field and not a latch of it is the whole point — a client
-                // that rewrites the property back to `input = True` regains
-                // eligibility in the `PropertyNotify` that reports the rewrite.
-                if !c.wants_input {
+                // declared `input = False` is not offered the X input focus.
+                // Reading the field and not a latch of it is the whole point —
+                // a client that rewrites the property back to `input = True`
+                // regains eligibility in the `PropertyNotify` that reports the
+                // rewrite.
+                //
+                // The exception is ICCCM 4.1.7 *Globally Active* (`input =
+                // False` with `WM_TAKE_FOCUS` in `WM_PROTOCOLS`, exactly what
+                // Wine/Proton game windows declare): such a client takes the
+                // focus itself, but only after the WM offers it the protocol.
+                // Refusing the whole request here — as opposed to just
+                // redirecting the X focus — deadlocks those windows: no
+                // `WM_TAKE_FOCUS` is ever sent, so the client never takes the
+                // focus, so no focus event ever arms the `reconcile_focus`
+                // path that would have offered it. Only a window with neither
+                // declaration ("No Input") is refused outright.
+                let wants_input = c.wants_input;
+                let take_focus = self.has_protocol(w, self.atoms.wm_take_focus)?;
+                if !wants_input && !take_focus {
                     return Ok(());
                 }
-                (c.monitor, c.geom, c.flags.has(WinFlags::URGENT))
+                (
+                    c.monitor,
+                    c.geom,
+                    c.flags.has(WinFlags::URGENT),
+                    wants_input,
+                )
             };
 
             // Guard against stale client.monitor after hotplug
@@ -1172,20 +1191,36 @@ impl WindowManager {
             // by the server when a newer focus change has occurred, which is
             // exactly what desyncs logical vs real focus (the red-border bug).
             //
-            // The window is known to want input — the eligibility gate above
-            // returned for anything that declared `WM_HINTS.input == False` —
-            // so this is the only direction the request can take. The ICCCM
-            // 4.1.7 counterpart for a window that declared the opposite (the X
-            // focus goes to `PointerRoot`, and `WM_TAKE_FOCUS` is still offered
-            // so a *Globally Active* client can take the focus itself) is
-            // applied in `reconcile_focus`, the one site that can still see
-            // such a window as the focus target: a window focused while it
-            // wanted input and which then rewrote the property.
-            let _ = self
-                .conn
-                .set_input_focus(InputFocus::PARENT, w, self.last_event_time);
+            // The target depends on the input model (ICCCM 4.1.7): a window
+            // that wants input is focused directly, while a *Globally Active*
+            // window (`input = False` + `WM_TAKE_FOCUS`, which passed the gate
+            // above) leaves the X focus on `PointerRoot` and is offered the
+            // protocol below, so it can take the focus itself. Either way the
+            // logical selection moves to `w` in the block that follows.
+            //
+            // The stamp is `focus_time()`, not the raw last input time: after
+            // an intervening focus change the stored stamp predates the
+            // server's last-focus-change time and the request would be
+            // silently ignored, leaving the focus stuck.
+            let stamp = self.focus_time();
+            if wants_input {
+                let _ = self.conn.set_input_focus(InputFocus::PARENT, w, stamp);
+                // A direct request supersedes any outstanding root offer.
+                self.root_focus_pending = None;
+            } else {
+                let _ = self
+                    .conn
+                    .set_input_focus(InputFocus::POINTER_ROOT, self.root, stamp);
+                // Record the outstanding offer so the `FocusOut` echo it
+                // produces (and the root/`None` the deferred probe reads back)
+                // is recognised as our own doing in `settle_focus`, not as
+                // focus theft to repair with a duplicate root request — which
+                // could land after the client's self-take and yank the focus
+                // back off it.
+                self.root_focus_pending = Some(w);
+            }
             if self.has_protocol(w, self.atoms.wm_take_focus)? {
-                self.send_proto(w, self.atoms.wm_take_focus, self.last_event_time)?;
+                self.send_proto(w, self.atoms.wm_take_focus, stamp)?;
             }
             // Commit the logical focus to `State` *before* reconciling against
             // the real X input focus below. `reconcile_focus()` compares the real
@@ -1334,11 +1369,12 @@ impl WindowManager {
                 // The maximize overlay loses its owner with the focus.
                 self.engine.state.sync_presented_maximize(sel);
             }
-            let _ = self.conn.set_input_focus(
-                InputFocus::POINTER_ROOT,
-                self.root,
-                self.last_event_time,
-            );
+            let _ =
+                self.conn
+                    .set_input_focus(InputFocus::POINTER_ROOT, self.root, self.focus_time());
+            // No logical target owns the root focus here: drop any
+            // outstanding offer with it.
+            self.root_focus_pending = None;
             // Nothing to settle: `mon.focused` is already `None`, so logical and
             // real agree. A window that grabbed focus back generates the
             // `FocusIn` the event path settles against.
@@ -1455,6 +1491,13 @@ impl WindowManager {
         if logical == real {
             #[cfg(feature = "input-trace")]
             itrace!("reconcile_focus OK (logical==real), no-op");
+            // The client holds exactly the window it was offered (or the WM's
+            // own direct request): any outstanding root offer is consumed.
+            if let Some(p) = self.root_focus_pending {
+                if Some(p) == real {
+                    self.root_focus_pending = None;
+                }
+            }
             return Ok(());
         }
 
@@ -1486,10 +1529,31 @@ impl WindowManager {
             }
         }
 
-        // ICCCM 4.1.7 counterpart of `focus()` needs no guard of its own any
-        // more. `focus()` refuses a window whose `WM_HINTS.input` is false, and
-        // the repair below re-asserts `PointerRoot` rather than the window, so
-        // the outcome this used to prevent — the X input focus landing on a
+        // Outstanding root offer: the probe read back root/`None` while the
+        // logical window is the *Globally Active* window the WM just offered
+        // the focus to. That read is the echo of our own offer — the
+        // `FocusOut` it produced is what armed this probe — not focus theft,
+        // so repairing here would point the X focus at the root a second time
+        // (plus a duplicate `WM_TAKE_FOCUS`): when the duplicate lands after
+        // the client's self-take it yanks the focus right back off the
+        // client. Settle quietly instead.
+        if real.is_none() {
+            if let Some(p) = self.root_focus_pending {
+                if Some(p) == logical && self.engine.state.clients.contains_key(&p) {
+                    #[cfg(feature = "input-trace")]
+                    itrace!(
+                        "reconcile_focus BAIL offer: real=None is the echo of the outstanding root offer to {:#x}, leaving X focus alone",
+                        p
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        // ICCCM 4.1.7 counterpart of `focus()`: `focus()` redirects a window
+        // whose `WM_HINTS.input` is false to `PointerRoot` (unless it offers
+        // no protocol at all), and the repair below does the same, so the
+        // outcome this used to prevent — the X input focus landing on a
         // client that declared it never wants it — cannot be reached through
         // either path. A second predicate here would have to distinguish a state
         // the window is no longer in: with `wants_input` the only record of the
@@ -1553,20 +1617,24 @@ impl WindowManager {
                 };
                 // ICCCM 4.1.7 (same rule as `focus()`): never put the X
                 // input focus on an `input == False` window — re-assert to
-                // the root instead.
+                // the root instead. Stamped with `focus_time()`: the probe
+                // that led here observed a focus change, so a stored stamp
+                // may already be older than it.
+                let stamp = self.focus_time();
                 if wants {
+                    let _ = self.conn.set_input_focus(InputFocus::PARENT, w, stamp);
+                    // A direct request supersedes any outstanding root offer.
+                    self.root_focus_pending = None;
+                } else {
                     let _ = self
                         .conn
-                        .set_input_focus(InputFocus::PARENT, w, self.last_event_time);
-                } else {
-                    let _ = self.conn.set_input_focus(
-                        InputFocus::POINTER_ROOT,
-                        self.root,
-                        self.last_event_time,
-                    );
+                        .set_input_focus(InputFocus::POINTER_ROOT, self.root, stamp);
+                    // A fresh offer, recorded like the one `focus()` makes so
+                    // its echo settles quietly instead of repairing again.
+                    self.root_focus_pending = Some(w);
                 }
                 if self.has_protocol(w, self.atoms.wm_take_focus)? {
-                    self.send_proto(w, self.atoms.wm_take_focus, self.last_event_time)?;
+                    self.send_proto(w, self.atoms.wm_take_focus, stamp)?;
                 }
                 let urgent = self
                     .engine
@@ -1585,11 +1653,12 @@ impl WindowManager {
                 );
             }
         } else {
-            let _ = self.conn.set_input_focus(
-                InputFocus::POINTER_ROOT,
-                self.root,
-                self.last_event_time,
-            );
+            let _ =
+                self.conn
+                    .set_input_focus(InputFocus::POINTER_ROOT, self.root, self.focus_time());
+            // No logical target owns the root focus here: drop any
+            // outstanding offer with it.
+            self.root_focus_pending = None;
         }
 
         // Repaint the previously-focused (now unfocused) window's border.

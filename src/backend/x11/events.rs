@@ -758,6 +758,7 @@ impl WindowManager {
 
     pub(super) fn on_key(&mut self, e: KeyPressEvent) -> Result<(), Box<dyn std::error::Error>> {
         self.last_event_time = e.time;
+        self.event_time_suspect = false;
         // Notches queued earlier in this turn happened before this key; apply
         // them first so the key acts on the state the user had already reached.
         self.apply_wheel_steps()?;
@@ -837,6 +838,7 @@ impl WindowManager {
             return Ok(());
         }
         self.last_event_time = e.time;
+        self.event_time_suspect = false;
         if self.engine.cfg.focus_mouse {
             // Guard: a key navigation that just ran must not be undone by an
             // EnterNotify caused by the pointer sitting over a tile edge (see
@@ -906,6 +908,11 @@ impl WindowManager {
                 .contains_key(&e.event)
                 .then_some(e.event)
         };
+        // Focus events carry no timestamp, so any stored input stamp may now
+        // predate the server's last-focus-change time (see
+        // `event_time_suspect`): the next focus request stamps with
+        // `CurrentTime` until fresh input arrives.
+        self.event_time_suspect = true;
         // The event names the window that took the focus, which is the answer
         // `reconcile_focus` would spend a blocking round trip to obtain — and
         // would obtain less accurately, since a probe issued now reports where
@@ -943,6 +950,9 @@ impl WindowManager {
         if self.engine.state.x11_input_focus == Some(e.event) {
             self.engine.state.x11_input_focus = None;
         }
+        // As in `on_focus_in`: the stored input stamp may now be older than
+        // the focus change that just happened.
+        self.event_time_suspect = true;
         // No inline `GetInputFocus`: a `FocusOut` names where focus *left*, not
         // where it went, so the probe is the only way to learn the destination.
         // Taking it here paid a round trip per event — and our own focus moves
