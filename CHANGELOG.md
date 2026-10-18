@@ -13,6 +13,9 @@ before it makes no compatibility promise.
 
 ### Changed
 
+- Column resize commands are ignored while the target column or focused window
+  is fullscreen. Leaving fullscreen preserves the previous column width instead
+  of applying size changes made invisibly during fullscreen.
 - The shipped configuration now matches the runtime defaults: square corners,
   zero-width borders, no application/workspace rules and no autostart programs.
   Most options and all default shortcuts remain visible as commented examples;

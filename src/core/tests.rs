@@ -4048,6 +4048,87 @@ mod unit_tests {
     }
 
     #[test]
+    fn column_resize_fullscreen_preserves_the_restored_layout() {
+        use crate::core::commands::ToggleFullscreen;
+        use crate::core::ipc::state_json;
+        for policy in [FullscreenPolicy::Normal, FullscreenPolicy::True] {
+            let mut engine = column_resize_engine(2, 100, 40);
+            settle(&mut engine);
+            let original = project(&engine);
+            engine.execute(ToggleFullscreen(Some(2)));
+            engine.state.clients.get_mut(&2).unwrap().fullscreen_policy = policy;
+            engine.state.monitors[0].ws_mut().camera.retarget(-137.5);
+            let fullscreen = state_json(&engine.state, &engine.cfg);
+            for action in [
+                Action::GrowCol(50),
+                Action::GrowCol(-50),
+                Action::GrowColPct(10.0),
+                Action::GrowColPct(-10.0),
+            ] {
+                for _ in 0..8 {
+                    let effects = engine.dispatch(action.clone());
+                    assert!(effects.is_empty(), "fullscreen resize emitted {effects:?}");
+                    assert_eq!(state_json(&engine.state, &engine.cfg), fullscreen);
+                }
+            }
+            engine.execute(ToggleFullscreen(Some(2)));
+            assert_eq!(project(&engine), original);
+            assert!(!engine.dispatch(Action::GrowCol(50)).is_empty());
+        }
+    }
+
+    #[test]
+    fn column_resize_fullscreen_elsewhere_does_not_block_a_normal_column() {
+        let mut engine = column_resize_engine(2, 100, 0);
+        engine
+            .state
+            .clients
+            .get_mut(&1)
+            .unwrap()
+            .flags
+            .set(WinFlags::FULLSCREEN);
+        assert!(!engine.dispatch(Action::GrowCol(50)).is_empty());
+        assert_eq!(engine.state.monitors[0].ws().columns[0].weight, 0.3);
+        assert!(engine.state.monitors[0].ws().columns[1].weight > 0.3);
+    }
+
+    #[test]
+    fn column_resize_fullscreen_preserves_shared_column_width() {
+        let mut engine = column_resize_engine(2, 100, 0);
+        engine
+            .state
+            .clients
+            .get_mut(&1)
+            .unwrap()
+            .flags
+            .set(WinFlags::FULLSCREEN);
+        let ws = engine.state.monitors[0].ws_mut();
+        ws.columns.pop();
+        ws.columns[0].windows.push(2);
+        ws.columns[0].focused = 1;
+        ws.focus.column_idx = 0;
+        assert!(engine.dispatch(Action::GrowCol(50)).is_empty());
+        assert_eq!(engine.state.monitors[0].ws().columns[0].weight, 0.3);
+    }
+
+    #[test]
+    fn column_resize_fullscreen_focus_does_not_resize_a_stale_column() {
+        use crate::core::ipc::state_json;
+        let mut engine = column_resize_engine(2, 100, 0);
+        engine
+            .state
+            .clients
+            .get_mut(&2)
+            .unwrap()
+            .flags
+            .set(WinFlags::FULLSCREEN);
+        engine.state.monitors[0].ws_mut().focus.column_idx = 0;
+        let before = state_json(&engine.state, &engine.cfg);
+        assert!(engine.dispatch(Action::GrowCol(50)).is_empty());
+        assert_eq!(state_json(&engine.state, &engine.cfg), before);
+    }
+
+    #[test]
     fn grow_column_does_not_panic_with_many_columns() {
         use crate::types::Client;
         let mut engine = setup_engine();

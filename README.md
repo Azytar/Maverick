@@ -115,7 +115,10 @@ focused column in view.
   resumes the normal layout for the selection. See "Overview is a navigation viewport"
   below.
 - `grow_col` resizes the focused column by a pixel amount; `maverickctl resize`
-  addresses the same operation as a percentage. `new_column` and
+  addresses the same operation as a percentage of the monitor workarea width.
+  Resizing is ignored while the target column or focused window is fullscreen;
+  leaving fullscreen preserves the previous width. Input that cannot change
+  the width at a size limit leaves the camera and layout untouched. `new_column` and
   `collapse_column` add and remove columns.
 - Fullscreen and maximize are **presentation**, applied after the layout
   (`present::present_into`), not separate layouts. A window taking a real

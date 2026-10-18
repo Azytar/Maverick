@@ -1805,12 +1805,26 @@ impl Command for GrowColumn {
         }
         let ws_i = state.monitors[mi].active_index();
         let wa = state.monitors[mi].workarea;
-        let ws = &mut state.monitors[mi].workspaces[ws_i];
+        let ws = &state.monitors[mi].workspaces[ws_i];
 
         if ws.columns.is_empty() {
             return CommandReport::new(cmds);
         }
         let ci = ws.focus.column_idx.min(ws.columns.len().saturating_sub(1));
+        let is_fullscreen = |win: &WindowId| {
+            state
+                .clients
+                .get(win)
+                .is_some_and(crate::types::Client::is_fullscreen)
+        };
+        if state.monitors[mi]
+            .focused
+            .as_ref()
+            .is_some_and(is_fullscreen)
+            || ws.columns[ci].windows.iter().any(is_fullscreen)
+        {
+            return CommandReport::new(cmds);
+        }
 
         let (_, gap_outer) = effective_gaps(ws, cfg);
         let usable_w = inset_workarea(wa, gap_outer).w;
@@ -1825,7 +1839,7 @@ impl Command for GrowColumn {
         if new_weight == old_weight {
             return CommandReport::new(cmds);
         }
-        ws.columns[ci].weight = new_weight;
+        state.monitors[mi].workspaces[ws_i].columns[ci].weight = new_weight;
 
         let fs = fs_of(state, mi, ws_i);
         let ws = &mut state.monitors[mi].workspaces[ws_i];
