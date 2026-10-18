@@ -97,6 +97,8 @@ jobs:
         run: cargo build --release -p maverick -p maverickctl --locked
       - name: Xvfb stacking regression
         run: python3 tests/xvfb-stacking.py
+      - name: Live configuration reload
+        run: python3 tests/xvfb-reload.py
       - name: Root cursor startup and ownership
         run: python3 tests/xvfb-cursor.py
       - name: X11 focus and input regressions

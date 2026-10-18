@@ -388,6 +388,12 @@ impl WindowManager {
 
         let tags_changed =
             cfg.n_tags != self.engine.cfg.n_tags || cfg.tag_names != self.engine.cfg.tag_names;
+        let geometry_changed = cfg.gaps_inner != self.engine.cfg.gaps_inner
+            || cfg.gaps_outer != self.engine.cfg.gaps_outer
+            || cfg.smart_gaps != self.engine.cfg.smart_gaps
+            || cfg.border_w != self.engine.cfg.border_w
+            || cfg.accordion_boost != self.engine.cfg.accordion_boost
+            || cfg.n_tags != self.engine.cfg.n_tags;
         // (window, monitor) pairs re-homed by the shrink, so their
         // `_NET_WM_DESKTOP` can be re-emitted at the new position.
         let mut clamped_wins: Vec<(WindowId, usize)> = Vec::new();
@@ -449,6 +455,12 @@ impl WindowManager {
         }
 
         for mi in 0..self.engine.state.monitors.len() {
+            // The old offset belongs to the previous ribbon geometry. Retarget
+            // before projecting, but preserve deliberate pans on unchanged or
+            // non-geometric reloads.
+            if geometry_changed {
+                self.retarget_cameras(mi);
+            }
             self.arrange(mi)?;
         }
         log::info!(

@@ -40,6 +40,9 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Reloading gaps, borders or accordion sizing recalculates camera positions
+  before applying the new layout, keeping the focused tile on screen. Unchanged
+  or non-geometric reloads preserve deliberate camera pans.
 - Switching from a covering fullscreen ribbon tile to an exclusive fullscreen
   on another View no longer raises docks above the destination window. All
   fullscreen stacking now follows the same cached order, without a second

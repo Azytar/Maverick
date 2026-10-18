@@ -110,6 +110,11 @@ The Xephyr wrapper uses the same pixel/event regression on its own display.
 opens, after opening and closing a client, and after shutdown. Its C probe
 needs `libxfixes-dev` in addition to `libx11-dev`.
 
+`python3 tests/xvfb-reload.py` checks focused tile visibility after changing
+spacing, borders and accordion settings, including extreme gaps and seeded
+combinations. It also checks that unchanged and malformed reloads preserve a
+deliberate camera pan. It uses its own Xvfb and needs `libx11-dev`.
+
 `python3 tests/xvfb-input.py --case protocol` validates ICCCM timestamps;
 `--case ownership` checks transfers and activation protections; `--case child`
 checks cached-time desynchronization; `--case capture` checks core/XI2 keys,
