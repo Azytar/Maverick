@@ -740,13 +740,10 @@ impl WindowManager {
     ///    ordinary fullscreen window is NOT an overlay (it scrolls with the
     ///    ribbon), so it is excluded here;
     ///
-    /// "fullscreen covering" (case 2-bis): when the focused window of a `Column`
-    ///    workspace is fullscreen and we are not in Overview, the fullscreen tile
-    ///    is raised above *everything* (including the dock/bar). The moment any of
-    ///    those conditions breaks it drops back to a normal tile and the dock is
-    ///    re-raised so the bar returns on top (only on that transition, so floats
-    ///    — which ride above the dock in the base layer — are never pushed below
-    ///    it);
+    /// A covering fullscreen tile in the `Column` ribbon also sits above docks.
+    /// Its position is part of the same order as exclusive overlays, so leaving
+    /// a covering tile cannot raise a dock above the destination's overlay.
+    ///
     /// 3. the focused window if it is a *floating* dialog/popup ("peek"): it
     ///    rises above the presented window so a focused popup stays visible.
     ///    A focused *tiled* window never peeks: h/l still moves focus freely
@@ -754,11 +751,10 @@ impl WindowManager {
     /// 4. floating popups/dialogs whose `WM_TRANSIENT_FOR` chain reaches a
     ///    presented window — always above that overlay.
     ///
-    /// Fire-and-forget `StackMode::ABOVE` (or `BELOW` for the covering→off
-    /// transition): arrange/focus paths must not block.
+    /// Fire-and-forget `StackMode::ABOVE`: arrange/focus paths must not block.
     ///
     /// To avoid a `raise()` storm while the camera moves (arrange runs on
-    /// every monitor every frame), the desired top-to-bottom order is computed
+    /// every monitor every frame), the desired bottom-to-top order is computed
     /// into `order` and compared with the cached `last_stack_order[mon_idx]`;
     /// `raise` is only re-issued when the order actually changed.
     fn stack_overlay(&mut self, mon_idx: usize) {
@@ -875,46 +871,6 @@ impl WindowManager {
             }
             self.last_stack_order.insert(mon_idx, order);
         }
-
-        // 2-bis. Fullscreen covering. The focused fullscreen tile of a `Column`
-        // workspace occupies `mon.screen` (not the workarea) and must stay above
-        // the dock for as long as it is focused — without waiting for the camera
-        // to settle, or the bar stays visible through the whole entry/exit
-        // geometry and "fullscreen covers the screen and is on top" is a lie.
-        // `covering_fullscreen_window` already filters `layout != Column` and
-        // Overview, and the `prev_cover != new_cover` test below keeps this out
-        // of the per-frame raise path.
-        let cover_win = self.engine.state.covering_fullscreen_window(mon_idx);
-        let covering = cover_win.is_some();
-
-        // `cover_win` is the *focused* fullscreen window (or `None`); exactly one
-        // fullscreen column is raised above the dock at a time — the one you are
-        // looking at. Track the transition so moving focus between fullscreen
-        // columns drops the old one and raises the new one.
-        let new_cover = if covering { cover_win } else { None };
-        let prev_cover = self.fs_covering.get(&mon_idx).copied().flatten();
-        if prev_cover != new_cover {
-            // Drop the previously-covering window to the bottom so the neighbour
-            // tile and the bar paint over it (only on this transition).
-            if let Some(w) = prev_cover {
-                if new_cover != Some(w) {
-                    let _ = self.conn.configure_window(
-                        w,
-                        &ConfigureWindowAux::new().stack_mode(StackMode::BELOW),
-                    );
-                    for (&dock, &dock_mon) in &self.docks {
-                        if dock_mon == mon_idx {
-                            self.raise(dock);
-                        }
-                    }
-                }
-            }
-            // Raise the newly-covering window above the dock and every tile.
-            if let Some(w) = new_cover {
-                self.raise(w);
-            }
-        }
-        self.fs_covering.insert(mon_idx, new_cover);
     }
 
     /// True when `win`'s `transient_parent` chain reaches any window in `roots`.

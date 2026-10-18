@@ -34,6 +34,10 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Switching from a covering fullscreen ribbon tile to an exclusive fullscreen
+  on another View no longer raises docks above the destination window. All
+  fullscreen stacking now follows the same cached order, without a second
+  transition path overriding it. Docks remain visible on ordinary Views.
 - Direct focus requests apply the WM's current selection without reusing a
   timestamp that an internal child-window focus change can silently invalidate.
   Focus diagnostics now record X11 mode/detail and protocol timestamps.

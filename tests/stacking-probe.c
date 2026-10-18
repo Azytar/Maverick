@@ -1,21 +1,31 @@
 // Cooperative X11 stacking probe. Used only on the isolated Xvfb test server.
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
+#include <X11/Xutil.h>
 #include <stdio.h>
 #include <string.h>
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc > 2 || (argc == 2 && strcmp(argv[1], "--fullscreen"))) return 3;
     Display *d = XOpenDisplay(NULL);
     if (!d) return 1;
     Window root = DefaultRootWindow(d), dock = None, peer = None;
     Window win = XCreateSimpleWindow(d, root, 0, 0, 400, 300, 0, 0, 0xffffff);
     XStoreName(d, win, "stacking-probe");
+    if (argc == 2) {
+        Atom fullscreen = XInternAtom(d, "_NET_WM_STATE_FULLSCREEN", False);
+        XChangeProperty(d, win, XInternAtom(d, "_NET_WM_STATE", False), XA_ATOM, 32,
+                        PropModeReplace, (unsigned char *)&fullscreen, 1);
+    }
     XMapWindow(d, win);
     XSync(d, False);
     printf("%lu\n", win); fflush(stdout);
     char cmd[64];
     while (fgets(cmd, sizeof(cmd), stdin)) {
-        if (!strncmp(cmd, "dock", 4)) {
+        if (!strncmp(cmd, "dockid", 6)) {
+            printf("%lu\n", dock); fflush(stdout);
+            continue;
+        } else if (!strncmp(cmd, "dock", 4)) {
             dock = XCreateSimpleWindow(d, root, 0, 0, 800, 24, 0, 0, 0xff0000);
             Atom type = XInternAtom(d, "_NET_WM_WINDOW_TYPE_DOCK", False);
             unsigned long strut[12] = {0, 0, 24, 0, 0, 0, 0, 0, 0, 799, 0, 0};
@@ -50,16 +60,25 @@ int main(void) {
             Window r, parent, *children = NULL;
             unsigned int count = 0;
             int wi = -1, di = -1;
+            Window checked_dock = dock;
+            sscanf(cmd, "check %lu", &checked_dock);
             XWindowAttributes a;
             if (!XQueryTree(d, root, &r, &parent, &children, &count)) return 2;
             for (unsigned int i = 0; i < count; i++) {
                 if (children[i] == win) wi = (int)i;
-                if (children[i] == dock) di = (int)i;
+                if (children[i] == checked_dock) di = (int)i;
             }
             if (children) XFree(children);
             XGetWindowAttributes(d, win, &a);
             printf("%d %d %d %d %d %d %d\n", wi, di, a.x, a.y,
                    a.width, a.height, a.border_width);
+            fflush(stdout);
+            continue;
+        } else if (!strncmp(cmd, "pixel", 5)) {
+            XImage *image = XGetImage(d, root, 400, 12, 1, 1, AllPlanes, ZPixmap);
+            if (!image) return 2;
+            printf("%lu\n", XGetPixel(image, 0, 0));
+            XDestroyImage(image);
             fflush(stdout);
             continue;
         } else if (!strncmp(cmd, "pcheck", 6)) {

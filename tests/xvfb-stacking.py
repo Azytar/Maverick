@@ -62,6 +62,7 @@ def main():
         config.write_text('''[general]
 focus_mouse = false
 warp_cursor = false
+honor_initial_state = true
 [autostart]
 commands = []
 [[keybindings]]
@@ -73,6 +74,15 @@ action = "focus:left"
 [[keybindings]]
 key = "Mod4+l"
 action = "focus:right"
+[[keybindings]]
+key = "Mod4+1"
+action = "view:1"
+[[keybindings]]
+key = "Mod4+2"
+action = "view:2"
+[[keybindings]]
+key = "Mod4+3"
+action = "view:3"
 ''')
         helper = tmp / "probe"
         subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(ROOT / "tests/stacking-probe.c"),
@@ -103,10 +113,10 @@ action = "focus:right"
                 win = line(probe.stdout)
                 time.sleep(0.3)
 
-                def command(cmd):
-                    probe.stdin.write(cmd + "\n")
-                    probe.stdin.flush()
-                    return line(probe.stdout)
+                def command(cmd, process=probe):
+                    process.stdin.write(cmd + "\n")
+                    process.stdin.flush()
+                    return line(process.stdout)
 
                 def toggle():
                     subprocess.run(["xdotool", "windowactivate", "--sync", win], env=env,
@@ -231,6 +241,87 @@ action = "focus:right"
                     subprocess.run(["xdotool", "key", "--clearmodifiers", "super+" + key],
                                    env=env, check=True, timeout=5)
                     check("return to A keeps fullscreen")
+
+                for process in (peer, probe):
+                    process.stdin.write("quit\n")
+                    process.stdin.flush()
+                    process.wait(timeout=3)
+
+                def switch_view(number):
+                    subprocess.run(["xdotool", "key", "--clearmodifiers", f"super+{number}"],
+                                   env=env, check=True, timeout=5)
+                    time.sleep(0.1)
+
+                def workspace_check(process, dock, label, fullscreen=True):
+                    for _ in range(60):
+                        values = list(map(int, command(f"check {dock}", process).split()))
+                        wi, di, x, y, w, h, bw = values
+                        pixel = int(command("pixel", process))
+                        if fullscreen:
+                            valid = (wi > di >= 0 and (x, y, w, h, bw) == (0, 0, 800, 600, 0)
+                                     and pixel == 0xffffff)
+                        else:
+                            valid = di >= 0 and pixel == 0xff0000
+                        if valid:
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise AssertionError(f"{label}: stack/geometry={values}, pixel={pixel:#x}")
+                    time.sleep(0.2)
+                    assert list(map(int, command(f"check {dock}", process).split())) == values
+                    assert int(command("pixel", process)) == pixel
+                    print("PASS:", label, values, f"pixel={pixel:#x}")
+
+                for first_mode, second_mode in (
+                    ("ribbon", "exclusive"), ("exclusive", "ribbon"),
+                    ("ribbon", "ribbon"), ("exclusive", "exclusive"),
+                    ("exclusive", "client"), ("client", "exclusive"),
+                ):
+                    pair = []
+                    for number, mode in ((1, first_mode), (2, second_mode)):
+                        switch_view(number)
+                        args = [str(helper)] + (["--fullscreen"] if mode == "ribbon" else [])
+                        process = subprocess.Popen(args, env=env, stdin=subprocess.PIPE,
+                                                   stdout=subprocess.PIPE, stderr=log,
+                                                   text=True, bufsize=1)
+                        processes.append(process)
+                        pair.append(process)
+                        window = line(process.stdout)
+                        for _ in range(100):
+                            desktop = subprocess.check_output(
+                                ["xprop", "-id", window, "_NET_WM_DESKTOP"],
+                                env=env, text=True, timeout=3)
+                            if desktop.rstrip().endswith(f"= {number - 1}"):
+                                break
+                            time.sleep(0.05)
+                        else:
+                            raise AssertionError(f"window {window} not managed on View {number}")
+                        if mode == "exclusive":
+                            subprocess.run(["xdotool", "windowactivate", "--sync", window],
+                                           env=env, check=True, timeout=5)
+                            subprocess.run(["xdotool", "key", "--clearmodifiers", "super+shift+f"],
+                                           env=env, check=True, timeout=5)
+                        elif mode == "client":
+                            command("fs", process)
+                    first, second = pair
+                    command("dock", first)
+                    dock = int(command("dockid", first))
+                    label = f"{first_mode}/{second_mode}"
+                    for number, process in ((1, first), (2, second), (1, first), (2, second)):
+                        switch_view(number)
+                        workspace_check(process, dock, f"{label}: View {number} covers dock")
+                    command("remove", first)
+                    command("dock", first)
+                    dock = int(command("dockid", first))
+                    workspace_check(second, dock, f"{label}: dock restart stays below fullscreen")
+                    switch_view(3)
+                    workspace_check(second, dock, f"{label}: empty View restores dock", False)
+                    switch_view(1)
+                    workspace_check(first, dock, f"{label}: return restores fullscreen")
+                    for process in pair:
+                        process.stdin.write("quit\n")
+                        process.stdin.flush()
+                        process.wait(timeout=3)
             except Exception:
                 subprocess.run(["xwininfo", "-root", "-tree"], env=env, timeout=5)
                 log.flush()

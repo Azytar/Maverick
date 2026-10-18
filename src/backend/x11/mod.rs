@@ -300,15 +300,10 @@ pub struct WindowManager {
     root_focus_pending: Option<Window>,
     /// Only the latest focus offer may consume its server timestamp reply.
     take_focus_pending: Option<(Window, u16)>,
-    /// Per-monitor cached stacking order (top-to-bottom) so `stack_overlay`
+    /// Per-monitor cached stacking order (bottom-to-top) so `stack_overlay`
     /// only re-issues `raise()` when the order actually changed, instead of
     /// re-raising every float/popup on every arrange.
     last_stack_order: std::collections::HashMap<usize, Vec<WindowId>>,
-    /// Per-monitor record of which fullscreen window was "covering" (raised
-    /// above the dock) on the previous frame, so the dock is only re-raised on
-    /// the covering→not-covering transition. Re-raising it every frame would
-    /// push floats below the bar.
-    fs_covering: std::collections::HashMap<usize, Option<WindowId>>,
     /// Reconcile work the events drained this turn owe, collapsed into at most
     /// one pass per monitor.
     pending: PendingReconcile,
@@ -1012,7 +1007,6 @@ impl WindowManager {
             root_focus_pending: None,
             take_focus_pending: None,
             last_stack_order: std::collections::HashMap::new(),
-            fs_covering: std::collections::HashMap::new(),
             pending: PendingReconcile::default(),
             protocols: std::cell::RefCell::new(std::collections::HashMap::new()),
             focus_probe_due: false,

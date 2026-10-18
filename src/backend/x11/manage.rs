@@ -688,13 +688,10 @@ impl WindowManager {
         let mon_i = client.monitor;
 
         // Clear any dangling reference to the just-removed window in the
-        // per-monitor stacking caches. `stack_overlay` reads these and would
+        // per-monitor stacking cache. `stack_overlay` reads it and would
         // otherwise issue a configure/raise on a dead WindowId (only a swallowed
         // BadWindow, but avoidable). The window belonged to `mon_i`, so only
         // that monitor's entries can name it.
-        if self.fs_covering.get(&mon_i) == Some(&Some(win)) {
-            self.fs_covering.remove(&mon_i);
-        }
         if let Some(order) = self.last_stack_order.get_mut(&mon_i) {
             order.retain(|&w| w != win);
         }
