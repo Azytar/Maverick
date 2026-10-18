@@ -168,7 +168,7 @@ impl WindowManager {
 
     /// Re-exec the WM binary in place with the EXACT arguments it was launched
     /// with, so the new instance reuses the same `--config`, `--name` and
-    /// `--replace` (a real hard restart that rebuilds all state from scratch).
+    /// `--replace`. A one-shot handoff retains the logical window layout.
     ///
     /// Before exec we explicitly tear down X11 (key grabs, `SubstructureRedirect`,
     /// EWMH root props, check window) and the IPC socket + identity ficha via
@@ -178,6 +178,11 @@ impl WindowManager {
     /// two maverick instances contend over X11 grabs.
     pub(super) fn restart(&mut self) {
         use std::os::unix::process::CommandExt;
+
+        if let Err(error) = self.save_restart() {
+            log::error!("restart cancelled: could not preserve layout: {error}");
+            return;
+        }
 
         // Stop answering as the instance *before* the socket is unbound. The
         // window in which the socket simply does not exist lasts only as long as
@@ -213,9 +218,15 @@ impl WindowManager {
             // `Command::new(exe)` already supplies, so the new argv matches the
             // original launch exactly.
             let args = restart_args(&self.launch_args, &self.session_id);
-            let err = std::process::Command::new(exe).args(&args).exec();
+            let err = std::process::Command::new(exe)
+                .args(&args)
+                .env(super::restart::HANDOFF_ENV, std::process::id().to_string())
+                .exec();
             log::error!("restart exec failed: {err}");
         }
+        let _ = self
+            .conn
+            .delete_property(self.root, self.atoms.maverick_restart);
         self.engine.state.running = false;
     }
 

@@ -40,6 +40,12 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Restart preserves the live View layout, column widths, floating geometry,
+  fullscreen restore state, Overview, camera offsets and selection through a
+  one-shot handoff to the replacement process. Restoring focus preserves the
+  pointer position; changed geometry settings retarget cameras. Existing clients
+  keep their X11 windows and autostart commands are not launched again after a
+  successful handoff.
 - Reloading gaps, borders or accordion sizing recalculates camera positions
   before applying the new layout, keeping the focused tile on screen. Unchanged
   or non-geometric reloads preserve deliberate camera pans.

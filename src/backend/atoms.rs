@@ -72,6 +72,8 @@ pub struct Atoms {
     // existing window tree returns windows to exactly where they were.
     pub maverick_float: u32,
     pub maverick_geom: u32,
+    /// One-shot layout handoff consumed only by the same process after exec.
+    pub maverick_restart: u32,
     pub maverick_timestamp: u32,
 
     // Property type for `WM_NAME`/`_NET_WM_NAME` values, which ICCCM/EWMH
@@ -136,6 +138,7 @@ impl Atoms {
 
         let r_maverick_float = intern!("_MAVERICK_FLOAT")?;
         let r_maverick_geom = intern!("_MAVERICK_GEOM")?;
+        let r_maverick_restart = intern!("_MAVERICK_RESTART")?;
 
         let r_utf8_string = intern!("UTF8_STRING")?;
 
@@ -181,6 +184,7 @@ impl Atoms {
             net_wm_pid: r_net_wm_pid.reply()?.atom,
             maverick_float: r_maverick_float.reply()?.atom,
             maverick_geom: r_maverick_geom.reply()?.atom,
+            maverick_restart: r_maverick_restart.reply()?.atom,
             maverick_timestamp: r_timestamp.reply()?.atom,
             utf8_string: r_utf8_string.reply()?.atom,
         })

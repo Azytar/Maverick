@@ -1064,6 +1064,21 @@ impl WindowManager {
     }
 
     pub(super) fn focus(&mut self, win: Option<Window>) -> Result<(), Box<dyn std::error::Error>> {
+        self.focus_with_camera_policy(win, true)
+    }
+
+    pub(super) fn restore_focus(
+        &mut self,
+        win: Option<Window>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.focus_with_camera_policy(win, false)
+    }
+
+    fn focus_with_camera_policy(
+        &mut self,
+        win: Option<Window>,
+        retarget_camera: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let valid_win = win.filter(|w| self.engine.state.clients.contains_key(w));
         self.take_focus_pending = None;
 
@@ -1257,7 +1272,13 @@ impl WindowManager {
             // `#[must_use]`: the monitor index it hands back is exactly the one
             // whose settled projection is still owed, so dropping it would leave
             // the retargeted monitor unarranged rather than failing to compile.
-            let retargeted = retarget_focus_to_window(&mut self.engine.state, &self.engine.cfg, w);
+            // Restoring X11 focus after exec is not navigation: retain the
+            // camera and column selection recovered from the handoff.
+            let retargeted = if retarget_camera {
+                retarget_focus_to_window(&mut self.engine.state, &self.engine.cfg, w)
+            } else {
+                None
+            };
 
             // Keep X11 geometry (`client.geom`) in sync with the just-retargeted
             // camera. The keyboard focus path emits `ArrangeMonitor` before
@@ -1277,7 +1298,8 @@ impl WindowManager {
             // under the hit-test, and `hide_offscreen` is skipped during a drag
             // (guarded in `arrange_full`) so a focus change mid-drag cannot
             // un-hide or mis-place windows.
-            self.pending.mark(retargeted.unwrap_or(mon_i), Some(w));
+            self.pending
+                .mark(retargeted.unwrap_or(mon_i), retarget_camera.then_some(w));
 
             let _ = self.conn.change_property32(
                 PropMode::REPLACE,
@@ -1287,13 +1309,10 @@ impl WindowManager {
                 &[w],
             );
 
-            if self.engine.cfg.warp_cursor {
-                // The one and only post-focus pointer warp. `arrange` above
-                // rewrote `client.geom` to the new settled position; warp onto
-                // *that* (not the stale pre-scroll `geom` captured at the top), so
-                // the pointer lands on the window we actually focused rather than
-                // wherever it slid from. Clamped to i16 like the synthetic-notify
-                // path: a >32k half-size would wrap negative.
+            if retarget_camera && self.engine.cfg.warp_cursor {
+                // Ordinary focus may warp immediately; the pending layout pass
+                // finishes it using settled geometry. Restoring a selection
+                // must leave the pointer where the user had it.
                 let g = self.engine.state.clients.get(&w).map_or(geom, |c| c.geom);
                 let dx = (g.w / 2).min(i16::MAX as u32) as i16;
                 let dy = (g.h / 2).min(i16::MAX as u32) as i16;

@@ -115,6 +115,12 @@ spacing, borders and accordion settings, including extreme gaps and seeded
 combinations. It also checks that unchanged and malformed reloads preserve a
 deliberate camera pan. It uses its own Xvfb and needs `libx11-dev`.
 
+`python3 tests/xvfb-restart.py` checks layout, geometry, fullscreen transitions,
+real X11 focus and opt-in autostart across repeated re-execs on its own Xvfb.
+It needs `libx11-dev`; the clients stay open throughout the restart checks.
+`--pointer-focus` enables hover focus and cursor warping before restarting;
+the restored selection and camera must survive a stationary pointer.
+
 `python3 tests/xvfb-input.py --case protocol` validates ICCCM timestamps;
 `--case ownership` checks transfers and activation protections; `--case child`
 checks cached-time desynchronization; `--case capture` checks core/XI2 keys,

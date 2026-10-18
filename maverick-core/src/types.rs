@@ -29,6 +29,8 @@
 
 use std::collections::HashMap;
 
+pub mod restart;
+
 /// Backend-agnostic window identifier used throughout the core domain model.
 ///
 /// A plain `u32`, not an alias for x11rb's `Window`: the core must not name

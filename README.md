@@ -102,7 +102,8 @@ focused column in view.
 - `ideal_scroll` derives the camera offset that makes the focused column fully
   visible, and it is recomputed after every change to the column tree, so the
   camera cannot be stranded past the end of a shorter ribbon.
-- Viewport zoom (`viewport_zoom`) enlarges the ribbon for close inspection, and
+- Viewport zoom (`viewport_zoom`) enlarges client window rectangles, so
+  applications receive new dimensions; it does not magnify their content.
   `page_snap` scrolls the camera one screen-width at a time.
 - Overview (`toggle_overview`, `overview_nav`, `overview_enter`) is a
   fixed-scale navigation viewport over the current View for picking a column.
@@ -207,7 +208,13 @@ focus/accordion policy can then resize columns when the selection changed.
 - An idle session costs no CPU. The event loop blocks on X11 plus the control
   self-pipe with no frame deadline, no heartbeat and no timer.
 - `--replace` requests a handover from a running window manager and adopts its
-  windows. Restart re-executes in place with the same arguments.
+  windows. Restart re-executes in place with the same arguments, preserving the
+  live Views, columns, sizes, fullscreen restore state, cameras and selection.
+  This handoff is transient and does not launch applications again. It applies
+  to Maverick's own restart with unchanged output geometry; an ordinary startup
+  or `--replace` adopts windows normally.
+  The running WM must already support this handoff: replacing an older binary
+  cannot reconstruct column widths or fullscreen snapshots it never saved.
 
 ## What Maverick is not
 
@@ -509,7 +516,7 @@ default** binding set: 33 explicit bindings plus one `Super+<digit>` and one
 | Collapse column | `Super+Ctrl+J` | removes the focused column |
 | Set the layout | `Super+T` | `layout:column`; the only accepted value |
 | Quit | `Super+Shift+Q` | orderly shutdown: ask clients to close, wait, force-kill the remainder, clean up |
-| Restart | `Super+Shift+R`, `Super+F5` | re-executes in place with the same arguments |
+| Restart | `Super+Shift+R`, `Super+F5` | re-executes while preserving the live window layout |
 | Focus the next monitor | `Super+Tab` | cycles monitor enumeration order |
 | Move window to the next monitor | `Super+Shift+Tab` | cycles monitor enumeration order |
 | Overview toggle / enter / next / previous | `Super+O` / `Super+E` / `Super+N` / `Super+Shift+O` | fixed-scale navigation viewport for picking a column |
@@ -801,10 +808,15 @@ limitations and its security boundary.
 than one candidate matches the display. List the candidates with
 `maverickctl list` and select explicitly with `--name` or `--session`.
 
-**A configuration change had no effect.** `reload` is a no-op when the running
-binary was built with compiled-in configuration only; restart the instance
-instead. `--check-config <path>` reports whether a file parses and whether any
-key is unknown.
+**A configuration change had no effect.** Run `maverickctl reload`; it rereads
+the original `--config` path or the default XDG path. A missing, unreadable or
+malformed file keeps the current configuration and reports the reason in the
+log. `maverick --check-config <path>` reports parse errors and unknown keys.
+`column_width` sets the width of newly added columns; resize existing columns
+with `grow_col` or `maverickctl resize`. Rules apply when managing a new window.
+Autostart runs at initial startup, not on reload or a successful WM restart.
+`maverickctl session restart` restarts the whole graphical session, including
+its X server; it is distinct from the WM's layout-preserving restart.
 
 **A keybinding does not fire.** Bindings resolve through the active XKB layout.
 A `[[keybindings]]` table replaces the compiled list outright, so declaring one

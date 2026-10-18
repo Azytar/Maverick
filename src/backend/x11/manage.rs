@@ -379,7 +379,16 @@ impl WindowManager {
             geom
         };
 
-        self.apply_rules(&mut client);
+        let restoring = self
+            .restart_snapshot
+            .as_ref()
+            .is_some_and(|s| s.layout.contains(win));
+        if !restoring {
+            self.apply_rules(&mut client);
+        }
+        if let Some(snapshot) = &self.restart_snapshot {
+            snapshot.layout.restore_client(&mut client);
+        }
 
         // Apply per-rule opacity, if any. _NET_WM_WINDOW_OPACITY is a 32-bit
         // cardinal in the range 0 (transparent) – 0xFFFFFFFF (opaque). It is
@@ -437,13 +446,18 @@ impl WindowManager {
         }
 
         // Rule geometry (forced size/position) overrides the auto-centering.
-        self.apply_rule_geometry(&mut client);
+        if !restoring {
+            self.apply_rule_geometry(&mut client);
+        }
 
         // A restored (persisted) geometry wins over every heuristic — it is
         // the user's explicit floating position from before the restart.
         if let Some(g) = restored_geom {
             client.geom = g;
             client.saved_geom = g;
+        }
+        if let Some(snapshot) = &self.restart_snapshot {
+            snapshot.layout.restore_client(&mut client);
         }
 
         // The border is applied by the Reconciler through `arrange` (the sole
@@ -522,6 +536,12 @@ impl WindowManager {
         }
 
         self.client_list_dirty = true;
+
+        // Adopt the whole tree before projecting or offering focus. Temporary
+        // placement during scanning must not overwrite the handoff's state.
+        if self.restart_snapshot.is_some() {
+            return Ok(());
+        }
 
         // Persist float status + geometry so a restart leaves exactly this.
         self.sync_window_prefs(win);

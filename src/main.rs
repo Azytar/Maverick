@@ -42,6 +42,10 @@ mod userconfig;
 use std::process;
 
 fn main() {
+    // Consume the private re-exec marker before control threads start and
+    // before any child can inherit it.
+    let restart_pid = std::env::var(backend::x11::HANDOFF_ENV).ok();
+    std::env::remove_var(backend::x11::HANDOFF_ENV);
     log::init();
     log::info!("maverick v{} starting", env!("CARGO_PKG_VERSION"));
 
@@ -292,6 +296,7 @@ fn main() {
         replace,
         config_path.clone().map(std::path::PathBuf::from),
         launch_args,
+        restart_pid,
     ) {
         Ok(mut manager) => {
             // Hand over the control socket + session id so cleanup() can tear
@@ -307,7 +312,15 @@ fn main() {
             // Compositor, bar, wallpaper and portals are all just entries here;
             // nothing is orchestrated specially. See the examples in
             // config.rs / config.toml.
-            for cmd in &manager.engine.cfg.autostart {
+            // A successful restart resumes existing applications, so these
+            // commands belong only to cold startup.
+            for cmd in manager
+                .engine
+                .cfg
+                .autostart
+                .iter()
+                .filter(|_| !manager.restarted)
+            {
                 if let Some((bin, args)) = cmd.split_first() {
                     // Detach stdio fully: an autostart child inheriting our
                     // stdin keeps the terminal/session alive and can block a

@@ -99,6 +99,10 @@ jobs:
         run: python3 tests/xvfb-stacking.py
       - name: Live configuration reload
         run: python3 tests/xvfb-reload.py
+      - name: Layout preservation across restart
+        run: |
+          python3 tests/xvfb-restart.py
+          python3 tests/xvfb-restart.py --pointer-focus
       - name: Root cursor startup and ownership
         run: python3 tests/xvfb-cursor.py
       - name: X11 focus and input regressions

@@ -91,6 +91,8 @@ mod overview;
 mod pointer;
 pub(crate) mod reconciler;
 mod render;
+mod restart;
+pub(crate) use restart::HANDOFF_ENV;
 mod struts;
 mod teardown;
 pub use teardown::ShutdownReason;
@@ -163,6 +165,8 @@ fn wait_timeout(
 /// `_NET_SUPPORTED` advertise EWMH; `RandR` monitors drive `workarea`; XKB +
 /// core `MappingNotify` drive keymap refresh.
 pub struct WindowManager {
+    restart_snapshot: Option<restart::Handoff>,
+    pub(crate) restarted: bool,
     /// The one X connection, shared by every part of the WM. It is an
     /// `XCBConnection` (not `RustConnection`) because it is the *same*
     /// `xcb_connection_t` the Xlib `Display` owns: `maverick_x11::open_x` opens
@@ -873,6 +877,7 @@ impl WindowManager {
         replace: bool,
         config_path: Option<PathBuf>,
         launch_args: Vec<String>,
+        restart_pid: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         trace::init();
         // The `XDisplay` returned here is deliberately not stored: the WM talks
@@ -906,6 +911,21 @@ impl WindowManager {
         }
 
         let monitors = detect_monitors(&conn, screen, &cfg)?;
+        let restart_snapshot = restart::take(
+            &conn,
+            root,
+            atoms.maverick_restart,
+            restart_pid.as_deref(),
+            &cfg,
+        )
+        .filter(|snapshot| {
+            let compatible = snapshot.layout.compatible(&monitors);
+            if !compatible {
+                log::warn!("restart: output geometry changed; adopting windows normally");
+            }
+            compatible
+        });
+        let restarted = restart_snapshot.is_some();
         let mut engine = Engine::new(cfg);
         engine.state.monitors = monitors;
         crate::log::config_snapshot("engine_config", &engine.cfg);
@@ -967,6 +987,8 @@ impl WindowManager {
         let keymap = build_keymap(&engine.cfg);
 
         let mut wm = WindowManager {
+            restart_snapshot,
+            restarted,
             conn,
             screen_num,
             root,
@@ -1016,11 +1038,24 @@ impl WindowManager {
 
         let _ = (depth, visual);
 
+        if wm.restarted {
+            // Restacking during adoption is not pointer motion. Seed the same
+            // stationary-pointer guard used by ordinary layout changes.
+            let pointer = wm.conn.query_pointer(wm.root)?.reply()?;
+            wm.ptr_truth
+                .note(i32::from(pointer.root_x), i32::from(pointer.root_y));
+        }
         wm.setup_root()?;
         wm.scan_windows()?;
+        wm.restore_restart()?;
 
         for i in 0..wm.engine.state.monitors.len() {
             wm.arrange(i)?;
+        }
+        if wm.restarted {
+            let focused = wm.engine.state.mon().and_then(|mon| mon.focused);
+            wm.restore_focus(focused)?;
+            wm.focus_probe_due = true;
         }
 
         // Publish the initial `_NET_WORKAREA` / `_NET_DESKTOP_GEOMETRY` now
