@@ -16,7 +16,6 @@
 
 set -u
 source "$(dirname "$0")/common.sh"
-mav_preflight
 build_helpers
 trap mav_cleanup EXIT ERR
 
@@ -31,17 +30,17 @@ bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
 # run one shutdown scenario; args: mode label
 run_shutdown() {
     local mode="$1" label="$2"
-    local disp=":98"
+    local disp="${DISP:-:98}"
     local xep
-    xep="$(start_xephyr "$disp" 1280 720)"
+    xep="$(start_xephyr "$disp" 1280 720)" || exit 1
     export DISPLAY="$disp"
     local mav
-    mav="$(mav_launch "$disp")"
+    mav="$(mav_launch "$disp")" || exit 1
 
     # one managed client in the requested cooperation mode
     "$BIN_DIR/mgdwin" $mode >/dev/null 2>&1 &
     local cpid=$!
-    HELPER_PIDS+=("$cpid")
+    mav_track "$cpid" || true
     # wait until maverick actually MANAGES the client (otherwise clients.is_empty()
     # makes quit instant and the cooperation path is not exercised)
     local i=0
@@ -79,6 +78,8 @@ run_shutdown() {
 
     # ensure nothing lingers
     alive "$mav" && { bad "[$label] maverick still running post-check"; kill -9 "$mav" 2>/dev/null; }
+    mav_stop "$cpid"
+    mav_stop "$xep"
     return 0
 }
 
@@ -93,12 +94,12 @@ run_shutdown "lie" "non-coop-lie"
 
 # ── D) kill a client with SIGKILL during normal operation ─────────────────────
 echo "=== D) SIGKILL a client mid-operation ==="
-disp=":99"
-xep="$(start_xephyr "$disp" 1280 720)"
+disp="${DISP_CLIENT_DEATH:-:99}"
+xep="$(start_xephyr "$disp" 1280 720)" || exit 1
 export DISPLAY="$disp"
-mav="$(mav_launch "$disp")"
-"$BIN_DIR/mgdwin" >/dev/null 2>&1 & CPID1=$!; HELPER_PIDS+=("$CPID1")
-"$BIN_DIR/mgdwin" >/dev/null 2>&1 & CPID2=$!; HELPER_PIDS+=("$CPID2")
+mav="$(mav_launch "$disp")" || exit 1
+"$BIN_DIR/mgdwin" >/dev/null 2>&1 & CPID1=$!; mav_track "$CPID1" || true
+"$BIN_DIR/mgdwin" >/dev/null 2>&1 & CPID2=$!; mav_track "$CPID2" || true
 sleep 1.5
 kill -9 "$CPID1" 2>/dev/null
 sleep 1.5

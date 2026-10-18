@@ -131,9 +131,8 @@ echo "── starting Xephyr + maverick on $DISP"
 # Headless Xephyr is not a texture-from-pixmap target (GLX texture-from-pixmap fails
 # with a fatal XIO that kills the WM mid-suite) — same policy as
 # xephyr-suite.sh: validate focus/float logic on the plain X11 path.
-mav_preflight
-start_xephyr "$DISP" 1280 720 >/dev/null
-mav_launch "$DISP" >/dev/null
+start_xephyr "$DISP" 1280 720 >/dev/null || exit 1
+mav_launch "$DISP" >/dev/null || exit 1
 
 # Two tiled windows; switch to Grid so both are fully visible for clicking.
 # Two tiled windows side by side (Column-only since Grid was removed; both

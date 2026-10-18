@@ -11,7 +11,6 @@
 
 set -u
 source "$(dirname "$0")/common.sh"
-mav_preflight
 build_helpers
 trap mav_cleanup EXIT ERR
 
@@ -21,12 +20,12 @@ ok()  { echo "PASS: $*"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
 
 DISP=":96"
-start_xephyr "$DISP" 1280 720 >/dev/null
+start_xephyr "$DISP" 1280 720 >/dev/null || exit 1
 export DISPLAY="$DISP"
-mav_launch "$DISP" >/dev/null
+mav_launch "$DISP" >/dev/null || exit 1
 
 MGDTITLE=ext-tile "$BIN_DIR/mgdwin" >/dev/null 2>&1 &
-HELPER_PIDS+=("$!")
+mav_track "$!" || true
 i=0
 while [ $i -lt 50 ] && [ "$(win_count "$DISP")" -lt 1 ]; do sleep 0.1; i=$((i+1)); done
 WIN="$(DISPLAY="$DISP" xdotool search --class mgdwin 2>/dev/null | head -1)"

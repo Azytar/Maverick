@@ -12,7 +12,6 @@
 
 set -u
 source "$(dirname "$0")/common.sh"
-mav_preflight
 build_helpers
 [ -x "$BIN_DIR/dockstrut" ] || cc -O2 -o "$BIN_DIR/dockstrut" "$BIN_DIR/dockstrut.c" -lX11 \
     || { echo "FAIL: could not build tests/dockstrut"; exit 1; }
@@ -24,9 +23,9 @@ ok()  { echo "PASS: $*"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
 
 DISP=":97"
-start_xephyr "$DISP" 1280 720 >/dev/null
+start_xephyr "$DISP" 1280 720 >/dev/null || exit 1
 export DISPLAY="$DISP"
-mav_launch "$DISP" >/dev/null
+mav_launch "$DISP" >/dev/null || exit 1
 
 # ── A) workarea published at startup, no docks ──────────────────────────────
 WA="$(DISPLAY="$DISP" xprop -root _NET_WORKAREA 2>/dev/null)"
@@ -45,7 +44,7 @@ fi
 # ── B) dock strut shrinks the workarea and the property follows ─────────────
 "$BIN_DIR/dockstrut" 30 >/dev/null 2>&1 &
 DOCKPID=$!
-HELPER_PIDS+=("$DOCKPID")
+mav_track "$DOCKPID" || true
 i=0
 while [ $i -lt 50 ]; do
     DISPLAY="$DISP" xprop -root _NET_WORKAREA 2>/dev/null | grep -q "0, 30, 1280, 690" && break
@@ -60,7 +59,7 @@ fi
 
 # a tiled client must sit below the 30px reservation (y=30+outer gap 8=38)
 MGDTITLE=wa-tile "$BIN_DIR/mgdwin" >/dev/null 2>&1 &
-HELPER_PIDS+=("$!")
+mav_track "$!" || true
 i=0
 while [ $i -lt 50 ] && [ "$(win_count "$DISP")" -lt 1 ]; do sleep 0.1; i=$((i+1)); done
 GY="$(DISPLAY="$DISP" "$MAVERICK_CTL" query tree 2>/dev/null \

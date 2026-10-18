@@ -40,6 +40,11 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- X11 shell tests use private runtime/configuration directories and refuse
+  occupied displays. Shared cleanup quits only its explicit test instance via
+  `maverickctl`, then uses registered PIDs with start-time checks as a bounded
+  fallback. Removed global process-name kills and deletion of inherited runtime
+  directories; command-substitution children remain tracked for cleanup.
 - Restart preserves the live View layout, column widths, floating geometry,
   fullscreen restore state, Overview, camera offsets and selection through a
   one-shot handoff to the replacement process. Restoring focus preserves the

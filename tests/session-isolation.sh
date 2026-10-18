@@ -22,6 +22,7 @@
 #   ./tests/session-isolation.sh
 
 set -u
+source "$(dirname "${BASH_SOURCE[0]}")/private-env.sh"
 export DISPLAY="${DISPLAY:-}"
 
 SCREEN_W=1280
@@ -47,21 +48,30 @@ bad() { log "FAIL: $*"; FAIL=$((FAIL+1)); }
 
 cleanup() {
     [ -n "${MGDWIN_PID:-}" ] && kill "$MGDWIN_PID" 2>/dev/null
-    pkill -f "maverick --name maverick-session-a" 2>/dev/null
-    pkill -f "maverick --name maverick-session-b" 2>/dev/null
-    pkill -f "Xephyr $X1" 2>/dev/null
-    pkill -f "Xephyr $X2" 2>/dev/null
+    [ -n "${MAV_A:-}" ] && kill "$MAV_A" 2>/dev/null
+    [ -n "${MAV_B:-}" ] && kill "$MAV_B" 2>/dev/null
+    [ -n "${XEP_A:-}" ] && kill "$XEP_A" 2>/dev/null
+    [ -n "${XEP_B:-}" ] && kill "$XEP_B" 2>/dev/null
+    mav_env_cleanup
 }
 trap cleanup EXIT
 
 # ── start two nested X servers ───────────────────────────────────────────────
+mav_require_free_display "$X1" || exit 1
 Xephyr "$X1" -screen "${SCREEN_W}x${SCREEN_H}" -ac +extension GLX +extension Composite 2>/dev/null &
+XEP_A=$!
+mav_wait_display "$XEP_A" "$X1" || exit 1
+mav_require_free_display "$X2" || exit 1
 Xephyr "$X2" -screen "${SCREEN_W}x${SCREEN_H}" -ac +extension GLX +extension Composite 2>/dev/null &
+XEP_B=$!
+mav_wait_display "$XEP_B" "$X2" || exit 1
 sleep 1
 
 # ── launch two Maverick sessions (no --name collision: each gets a random sid) ─
 DISPLAY="$X1" "$MAVERICK_BIN" --name maverick-session-a >/dev/null 2>&1 &
+MAV_A=$!
 DISPLAY="$X2" "$MAVERICK_BIN" --name maverick-session-b >/dev/null 2>&1 &
+MAV_B=$!
 sleep 2
 
 # ── list must show exactly two, with distinct sessions ───────────────────────

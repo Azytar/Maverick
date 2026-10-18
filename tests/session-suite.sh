@@ -747,7 +747,6 @@ if [ -n "$SIG_DISPLAY" ]; then
         && ok "SIGQUIT runs the orderly path (the 'exiting cleanly' log line is present)" \
         || bad "SIGQUIT did not reach the orderly shutdown path"
     kill "$SIG_XP" 2>/dev/null; wait "$SIG_XP" 2>/dev/null
-    rm -f "/tmp/.X${SIG_DISPLAY#:}-lock" 2>/dev/null
 else
     note "no Xvfb for the signal section; the disposition case is not covered here"
 fi

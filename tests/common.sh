@@ -6,7 +6,8 @@
 #   build_helpers        compile tests/mgdwin (+ pxsample/staticwin/winmove if absent)
 #   start_xephyr DISP W H   start a nested X server, return its pid
 #   mav_launch DISP ARGS..  start `maverick ARGS` on DISP, return its pid
-#   mav_cleanup           kill tracked pids + helper clients, remove runtime dir
+#   mav_track PID         register a child, including inside command substitution
+#   mav_cleanup           quit owned WMs, stop registered children, remove runtime
 #
 # Every script MUST `source` this file and `trap mav_cleanup EXIT ERR` so that
 # Xephyr / maverick / helper processes never leak between scenarios.
@@ -20,35 +21,89 @@ cd "$APP_DIR"
 MAVERICK_BIN="${MAVERICK_BIN:-./target/debug/maverick}"
 MAVERICK_CTL="${MAVERICK_CTL:-./target/debug/maverickctl}"
 MAVERICK_MSG="${MAVERICK_MSG:-./target/debug/maverickctl}"
+MAV_TEST_HOST_DISPLAY="${DISPLAY:-}"
 
 # Short, explicit XDG_RUNTIME_DIR so the control-socket path stays under
 # SUN_LEN (the default can be too long in some sandboxes).
-export XDG_RUNTIME_DIR="$(mktemp -d /tmp/mrt.XXXX)"
+source "$(dirname "${BASH_SOURCE[0]}")/private-env.sh"
+mkdir -p "$MAV_TEST_RUNTIME/pids"
 
-declare -a MAV_PIDS=()
-declare -a XEPHYR_PIDS=()
-declare -a HELPER_PIDS=()
-
-mav_cleanup() {
-    local p
-    for p in "${HELPER_PIDS[@]:-}"; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
-    for p in "${MAV_PIDS[@]:-}"; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
-    for p in "${XEPHYR_PIDS[@]:-}"; do [ -n "$p" ] && kill -9 "$p" 2>/dev/null; done
-    # bracket-regex avoids matching this very shell's own command line.
-    pkill -f "tests/mgdwi[n]" 2>/dev/null
-    pkill -f "target/debug/maveri[c]ck" 2>/dev/null
-    pkill -x Xephyr 2>/dev/null
-    rm -rf "$XDG_RUNTIME_DIR"
+# Read the kernel start time and parent without splitting a comm containing
+# spaces or parentheses. Zombies have already exited and need no more signals.
+mav_process() {
+    local pid="$1" stat
+    local -a fields
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [ -O "/proc/$pid" ] || return 1
+    { IFS= read -r stat <"/proc/$pid/stat"; } 2>/dev/null || return 1
+    read -r -a fields <<<"${stat##*) }"
+    [ "${#fields[@]}" -ge 20 ] && [ "${fields[0]}" != Z ] || return 1
+    printf '%s %s\n' "${fields[19]}" "${fields[1]}"
 }
 
-# Kill any leftovers from a previous (possibly timed-out) run so a competing WM
-# on the same DISPLAY can't make `maverickctl` return `{}` or hang. Uses the
-# bracket trick so it never matches the running script's own shell.
-mav_preflight() {
-    pkill -9 -f "target/debug/maveri[c]ck" 2>/dev/null
-    pkill -9 -x Xephyr 2>/dev/null
-    pkill -9 -f "tests/mgdwi[n]" 2>/dev/null
-    sleep 0.3
+mav_track() {
+    local pid="$1" identity start parent
+    identity="$(mav_process "$pid")" || return 1
+    read -r start parent <<<"$identity"
+    [ "$parent" = "$BASHPID" ] || return 1
+    # Files survive $(...) subshells; Bash arrays alone lose those children.
+    printf '%s\n' "$start" "${2:-child}" "${3:-}" "${4:-${DISPLAY:-}}" "$XDG_RUNTIME_DIR" \
+        >"$MAV_TEST_RUNTIME/pids/$pid"
+}
+
+mav_owned() {
+    local pid="$1" identity start
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] && [ -f "$MAV_TEST_RUNTIME/pids/$pid" ] || return 1
+    IFS= read -r start <"$MAV_TEST_RUNTIME/pids/$pid" || return 1
+    identity="$(mav_process "$pid")" || return 1
+    [ "${identity%% *}" = "$start" ]
+}
+
+mav_stop() {
+    local pid="$1" i
+    mav_owned "$pid" || return 0
+    kill -TERM "$pid" 2>/dev/null || true
+    for i in {1..10}; do
+        mav_owned "$pid" || break
+        sleep 0.05
+    done
+    if mav_owned "$pid"; then kill -KILL "$pid" 2>/dev/null || true; fi
+    wait "$pid" 2>/dev/null || true
+}
+
+mav_cleanup() {
+    local record pid lock lock_pid
+    local -a info
+    [ -d "$MAV_TEST_RUNTIME/pids" ] || return 0
+    # Ask each owned WM first; its clients may close cooperatively. A hung WM
+    # still has a bounded, identity-checked PID fallback.
+    for record in "$MAV_TEST_RUNTIME"/pids/*; do
+        [ -f "$record" ] || continue
+        pid="${record##*/}"
+        mav_owned "$pid" || continue
+        mapfile -t info <"$record"
+        if [ "${info[1]}" = wm ] && [ -n "${info[2]}" ]; then
+            env -u MAVERICK_INSTANCE -u MAVERICK_SESSION DISPLAY="${info[3]}" \
+                XDG_RUNTIME_DIR="${info[4]}" timeout 6 "$MAVERICK_CTL" \
+                quit --session "${info[2]}" --yes >/dev/null 2>&1 || true
+            mav_wait_exit "$pid" 4 || mav_stop "$pid"
+        fi
+    done
+    for record in "$MAV_TEST_RUNTIME"/pids/*; do
+        [ -f "$record" ] || continue
+        mav_stop "${record##*/}"
+        mapfile -t info <"$record"
+        if [ "${info[1]}" = server ] && ! alive "${record##*/}"; then
+            lock="/tmp/.X${info[3]#:}-lock"
+            # A failed Xephyr can leave its own lock before opening the host
+            # display. Never remove a lock naming any other server.
+            if { read -r lock_pid <"$lock"; } 2>/dev/null \
+                && [ "$lock_pid" = "${record##*/}" ]; then
+                rm -f -- "$lock"
+            fi
+        fi
+    done
+    rm -rf -- "$MAV_TEST_RUNTIME"
+    return 0
 }
 
 # ── build the managed-window helper + any missing static helpers ──────────────
@@ -63,41 +118,57 @@ build_helpers() {
 # ── start a nested X server; echo its pid ─────────────────────────────────────
 start_xephyr() {
     local disp="$1" w="${2:-1280}" h="${3:-720}"
-    Xephyr "$disp" -screen "${w}x${h}" -ac \
+    local number="${disp#:}"
+    [[ "$number" =~ ^[0-9]+$ ]] || return 1
+    mav_require_free_display "$disp" || return 1
+    DISPLAY="$MAV_TEST_HOST_DISPLAY" Xephyr "$disp" -screen "${w}x${h}" -ac \
         +extension RANDR +extension GLX +extension Composite +extension DAMAGE \
         >"/tmp/xephyr${disp}.log" 2>&1 &
     local realpid=$!
-    XEPHYR_PIDS+=("$realpid")
+    mav_track "$realpid" server "" "$disp" || return 1
     local i=0
     while [ $i -lt 60 ]; do
-        DISPLAY="$disp" xprop -root >/dev/null 2>&1 && break
+        mav_owned "$realpid" || break
+        if mav_display_ready "$realpid" "$disp"; then
+            printf '%s\n' "$realpid" >"$MAV_TEST_RUNTIME/server-$number"
+            echo "$realpid"
+            return 0
+        fi
         sleep 0.1
         i=$((i+1))
     done
-    echo "$realpid"
+    echo "FAIL: our Xephyr did not become ready on $disp" >&2
+    return 1
 }
 
 # ── start maverick on DISP with ARGS; echo its pid ───────────────────────────
 mav_launch() {
     local disp="$1"; shift
-    DISPLAY="$disp" "$MAVERICK_BIN" "$@" >"/tmp/mav${disp}.log" 2>&1 &
+    local server sid
+    { IFS= read -r server <"$MAV_TEST_RUNTIME/server-${disp#:}"; } 2>/dev/null || return 1
+    mav_owned "$server" || return 1
+    sid="$(mktemp -d "$MAV_TEST_RUNTIME/test-XXXXXX")" || return 1
+    sid="${sid##*/}"
+    DISPLAY="$disp" "$MAVERICK_BIN" --session-id "$sid" "$@" >"/tmp/mav${disp}.log" 2>&1 &
     local pid=$!
-    MAV_PIDS+=("$pid")
+    mav_track "$pid" wm "$sid" "$disp" || return 1
     local i=0
     while [ $i -lt 80 ]; do
-        # Wait for a *real* state snapshot (not the transient `{}` some
-        # startup phases emit), so callers don't proceed on empty state.
-        if DISPLAY="$disp" "$MAVERICK_CTL" state 2>/dev/null | grep -q '"monitors"'; then
-            break
+        # Query the WM thread, rather than waiting on the hub's startup cache.
+        mav_owned "$pid" || break
+        if DISPLAY="$disp" "$MAVERICK_CTL" query tree --session "$sid" 2>/dev/null | grep -q '"monitors"'; then
+            echo "$pid"
+            return 0
         fi
         sleep 0.1
         i=$((i+1))
     done
-    echo "$pid"
+    echo "FAIL: our Maverick did not become ready on $disp" >&2
+    return 1
 }
 
 # is a process (by pid) still alive?
-alive() { kill -0 "$1" 2>/dev/null; }
+alive() { mav_process "$1" >/dev/null; }
 
 # count workspaces reported by `maverickctl state` on DISP
 ws_count() {
@@ -118,7 +189,7 @@ fs_count() {
 
 # wait up to $2 seconds for pid $1 to exit (0 = exited, 1 = still alive)
 mav_wait_exit() {
-    local pid="$1" max="${2:-10}" i=0
+    local pid="$1" max=$(( ${2:-10} * 5 )) i=0
     while alive "$pid"; do
         [ $i -ge "$max" ] && return 1
         sleep 0.2; i=$((i+1))
@@ -128,6 +199,7 @@ mav_wait_exit() {
 
 # SIGKILL pid $1 and wait up to $2 seconds for it to be gone
 mav_kill_wait() {
+    mav_owned "$1" || return 1
     kill -9 "$1" 2>/dev/null
     mav_wait_exit "$1" "${2:-10}"
 }

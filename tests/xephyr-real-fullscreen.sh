@@ -5,6 +5,7 @@
 # on a server with no external compositor. It asserts nothing — the value is the
 # artifact under `logs/`, for whoever is investigating a fullscreen report.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/private-env.sh"
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$APP_DIR"
 mkdir -p logs
@@ -22,7 +23,7 @@ RUN_SCREEN="$BIN/screen-run.xwd"
 STATE_FILE="$BIN/realwin-state"
 SUMMARY="$APP_DIR/logs/real-fullscreen-${BUILD_ID}.txt"
 
-export XDG_RUNTIME_DIR="$(mktemp -d /tmp/mrt.XXXX)"
+export XDG_RUNTIME_DIR="$MAV_TEST_RUNTIME"
 export XDG_CONFIG_HOME="$BIN/xdg"
 mkdir -p "$XDG_CONFIG_HOME/maverick"
 
@@ -38,10 +39,12 @@ action = "toggle_fullscreen"
 EOF
 
 start_xephyr() {
+  mav_require_free_display "$XEPHYR_DISPLAY" || exit 1
   Xephyr "$XEPHYR_DISPLAY" -screen 1280x800 -ac \
     +extension RANDR +extension GLX +extension Composite +extension DAMAGE \
     >/tmp/xephyr-real.log 2>&1 &
   XEPHYR_PID=$!
+  mav_wait_display "$XEPHYR_PID" "$XEPHYR_DISPLAY" || exit 1
   for _ in $(seq 1 80); do
     DISPLAY="$XEPHYR_DISPLAY" xprop -root >/dev/null 2>&1 && break
     sleep 0.1
@@ -66,16 +69,11 @@ cleanup() {
   [ -n "${CLIENT_PID:-}" ] && kill "$CLIENT_PID" 2>/dev/null || true
   [ -n "${MAV_PID:-}" ] && kill "$MAV_PID" 2>/dev/null || true
   [ -n "${XEPHYR_PID:-}" ] && kill "$XEPHYR_PID" 2>/dev/null || true
-  pkill -f "realwin$$" 2>/dev/null || true
-  pkill -f "target/debug/maverick" 2>/dev/null || true
-  pkill -f "Xephyr :92" 2>/dev/null || true
-  rm -rf "$XDG_RUNTIME_DIR"
   set -e
+  mav_env_cleanup
 }
 trap cleanup EXIT
 
-pkill -f "target/debug/maverick" 2>/dev/null || true
-pkill -f "Xephyr :92" 2>/dev/null || true
 sleep 0.3
 
 start_xephyr

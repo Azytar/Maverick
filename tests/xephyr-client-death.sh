@@ -13,7 +13,6 @@
 
 set -u
 source "$(dirname "$0")/common.sh"
-mav_preflight
 build_helpers
 trap mav_cleanup EXIT ERR
 
@@ -23,8 +22,8 @@ bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
 
 DISP=":98"
 MAV_LOG="/tmp/mav${DISP}.log"
-XEP="$(start_xephyr "$DISP" 1280 720)"
-MAV="$(mav_launch "$DISP")"
+XEP="$(start_xephyr "$DISP" 1280 720)" || exit 1
+MAV="$(mav_launch "$DISP")" || exit 1
 
 # launch a managed window with a given title; echo its pid
 open_win() {
@@ -32,7 +31,7 @@ open_win() {
     export DISPLAY="$DISP"
     MGDTITLE="$title" "$BIN_DIR/mgdwin" >/dev/null 2>&1 &
     local pid=$!
-    HELPER_PIDS+=("$pid")
+    mav_track "$pid" || true
     echo "$pid"
 }
 

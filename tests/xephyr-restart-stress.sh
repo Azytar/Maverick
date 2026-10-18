@@ -40,6 +40,7 @@
 # break at iteration 2, so an all-pass run is the bug, not the success.
 
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/private-env.sh"
 
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 BIN_DIR=${1:-${BIN_DIR:-$REPO/target/debug}}
@@ -47,7 +48,7 @@ RESTARTS=${RESTARTS:-15}
 DPY=${DPY:-98}
 KEEP=${KEEP:-0}
 EXPECT=${EXPECT:-stale}
-WORK=${WORK:-$(mktemp -d /tmp/kilo/rs.XXXXXX)}
+WORK=$(mktemp -d /tmp/mvrs.XXXXXX)
 
 MAVERICK=$BIN_DIR/maverick
 CTL=$BIN_DIR/maverickctl
@@ -85,9 +86,8 @@ cleanup() {
     [ -n "$HOLDER_B" ] && "$PY" "$PTRUN" killp "$HOLDER_B" 2>/dev/null
     [ -n "$HOLDER_C" ] && "$PY" "$PTRUN" killp "$HOLDER_C" 2>/dev/null
     [ -n "$XPID" ] && kill -KILL "$XPID" 2>/dev/null
-    pkill -KILL -f "$MGDWIN" 2>/dev/null
-    rm -f "/tmp/.X${DPY}-lock" 2>/dev/null
     if [ "$KEEP" != 0 ]; then echo "keeping $WORK"; else rm -rf "$WORK" 2>/dev/null; fi
+    mav_env_cleanup
     return 0
 }
 trap cleanup EXIT INT TERM
@@ -338,7 +338,7 @@ PING_EOF
 # itself inherits MAVERICK_INSTANCE from the live :0 session, so `env -i` is
 # load-bearing, not hygiene: without it every probe would be answered by an
 # instance on another display.
-hermetic() { env -i PATH="$PATH" HOME="$HOME" DISPLAY="$DISP" XDG_RUNTIME_DIR="$RT" "$@"; }
+hermetic() { env -i PATH="$PATH" HOME="$HOME" DISPLAY="$DISP" XDG_RUNTIME_DIR="$RT" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$@"; }
 
 # Run one command inside a pty, as the "user terminal" living in that pty.
 #   term <ttyfile> <MAVERICK_INSTANCE|""> <shell command>
@@ -346,7 +346,7 @@ hermetic() { env -i PATH="$PATH" HOME="$HOME" DISPLAY="$DISP" XDG_RUNTIME_DIR="$
 # Result: TERM_OUT (combined output), return code of the command.
 term() {
     local ttyf=$1 mi=$2 cmd=$3
-    local -a e=(DISPLAY="$DISP" XDG_RUNTIME_DIR="$RT" HOME="$HOME" PATH="$PATH")
+    local -a e=(DISPLAY="$DISP" XDG_RUNTIME_DIR="$RT" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" HOME="$HOME" PATH="$PATH")
     [ -n "$mi" ] && e+=(MAVERICK_INSTANCE="$mi")
     "$PY" "$PTRUN" exec "$ttyf" "$WORK/term.out" \
         /usr/bin/env -i "${e[@]}" /bin/sh -c "$cmd"
@@ -540,19 +540,12 @@ printf 'iter\trc\tsid_changed\tsid\tV1\tV2\tV3\tV4\tV5\twmcheck\tnote\n' >"$TSV"
 hdr "xephyr $DISP"
 # A display already in use would silently hand the WM somebody else's server
 # (and a stale Xephyr keeps a SubstructureRedirect grab, which fails as
-# "another WM is already running"). Wait it out rather than stomping it.
-for _ in $(seq 1 40); do
-    DISPLAY=$DISP xprop -root >/dev/null 2>&1 || break
-    sleep 1
-done
-if DISPLAY=$DISP xprop -root >/dev/null 2>&1; then
-    log "FATAL: $DISP is already in use by another X server; refusing to share it."
-    exit 2
-fi
-rm -f "/tmp/.X${DPY}-lock"
+# "another WM is already running"). Refuse it without removing its lock.
+mav_require_free_display "$DISP" || exit 2
 DISPLAY=$HOST_DISPLAY Xephyr "$DISP" -screen 1280x800 -resizeable -nolisten tcp \
     >"$WORK/xephyr.log" 2>&1 &
 XPID=$!
+mav_wait_display "$XPID" "$DISP" || exit 1
 for _ in $(seq 1 60); do
     DISPLAY=$DISP xprop -root >/dev/null 2>&1 && break
     sleep 0.25
@@ -569,7 +562,7 @@ start_wm() {
     # harness's runtime dir, never on whatever the invoking shell pointed at.
     "$PY" "$PTRUN" wm "$ttyf" "$pidf" "$logf" -- \
         /usr/bin/env -i PATH="$PATH" HOME="$HOME" DISPLAY="$DISP" \
-        XDG_RUNTIME_DIR="$RT" "$@"
+        XDG_RUNTIME_DIR="$RT" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" "$@"
     local i
     for i in $(seq 1 160); do
         [ -n "$(wmcheck_window)" ] && [ -n "$(cur_sid)" ] && return 0

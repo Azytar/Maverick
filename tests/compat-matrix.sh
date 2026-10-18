@@ -27,6 +27,7 @@
 #   * If no X server is reachable the live phases SKIP with a clear message; the
 #     deterministic Rust property harnesses (cargo test) cover the same logic.
 set -u
+source "$(dirname "${BASH_SOURCE[0]}")/private-env.sh"
 
 # ── config ────────────────────────────────────────────────────────────────────
 XEPHYR_DISPLAY="${XEPHYR_DISPLAY:-:97}"
@@ -34,8 +35,7 @@ MW=1280; MH=800; TOTAL_W=1280
 MAVERICK_BIN="${MAVERICK_BIN:-./target/release/maverick}"
 MSG_BIN="${MSG_BIN:-./target/release/maverickctl}"
 HOSTILE="${HOSTILE:-/tmp/hostile}"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/mvcm}"   # short -> avoids SUN_LEN
-rm -rf "$XDG_RUNTIME_DIR"; mkdir -p "$XDG_RUNTIME_DIR"
+export XDG_RUNTIME_DIR="$MAV_TEST_RUNTIME"
 
 PASS=0; FAIL=0; SKIP=0
 SPIDS=()
@@ -50,6 +50,7 @@ cleanup() {
     for p in "${SPIDS[@]:-}";   do kill "$p" 2>/dev/null; done
     [ -n "${MAV_PID:-}" ]    && kill "$MAV_PID" 2>/dev/null
     [ -n "${XEPHYR_PID:-}" ] && kill "$XEPHYR_PID" 2>/dev/null
+    mav_env_cleanup
 }
 trap cleanup EXIT
 
@@ -61,10 +62,12 @@ fi
 
 # ── launch nested Xephyr + maverick ───────────────────────────────────────────
 info "Xephyr $XEPHYR_DISPLAY -screen ${TOTAL_W}x${MH} -ac +extension RANDR +extension GLX +extension Composite +extension DAMAGE"
+mav_require_free_display "$XEPHYR_DISPLAY" || exit 1
 Xephyr "$XEPHYR_DISPLAY" -screen "${TOTAL_W}x${MH}" -ac \
     +extension RANDR +extension GLX +extension Composite +extension DAMAGE \
     -retro >/tmp/mvcm-xephyr.log 2>&1 &
 XEPHYR_PID=$!
+mav_wait_display "$XEPHYR_PID" "$XEPHYR_DISPLAY" || exit 1
 sleep 1.5
 export DISPLAY="$XEPHYR_DISPLAY"
 if ! xprop -root >/dev/null 2>&1; then
@@ -148,7 +151,8 @@ hostile_stop() { # $1=tag
 # ══════════════════════════════════════════════════════════════════════════════
 echo; echo "########## Firefox (real) ##########"
 if command -v firefox >/dev/null 2>&1; then
-    firefox -new-instance -no-remote about:blank >/dev/null 2>&1 &
+    mkdir -p "$MAV_TEST_RUNTIME/firefox"
+    firefox -new-instance -no-remote --profile "$MAV_TEST_RUNTIME/firefox" about:blank >/dev/null 2>&1 &
     FF=$!; SPIDS+=("$FF")
     FFID=""
     for _ in $(seq 1 60); do

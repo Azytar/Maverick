@@ -36,6 +36,7 @@
 #   pending focus (overlay + silently-added background window, both monitors).
 #
 set -u
+source "$(dirname "${BASH_SOURCE[0]}")/private-env.sh"
 
 # ── config ────────────────────────────────────────────────────────────────────
 XEPHYR_DISPLAY=":98"
@@ -47,7 +48,7 @@ MSG_BIN="${MSG_BIN:-./target/debug/maverickctl}"
 # Private runtime dir (mktemp, like common.sh): never rm -rf the session's
 # $XDG_RUNTIME_DIR — a previous revision did exactly that when the variable
 # was already set, wiping the live user runtime dir. Short path avoids SUN_LEN.
-export XDG_RUNTIME_DIR="$(mktemp -d /tmp/mv2m.XXXXXX)"
+export XDG_RUNTIME_DIR="$MAV_TEST_RUNTIME"
 LOG="$(mktemp -t maverick-2mon.XXXXXX.log)"
 XEPHYR_LOG="$(mktemp -t xephyr-2mon.XXXXXX.log)"
 
@@ -70,17 +71,19 @@ cleanup() {
     [ -n "${MAV_PID:-}" ] && kill "$MAV_PID" 2>/dev/null
     [ -n "${XEPHYR_PID:-}" ] && kill "$XEPHYR_PID" 2>/dev/null
     [ -n "${KEEPER_PID:-}" ] && kill "$KEEPER_PID" 2>/dev/null
-    rm -rf "$XDG_RUNTIME_DIR"
+    mav_env_cleanup
 }
 trap cleanup EXIT
 
 # ── launch nested 2-output Xephyr ──────────────────────────────────────────────
 info "Launch command:"
 info "  Xephyr $XEPHYR_DISPLAY -screen ${TOTAL_W}x${MH} -ac +extension RANDR +extension GLX +extension Composite +extension DAMAGE -retro"
+mav_require_free_display "$XEPHYR_DISPLAY" || exit 1
 Xephyr "$XEPHYR_DISPLAY" -screen "${TOTAL_W}x${MH}" -ac \
     +extension RANDR +extension GLX +extension Composite +extension DAMAGE \
     -retro >"$XEPHYR_LOG" 2>&1 &
 XEPHYR_PID=$!
+mav_wait_display "$XEPHYR_PID" "$XEPHYR_DISPLAY" || exit 1
 sleep 1.5
 
 export DISPLAY="$XEPHYR_DISPLAY"
@@ -343,14 +346,11 @@ for m in 0 1; do
     else
         bad "S6 mon$m: click did not reach B2 (got $GOT, expected $HEXB)"
     fi
-    # clean up these two for next iteration (guarded: the file may hold
-    # fewer than two pids if a spawn failed; never crash under `set -u`)
-    if [ -s "$SPIDS_FILE" ]; then
-        tail -n 1 "$SPIDS_FILE" | xargs -r kill 2>/dev/null
-        head -n -1 "$SPIDS_FILE" >"$SPIDS_FILE.tmp" 2>/dev/null && mv "$SPIDS_FILE.tmp" "$SPIDS_FILE"
-    fi
-    pkill -f "R6_PF${m}_A" 2>/dev/null; pkill -f "R6_PF${m}_B" 2>/dev/null
-    : >"$SPIDS_FILE"; sleep 0.5
+    # Both clients were recorded by spawn_win, even in command substitutions.
+    tail -n 2 "$SPIDS_FILE" | xargs -r kill 2>/dev/null
+    head -n -2 "$SPIDS_FILE" >"$SPIDS_FILE.tmp"
+    mv "$SPIDS_FILE.tmp" "$SPIDS_FILE"
+    sleep 0.5
 done
 
 # ── summary ─────────────────────────────────────────────────────────────────────

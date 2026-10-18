@@ -14,7 +14,6 @@
 
 set -u
 source "$(dirname "$0")/common.sh"
-mav_preflight
 build_helpers
 trap mav_cleanup EXIT ERR
 
@@ -25,8 +24,8 @@ bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
 # ── 1) long IPC path (sid) ─────────────────────────────────────────────────────
 echo "=== long IPC path (sid) ==="
 LONGNAME="$(printf 'a%.0s' {1..200})"
-X1="$(start_xephyr ":98" 1280 720)"
-M1="$(mav_launch ":98" --name "$LONGNAME")"
+X1="$(start_xephyr ":98" 1280 720)" || exit 1
+M1="$(mav_launch ":98" --name "$LONGNAME")" || exit 1
 if DISPLAY=":98" "$MAVERICK_CTL" state >/dev/null 2>&1; then
     ok "maverick started with 200-char --name; state works"
 else
@@ -46,8 +45,8 @@ echo "$OUT" | grep -qi "panic" && bad "PANIC on missing session" || ok "no panic
 
 # ── 3) socket stale / proceso muerto ───────────────────────────────────────────
 echo "=== socket stale (maverick SIGKILLed) ==="
-X2="$(start_xephyr ":97" 1280 720)"
-M2="$(mav_launch ":97")"
+X2="$(start_xephyr ":97" 1280 720)" || exit 1
+M2="$(mav_launch ":97")" || exit 1
 kill -9 "$M2" 2>/dev/null
 sleep 0.5
 OUT="$(timeout 5 env DISPLAY=":97" "$MAVERICK_CTL" quit 2>&1)"; RC=$?
@@ -57,10 +56,10 @@ echo "NOTE stale-socket quit rc=$RC (graceful failure expected, rc!=0 ideal)"
 
 # ── 4) multiple displays ────────────────────────────────────────────────────────
 echo "=== multiple displays (:96 and :95) ==="
-XD1="$(start_xephyr ":96" 1280 720)"
-XD2="$(start_xephyr ":95" 1280 720)"
-MD1="$(mav_launch ":96")"
-MD2="$(mav_launch ":95")"
+XD1="$(start_xephyr ":96" 1280 720)" || exit 1
+XD2="$(start_xephyr ":95" 1280 720)" || exit 1
+MD1="$(mav_launch ":96")" || exit 1
+MD2="$(mav_launch ":95")" || exit 1
 if DISPLAY=":96" "$MAVERICK_CTL" state >/dev/null 2>&1 && DISPLAY=":95" "$MAVERICK_CTL" state >/dev/null 2>&1; then
     ok "both instances answer state independently"
 else
@@ -74,8 +73,8 @@ alive "$MD2" && { bad ":95 instance alive after quit"; kill -9 "$MD2" 2>/dev/nul
 
 # ── 5) restart repetido (N veces) ──────────────────────────────────────────────
 echo "=== restart repetido (5x) ==="
-X3="$(start_xephyr ":94" 1280 720)"
-M3="$(mav_launch ":94")"
+X3="$(start_xephyr ":94" 1280 720)" || exit 1
+M3="$(mav_launch ":94")" || exit 1
 launch_pid="$M3"
 for i in $(seq 1 5); do
     DISPLAY=":94" "$MAVERICK_CTL" restart >/dev/null 2>&1
@@ -92,12 +91,13 @@ alive "$launch_pid" && kill "$launch_pid" 2>/dev/null
 # ── 6) quit repetido ───────────────────────────────────────────────────────────
 echo "=== quit repetido (3x) ==="
 for i in 1 2 3; do
-    Xq="$(start_xephyr ":93" 1280 720)"
-    Mq="$(mav_launch ":93")"
+    Xq="$(start_xephyr ":93" 1280 720)" || exit 1
+    Mq="$(mav_launch ":93")" || exit 1
     DISPLAY=":93" "$MAVERICK_CTL" quit >/dev/null 2>&1
     sleep 0.5
     if alive "$Mq"; then bad "quit #$i left maverick running"; kill -9 "$Mq" 2>/dev/null;
     else ok "quit #$i: clean exit"; fi
+    mav_stop "$Xq"
 done
 
 echo "────────────────────────────────────"

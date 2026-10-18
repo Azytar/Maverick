@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/private-env.sh"
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$APP_DIR"
 
@@ -21,9 +22,11 @@ touch "$TRACE"
 echo -e "wall_time_s\tclient_frame\tdamage\tcomp_frame\tneeds_frame\tpresent\tscene_hash\tobserved_age\tmode" > "$SUMMARY"
 
 start_xephyr() {
+mav_require_free_display "$XEPHYR_DISPLAY" || exit 1
   Xephyr "$XEPHYR_DISPLAY" -screen 1280x1024 -ac \
     +extension GLX +extension RANDR +extension Composite >/dev/null 2>&1 &
   XEPHYR_PID=$!
+mav_wait_display "$XEPHYR_PID" "$XEPHYR_DISPLAY" || exit 1
   sleep 1.5
   export DISPLAY="$XEPHYR_DISPLAY"
 }
@@ -64,6 +67,7 @@ cleanup() {
   [ -n "${FS_PID:-}" ] && kill "$FS_PID" 2>/dev/null || true
   [ -n "${MAV_PID:-}" ] && kill "$MAV_PID" 2>/dev/null || true
   [ -n "${XEPHYR_PID:-}" ] && kill "$XEPHYR_PID" 2>/dev/null || true
+    mav_env_cleanup
 }
 trap cleanup EXIT
 

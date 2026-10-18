@@ -23,7 +23,6 @@ export MAVERICK_CTL="${MAVERICK_CTL:-$CARGO_TARGET_DIR/debug/maverickctl}"
 SCRATCH="${MAV_TEST_SCRATCH:-/tmp/mav-xdis}"
 
 source "$(dirname "$0")/common.sh"
-mav_preflight
 build_helpers
 trap mav_cleanup EXIT ERR
 
@@ -57,13 +56,8 @@ start_server() { # -> sets XVFB_PID and exports DISPLAY; fails if none is free
     fi
     Xvfb "$disp" -screen 0 800x600x24 >"$SCRATCH/xvfb${disp#:}.log" 2>&1 &
     XVFB_PID=$!
-    local i=0
-    while [ $i -lt 60 ]; do
-        DISPLAY="$disp" xdpyinfo >/dev/null 2>&1 && break
-        alive "$XVFB_PID" || break
-        sleep 0.1; i=$((i+1))
-    done
-    if ! DISPLAY="$disp" xdpyinfo >/dev/null 2>&1; then
+    mav_track "$XVFB_PID" || return 1
+    if ! mav_wait_display "$XVFB_PID" "$disp"; then
         bad "Xvfb did not come up on $disp"
         stop_server
         return 1
@@ -74,7 +68,7 @@ start_server() { # -> sets XVFB_PID and exports DISPLAY; fails if none is free
 
 stop_server() {
     # Only ever the pid this script started, and only while it is still ours.
-    if [ -n "$XVFB_PID" ] && alive "$XVFB_PID"; then kill -9 "$XVFB_PID" 2>/dev/null; fi
+    if [ -n "$XVFB_PID" ] && mav_owned "$XVFB_PID"; then kill -9 "$XVFB_PID" 2>/dev/null; fi
     XVFB_PID=""
 }
 
@@ -110,13 +104,13 @@ run_case() {
     # testing the thing it exists for.
     "$BIN_DIR/mgdwin" >/dev/null 2>&1 &
     local client=$!
-    HELPER_PIDS+=("$client")
+    mav_track "$client" || true
     sleep 0.3
 
     env MAVERICK_TRACE=1 MAVERICK_TRACE_PATH="$trace" \
         "$MAVERICK_BIN" --session-id "$sid" --config /dev/null >"$log" 2>&1 &
     local mav=$!
-    MAV_PIDS+=("$mav")
+    mav_track "$mav" || true
     local i=0
     while [ $i -lt 100 ] && ! grep -q 'maverick ready' "$log" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
     sleep 0.8
@@ -200,7 +194,7 @@ run_case() {
     env MAVERICK_TRACE=1 MAVERICK_TRACE_PATH="$trace" \
         "$MAVERICK_BIN" --session-id "$sid" --config /dev/null >"$log2" 2>&1 &
     local mav2=$!
-    MAV_PIDS+=("$mav2")
+    mav_track "$mav2" || true
     i=0
     while [ $i -lt 100 ] && ! grep -q 'maverick ready' "$log2" 2>/dev/null; do
         alive "$mav2" || break

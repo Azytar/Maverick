@@ -13,7 +13,6 @@
 
 set -u
 source "$(dirname "$0")/common.sh"
-mav_preflight
 build_helpers
 trap mav_cleanup EXIT ERR
 
@@ -21,8 +20,8 @@ PASS=0; FAIL=0
 ok()  { echo "PASS: $*"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $*"; FAIL=$((FAIL+1)); }
 
-DISP=":98"
-XEP="$(start_xephyr "$DISP" 1280 720)"
+DISP="${DISP:-:98}"
+XEP="$(start_xephyr "$DISP" 1280 720)" || exit 1
 
 CFG="$(mktemp /tmp/maverick-f2.XXXX.toml)"
 cat > "$CFG" <<'EOF'
@@ -35,7 +34,7 @@ focused = 0x0badf0
 EOF
 echo "F2 config: $CFG (n_tags=5)"
 
-MAV="$(mav_launch "$DISP" --config "$CFG")"
+MAV="$(mav_launch "$DISP" --config "$CFG")" || exit 1
 echo "maverick pid=$MAV"
 
 NWS="$(ws_count "$DISP")"

@@ -97,6 +97,8 @@ jobs:
         run: cargo build --release -p maverick -p maverickctl --locked
       - name: Xvfb stacking regression
         run: python3 tests/xvfb-stacking.py
+      - name: Shell harness isolation
+        run: python3 tests/harness-isolation.py
       - name: Live configuration reload
         run: python3 tests/xvfb-reload.py
       - name: Layout preservation across restart

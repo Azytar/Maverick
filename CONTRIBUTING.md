@@ -92,9 +92,30 @@ automated regression and is what CI runs. `tests/xephyr-*.sh` are manual
 integration scenarios; `tests/session-suite.sh` and `tests/session-security.sh`
 cover sessions and their security boundary, and the session suite exits 77 with
 a reason when it cannot run, so "could not run" is never reported as "passed".
-The harnesses are not all isolated to the same standard — some helpers in
-`tests/common.sh` kill processes by name or use fixed displays — so read a script
-before running it and reserve the older ones for a disposable graphical session.
+Shell X11 harnesses use private runtime/configuration directories and clear
+inherited instance selection. A requested fixed display must be unused; startup
+verifies that the child server owns its lock before using it. Tests never remove
+another server's lock or kill processes by name. The compatibility/browser
+scenarios also use private Firefox profiles.
+
+`tests/common.sh` registers child PIDs and kernel start times in files so
+command substitutions cannot lose them. Its cleanup first uses
+`maverickctl quit --session <test-id> --yes`, then falls back to signals for
+registered processes only. Signal/crash tests deliberately signal their own
+captured PIDs. Register new helpers with `mav_track "$!"`; propagate startup
+failure before launching clients.
+
+`python3 tests/harness-isolation.py` exercises successful and failed IPC cleanup
+with a separate live WM that must survive and keep answering. It also checks
+occupied displays, stale PID records and preservation of the caller's runtime
+directory. CI runs it with Xvfb, so it needs no active desktop.
+
+For an interactive sandbox, the existing session interface owns the whole
+nested server: create a uniquely named session with
+`maverickctl session create <test-name> --backend xephyr --binary <wm-path>`,
+launch clients with `maverickctl exec <test-name> <program>`, and close it with
+`maverickctl session stop <test-name>`. Instance `quit` and session `stop` have
+different scopes; always name the test target explicitly.
 
 CI (`.github/workflows/ci.yml`) runs three jobs: the workspace with strict
 Clippy and both feature sets, the installer checks, and the Xvfb stacking smoke

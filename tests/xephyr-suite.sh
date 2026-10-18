@@ -22,6 +22,7 @@
 # fabricated: every assertion reads live X properties via xprop/xwininfo.
 
 set -u
+source "$(dirname "${BASH_SOURCE[0]}")/private-env.sh"
 
 # GLX texture-from-pixmap fails under nested Xephyr/llvmpipe
 # ("failed to create drawable" -> fatal XIO), which kills the WM mid-suite and
@@ -64,12 +65,15 @@ assert_state() {
 cleanup() {
     [ -n "${XEPHYR_PID:-}" ] && kill "$XEPHYR_PID" 2>/dev/null
     [ -n "${MAV_PID:-}" ] && kill "$MAV_PID" 2>/dev/null
+    mav_env_cleanup
 }
 trap cleanup EXIT
 
+mav_require_free_display "$XEPHYR_DISPLAY" || exit 1
 Xephyr "$XEPHYR_DISPLAY" -screen "${SCREEN_W}x${SCREEN_H}" -ac +extension RANDR \
     >"$LOG.xephyr" 2>&1 &
 XEPHYR_PID=$!
+mav_wait_display "$XEPHYR_PID" "$XEPHYR_DISPLAY" || exit 1
 sleep 1
 
 export DISPLAY="$XEPHYR_DISPLAY"
@@ -97,7 +101,8 @@ ok "maverick started on $DISPLAY"
 # *deny* path by sending a raw _NET_WM_STATE fullscreen client message (what
 # F11 produces) and confirming Maverick does NOT set _NET_WM_STATE_FULLSCREEN.
 if command -v firefox >/dev/null 2>&1; then
-    firefox &>/dev/null &
+    mkdir -p "$MAV_TEST_RUNTIME/firefox"
+    firefox --no-remote --profile "$MAV_TEST_RUNTIME/firefox" &>/dev/null &
     # Firefox maps several windows (children first); poll for a mapped,
     # non-trivial main window instead of grabbing the first XID seen.
     FF=""

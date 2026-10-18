@@ -17,6 +17,7 @@
 # after a grab release, landing on the bare root. We tolerate that by polling and
 # nudging (re-click) rather than asserting on a single fragile sample.
 set -u
+source "$(dirname "${BASH_SOURCE[0]}")/private-env.sh"
 
 SCREEN_W=1920
 SCREEN_H=1080
@@ -56,6 +57,7 @@ cleanup() {
     [ -n "${A_PID:-}" ] && kill "$A_PID" 2>/dev/null
     [ -n "${B_PID:-}" ] && kill "$B_PID" 2>/dev/null
     [ -n "${C_PID:-}" ] && kill "$C_PID" 2>/dev/null
+    mav_env_cleanup
 }
 trap cleanup EXIT
 
@@ -69,9 +71,11 @@ wait_win() {
     printf '%s' "$id"
 }
 
+mav_require_free_display "$XEPHYR_DISPLAY" || exit 1
 Xephyr "$XEPHYR_DISPLAY" -screen "${SCREEN_W}x${SCREEN_H}" -ac +extension RANDR \
     >"$XEPHYR_LOG" 2>&1 &
 XEPHYR_PID=$!
+mav_wait_display "$XEPHYR_PID" "$XEPHYR_DISPLAY" || exit 1
 sleep 1
 
 export DISPLAY="$XEPHYR_DISPLAY"

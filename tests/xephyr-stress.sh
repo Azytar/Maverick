@@ -25,6 +25,7 @@
 # Env:  STRESS_ITERS (default 500)  MAVERICK_BIN  MAVERICK_TRACE=1  HANG_TIMEOUT (default 90s)
 
 set -u
+source "$(dirname "${BASH_SOURCE[0]}")/private-env.sh"
 
 SCREEN_W=1920
 SCREEN_H=1080
@@ -52,6 +53,7 @@ cleanup() {
     [ -n "${STRESS_PID:-}" ] && kill "$STRESS_PID" 2>/dev/null
     [ -n "${MAV_PID:-}" ] && kill "$MAV_PID" 2>/dev/null
     [ -n "${XEPHYR_PID:-}" ] && kill "$XEPHYR_PID" 2>/dev/null
+    mav_env_cleanup
 }
 trap cleanup EXIT
 
@@ -74,9 +76,11 @@ if [ "$MAVERICK_TRACE" = "1" ]; then
 fi
 
 # ── bring up the nested server ────────────────────────────────────────────
+mav_require_free_display "$XEPHYR_DISPLAY" || exit 1
 Xephyr "$XEPHYR_DISPLAY" -screen "${SCREEN_W}x${SCREEN_H}" -ac +extension RANDR \
     >"$XLOG" 2>&1 &
 XEPHYR_PID=$!
+mav_wait_display "$XEPHYR_PID" "$XEPHYR_DISPLAY" || exit 1
 sleep 1
 export DISPLAY="$XEPHYR_DISPLAY"
 

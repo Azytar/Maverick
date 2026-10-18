@@ -16,6 +16,7 @@
 # Run: ./tests/xephyr-restart.sh
 
 set -u
+source "$(dirname "${BASH_SOURCE[0]}")/private-env.sh"
 
 SCREEN_W=1920
 SCREEN_H=1080
@@ -26,7 +27,7 @@ BINDIR="$(cd "$(dirname "$0")" && pwd)"
 # Short, explicit XDG_RUNTIME_DIR so the control-socket path stays under
 # SUN_LEN (the default can be too long in some sandboxes). Shared by the daemon
 # and the client tools (maverickctl/maverickctl).
-RTDIR="$(mktemp -d /tmp/mrt.XXXX)"
+RTDIR="$MAV_TEST_RUNTIME"
 export XDG_RUNTIME_DIR="$RTDIR"
 LOG="$(mktemp -t maverick-restart.XXXXXX.log)"
 PASS=0
@@ -51,15 +52,17 @@ done
 cleanup() {
     [ -n "${XEPHYR_PID:-}" ] && kill "$XEPHYR_PID" 2>/dev/null
     [ -n "${MAV_PID:-}" ] && kill "$MAV_PID" 2>/dev/null
-    pkill -f staticwin 2>/dev/null
-    rm -rf "$RTDIR"
+    [ -n "${CLIENT_PID:-}" ] && kill "$CLIENT_PID" 2>/dev/null
+    mav_env_cleanup
 }
 trap cleanup EXIT
 
+mav_require_free_display "$XEPHYR_DISPLAY" || exit 1
 Xephyr "$XEPHYR_DISPLAY" -screen "${SCREEN_W}x${SCREEN_H}" -ac \
     +extension RANDR +extension GLX +extension Composite +extension DAMAGE \
     >"$LOG.xephyr" 2>&1 &
 XEPHYR_PID=$!
+mav_wait_display "$XEPHYR_PID" "$XEPHYR_DISPLAY" || exit 1
 sleep 1
 export DISPLAY="$XEPHYR_DISPLAY"
 
@@ -73,6 +76,7 @@ xprop -root >/dev/null 2>&1 && ok "maverick started on $DISPLAY" \
 # Centre is (400,350). This test guards the restart regression where
 # pre-existing windows did not survive the restart.
 "$BINDIR/staticwin" 200 200 400 300 0x22cc44 >/dev/null 2>&1 &
+CLIENT_PID=$!
 sleep 1.5
 
 # ── THE restart ───────────────────────────────────────────────────────────────
