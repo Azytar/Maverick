@@ -172,7 +172,7 @@ pub(crate) const MAX_CFG_GAP: i32 = 1_000_000;
 /// keeps the numbers sane so the workarea-aware gap reduction in
 /// `arrange_columns` can do its real job: preserve the user's intent (big gaps)
 /// while guaranteeing valid geometry.
-fn effective_gaps(ws: &Workspace, cfg: &Cfg) -> (i32, i32) {
+pub(crate) fn effective_gaps(ws: &Workspace, cfg: &Cfg) -> (i32, i32) {
     if cfg.smart_gaps && count_tiled(ws) <= 1 && ws.floats.is_empty() {
         return (0, 0);
     }
@@ -607,6 +607,21 @@ fn sanitize_overview_scale(scale: f32, fallback: f32) -> f32 {
     }
 }
 
+/// Inset all edges without allowing an oversized gap to move the area outside
+/// the monitor. Resizing and projection must use the same column width basis.
+pub(crate) fn inset_workarea(workarea: Rect, gap_outer: i32) -> Rect {
+    let gap_outer = gap_outer
+        .min(workarea.w as i32 / 2)
+        .min(workarea.h as i32 / 2)
+        .max(0);
+    Rect::new(
+        workarea.x + gap_outer,
+        workarea.y + gap_outer,
+        workarea.w.saturating_sub((2 * gap_outer) as u32),
+        workarea.h.saturating_sub((2 * gap_outer) as u32),
+    )
+}
+
 /// Like [`ribbon_geom`] but writes the per-column table into `cols` (a reused
 /// buffer supplied by the caller) and borrows it back, so the per-frame
 /// projection allocates nothing. `cols` is cleared first, so a buffer grown to
@@ -619,23 +634,7 @@ pub(crate) fn ribbon_geom_into<'s>(
     cols: &'s mut Vec<(f32, f32)>,
 ) -> RibbonGeom<'s> {
     let (gap, gap_outer) = effective_gaps(ws, cfg);
-    // The outer gap insets the workarea on all four edges — unlike the
-    // scrollable horizontal ribbon, it anchors real geometry. A gap larger
-    // than half the workarea pushes the inset area off-monitor (saturating to a
-    // zero-area workarea *anchored outside the screen*, e.g. a window at y=5000
-    // on a 1080 px display), so clamp to the largest gap that keeps the inset
-    // inside the workarea: a "huge gap" still yields the maximum possible
-    // inset and the geometry stays valid.
-    let gap_outer = gap_outer
-        .min(workarea.w as i32 / 2)
-        .min(workarea.h as i32 / 2)
-        .max(0);
-    let wa = Rect::new(
-        workarea.x + gap_outer,
-        workarea.y + gap_outer,
-        workarea.w.saturating_sub((2 * gap_outer) as u32),
-        workarea.h.saturating_sub((2 * gap_outer) as u32),
-    );
+    let wa = inset_workarea(workarea, gap_outer);
 
     let gap_f = gap as f32;
     // Each column's width is a fraction of the FULL workarea width, *independent

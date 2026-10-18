@@ -40,6 +40,9 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Column resizing converts pixel deltas using the same inset workarea as the
+  layout, including outer and smart gaps. Inner gaps and the number of columns
+  no longer distort resize amounts or disable resizing on long ribbons.
 - The desktop cursor respects the session's Xcursor theme and size, including
   X resources and DPI defaults, instead of always using the small core-font
   arrow. Empty Views keep the same root cursor; applications retain their own

@@ -41,7 +41,9 @@
 use crate::config::Cfg;
 use crate::core::effect::Effect;
 use crate::core::event::{CommandReport, Event};
-use crate::core::layout::{fs_ctx, ideal_scroll, overview_scroll, ribbon_geom, FsCtx};
+use crate::core::layout::{
+    effective_gaps, fs_ctx, ideal_scroll, inset_workarea, overview_scroll, ribbon_geom, FsCtx,
+};
 
 use crate::types::{
     Column, Dir, FullscreenPolicy, FullscreenSnapshot, LayoutKind, Rect, State, ViewportMode,
@@ -1802,7 +1804,6 @@ impl Command for GrowColumn {
             return CommandReport::new(cmds);
         }
         let ws_i = state.monitors[mi].active_index();
-        let workarea_w = state.monitors[mi].workarea.w;
         let wa = state.monitors[mi].workarea;
         let fs = fs_of(state, mi, ws_i);
         let ws = &mut state.monitors[mi].workspaces[ws_i];
@@ -1812,27 +1813,13 @@ impl Command for GrowColumn {
         }
         let ci = ws.focus.column_idx.min(ws.columns.len().saturating_sub(1));
 
-        // Scrolling layout: each column has an *independent* width (a fraction of
-        // the workarea), and growing/shrinking one column never resizes its
-        // neighbours — the ribbon just gets longer/shorter and the camera
-        // scrolls. Stealing width from siblings (fit-to-screen) is wrong here.
-        let col_count = ws.columns.len();
-        // Clamp config gaps: `gaps_inner: u32` is user-controlled and
-        // `as i32` wraps at u32::MAX (== -1). Bound it to the same ceiling
-        // the layout uses so `usable_w` can never go pathological.
-        let gap_i = (cfg.gaps_inner.min(1_000_000)) as i32;
-        let usable_w = if col_count > 1 {
-            workarea_w.saturating_sub(((col_count as i32 - 1).saturating_mul(gap_i)) as u32) as i32
-        } else {
-            workarea_w as i32
-        };
-        if usable_w <= 0 {
+        let (_, gap_outer) = effective_gaps(ws, cfg);
+        let usable_w = inset_workarea(wa, gap_outer).w;
+        if usable_w == 0 {
             return CommandReport::new(cmds);
         }
 
-        // Convert the pixel delta into a weight delta against the space the
-        // columns can actually use, so a drag of N px widens the column by N px
-        // of usable width.
+        // Each column uses the full inset width; sibling gaps only lengthen the ribbon.
         let delta_weight = self.0 as f32 / usable_w as f32;
         let old_weight = ws.columns[ci].weight;
         // A column may fill the whole workarea (`weight == 1.0`) regardless of how

@@ -3937,10 +3937,76 @@ mod unit_tests {
              input focus on the visible window)"
         );
     }
-    // `GrowColumn`'s upper bound `1.0 - 0.05*(n-1)` crosses the `.clamp`'s 0.05
-    // lower bound once the ribbon is wide enough, and `f32::clamp` panics on
-    // `min > max` in debug *and* release. The command must stay total for any
-    // column count.
+    fn column_resize_engine(columns: u32, inner: u32, outer: u32) -> Engine {
+        let mut engine = setup_engine();
+        engine.cfg.gaps_inner = inner;
+        engine.cfg.gaps_outer = outer;
+        engine.cfg.border_w = 0;
+        engine.cfg.accordion_boost = 0.0;
+        engine.state.monitors[0].screen = Rect::new(0, 0, 1000, 600);
+        engine.state.monitors[0].workarea = Rect::new(0, 0, 1000, 600);
+        for win in 1..=columns {
+            engine.state.add_client(Client::new(win, 0, ViewId::new(0)));
+            engine.state.monitors[0].ws_mut().add_tiled(win, 0.3);
+        }
+        for column in &mut engine.state.monitors[0].ws_mut().columns {
+            column.weight = 0.3;
+        }
+        engine.state.monitors[0].focused = Some(columns);
+        engine
+    }
+
+    #[test]
+    fn column_resize_pixels_match_layout_with_independent_gaps() {
+        for columns in [1, 2, 20] {
+            for inner in [0, 100, u32::MAX] {
+                for outer in [0, 50, u32::MAX] {
+                    let mut engine = column_resize_engine(columns, inner, outer);
+                    let width = |engine: &Engine| {
+                        project(engine)
+                            .iter()
+                            .find(|(w, _, _)| *w == columns)
+                            .unwrap()
+                            .1
+                            .w
+                    };
+                    let before = width(&engine);
+                    engine.dispatch(Action::GrowCol(90));
+                    assert!(
+                        (width(&engine) as i64 - before as i64 - 90).abs() <= 1,
+                        "columns={columns}, inner={inner}, outer={outer}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn column_resize_percentage_matches_workarea_pixels() {
+        for inner in [0, 100, u32::MAX] {
+            let mut engine = column_resize_engine(2, inner, 50);
+            let width = |engine: &Engine| {
+                project(engine)
+                    .iter()
+                    .find(|(w, _, _)| *w == 2)
+                    .unwrap()
+                    .1
+                    .w
+            };
+            let before = width(&engine);
+            engine.dispatch(Action::GrowColPct(10.0));
+            assert!((width(&engine) as i64 - before as i64 - 100).abs() <= 1);
+        }
+    }
+
+    #[test]
+    fn column_resize_pixels_respect_smart_gaps() {
+        let mut engine = column_resize_engine(1, 100, 100);
+        engine.cfg.smart_gaps = true;
+        let before = project(&engine)[0].1.w;
+        engine.dispatch(Action::GrowCol(90));
+        assert!((project(&engine)[0].1.w as i64 - before as i64 - 90).abs() <= 1);
+    }
 
     #[test]
     fn grow_column_does_not_panic_with_many_columns() {
@@ -10789,11 +10855,7 @@ mod unit_tests {
         );
     }
 
-    /// A percentage resize is a statement about the *workarea*, resolved where
-    /// the layout lives. The test pins the direction, not the exact weight: the
-    /// weight is then redistributed among the siblings, which is what makes a
-    /// scroll layout's ribbon change length instead of stealing from a
-    /// neighbour.
+    /// Percentage deltas follow the workarea without redistributing sibling widths.
     #[test]
     fn a_percentage_resize_scales_with_the_workarea() {
         use crate::types::Action;
@@ -10830,11 +10892,7 @@ mod unit_tests {
             "+10% of a 1920px workarea must widen the focused column ({before} -> {after})"
         );
 
-        // The weight is a fraction of the *usable* width — the workarea minus
-        // the gaps between columns — because that is the space the layout
-        // actually distributes. So ten percent lands within a hair of a tenth
-        // on any monitor, and not exactly: the same fraction of a larger
-        // usable width is a larger number of pixels, which is the whole point.
+        // Outer gaps slightly reduce the width represented by a column weight.
         let mut small = two_columns(800);
         let s_before = focused_weight(&small);
         small.dispatch(Action::GrowColPct(10.0));
