@@ -362,11 +362,10 @@ which is why that line names neither.
 For an X11 session started with `startx`, `xorg-server` and `xorg-xinit` are
 also required (Arch: `xorg-server xorg-xinit`).
 
-The compiled default keybindings launch `alacritty` and `rofi`, and the compiled
-autostart launches `/usr/lib/xdg-desktop-portal` and
-`/usr/lib/xdg-desktop-portal-gtk` by absolute path. Those are conveniences, not
-requirements: the bindings can be overridden and the `[autostart] commands` list
-replaced. The layout engine needs none of them.
+The default terminal and launcher shortcuts invoke `alacritty` and `rofi` only
+when pressed; replace those commands with your preferred programs. No external
+program starts automatically. File chooser portals can be enabled explicitly;
+see [Optional file chooser portals](#optional-file-chooser-portals).
 
 Relevant environment variables:
 
@@ -532,10 +531,10 @@ the keyboard actually produces rather than the nominal keycode. A key combinatio
 written in a configuration file uses X keysym names with `Mod4`/`Mod1`-style
 modifiers, for example `Mod4+Shift+Return` or `Mod4+Control+h`.
 
-The sample configuration in [`config/config.toml`](config/config.toml) is a
-preset rather than a copy of the compiled defaults: it binds viewport zoom and
-page-snap to different keys and adds rules, a theme and an autostart list, so
-using it as a starting point replaces the compiled bindings.
+The sample configuration in [`config/config.toml`](config/config.toml) retains
+the compiled defaults: square corners, no borders, no application rules and no
+autostart commands. Settings, keybindings and rules are shown as commented
+examples so copying it does not apply someone else's application preferences.
 
 ## Configuration
 
@@ -561,13 +560,12 @@ Compiled defaults for the most relevant `[general]` keys:
 | `column_width` | `0.6` | column width as a fraction of the monitor workarea; must be between `0.1` and `1.0` |
 | `gaps_inner` | `4` | gap between adjacent tiles |
 | `gaps_outer` | `8` | gap between tiles and the screen edge |
-| `border_width` | `1` | tile border width in pixels |
+| `border_width` | `0` | tile border width in pixels; zero disables borders |
 | `focus_mouse` | `false` | whether moving the pointer changes focus |
 | `honor_initial_state` | `false` | honour a client's map-time maximized/fullscreen state instead of normalising it |
 | `auto_workspace_binds` | `true` | generate the `Super+<digit>` View bindings |
 | `smart_gaps` | `false` | suppress outer gaps where only one tile is visible |
 | `corner_radius` | `0` | tile corner radius in pixels |
-| `theme` | `catppuccin-mocha` | built-in theme name |
 | `tag_names` | `["1"]` … `["9"]` | View labels published as `_NET_DESKTOP_NAMES` |
 | `overview_scale` | `0.76` | the scale Overview is entered at; the one view that visibly shrinks the tiles |
 | `overview_zoom_min` | `0.25` | floor for the Overview entry scale: the smallest it may go when the focused tile would not fit even reduced |
@@ -589,14 +587,19 @@ emit a warning:
 | `split_bias` | — | fraction, `0.0`–`1.0` | `column_width` |
 
 `[colors]` accepts `normal`, `focused` and `urgent`, each also readable as
-`col_normal`, `col_focused` and `col_urgent`.
+`col_normal`, `col_focused` and `col_urgent`. These values affect window borders
+only. The older `[general].theme` presets remain accepted for compatibility;
+explicit colors override them. With `border_width = 0`, none of these colors
+is visible.
 
 ### How a file is combined with the defaults
 
 - Ordinary settings are merged field by field.
 - `[[keybindings]]` and `[[rules]]` **replace** the compiled list outright when
-  they are declared. Supplying one `[[rules]]` drops the compiled
-  per-application float policy, so the required entries must be repeated.
+  they are declared. The compiled rule list is empty. To customize bindings
+  while keeping the other defaults, uncomment the complete keybinding section
+  of the sample before editing it. Automatic numeric View bindings still fill
+  unclaimed slots.
 
 ### Behaviour on a malformed or partial file
 
@@ -614,8 +617,9 @@ Validate before relying on any of this:
 maverick --check-config ~/.config/maverick/config.toml
 ```
 
-[`config/config.toml`](config/config.toml) is a commented sample covering the
-wider vocabulary. It is a preset, not a copy of the compiled defaults.
+[`config/config.toml`](config/config.toml) covers the wider vocabulary without
+enabling its examples. Dialogs and transients still float according to their
+X11 properties; no application names or titles are singled out by default.
 
 ### Application rules
 
@@ -657,10 +661,54 @@ position = [120, 100]
 commands = [["polybar", "main"], ["picom", "--vsync"]]
 ```
 
-A non-empty list replaces the compiled one. This is where a compositor, a panel
-or a wallpaper program belongs: Maverick starts the command and never speaks to
-it again. Docks that publish struts reserve workarea automatically. Session
-startup and restart are not a general-purpose service supervisor.
+A list replaces the compiled one; the default is empty. This is where a
+compositor, a panel or a wallpaper program belongs: Maverick starts the command
+and never speaks to it again. Docks that publish struts reserve workarea
+automatically. Session startup and restart are not a general-purpose service
+supervisor.
+
+### Optional file chooser portals
+
+For applications that use a portal file chooser, install `xdg-desktop-portal`
+and `xdg-desktop-portal-gtk` using your distribution's packages. Neither is a
+Maverick dependency. Both must use the same session D-Bus as the application.
+Reuse the bus provided by your login session; for a minimal `startx` session
+without one, the launcher can use `exec dbus-run-session -- maverick`.
+
+Select the GTK backend in `~/.config/xdg-desktop-portal/portals.conf`:
+
+```ini
+[preferred]
+default=gtk
+```
+
+Packages normally provide D-Bus activation. If you prefer to start the services
+explicitly, uncomment only the two portal entries in the sample's existing
+`[autostart].commands` array. The sample uses Arch Linux's `/usr/lib` paths;
+Debian/Ubuntu normally use `/usr/libexec`. Check the paths installed by your
+packages before enabling them. Start each service once; do not add `--replace`
+or run another copy if the session already manages it.
+
+Services started by Maverick inherit its X11 environment. For services activated
+by an existing D-Bus session, publish the session environment from its launcher
+before starting applications, with the variables that session has set:
+
+```bash
+dbus-update-activation-environment DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP
+```
+
+Check that the frontend exposes a file chooser backend:
+
+```bash
+dbus-send --session --print-reply --dest=org.freedesktop.portal.Desktop \
+  /org/freedesktop/portal/desktop org.freedesktop.DBus.Properties.Get \
+  string:org.freedesktop.portal.FileChooser string:version
+```
+
+A successful reply contains a version number. Then open and cancel a file
+chooser in the application you use. The GTK backend provides file dialogs;
+screen sharing may require another backend. Removing the portal entries from
+autostart does not disable services activated independently by the session.
 
 ## maverickctl
 

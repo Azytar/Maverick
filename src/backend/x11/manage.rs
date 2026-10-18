@@ -37,9 +37,8 @@
 //! menu/toolbar/splash, `_NET_WM_STATE_MODAL`, a fixed-size `WM_NORMAL_HINTS`,
 //! `WM_TRANSIENT_FOR`), a `[[rules]]` entry with `float = true`, or float state
 //! restored from a previous session. Per-application policy such as
-//! "portals float" is expressed as a `[[rules]]` entry in the shipped
-//! defaults, which a user config replaces wholesale — see
-//! `config::compiled_config`. It is deliberately not a hard-coded list here:
+//! "portals float" can be expressed as a user `[[rules]]` entry. The shipped
+//! rule list is empty. There is no hard-coded list here:
 //! policy the user cannot see or override is not configuration.
 //!
 //! # Focus on manage

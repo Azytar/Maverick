@@ -13,6 +13,12 @@ before it makes no compatibility promise.
 
 ### Changed
 
+- The shipped configuration now matches the runtime defaults: square corners,
+  zero-width borders, no application/workspace rules and no autostart programs.
+  Most options and all default shortcuts remain visible as commented examples;
+  enabling the full keybinding example preserves the compiled shortcuts.
+  Optional GTK portal setup is documented without starting it automatically.
+  The installer's fallback configuration follows the same defaults.
 - Overview (`Super+O`) now scales live window images instead of configuring
   smaller client windows. Entering, panning and repainting preserve existing
   client geometry and avoid resize/map/unmap events. The core retains logical

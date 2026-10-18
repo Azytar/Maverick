@@ -1816,9 +1816,7 @@ border_width = 0
 
     #[test]
     fn shipped_example_config_parses() {
-        // The example at config/config.toml must always parse and exercise the
-        // documented features (themes, hex colors, viewport keybinds, rules
-        // with deny/true fullscreen, autostart grid).
+        // Copying the sample must preserve the neutral runtime defaults.
         let (cfg, diag) = load_from_path(Path::new("config/config.toml"));
         assert!(!cfg.keybinds.is_empty(), "keybindings must parse");
         // Diagnostic-clean, because this is the file users copy and
@@ -1829,28 +1827,15 @@ border_width = 0
             diag.is_clean(),
             "the shipped example must not warn: {diag:?}"
         );
-        // The example must not reintroduce a per-`WM_CLASS` workaround for
-        // map-time state: normalization is a global invariant, so the example
-        // carries no `firefox` rule and leaves `honor_initial_state` at its
-        // `false` default, while still pinning Steam to exclusive fullscreen.
         assert!(
             !cfg.honor_initial_state,
             "default must normalize initial state"
         );
-        assert!(!cfg
-            .rules
-            .iter()
-            .any(|r| r.class.as_deref() == Some("firefox")));
-        assert!(cfg
-            .rules
-            .iter()
-            .any(|r| r.class.as_deref() == Some("steam") && r.true_fullscreen));
-        assert_eq!(cfg.col_focused, 0x89b4fa);
-        // A second compositor alongside an external one breaks compositing.
-        assert!(!cfg
-            .autostart
-            .iter()
-            .any(|c| c.first().is_some_and(|b| b == "picom")));
+        assert_eq!(cfg.border_w, 0);
+        assert_eq!(cfg.corner_radius, 0);
+        assert!(cfg.rules.is_empty());
+        assert!(cfg.autostart.is_empty());
+        assert_eq!(cfg.keybinds, default_config().keybinds);
         // Numeric workspace binds are auto-restored when no digit keybinds exist.
         assert!(cfg
             .keybinds
@@ -1874,6 +1859,50 @@ border_width = 0
                 Action::Spawn(cmd) if cmd.iter().any(|c| c == "maverickctl")
             )),
             "example config must not shell out to maverickctl"
+        );
+    }
+
+    #[test]
+    fn uncommented_keybinding_examples_preserve_default_shortcuts() {
+        let sample = include_str!("../config/config.toml");
+        let bindings = sample
+            .lines()
+            .filter_map(|line| line.strip_prefix("# "))
+            .filter(|line| {
+                *line == "[[keybindings]]"
+                    || line.starts_with("key = ")
+                    || line.starts_with("action = ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut diag = Diagnostics::default();
+        let user = parse_user(&bindings, &mut diag).expect("keybinding examples parse");
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert!(diag.is_clean(), "{diag:?}");
+        assert_eq!(cfg.keybinds, default_config().keybinds);
+    }
+
+    #[test]
+    fn portal_autostart_example_is_opt_in_and_parses_as_argv() {
+        let sample = include_str!("../config/config.toml");
+        let commands = sample
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("# [\"/usr/lib/"))
+            .filter(|line| line.starts_with("xdg-desktop-portal"))
+            .map(|line| format!("[\"/usr/lib/{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source = format!("[autostart]\ncommands = [\n{commands}\n]\n");
+        let mut diag = Diagnostics::default();
+        let user = parse_user(&source, &mut diag).expect("portal example parses");
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert!(diag.is_clean(), "{diag:?}");
+        assert_eq!(
+            cfg.autostart,
+            vec![
+                vec!["/usr/lib/xdg-desktop-portal-gtk".to_string()],
+                vec!["/usr/lib/xdg-desktop-portal".to_string()],
+            ]
         );
     }
 
