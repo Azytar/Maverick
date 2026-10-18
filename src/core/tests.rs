@@ -4009,6 +4009,45 @@ mod unit_tests {
     }
 
     #[test]
+    fn column_resize_unchanged_width_preserves_state_without_effects() {
+        use crate::core::ipc::state_json;
+        for (weight, action) in [
+            (1.0, Action::GrowCol(50)),
+            (0.05, Action::GrowCol(-50)),
+            (0.3, Action::GrowCol(0)),
+            (1.0, Action::GrowColPct(10.0)),
+            (0.05, Action::GrowColPct(-10.0)),
+            (0.3, Action::GrowColPct(0.0)),
+        ] {
+            let mut engine = column_resize_engine(2, 100, 0);
+            engine.state.monitors[0].ws_mut().columns[1].weight = weight;
+            engine.state.monitors[0].ws_mut().camera.retarget(-137.5);
+            let before = state_json(&engine.state, &engine.cfg);
+            for _ in 0..16 {
+                let effects = engine.dispatch(action.clone());
+                assert!(effects.is_empty(), "unchanged resize emitted {effects:?}");
+                assert_eq!(state_json(&engine.state, &engine.cfg), before);
+            }
+        }
+    }
+
+    #[test]
+    fn column_resize_leaves_each_limit_on_the_first_reverse_step() {
+        for (weight, delta, limit) in [(0.98, 50, 1.0), (0.06, -50, 0.05)] {
+            let mut engine = column_resize_engine(2, 100, 0);
+            engine.state.monitors[0].ws_mut().columns[1].weight = weight;
+            assert!(!engine.dispatch(Action::GrowCol(delta)).is_empty());
+            assert_eq!(engine.state.monitors[0].ws().columns[1].weight, limit);
+            for _ in 0..16 {
+                assert!(engine.dispatch(Action::GrowCol(delta)).is_empty());
+            }
+            assert!(!engine.dispatch(Action::GrowCol(-delta)).is_empty());
+            let expected = limit - delta as f32 / 1000.0;
+            assert!((engine.state.monitors[0].ws().columns[1].weight - expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn grow_column_does_not_panic_with_many_columns() {
         use crate::types::Client;
         let mut engine = setup_engine();

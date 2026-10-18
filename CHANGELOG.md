@@ -40,6 +40,9 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Column resize commands that cannot change the width return without arranging
+  windows, publishing state or recentering a manually panned camera. Repeated
+  input at either size limit does not accumulate pending growth.
 - Column resizing converts pixel deltas using the same inset workarea as the
   layout, including outer and smart gaps. Inner gaps and the number of columns
   no longer distort resize amounts or disable resizing on long ribbons.

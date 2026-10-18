@@ -1805,7 +1805,6 @@ impl Command for GrowColumn {
         }
         let ws_i = state.monitors[mi].active_index();
         let wa = state.monitors[mi].workarea;
-        let fs = fs_of(state, mi, ws_i);
         let ws = &mut state.monitors[mi].workspaces[ws_i];
 
         if ws.columns.is_empty() {
@@ -1822,15 +1821,14 @@ impl Command for GrowColumn {
         // Each column uses the full inset width; sibling gaps only lengthen the ribbon.
         let delta_weight = self.0 as f32 / usable_w as f32;
         let old_weight = ws.columns[ci].weight;
-        // A column may fill the whole workarea (`weight == 1.0`) regardless of how
-        // many columns exist. A lower ceiling (e.g. `1.0 - 0.05*(n-1)`, reserving
-        // 5% of peek per neighbour) is a fit-to-screen leftover: it blocks the
-        // second column at 0.95 while a first column created at 1.0 does fill the
-        // screen. In a scrollable ribbon nothing has to be reserved — the
-        // neighbour simply scrolls out of view.
-        let max_w = 1.0;
-        ws.columns[ci].weight = (old_weight + delta_weight).clamp(0.05, max_w);
+        let new_weight = (old_weight + delta_weight).clamp(0.05, 1.0);
+        if new_weight == old_weight {
+            return CommandReport::new(cmds);
+        }
+        ws.columns[ci].weight = new_weight;
 
+        let fs = fs_of(state, mi, ws_i);
+        let ws = &mut state.monitors[mi].workspaces[ws_i];
         let scroll = follow_scroll(ws, cfg, wa, fs);
         ws.camera.retarget(scroll);
         cmds.push(Effect::ArrangeMonitor(mi));
