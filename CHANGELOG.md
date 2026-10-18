@@ -40,6 +40,11 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- The desktop cursor respects the session's Xcursor theme and size, including
+  X resources and DPI defaults, instead of always using the small core-font
+  arrow. Empty Views keep the same root cursor; applications retain their own
+  cursors. Missing or invalid themes and servers without Render fall back to a
+  visible core arrow.
 - X11 shell tests use private runtime/configuration directories and refuse
   occupied displays. Shared cleanup quits only its explicit test instance via
   `maverickctl`, then uses registered PIDs with start-time checks as a bounded

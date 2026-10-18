@@ -82,7 +82,8 @@ def main():
                 assert command("sample") == arrow
                 print("PASS: the root cursor remains visible without opening an application")
                 command("client")
-                wait_for(lambda: command("sample") != arrow, "the client's own cursor was replaced")
+                wait_for(lambda: command("enter")[2] > 0 and command("sample") != arrow,
+                         "the client's own cursor was replaced")
                 assert command("sample")[2] > 0
                 print("PASS: applications retain their own cursor")
                 command("destroy")

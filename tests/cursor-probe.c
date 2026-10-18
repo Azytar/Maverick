@@ -51,6 +51,8 @@ int main(void) {
         } else if (!strcmp(line, "destroy\n")) {
             XDestroyWindow(display, client);
             client = None;
+        } else if (!strcmp(line, "enter\n")) {
+            XWarpPointer(display, None, client, 0, 0, 0, 0, 10, 10);
         } else if (!strcmp(line, "quit\n")) break;
         else if (strcmp(line, "sample\n")) return 3;
         sample(display);

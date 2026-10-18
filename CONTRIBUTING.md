@@ -131,6 +131,11 @@ The Xephyr wrapper uses the same pixel/event regression on its own display.
 opens, after opening and closing a client, and after shutdown. Its C probe
 needs `libxfixes-dev` in addition to `libx11-dev`.
 
+`python3 tests/xvfb-cursor-theme.py` measures cursor pixels using a generated
+theme, covering session defaults, environment/resource precedence, DPI-derived sizes, View
+switches, client cursor ownership and fallback without a usable theme or Render.
+It uses the same probe and libraries; no installed cursor theme is required.
+
 `python3 tests/xvfb-reload.py` checks focused tile visibility after changing
 spacing, borders and accordion settings, including extreme gaps and seeded
 combinations. It also checks that unchanged and malformed reloads preserve a

@@ -154,26 +154,35 @@ impl WindowManager {
     }
 
     fn setup_root_cursor(&self) -> Result<(), Box<dyn std::error::Error>> {
-        const LEFT_PTR: u16 = 68;
-        let font = self.conn.generate_id()?;
-        let cursor = self.conn.generate_id()?;
-        self.conn.open_font(font, b"cursor")?.check()?;
-        // The core cursor font pairs each shape with its mask in the next glyph.
-        let created = self.conn.create_glyph_cursor(
-            cursor,
-            font,
-            font,
-            LEFT_PTR,
-            LEFT_PTR + 1,
-            0,
-            0,
-            0,
-            u16::MAX,
-            u16::MAX,
-            u16::MAX,
-        );
-        let _ = self.conn.close_font(font);
-        created?.check()?;
+        let resources = x11rb::resource_manager::new_from_default(&*self.conn)?;
+        let handle =
+            x11rb::cursor::Handle::new(&*self.conn, self.screen_num, &resources)?.reply()?;
+        let cursor = match handle.load_cursor(&*self.conn, "left_ptr") {
+            Ok(cursor) if cursor != x11rb::NONE => cursor,
+            _ => {
+                // A missing or unreadable theme must still leave a visible arrow.
+                const LEFT_PTR: u16 = 68;
+                let font = self.conn.generate_id()?;
+                let cursor = self.conn.generate_id()?;
+                self.conn.open_font(font, b"cursor")?.check()?;
+                let created = self.conn.create_glyph_cursor(
+                    cursor,
+                    font,
+                    font,
+                    LEFT_PTR,
+                    LEFT_PTR + 1,
+                    0,
+                    0,
+                    0,
+                    u16::MAX,
+                    u16::MAX,
+                    u16::MAX,
+                );
+                let _ = self.conn.close_font(font);
+                created?.check()?;
+                cursor
+            }
+        };
 
         let installed = self
             .conn

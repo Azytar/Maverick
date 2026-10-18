@@ -106,7 +106,9 @@ jobs:
           python3 tests/xvfb-restart.py
           python3 tests/xvfb-restart.py --pointer-focus
       - name: Root cursor startup and ownership
-        run: python3 tests/xvfb-cursor.py
+        run: |
+          python3 tests/xvfb-cursor.py
+          python3 tests/xvfb-cursor-theme.py
       - name: X11 focus and input regressions
         run: |
           python3 tests/xvfb-input.py --case protocol
