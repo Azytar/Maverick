@@ -130,42 +130,8 @@ impl WindowManager {
                 );
             }
             Effect::RefreshDesktops => {
-                // The live View count is authoritative for EWMH, so the count and
-                // the names are rewritten from the *selected monitor's* View list
-                // rather than from `cfg.n_tags` / `cfg.tag_names` — a
-                // `CreateView`/`RemoveView` at runtime changes neither, and the
-                // old pairing would report a stale desktop count to pagers and
-                // taskbars. `_NET_CURRENT_DESKTOP` is deliberately untouched.
-                let Some(mon) = self.engine.state.monitors.get(self.engine.state.sel_mon) else {
-                    return Ok(());
-                };
-                let n = mon.workspaces.len() as u32;
-                let _ = self.conn.change_property32(
-                    PropMode::REPLACE,
-                    self.root,
-                    self.atoms.net_number_of_desktops,
-                    AtomEnum::CARDINAL,
-                    &[n],
-                );
-                let mut names = Vec::new();
-                for i in 0..mon.workspaces.len() {
-                    let name = self
-                        .engine
-                        .cfg
-                        .tag_names
-                        .get(i)
-                        .cloned()
-                        .unwrap_or_else(|| (i + 1).to_string());
-                    names.extend_from_slice(name.as_bytes());
-                    names.push(0);
-                }
-                let _ = self.conn.change_property8(
-                    PropMode::REPLACE,
-                    self.root,
-                    self.atoms.net_desktop_names,
-                    self.atoms.utf8_string,
-                    &names,
-                );
+                self.update_ewmh_desktop_count()?;
+                self.update_workarea()?;
             }
             Effect::Spawn(cmd) => self.spawn(&cmd),
             Effect::Quit => self.begin_shutdown(),

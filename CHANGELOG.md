@@ -48,6 +48,9 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Live View creation/removal refreshes `_NET_WORKAREA` with the desktop count
+  and names. Root desktop metadata uses the largest live View count and publishes
+  one physical workarea rectangle per desktop, rather than one per monitor.
 - Repeating an already-applied client maximize request no longer arranges
   windows or rewrites `_NET_WM_STATE`, including single-axis requests.
 - Client attention requests respect ADD, REMOVE and TOGGLE and immediately

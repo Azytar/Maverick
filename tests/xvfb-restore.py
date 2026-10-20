@@ -48,7 +48,7 @@ def main():
             path.mkdir(mode=0o700)
             env[key] = str(path)
         config = directory / "config.toml"
-        config.write_text("[general]\nfocus_mouse = false\nwarp_cursor = false\n"
+        config.write_text("[general]\nn_tags = 3\nfocus_mouse = false\nwarp_cursor = false\n"
                           "gaps_outer = 10\nborder_width = 2\n[autostart]\ncommands = []\n")
         helper = directory / "probe"
         subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(ROOT / "tests/stacking-probe.c"),
@@ -145,8 +145,21 @@ def main():
                     ctl("msg", "restore_layout")
                     wait_for(restored, "maximize repeat case was not restored")
                 print("PASS: repeated maximization does no client configure/property work")
+                def root_cardinals(atom):
+                    value = subprocess.check_output(["xprop", "-root", atom],
+                                                    env=env, text=True, timeout=3)
+                    return [int(item.strip()) for item in value.split("=", 1)[1].split(",")]
+
+                for count, action in ((4, "view_create"), (3, "view_remove:4")):
+                    ctl("msg", action)
+                    wait_for(lambda: root_cardinals("_NET_NUMBER_OF_DESKTOPS") == [count]
+                             and root_cardinals("_NET_WORKAREA") == [0, 0, 800, 600] * count,
+                             "live desktop count and workarea cardinality diverged")
+                print("PASS: creating/removing Views keeps EWMH desktop and workarea counts consistent")
                 command("dock")
                 wait_for(lambda: geometry()[1] == 34, "dock workarea was not applied")
+                wait_for(lambda: root_cardinals("_NET_WORKAREA") == [0, 24, 800, 576] * 3,
+                         "dock change lost live desktop workareas")
                 original = geometry()
                 for floating in (False, True):
                     if floating:

@@ -152,6 +152,8 @@ layout restoration, tiled/floating geometry, both maximized axes, EWMH flags,
 compositor bypass and the default restoration shortcut. Repeated restoration
 must produce no client configure/property events. It uses its own Xvfb and the
 stacking probe, requiring `libx11-dev` and `xdotool`.
+It also checks invalid EWMH state actions, attention transitions, repeated
+maximize requests and workarea metadata after live View and dock changes.
 
 `python3 tests/xvfb-input.py --case protocol` validates ICCCM timestamps;
 `--case ownership` checks transfers and activation protections; `--case child`

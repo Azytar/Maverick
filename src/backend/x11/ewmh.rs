@@ -7,11 +7,10 @@
 //!
 //! # Protocol semantics
 //!
-//! - `_NET_WORKAREA` — `mon.workarea` × `n_tags`.
-//!   The workarea is the screen minus reserved regions
-//!   (docks). Written as a flat CARDINAL array.
+//! - `_NET_WORKAREA` — the physical workarea bounds, once per live desktop.
+//!   Written as a flat CARDINAL array, independent of monitor count.
 //! - `_NET_DESKTOP_GEOMETRY` — the full screen rect.
-//! - `_NET_NUMBER_OF_DESKTOPS` — `n_tags`.
+//! - `_NET_NUMBER_OF_DESKTOPS` — the largest live View count across monitors.
 //! - `_NET_DESKTOP_NAMES` — nul-separated UTF-8.
 //! - `_NET_CURRENT_DESKTOP` — published by
 //!   `Effect::SetCurrentDesktop`; only the initial startup
@@ -34,22 +33,47 @@
 
 use super::*;
 
+fn desktop_count(monitors: &[Monitor]) -> usize {
+    monitors
+        .iter()
+        .map(|mon| mon.workspaces.len())
+        .max()
+        .unwrap_or(0)
+}
+
+fn workarea_property(monitors: &[Monitor]) -> Vec<u32> {
+    let Some(first) = monitors.first() else {
+        return Vec::new();
+    };
+    let (mut x0, mut y0, mut x1, mut y1) = (
+        first.workarea.x as i64,
+        first.workarea.y as i64,
+        first.workarea.x as i64 + first.workarea.w as i64,
+        first.workarea.y as i64 + first.workarea.h as i64,
+    );
+    for mon in &monitors[1..] {
+        let wa = mon.workarea;
+        x0 = x0.min(wa.x as i64);
+        y0 = y0.min(wa.y as i64);
+        x1 = x1.max(wa.x as i64 + wa.w as i64);
+        y1 = y1.max(wa.y as i64 + wa.h as i64);
+    }
+    [
+        x0 as u32,
+        y0 as u32,
+        (x1 - x0).clamp(1, u32::MAX as i64) as u32,
+        (y1 - y0).clamp(1, u32::MAX as i64) as u32,
+    ]
+    .repeat(desktop_count(monitors))
+}
+
 impl WindowManager {
     pub(super) fn update_workarea(&self) -> Result<(), Box<dyn std::error::Error>> {
         let a = &self.atoms;
-        let n = self.engine.cfg.n_tags;
         if self.engine.state.monitors.is_empty() {
             return Ok(());
         }
-        let mut data = Vec::with_capacity(self.engine.state.monitors.len() * n * 4);
-        for mon in &self.engine.state.monitors {
-            for _ in 0..n {
-                data.push(mon.workarea.x as u32);
-                data.push(mon.workarea.y as u32);
-                data.push(mon.workarea.w);
-                data.push(mon.workarea.h);
-            }
-        }
+        let data = workarea_property(&self.engine.state.monitors);
         self.conn
             .change_property32(
                 PropMode::REPLACE,
@@ -92,12 +116,12 @@ impl WindowManager {
     }
 
     /// Rewrite `_NET_NUMBER_OF_DESKTOPS` and `_NET_DESKTOP_NAMES` to match the
-    /// current config. Unlike `update_ewmh_desktops`, this deliberately leaves
+    /// live Views. Unlike `update_ewmh_desktops`, this deliberately leaves
     /// `_NET_CURRENT_DESKTOP` untouched — callers that reconcile workspaces
     /// (e.g. `reload_config`) must not reset the active desktop to 0.
     pub(super) fn update_ewmh_desktop_count(&self) -> Result<(), Box<dyn std::error::Error>> {
         let a = &self.atoms;
-        let n = self.engine.cfg.n_tags as u32;
+        let n = desktop_count(&self.engine.state.monitors) as u32;
 
         self.conn
             .change_property32(
@@ -110,7 +134,14 @@ impl WindowManager {
             .check()?;
 
         let mut names = Vec::new();
-        for name in &self.engine.cfg.tag_names {
+        for i in 0..n as usize {
+            let name = self
+                .engine
+                .cfg
+                .tag_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| (i + 1).to_string());
             names.extend_from_slice(name.as_bytes());
             names.push(0);
         }
@@ -452,5 +483,23 @@ mod stacking_order_tests {
     #[test]
     fn a_single_client_is_its_own_only_leftover() {
         assert_eq!(WindowManager::leftovers(&clients(&[0x42])), vec![0x42]);
+    }
+}
+
+#[cfg(test)]
+mod workarea_tests {
+    use super::*;
+
+    #[test]
+    fn workareas_have_one_rectangle_per_live_desktop_not_per_output() {
+        let mut left = Monitor::new(Rect::new(0, 0, 800, 600), 3);
+        let mut right = Monitor::new(Rect::new(800, 0, 800, 600), 4);
+        left.workarea = Rect::new(0, 24, 800, 576);
+        right.workarea = Rect::new(800, 24, 800, 576);
+        assert_eq!(
+            workarea_property(&[left, right]),
+            [0, 24, 1600, 576].repeat(4)
+        );
+        assert!(workarea_property(&[]).is_empty());
     }
 }
