@@ -51,7 +51,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wm", default=str(ROOT / "target/release/maverick"))
     parser.add_argument("--ctl", default=str(ROOT / "target/release/maverickctl"))
-    parser.add_argument("--case", choices=("layers", "focus", "transients", "metadata", "profile"), default="focus")
+    parser.add_argument("--case", choices=("layers", "focus", "vertical", "transients", "metadata", "profile"), default="focus")
     parser.add_argument("--clients", type=int, default=10, help="profile: total clients, including two floats")
     parser.add_argument("--actions", type=int, default=100, help="profile: successive focus requests")
     parser.add_argument("--idle-seconds", type=float, default=2, help="profile: idle sampling interval")
@@ -143,6 +143,36 @@ def main():
                         "focus did not reach the requested window")
 
                 a = launch()
+                if args.case == "vertical":
+                    b = launch()
+                    focus(b)
+                    ctl("msg", "collapse_column")
+
+                    def rows():
+                        return [window["id"] for window in tree()["monitors"][0]
+                                ["workspaces"][0]["columns"][0]["windows"]]
+
+                    def key(chord):
+                        subprocess.run(["xdotool", "key", "--clearmodifiers", chord],
+                                       env=env, check=True, timeout=5)
+
+                    def focused(win):
+                        return f"0x{win:x}" in subprocess.check_output(
+                            ["xprop", "-root", "_NET_ACTIVE_WINDOW"], env=env, text=True, timeout=3)
+
+                    wait_for(lambda: rows() == [a, b], "columns were not merged")
+                    key("super+k")
+                    wait_for(lambda: focused(a), "Super+K did not navigate from the collapsed row")
+                    key("super+j")
+                    wait_for(lambda: focused(b), "Super+J did not navigate to the next row")
+                    key("super+shift+k")
+                    wait_for(lambda: rows() == [b, a] and focused(b), "Super+Shift+K did not move the focused row up")
+                    key("super+shift+j")
+                    wait_for(lambda: rows() == [a, b] and focused(b), "Super+Shift+J did not move the focused row down")
+                    print("PASS: default vertical focus and movement shortcuts work after merging columns", flush=True)
+                    ctl("quit", "--yes", check=False)
+                    assert wm.wait(timeout=5) == 0
+                    return
                 ctl("msg", f"float_window {a}")
                 b = launch()
                 wait_for(lambda: above(a, b), "new tile covered an existing float")

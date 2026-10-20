@@ -168,6 +168,8 @@ map, floats take focus and fullscreen changes its presented owner.
 unrelated float. Both use their own Xvfb and the stacking probe (`libx11-dev`).
 `--case metadata` compares the published stack with real X11 order, including
 fullscreen covering a dock created afterwards.
+`--case vertical` uses `xdotool` to exercise the default focus and row movement
+shortcuts after merging columns, including the stale row cursor from collapse.
 
 `--case profile` is an optional CPU/RSS and control round-trip workload, with
 `--clients`, `--actions`, `--idle-seconds` and optional `--trace-output`.

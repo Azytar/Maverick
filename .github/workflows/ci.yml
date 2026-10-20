@@ -113,6 +113,7 @@ jobs:
           python3 tests/xvfb-floats.py --case focus
           python3 tests/xvfb-floats.py --case transients
           python3 tests/xvfb-floats.py --case metadata
+          python3 tests/xvfb-floats.py --case vertical
       - name: Layout preservation across restart
         run: |
           python3 tests/xvfb-restart.py
