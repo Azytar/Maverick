@@ -2,10 +2,12 @@
 """Check floating-window layers and focus on a private Xvfb display."""
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import re
 import select
+import statistics
 import subprocess
 import tempfile
 import time
@@ -31,12 +33,34 @@ def wait_for(predicate, message):
     raise AssertionError(message)
 
 
+def distribution(values):
+    ordered = sorted(values)
+    return {"count": len(ordered), "p50": round(statistics.median(ordered), 3),
+            "p95": round(ordered[math.ceil(0.95 * len(ordered)) - 1], 3),
+            "max": round(ordered[-1], 3)}
+
+
+def process_sample(pid):
+    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+    cpu = (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    rss = int(Path(f"/proc/{pid}/statm").read_text().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 1024
+    return cpu, rss
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wm", default=str(ROOT / "target/release/maverick"))
     parser.add_argument("--ctl", default=str(ROOT / "target/release/maverickctl"))
-    parser.add_argument("--case", choices=("layers", "focus", "transients", "metadata"), default="focus")
+    parser.add_argument("--case", choices=("layers", "focus", "transients", "metadata", "profile"), default="focus")
+    parser.add_argument("--clients", type=int, default=10, help="profile: total clients, including two floats")
+    parser.add_argument("--actions", type=int, default=100, help="profile: successive focus requests")
+    parser.add_argument("--idle-seconds", type=float, default=2, help="profile: idle sampling interval")
+    parser.add_argument("--trace-output", type=Path, help="profile: enable and save the existing WM trace")
     args = parser.parse_args()
+    if not 2 <= args.clients <= 200 or not 1 <= args.actions <= 10000 or not 0 < args.idle_seconds <= 30:
+        parser.error("expected 2..200 clients, 1..10000 actions and 0..30 idle seconds")
+    if args.trace_output and args.case != "profile":
+        parser.error("--trace-output requires --case profile")
     processes = []
     with tempfile.TemporaryDirectory(prefix="mfloat-", dir="/tmp") as directory:
         directory = Path(directory)
@@ -45,6 +69,9 @@ def main():
             path = directory / key
             path.mkdir(mode=0o700)
             env[key] = str(path)
+        if args.trace_output:
+            env["MAVERICK_TRACE"] = "1"
+            env["MAVERICK_TRACE_PATH"] = str(directory / "wm.trace")
         config = directory / "config.toml"
         config.write_text("[general]\nfocus_mouse = false\nwarp_cursor = false\n"
                           "[autostart]\ncommands = []\n")
@@ -124,7 +151,37 @@ def main():
                 print("PASS: a new or focused tile stays below an existing float", flush=True)
                 if args.case != "layers":
                     ctl("msg", f"float_window {b}")
-                    if args.case in ("focus", "metadata"):
+                    if args.case == "profile":
+                        targets = [a, b] + [launch() for _ in range(args.clients - 2)]
+                        time.sleep(0.2)
+                        idle_cpu, _ = process_sample(wm.pid)
+                        idle_start = time.monotonic()
+                        time.sleep(args.idle_seconds)
+                        idle_wall = time.monotonic() - idle_start
+                        after_idle_cpu, _ = process_sample(wm.pid)
+                        busy_cpu, _ = process_sample(wm.pid)
+                        busy_start = time.monotonic()
+                        latencies = []
+                        for index in range(args.actions):
+                            started = time.monotonic()
+                            ctl("msg", f"focus_window {targets[index % len(targets)]}")
+                            latencies.append((time.monotonic() - started) * 1000)
+                        command(a, "state 1 _NET_WM_STATE_DEMANDS_ATTENTION")
+                        wait_for(lambda: "_NET_WM_STATE_DEMANDS_ATTENTION" in subprocess.check_output(
+                            ["xprop", "-id", str(a), "_NET_WM_STATE"], env=env, text=True, timeout=3),
+                            "workload completion sentinel was not processed")
+                        busy_wall = time.monotonic() - busy_start
+                        after_busy_cpu, rss = process_sample(wm.pid)
+                        profile = {"clients": args.clients, "floats": 2, "actions": args.actions,
+                                   "trace_enabled": bool(args.trace_output),
+                                   "idle_wall_seconds": round(idle_wall, 3),
+                                   "idle_wm_cpu_ms": round((after_idle_cpu - idle_cpu) * 1000, 3),
+                                   "idle_wm_cpu_percent_one_core": round((after_idle_cpu - idle_cpu) / idle_wall * 100, 3),
+                                   "workload_wall_seconds": round(busy_wall, 3),
+                                   "workload_wm_cpu_ms": round((after_busy_cpu - busy_cpu) * 1000, 3),
+                                   "wm_rss_kib": round(rss),
+                                   "ipc_cli_round_trip_ms": distribution(latencies)}
+                    elif args.case in ("focus", "metadata"):
                         for win, other in ((a, b), (b, a), (a, b)):
                             focus(win)
                             wait_for(lambda: above(win, other), "focused float stayed behind its peer")
@@ -155,6 +212,22 @@ def main():
                         print("PASS: transient descendants stay above their raised parent", flush=True)
                 ctl("quit", "--yes", check=False)
                 assert wm.wait(timeout=5) == 0
+                if args.case == "profile":
+                    if args.trace_output:
+                        trace = Path(env["MAVERICK_TRACE_PATH"]).read_text()
+                        args.trace_output.write_text(trace)
+                        spans = {}
+                        for record in trace.splitlines():
+                            if record.startswith("#"):
+                                continue
+                            _, _, event, fields = record.split("\t", 3)
+                            duration = re.search(r"boundary=end duration_ns=(\d+)", fields)
+                            if duration and event in ("state_action", "reconcile", "x_flush", "wait"):
+                                spans.setdefault(event, []).append(int(duration[1]) / 1_000_000)
+                        profile["trace_header"] = trace.splitlines()[0]
+                        profile["trace_session_spans_ms"] = {event: distribution(values)
+                                                             for event, values in spans.items()}
+                    print(json.dumps(profile, indent=2))
             except Exception:
                 if "wm" in locals() and wm.poll() is None:
                     print("STATE", tree())

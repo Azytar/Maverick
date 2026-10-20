@@ -35,6 +35,10 @@ before it makes no compatibility promise.
 
 ### Added
 
+- An optional isolated performance workload reports WM CPU/RSS and control
+  round trips, with existing runtime traces available for internal spans.
+  Documentation distinguishes those measurements from visible frame rate and
+  application input latency.
 - `restore_layout`, bound to `Super+Shift+Escape` and available through
   `maverickctl msg`, explicitly leaves fullscreen and both maximized axes while
   preserving the underlying layout or floating placement. Repeated restoration

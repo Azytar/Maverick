@@ -169,6 +169,11 @@ unrelated float. Both use their own Xvfb and the stacking probe (`libx11-dev`).
 `--case metadata` compares the published stack with real X11 order, including
 fullscreen covering a dock created afterwards.
 
+`--case profile` is an optional CPU/RSS and control round-trip workload, with
+`--clients`, `--actions`, `--idle-seconds` and optional `--trace-output`.
+It does not impose timing thresholds in CI; [docs/performance.md](docs/performance.md)
+describes its scope and how to interpret the measurements.
+
 `python3 tests/xvfb-input.py --case protocol` validates ICCCM timestamps;
 `--case ownership` checks transfers and activation protections; `--case child`
 checks cached-time desynchronization; `--case capture` checks core/XI2 keys,

@@ -872,6 +872,10 @@ cargo build -p maverick --features input-trace,window-trace
 
 Run that only on a `DISPLAY` intended to be handed to a window manager.
 
+For CPU/RSS sampling and an isolated release workload with optional internal
+spans, see [Measuring Maverick](docs/performance.md). CLI round trips and X11
+flushes are not measurements of visible frame rate or keyboard-to-screen latency.
+
 **Installer animation garbles piped output.** Use `--no-anim`, or export
 `MAVERICK_NO_ANIM=1`. It reaches no cargo build: Maverick draws through X11 and
 has no animation subsystem.
