@@ -3937,6 +3937,33 @@ mod unit_tests {
              input focus on the visible window)"
         );
     }
+    #[test]
+    fn maximized_float_fullscreen_exit_keeps_both_restore_steps() {
+        use crate::core::commands::{ToggleFullscreen, ToggleMaximize};
+        let mut engine = setup_engine();
+        let original = Rect::new(120, 90, 480, 320);
+        let maximized = engine.state.monitors[0].workarea;
+        let mut client = Client::new(1, 0, ViewId::new(0));
+        client.flags.set(WinFlags::FLOAT);
+        client.geom = original;
+        client.saved_geom = original;
+        client.border_w = 2;
+        engine.state.add_client(client);
+        engine.state.monitors[0].ws_mut().floats.push(1);
+        engine.state.monitors[0].focused = Some(1);
+        engine.execute(ToggleMaximize(Some(1)));
+        engine.state.clients.get_mut(&1).unwrap().geom = maximized;
+        engine.execute(ToggleFullscreen(Some(1)));
+        engine.state.clients.get_mut(&1).unwrap().geom = engine.state.monitors[0].screen;
+        engine.execute(ToggleFullscreen(Some(1)));
+        let client = &engine.state.clients[&1];
+        assert!(client.is_float() && client.is_maximized() && !client.is_fullscreen());
+        assert_eq!(client.geom, maximized);
+        assert_eq!(client.saved_geom, original);
+        engine.execute(ToggleMaximize(Some(1)));
+        assert_eq!(engine.state.clients[&1].geom, original);
+    }
+
     fn column_resize_engine(columns: u32, inner: u32, outer: u32) -> Engine {
         let mut engine = setup_engine();
         engine.cfg.gaps_inner = inner;

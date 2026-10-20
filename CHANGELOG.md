@@ -43,6 +43,9 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- A maximized floating window keeps its original floating rectangle across a
+  fullscreen cycle. Leaving fullscreen restores maximized presentation; leaving
+  maximization afterwards restores the original floating size and position.
 - Column resize commands that cannot change the width return without arranging
   windows, publishing state or recentering a manually panned camera. Repeated
   input at either size limit does not accumulate pending growth.

@@ -212,7 +212,10 @@ pub fn apply_fullscreen_topology(
             // geometry. `arrange` overwrites `geom` with the tile rect as soon
             // as it runs, so saving it any later would remember the tile instead
             // of where the user had the float.
-            c.saved_geom = c.geom;
+            // Maximization owns saved_geom; fullscreen has its own snapshot.
+            if !c.is_maximized() {
+                c.saved_geom = c.geom;
+            }
             // Capture the fullscreen snapshot (prior mode + exact rect) so that
             // leaving fullscreen restores the float verbatim — robust against an
             // intervening maximize (which would otherwise clobber `saved_geom`).
@@ -232,6 +235,7 @@ pub fn apply_fullscreen_topology(
         if !client.flags.has(WinFlags::FS_WAS_FLOAT) {
             return false;
         }
+        let maximized_restore = client.is_maximized().then_some(client.saved_geom);
         state.monitors[mi].workspaces[ws_i].remove_window(win);
         state.monitors[mi].workspaces[ws_i].floats.push(win);
         if let Some(c) = state.clients.get_mut(&win) {
@@ -243,6 +247,11 @@ pub fn apply_fullscreen_topology(
         // avoids a visible jump when the first `arrange` corrects it.
         // Single "new context" helper, see `layout::settle_float_in_workarea`.
         crate::core::layout::settle_float_in_workarea(state, mi, win);
+        if let Some(rect) = maximized_restore {
+            if let Some(client) = state.clients.get_mut(&win) {
+                client.saved_geom = rect;
+            }
+        }
     }
     true
 }
