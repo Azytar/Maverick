@@ -715,13 +715,14 @@ fn teardown(session: &mut Session, mode: StopMode) -> Vec<String> {
             // already be gone or wedged, and the escalation below covers both.
             let _ = client::quit(session.name.as_str());
         }
-        wait_until(STOP_GRACE, || !session.wm.is_alive());
-        if session.wm.is_alive() {
+        wait_until(STOP_GRACE, || !proc::is_running(&session.wm));
+        if proc::is_running(&session.wm) {
             // Not consulted either: whether the signal was delivered is not the
             // question. The postcondition below asks whether the process is
             // still there, and a signal that "failed" because the process had
             // already exited is the outcome that was wanted.
             let _ = signal_tree(&session.wm, StopMode::Hard);
+            wait_until(STOP_GRACE, || !proc::is_running(&session.wm));
         }
         // An unresponsive WM can also hold the whole client tree; the process
         // group covers the applications it started, which a signal to the WM's
@@ -758,10 +759,10 @@ fn teardown(session: &mut Session, mode: StopMode) -> Vec<String> {
     // there. Both ids are captured now because the record is about to forget
     // them, and a component that outlives its record is exactly what a caller
     // needs to be told about.
-    if session.wm.is_alive() {
+    if proc::is_running(&session.wm) {
         survived.push("window manager".to_string());
     }
-    if session.xserver.is_some() && session.xserver.is_alive() {
+    if proc::is_running(&session.xserver) {
         survived.push("X server".to_string());
     }
     session.wm = ProcRef::default();

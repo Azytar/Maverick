@@ -48,6 +48,9 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Nested session shutdown distinguishes exited zombies from running processes.
+  WM/X-server identity checks remain strict, but unreaped children no longer
+  cause false shutdown failures or unnecessary grace-period waits.
 - Live View creation/removal refreshes `_NET_WORKAREA` with the desktop count
   and names. Root desktop metadata uses the largest live View count and publishes
   one physical workarea rectangle per desktop, rather than one per monitor.

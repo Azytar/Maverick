@@ -683,7 +683,7 @@ pub fn spawn(spec: &XServerSpec) -> io::Result<XServer> {
 impl XServer {
     /// True if this exact server is still running.
     pub fn is_running(&self) -> bool {
-        proc::pid_is(self.proc.pid, self.proc.start_time)
+        proc::is_running(&self.proc)
     }
 
     /// Ask the server to exit, escalating to `SIGKILL` after `grace`.
@@ -704,7 +704,7 @@ impl XServer {
         let _ = proc::terminate(self.proc.pid, self.proc.start_time);
         let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
-            if !proc::pid_is(self.proc.pid, self.proc.start_time) {
+            if !proc::is_running(&self.proc) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));

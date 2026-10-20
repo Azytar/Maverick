@@ -110,6 +110,10 @@ with a separate live WM that must survive and keep answering. It also checks
 occupied displays, stale PID records and preservation of the caller's runtime
 directory. CI runs it with Xvfb, so it needs no active desktop.
 
+`python3 tests/session-teardown.py` creates a private Xvfb session and adopts
+its orphaned children as a Linux subreaper. Shutdown must succeed even before
+those exited children are reaped, while an unrelated process remains alive.
+
 For an interactive sandbox, the existing session interface owns the whole
 nested server: create a uniquely named session with
 `maverickctl session create <test-name> --backend xephyr --binary <wm-path>`,
