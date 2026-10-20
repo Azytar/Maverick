@@ -131,6 +131,20 @@ def main():
                 ctl("msg", "restore_layout")
                 wait_for(restored, "attention sentinel was not restored")
                 print("PASS: attention ADD, REMOVE and TOGGLE publish the matching state")
+                for atoms in (VERT, HORZ, f"{VERT} {HORZ}"):
+                    command(f"state 1 {atoms}")
+                    wait_for(lambda: has(*atoms.split()), "maximize request was not applied")
+                    command("events")
+                    for _ in range(5):
+                        command(f"state 1 {atoms}")
+                    command(f"state 1 {ATTENTION}")
+                    wait_for(lambda: has(ATTENTION), "maximize repeat sentinel was not processed")
+                    assert command("events") == "0 1", "repeated maximize rewrote client geometry or state"
+                    command(f"state 0 {ATTENTION}")
+                    wait_for(lambda: not has(ATTENTION), "attention sentinel was not removed")
+                    ctl("msg", "restore_layout")
+                    wait_for(restored, "maximize repeat case was not restored")
+                print("PASS: repeated maximization does no client configure/property work")
                 command("dock")
                 wait_for(lambda: geometry()[1] == 34, "dock workarea was not applied")
                 original = geometry()

@@ -48,6 +48,8 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Repeating an already-applied client maximize request no longer arranges
+  windows or rewrites `_NET_WM_STATE`, including single-axis requests.
 - Client attention requests respect ADD, REMOVE and TOGGLE and immediately
   publish the matching `_NET_WM_STATE_DEMANDS_ATTENTION` property.
 - Invalid `_NET_WM_STATE` actions are ignored instead of being treated as

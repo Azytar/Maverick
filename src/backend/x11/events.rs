@@ -768,13 +768,19 @@ impl WindowManager {
                         _ => !cur,
                     })
                 };
-                crate::core::commands::apply_maximize(
-                    &mut self.engine.state,
-                    e.window,
-                    resolve(wants_v, cur_v),
-                    resolve(wants_h, cur_h),
-                );
-                self.set_maximized(e.window, resolve(wants_v, cur_v), resolve(wants_h, cur_h))?;
+                let vert = resolve(wants_v, cur_v);
+                let horiz = resolve(wants_h, cur_h);
+                if vert.is_some_and(|value| value != cur_v)
+                    || horiz.is_some_and(|value| value != cur_h)
+                {
+                    crate::core::commands::apply_maximize(
+                        &mut self.engine.state,
+                        e.window,
+                        vert,
+                        horiz,
+                    );
+                    self.set_maximized(e.window, vert, horiz)?;
+                }
             }
             let urg = self.atoms.net_wm_state_demands_attention;
             if a1 == urg || a2 == urg {
