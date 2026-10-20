@@ -41,7 +41,8 @@
 //! # Thread model
 //!
 //! [`ControlServer::spawn`] binds the socket and spawns a **background accept
-//! thread** (non-blocking `UnixListener` + 50 ms poll). Each accepted
+//! thread** (non-blocking `UnixListener` + readiness wait). Shutdown wakes that
+//! wait through a private socket pair. Each accepted
 //! connection is handed to its own **per-connection thread** that blocks on
 //! `BufReader::read_line` with a 500 ms read timeout. `subscribe` hijacks its
 //! connection thread into [`stream_events`], which blocks on the hub
@@ -53,7 +54,8 @@
 //! iteration.
 //!
 //! Back-pressure is enforced via an `AtomicUsize` counter capped at 32 concurrent
-//! handlers; excess accepts sleep 100 ms before retrying. A handler holds its
+//! handlers; excess accepts wait up to 100 ms before retrying, interruptible by
+//! shutdown. A handler holds its
 //! slot until its thread finishes, including when the handler unwinds, so a
 //! panicking connection cannot permanently consume capacity. Because a
 //! subscriber occupies its handler slot until it disconnects, `subscribe`
@@ -81,6 +83,7 @@
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::FileTypeExt;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -164,6 +167,7 @@ fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
 pub struct ControlServer {
     name: String,
     stop: Arc<AtomicBool>,
+    stop_wake: UnixStream,
     /// The uid allowed to talk to this instance, from the kernel.
     owner_uid: u32,
 }
@@ -236,6 +240,9 @@ impl ControlServer {
         // systems is 022 — world-writable-adjacent. A control socket is a
         // one-user channel; make that explicit rather than inherited.
         set_mode(&path, 0o600)?;
+        sock.set_nonblocking(true)?;
+        let (stop_reader, stop_wake) = UnixStream::pair()?;
+        stop_wake.set_nonblocking(true)?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -244,13 +251,15 @@ impl ControlServer {
         let srv_stop = stop.clone();
         let srv_active = active.clone();
         thread::spawn(move || {
-            let _ = sock.set_nonblocking(true);
             loop {
                 if srv_stop.load(ORD) {
                     break;
                 }
                 if srv_active.load(ORD) >= MAX_CONCURRENT {
-                    thread::sleep(Duration::from_millis(100));
+                    crate::wait_readable_fds(
+                        &[stop_reader.as_raw_fd()],
+                        Some(Duration::from_millis(100)),
+                    );
                     continue;
                 }
                 match sock.accept() {
@@ -286,11 +295,17 @@ impl ControlServer {
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(50));
+                        crate::wait_readable_fds(
+                            &[sock.as_raw_fd(), stop_reader.as_raw_fd()],
+                            None,
+                        );
                         continue;
                     }
                     Err(_) => {
-                        thread::sleep(Duration::from_millis(50));
+                        crate::wait_readable_fds(
+                            &[stop_reader.as_raw_fd()],
+                            Some(Duration::from_millis(50)),
+                        );
                         continue;
                     }
                 }
@@ -300,6 +315,7 @@ impl ControlServer {
         Ok(Self {
             name: name.to_string(),
             stop,
+            stop_wake,
             owner_uid,
         })
     }
@@ -307,6 +323,7 @@ impl ControlServer {
     /// Stop the server thread and unlink the socket.
     pub fn shutdown(&self) {
         self.stop.store(true, ORD);
+        let _ = (&self.stop_wake).write_all(&[1]);
         // Best-effort unlink; cleanup_meta also handles it.
         // Only unlink if it really is a socket (no symlink following).
         if let Ok(p) = identity::try_sock_path(&self.name) {
@@ -595,6 +612,34 @@ pub fn identity_json(info: &InstanceInfo) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn shutdown_wakes_and_releases_the_idle_accept_thread() {
+        use super::*;
+        use std::io::Read;
+        crate::prop_support::runtime_root();
+        let name = format!("accept-wake{}", std::process::id());
+        let server = ControlServer::spawn(&name, "{}".into(), ControlHub::new()).expect("server");
+        assert!(server_answers(&name), "server accepted a connection");
+        server.shutdown();
+        assert!(
+            crate::wait_readable_fds(
+                &[server.stop_wake.as_raw_fd()],
+                Some(Duration::from_secs(2))
+            ),
+            "accept thread released its wake endpoint"
+        );
+        let mut reader = &server.stop_wake;
+        let closed = reader.read(&mut [0]);
+        assert!(
+            matches!(closed, Ok(0))
+                || matches!(closed, Err(ref e) if e.kind() == io::ErrorKind::ConnectionReset),
+            "wake peer is closed: {closed:?}"
+        );
+        assert!(!identity::sock_path(&name).exists());
+        drop(server);
+        let _ = std::fs::remove_dir(identity::try_session_dir(&name).expect("session path"));
+    }
 
     /// Whether the server still answers `ping` over a raw socket.
     ///

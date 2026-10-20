@@ -52,6 +52,10 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- The control accept thread waits for socket readiness instead of checking
+  every 50 ms. Short `maverickctl` requests no longer inherit that polling delay,
+  and shutdown wakes an idle accept wait explicitly. Handler limits, peer
+  credential checks and error backoff remain in place.
 - `_NET_CLIENT_LIST_STACKING` follows the server's actual window order after
   restacking instead of publishing a separate approximation. Floating focus,
   fullscreen and dock changes refresh the stack without rewriting the unchanged
