@@ -48,6 +48,8 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Client attention requests respect ADD, REMOVE and TOGGLE and immediately
+  publish the matching `_NET_WM_STATE_DEMANDS_ATTENTION` property.
 - Invalid `_NET_WM_STATE` actions are ignored instead of being treated as
   toggles for fullscreen, maximization or attention.
 - A maximized floating window keeps its original floating rectangle across a

@@ -778,8 +778,26 @@ impl WindowManager {
             }
             let urg = self.atoms.net_wm_state_demands_attention;
             if a1 == urg || a2 == urg {
+                let mut changed = false;
                 if let Some(c) = self.engine.state.clients.get_mut(&e.window) {
-                    c.flags.set(WinFlags::URGENT);
+                    let current = c.flags.has(WinFlags::URGENT);
+                    let urgent = match action {
+                        0 => false,
+                        1 => true,
+                        _ => !current,
+                    };
+                    if urgent != current {
+                        if urgent {
+                            c.flags.set(WinFlags::URGENT);
+                        } else {
+                            c.flags.clear(WinFlags::URGENT);
+                        }
+                        changed = true;
+                    }
+                }
+                if changed {
+                    self.write_net_wm_state(e.window);
+                    self.publish_state();
                 }
             }
         } else if e.type_ == self.atoms.net_current_desktop {

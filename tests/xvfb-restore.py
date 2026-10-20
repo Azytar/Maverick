@@ -119,6 +119,18 @@ def main():
                 ctl("msg", "restore_layout")
                 wait_for(restored, "fullscreen sentinel was not restored")
                 print("PASS: invalid EWMH actions change no fullscreen, maximize or attention state")
+                for action, expected in ((1, True), (0, False), (2, True), (2, False)):
+                    command(f"state {action} {ATTENTION}")
+                    wait_for(lambda: has(ATTENTION) == expected,
+                             f"attention action {action} did not publish {expected}")
+                command("events")
+                command(f"state 0 {ATTENTION}")
+                command(f"state 1 {VERT}")
+                wait_for(lambda: has(VERT), "attention repeat sentinel was not processed")
+                assert not has(ATTENTION), "removing attention raised it again"
+                ctl("msg", "restore_layout")
+                wait_for(restored, "attention sentinel was not restored")
+                print("PASS: attention ADD, REMOVE and TOGGLE publish the matching state")
                 command("dock")
                 wait_for(lambda: geometry()[1] == 34, "dock workarea was not applied")
                 original = geometry()
