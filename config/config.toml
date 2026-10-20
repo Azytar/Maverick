@@ -89,6 +89,8 @@ corner_radius = 0
 # action = "restore_layout"
 
 # Focus / move within the ribbon (vim-style)
+# Left/right changes column; up/down cycles or swaps rows within a column.
+# A single-window column has no vertical neighbour.
 # [[keybindings]]
 # key = "Mod4+h"
 # action = "focus:left"

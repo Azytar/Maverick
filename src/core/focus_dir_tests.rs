@@ -284,3 +284,61 @@ fn focus_direction_off_a_maximized_window_does_not_leave_best_focus_stale() {
         .check_invariants()
         .expect("invariants after FocusDirection off a maximized window");
 }
+
+#[test]
+fn vertical_focus_starts_from_the_focused_window_after_column_insertion() {
+    for dir in [Dir::Up, Dir::Down] {
+        let mut engine = setup_engine();
+        two_rows(&mut engine, [1, 2]);
+        focus_via_sink(&mut engine, 1);
+        engine.execute(crate::core::commands::ToggleFullscreen(Some(1)));
+        add_client(&mut engine, 3);
+        engine.state.monitors[0].workspaces[0].add_tiled(3, 0.6);
+        assert_eq!(engine.state.monitors[0].workspaces[0].focus.column_idx, 1);
+        assert_eq!(engine.state.monitors[0].focused, Some(1));
+
+        engine.execute(FocusDirection(dir));
+
+        assert_eq!(engine.state.monitors[0].focused, Some(2), "{dir:?}");
+        assert_eq!(engine.state.monitors[0].workspaces[0].focus.column_idx, 0);
+        assert!(engine.state.clients[&1].is_fullscreen());
+    }
+}
+
+#[test]
+fn vertical_focus_uses_the_focused_window_row_instead_of_a_stale_cursor() {
+    for (dir, expected) in [(Dir::Up, 1), (Dir::Down, 3)] {
+        let mut engine = setup_engine();
+        two_rows(&mut engine, [1, 2]);
+        add_client(&mut engine, 3);
+        engine.state.monitors[0].workspaces[0].columns[0]
+            .windows
+            .push(3);
+        focus_via_sink(&mut engine, 2);
+        assert_eq!(engine.state.monitors[0].workspaces[0].columns[0].focused, 0);
+
+        engine.execute(FocusDirection(dir));
+
+        assert_eq!(engine.state.monitors[0].focused, Some(expected), "{dir:?}");
+    }
+}
+
+#[test]
+fn vertical_focus_without_another_row_preserves_camera_and_emits_no_effects() {
+    for dir in [Dir::Up, Dir::Down] {
+        let mut engine = setup_engine();
+        add_client(&mut engine, 1);
+        engine.state.monitors[0].workspaces[0].add_tiled(1, 1.0);
+        focus_via_sink(&mut engine, 1);
+        engine.state.monitors[0].workspaces[0].camera.snap(123.0);
+
+        let effects = engine.execute(FocusDirection(dir));
+
+        assert!(effects.is_empty(), "{dir:?}: {effects:?}");
+        assert_eq!(engine.state.monitors[0].focused, Some(1));
+        assert_eq!(
+            engine.state.monitors[0].workspaces[0].camera.position,
+            123.0
+        );
+    }
+}

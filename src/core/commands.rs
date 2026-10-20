@@ -877,24 +877,38 @@ impl Command for FocusDirection {
                 state.monitors[mi].workspaces[ws_i].columns[new_ci].focused_win()
             }
             Dir::Up | Dir::Down => {
-                let ws_i = state.monitors[mi].active_index();
-                let ci = state.monitors[mi].workspaces[ws_i].focus.column_idx;
-                if ci >= state.monitors[mi].workspaces[ws_i].columns.len() {
+                let ws = &state.monitors[mi].workspaces[ws_i];
+                let position = from.and_then(|win| {
+                    ws.columns.iter().enumerate().find_map(|(ci, col)| {
+                        col.windows
+                            .iter()
+                            .position(|&w| w == win)
+                            .map(|ri| (ci, ri))
+                    })
+                });
+                let (ci, ri) = position.unwrap_or_else(|| {
+                    let ci = ws.focus.column_idx;
+                    (ci, ws.columns.get(ci).map_or(0, |col| col.focused))
+                });
+                let Some(col) = ws.columns.get(ci) else {
                     return CommandReport::new(cmds);
-                }
-                let n = state.monitors[mi].workspaces[ws_i].columns[ci]
-                    .windows
-                    .len();
+                };
+                let n = col.windows.len();
                 if n == 0 {
                     return CommandReport::new(cmds);
                 }
                 let new_ri = if self.0 == Dir::Up {
-                    (state.monitors[mi].workspaces[ws_i].columns[ci].focused + n - 1) % n
+                    (ri + n - 1) % n
                 } else {
-                    (state.monitors[mi].workspaces[ws_i].columns[ci].focused + 1) % n
+                    (ri + 1) % n
                 };
-                state.monitors[mi].workspaces[ws_i].columns[ci].focused = new_ri;
-                let target = state.monitors[mi].workspaces[ws_i].columns[ci].windows[new_ri];
+                let target = col.windows[new_ri];
+                if Some(target) == from {
+                    return CommandReport::new(cmds);
+                }
+                let ws = &mut state.monitors[mi].workspaces[ws_i];
+                ws.focus.column_idx = ci;
+                ws.columns[ci].focused = new_ri;
                 let wa = state.monitors[mi].workarea;
                 let scroll = follow_scroll(
                     &state.monitors[mi].workspaces[ws_i],

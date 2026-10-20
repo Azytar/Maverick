@@ -520,7 +520,7 @@ default** binding set: 33 explicit bindings plus one `Super+<digit>` and one
 | Toggle maximize | `Super+Shift+M` | presentation-only maximize |
 | Restore layout | `Super+Shift+Escape` | leaves fullscreen and maximized presentation |
 | Focus left / down / up / right | `Super+H` / `J` / `K` / `L` | moves focus within the View |
-| Move window left / down / up / right | `Super+Shift+H` / `J` / `K` / `L` | moves the client to a neighbouring column |
+| Move window left / down / up / right | `Super+Shift+H` / `J` / `K` / `L` | left/right changes column; up/down swaps rows within a column |
 | New column | `Super+Shift+Return` | appends a column to the ribbon |
 | Shrink column | `Super+Ctrl+H` | `grow_col:-50` |
 | Grow column | `Super+Ctrl+L` | `grow_col:50` |
@@ -529,6 +529,12 @@ default** binding set: 33 explicit bindings plus one `Super+<digit>` and one
 | Quit | `Super+Shift+Q` | orderly shutdown: ask clients to close, wait, force-kill the remainder, clean up |
 | Restart | `Super+Shift+R`, `Super+F5` | re-executes while preserving the live window layout |
 | Focus the next monitor | `Super+Tab` | cycles monitor enumeration order |
+
+`Super+J` / `Super+K` cycle rows within the focused window's column. A column
+with one window has no vertical neighbour, so these keys leave focus and the
+camera unchanged. `Super+Ctrl+J` merges the selected column into the one to its
+left, making several rows; `Super+Shift+Return` splits the focused window into
+a new column. These shortcuts act on keysyms in the active keyboard layout.
 | Move window to the next monitor | `Super+Shift+Tab` | cycles monitor enumeration order |
 | Overview toggle / enter / next / previous | `Super+O` / `Super+E` / `Super+N` / `Super+Shift+O` | fixed-scale navigation viewport for picking a column |
 | Viewport zoom in / out | `Super+=` / `Super+-` | enlarges or restores the ribbon |

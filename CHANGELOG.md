@@ -48,6 +48,10 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Vertical keyboard focus starts from the focused window's column and row,
+  including after another window was inserted behind fullscreen. A column with
+  no other row leaves focus and a manually positioned camera untouched instead
+  of arranging and refocusing the same window.
 - Nested session shutdown also terminates programs launched with
   `maverickctl exec` and their verified group members. Group records pair the leader PID with
   its kernel start time; stale and legacy identities never authorise signals,
