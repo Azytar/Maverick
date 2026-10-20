@@ -48,6 +48,10 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Focusing a floating window raises it above its floating peers instead of
+  leaving keyboard focus on a covered window. Transient descendants remain
+  above their parent; sticky floats share the same deterministic base order
+  without being inserted twice on their own View.
 - Vertical keyboard focus starts from the focused window's column and row,
   including after another window was inserted behind fullscreen. A column with
   no other row leaves focus and a manually positioned camera untouched instead

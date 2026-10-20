@@ -3,17 +3,25 @@
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 int main(int argc, char **argv) {
-    if (argc > 2 || (argc == 2 && strcmp(argv[1], "--fullscreen"))) return 3;
+    int fullscreen = argc == 2 && !strcmp(argv[1], "--fullscreen");
+    Window transient = None;
+    if (argc == 3 && !strcmp(argv[1], "--transient-for")) {
+        char *end;
+        transient = strtoul(argv[2], &end, 0);
+        if (!transient || *end) return 3;
+    } else if (argc != 1 && !fullscreen) return 3;
     Display *d = XOpenDisplay(NULL);
     if (!d) return 1;
     Window root = DefaultRootWindow(d), dock = None, peer = None;
     Window win = XCreateSimpleWindow(d, root, 0, 0, 400, 300, 0, 0, 0xffffff);
     XStoreName(d, win, "stacking-probe");
     XSelectInput(d, win, StructureNotifyMask | PropertyChangeMask);
-    if (argc == 2) {
+    if (transient) XSetTransientForHint(d, win, transient);
+    if (fullscreen) {
         Atom fullscreen = XInternAtom(d, "_NET_WM_STATE_FULLSCREEN", False);
         XChangeProperty(d, win, XInternAtom(d, "_NET_WM_STATE", False), XA_ATOM, 32,
                         PropModeReplace, (unsigned char *)&fullscreen, 1);

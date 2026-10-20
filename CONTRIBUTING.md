@@ -162,6 +162,11 @@ stacking probe, requiring `libx11-dev` and `xdotool`.
 It also checks invalid EWMH state actions, attention transitions, repeated
 maximize requests and workarea metadata after live View and dock changes.
 
+`python3 tests/xvfb-floats.py --case focus` checks real X11 stacking when tiles
+map, floats take focus and fullscreen changes its presented owner.
+`--case transients` checks parent/dialog/sub-dialog ordering and focus on an
+unrelated float. Both use their own Xvfb and the stacking probe (`libx11-dev`).
+
 `python3 tests/xvfb-input.py --case protocol` validates ICCCM timestamps;
 `--case ownership` checks transfers and activation protections; `--case child`
 checks cached-time desynchronization; `--case capture` checks core/XI2 keys,

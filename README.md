@@ -184,6 +184,10 @@ focus/accordion policy can then resize columns when the selection changed.
   Overview leave their logical geometry intact, in global X11 coordinates.
 - Sticky floats stay visible on every View of their monitor. Ordinary floats
   follow the visibility of the View they belong to.
+- Ordinary tiles stay below floats, including when a new tile opens or takes
+  focus. Focusing a float raises it among its floating peers; transient dialogs
+  stay above their parent. Fullscreen presentation keeps its own layer, with
+  a focused floating window allowed to peek above it.
 - `[[rules]]` can force a float's size and position (relative to the workarea
   origin), its opacity, its border width, and whether a client's own fullscreen
   requests are honoured, normalised or refused.

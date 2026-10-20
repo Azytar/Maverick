@@ -442,6 +442,39 @@ pub(super) fn transient_chain_reaches(
     false
 }
 
+/// Focus recency orders peers; a transient must still follow its parent.
+fn float_stack_order(
+    mut pending: Vec<WindowId>,
+    clients: &std::collections::HashMap<WindowId, Client>,
+    focus_stack: &[WindowId],
+) -> Vec<WindowId> {
+    pending.sort_by_key(|win| {
+        (
+            focus_stack
+                .iter()
+                .position(|w| w == win)
+                .map_or(0, |i| i + 1),
+            *win,
+        )
+    });
+    let mut order = Vec::with_capacity(pending.len());
+    while !pending.is_empty() {
+        let next = pending
+            .iter()
+            .position(|win| {
+                clients
+                    .get(win)
+                    .and_then(|client| client.transient_parent)
+                    .is_none_or(|parent| !pending.contains(&parent))
+            })
+            // A client-controlled cycle has no valid parent-first order.
+            // Remove one member to keep the pass finite and deterministic.
+            .unwrap_or(0);
+        order.push(pending.remove(next));
+    }
+    order
+}
+
 impl WindowManager {
     /// Apply (or clear) rounded corners on `win` via the Shape extension's
     /// bounding and client-clip masks. With radius zero, restore both default
@@ -775,20 +808,22 @@ impl WindowManager {
             .filter(|win| self.engine.state.clients.contains_key(win))
             .collect();
 
-        // 1. Base float layer.
-        for &win in &ws.floats {
-            if self.engine.state.clients.contains_key(&win) {
-                order.push(win);
-            }
-        }
-        // Sticky floats ride above every workspace's tiles by definition —
-        // include them in the base layer regardless of which workspace is
-        // active.
+        let mut floats: Vec<_> = ws
+            .floats
+            .iter()
+            .copied()
+            .filter(|win| self.engine.state.clients.contains_key(win))
+            .collect();
         for (&win, c) in &self.engine.state.clients {
-            if c.monitor == mon_idx && c.is_sticky() && c.is_float() {
-                order.push(win);
+            if c.monitor == mon_idx && c.workspace != ws.id && c.is_sticky() && c.is_float() {
+                floats.push(win);
             }
         }
+        order.extend(float_stack_order(
+            floats,
+            &self.engine.state.clients,
+            &mon.focus_stack,
+        ));
 
         // 2. Presentation overlay — only `FullscreenPolicy::True` exclusive
         // fullscreen (in any layout, already excluded from `fs_ctx`) and focused
@@ -1718,6 +1753,18 @@ impl WindowManager {
 mod tests {
     use super::*;
     use crate::types::ViewId;
+
+    #[test]
+    fn floating_stack_keeps_all_members_when_transient_parents_form_cycles() {
+        let mut clients = std::collections::HashMap::new();
+        for (win, parent) in [(1, 2), (2, 1), (3, 3), (4, 99)] {
+            let mut client = Client::new(win, 0, ViewId::new(0));
+            client.transient_parent = Some(parent);
+            clients.insert(win, client);
+        }
+        let order = float_stack_order(vec![1, 2, 3, 4], &clients, &[1, 2, 3, 4]);
+        assert_eq!(order, vec![4, 1, 2, 3]);
+    }
 
     /// A 22px-tall bar reserved at the top, so `workarea != screen` and the
     /// vertical clamp has a non-zero origin to respect.
