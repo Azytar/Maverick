@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FULLSCREEN = "_NET_WM_STATE_FULLSCREEN"
 VERT = "_NET_WM_STATE_MAXIMIZED_VERT"
 HORZ = "_NET_WM_STATE_MAXIMIZED_HORZ"
+ATTENTION = "_NET_WM_STATE_DEMANDS_ATTENTION"
 
 
 def line(pipe):
@@ -101,6 +102,23 @@ def main():
 
                 wait_for(lambda: json.loads(ctl("query", "inspect"))["windows"]["total"] == 1,
                          "probe was not managed")
+                for action in (3, 0xFFFFFFFF):
+                    for atom in (FULLSCREEN, HORZ, ATTENTION):
+                        command(f"state {action} {atom}")
+                        command(f"state 1 {VERT}")
+                        wait_for(lambda: has(VERT), "valid state sentinel was not processed")
+                        assert not has(atom), f"invalid action {action} changed {atom}"
+                        ctl("msg", "restore_layout")
+                        wait_for(restored, "sentinel maximize was not restored")
+                command("fs")
+                wait_for(lambda: has(FULLSCREEN), "fullscreen was not applied")
+                command(f"state 3 {FULLSCREEN}")
+                command(f"state 1 {VERT}")
+                wait_for(lambda: has(VERT), "fullscreen sentinel was not processed")
+                assert has(FULLSCREEN), "invalid action exited fullscreen"
+                ctl("msg", "restore_layout")
+                wait_for(restored, "fullscreen sentinel was not restored")
+                print("PASS: invalid EWMH actions change no fullscreen, maximize or attention state")
                 command("dock")
                 wait_for(lambda: geometry()[1] == 34, "dock workarea was not applied")
                 original = geometry()

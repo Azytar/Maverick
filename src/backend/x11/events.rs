@@ -691,6 +691,9 @@ impl WindowManager {
         if e.type_ == self.atoms.net_wm_state {
             let data = e.data.as_data32();
             let action = data[0];
+            if action > 2 {
+                return Ok(());
+            }
             let a1 = data[1];
             let a2 = data[2];
             let fs_atom = self.atoms.net_wm_state_fullscreen;

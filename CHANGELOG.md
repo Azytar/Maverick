@@ -48,6 +48,8 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Invalid `_NET_WM_STATE` actions are ignored instead of being treated as
+  toggles for fullscreen, maximization or attention.
 - A maximized floating window keeps its original floating rectangle across a
   fullscreen cycle. Leaving fullscreen restores maximized presentation; leaving
   maximization afterwards restores the original floating size and position.
