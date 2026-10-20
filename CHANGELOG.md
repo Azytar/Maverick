@@ -48,6 +48,10 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- `_NET_CLIENT_LIST_STACKING` follows the server's actual window order after
+  restacking instead of publishing a separate approximation. Floating focus,
+  fullscreen and dock changes refresh the stack without rewriting the unchanged
+  `_NET_CLIENT_LIST`; updates remain coalesced per event-loop turn.
 - Focusing a floating window raises it above its floating peers instead of
   leaving keyboard focus on a covered window. Transient descendants remain
   above their parent; sticky floats share the same deterministic base order

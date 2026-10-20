@@ -89,7 +89,7 @@ impl WindowManager {
             Effect::MarkRestack(_mi) => {
                 // Focus-driven raises reorder the stack: refresh the
                 // `_NET_CLIENT_LIST_STACKING` property in the same flush.
-                self.client_list_dirty = true;
+                self.stacking_dirty = true;
             }
             Effect::FocusWindow(win) => self.focus(win)?,
             Effect::Unfocus(win) => self.unfocus(win)?,

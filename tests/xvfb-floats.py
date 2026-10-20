@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import select
 import subprocess
 import tempfile
@@ -34,7 +35,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wm", default=str(ROOT / "target/release/maverick"))
     parser.add_argument("--ctl", default=str(ROOT / "target/release/maverickctl"))
-    parser.add_argument("--case", choices=("layers", "focus", "transients"), default="focus")
+    parser.add_argument("--case", choices=("layers", "focus", "transients", "metadata"), default="focus")
     args = parser.parse_args()
     processes = []
     with tempfile.TemporaryDirectory(prefix="mfloat-", dir="/tmp") as directory:
@@ -98,7 +99,15 @@ def main():
 
                 def above(upper, lower):
                     first, second, *_ = map(int, command(upper, f"check {lower}").split())
-                    return first > second >= 0
+                    if not first > second >= 0:
+                        return False
+                    if args.case == "metadata":
+                        value = subprocess.check_output(["xprop", "-root", "_NET_CLIENT_LIST_STACKING"],
+                                                        env=env, text=True, timeout=3)
+                        order = [int(win, 16) for win in re.findall(r"0x[0-9a-fA-F]+", value)]
+                        assert len(order) == len(set(order)), "stack metadata contains duplicate windows"
+                        return upper in order and lower in order and order.index(upper) > order.index(lower)
+                    return True
 
                 def focus(win):
                     ctl("msg", f"focus_window {win}")
@@ -115,7 +124,7 @@ def main():
                 print("PASS: a new or focused tile stays below an existing float", flush=True)
                 if args.case != "layers":
                     ctl("msg", f"float_window {b}")
-                    if args.case == "focus":
+                    if args.case in ("focus", "metadata"):
                         for win, other in ((a, b), (b, a), (a, b)):
                             focus(win)
                             wait_for(lambda: above(win, other), "focused float stayed behind its peer")
@@ -129,6 +138,11 @@ def main():
                         wait_for(lambda: above(a, c), "focused float did not peek above fullscreen")
                         focus(c)
                         wait_for(lambda: above(c, a), "fullscreen did not regain its layer")
+                        if args.case == "metadata":
+                            command(a, "dock")
+                            dock = int(command(a, "dockid"))
+                            wait_for(lambda: above(c, dock), "published stack put a dock above fullscreen")
+                            print("PASS: published stack matches X11 for float focus, fullscreen and docks", flush=True)
                         print("PASS: fullscreen and focused floating peek retain their layers", flush=True)
                     else:
                         child = launch(a)
@@ -144,6 +158,8 @@ def main():
             except Exception:
                 if "wm" in locals() and wm.poll() is None:
                     print("STATE", tree())
+                    print(subprocess.check_output(["xprop", "-root", "_NET_CLIENT_LIST_STACKING"],
+                                                  env=env, text=True, timeout=3))
                 log.flush()
                 log.seek(0)
                 print(log.read())

@@ -16,8 +16,8 @@
 //!   `Effect::SetCurrentDesktop`; only the initial startup
 //!   publish resets it to 0.
 //! - `_NET_CLIENT_LIST` / `_NET_CLIENT_LIST_STACKING`
-//!   — bottom-to-top: tiled → floats → `focus_stack` →
-//!   remaining. Updated lazily (deferred dirty coalesce).
+//!   — tracked windows in the X server's bottom-to-top stack order.
+//!   Updated lazily (deferred dirty coalesce).
 //! - `_NET_WM_STATE` — `WM_STATE` normal (1) on manage;
 //!   `write_net_wm_state` rewrites the atom list
 //!   preserving urgent.
@@ -189,77 +189,18 @@ impl WindowManager {
         Ok(())
     }
 
-    /// Clients that no other rule placed, in a stable order.
-    ///
-    /// This is the only part of the stacking list that came straight out of a
-    /// `HashMap`, and `HashMap` iteration order is randomised per process. The
-    /// result is the bottom-to-top Z order published in
-    /// `_NET_CLIENT_LIST_STACKING` and re-published on every restack, so the
-    /// leftover windows reshuffled between runs and between frames — visible as a
-    /// taskbar reordering its entries as focus moved. Both other sources in this
-    /// function already sort, and the comment above the dock loop says so; this
-    /// one had been missed.
-    ///
-    /// Sorted rather than insertion-ordered on purpose: an ordered map would key
-    /// the list on *manage* history, which changes across a restart, so it would
-    /// trade one non-reproducible order for a different one.
-    fn leftovers(clients: &std::collections::HashMap<WindowId, Client>) -> Vec<u32> {
-        let mut out: Vec<u32> = clients.keys().copied().collect();
-        out.sort_unstable();
-        out
-    }
-
-    /// Rewrite `_NET_CLIENT_LIST_STACKING` — the client list in bottom-to-top
-    /// stack order, consumed by taskbars, Alt+Tab switchers (rofi -windowdmenu,
-    /// i3lock-style UIs) and EWMH clients that `XmuClientWindow`-walk the stack.
-    /// Not perfectly the raw X Z-order (Maverick re-stacks programmatically in
-    /// `stack_overlay`), but a faithful, deterministic model of it: tiled then
-    /// floats per workspace, then anything left over in most-recently-focused
-    /// order on top.
+    /// Publish the server's stack after pending raises, including tracked docks.
     pub(super) fn update_client_list_stacking(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let state = &self.engine.state;
-        let mut out: Vec<u32> = Vec::with_capacity(state.clients.len());
-        let mut seen = std::collections::HashSet::with_capacity(state.clients.len());
-        for mon in &state.monitors {
-            for ws in &mon.workspaces {
-                for col in &ws.columns {
-                    for &w in &col.windows {
-                        if seen.insert(w) {
-                            out.push(w);
-                        }
-                    }
-                }
-                for &w in &ws.floats {
-                    if seen.insert(w) {
-                        out.push(w);
-                    }
-                }
-            }
-        }
-        // Any client not represented in the tiling tree (hidden/inactive-wo
-        // state, hotplug leftovers) goes on top in focus-recency order.
-        for mon in &state.monitors {
-            for &w in mon.focus_stack.iter().rev() {
-                if seen.insert(w) {
-                    out.push(w);
-                }
-            }
-        }
-        for w in Self::leftovers(&state.clients) {
-            if seen.insert(w) {
-                out.push(w);
-            }
-        }
-        // Docks (override-redirect panels) are not `clients`, but they ARE
-        // mapped windows above the tiling tree — pagers and `rofi
-        // -windowdmenu` must see them. Sorted for stability, stacked topmost.
-        let mut docks: Vec<u32> = self.docks.keys().copied().collect();
-        docks.sort_unstable();
-        for w in docks {
-            if seen.insert(w) {
-                out.push(w);
-            }
-        }
+        let out: Vec<_> = self
+            .conn
+            .query_tree(self.root)?
+            .reply()?
+            .children
+            .into_iter()
+            .filter(|win| {
+                self.engine.state.clients.contains_key(win) || self.docks.contains_key(win)
+            })
+            .collect();
         self.conn
             .change_property32(
                 PropMode::REPLACE,
@@ -299,6 +240,10 @@ impl WindowManager {
         if self.client_list_dirty {
             self.client_list_dirty = false;
             self.update_client_list()?;
+            self.stacking_dirty = true;
+        }
+        if self.stacking_dirty {
+            self.stacking_dirty = false;
             self.update_client_list_stacking()?;
         }
         Ok(())
@@ -435,54 +380,6 @@ impl WindowManager {
         // authenticated identity. PID and WM_CLASS are not focus authority.
         let from = self.declared_focus_group(from)?;
         Ok(from.is_some() && from == self.declared_focus_group(to)?)
-    }
-}
-
-#[cfg(test)]
-mod stacking_order_tests {
-    use super::*;
-    use maverick_core::types::{Client, ViewId};
-    use std::collections::HashMap;
-
-    fn clients(ids: &[u32]) -> HashMap<WindowId, Client> {
-        ids.iter()
-            .map(|id| (*id, Client::new(*id, 0, ViewId::new(0))))
-            .collect()
-    }
-
-    /// The published stack order must not depend on `HashMap` iteration order.
-    ///
-    /// This is not a cosmetic property. `_NET_CLIENT_LIST_STACKING` is the
-    /// bottom-to-top Z order, consumed by taskbars and Alt-Tab switchers, and
-    /// it is rewritten on every restack — so an unstable order made those
-    /// consumers reshuffle as focus moved, and differently again on the next
-    /// run of the same session.
-    #[test]
-    fn the_leftover_order_is_stable_across_insertion_orders() {
-        let ids: [u32; 4] = [0x31, 0x7, 0x2ab, 0x1001];
-        let expected: Vec<u32> = {
-            let mut e = ids.to_vec();
-            e.sort_unstable();
-            e
-        };
-        // Insert in several orders into freshly built maps. `HashMap` seeds
-        // its hasher per map, so iteration order genuinely differs between
-        // these; the result must not.
-        let orders: [Vec<u32>; 2] = [ids.to_vec(), ids.iter().rev().copied().collect()];
-        for order in orders {
-            let map = clients(&order);
-            assert_eq!(WindowManager::leftovers(&map), expected);
-        }
-    }
-
-    #[test]
-    fn an_empty_client_map_yields_no_leftovers() {
-        assert!(WindowManager::leftovers(&HashMap::new()).is_empty());
-    }
-
-    #[test]
-    fn a_single_client_is_its_own_only_leftover() {
-        assert_eq!(WindowManager::leftovers(&clients(&[0x42])), vec![0x42]);
     }
 }
 

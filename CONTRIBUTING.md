@@ -166,6 +166,8 @@ maximize requests and workarea metadata after live View and dock changes.
 map, floats take focus and fullscreen changes its presented owner.
 `--case transients` checks parent/dialog/sub-dialog ordering and focus on an
 unrelated float. Both use their own Xvfb and the stacking probe (`libx11-dev`).
+`--case metadata` compares the published stack with real X11 order, including
+fullscreen covering a dock created afterwards.
 
 `python3 tests/xvfb-input.py --case protocol` validates ICCCM timestamps;
 `--case ownership` checks transfers and activation protections; `--case child`

@@ -905,6 +905,7 @@ impl WindowManager {
                 self.raise(win);
             }
             self.last_stack_order.insert(mon_idx, order);
+            self.stacking_dirty = true;
         }
     }
 

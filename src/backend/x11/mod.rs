@@ -212,6 +212,8 @@ pub struct WindowManager {
     /// per event-loop turn so a burst of window changes costs one property
     /// write.
     client_list_dirty: bool,
+    /// Deferred stack publication, independent of client membership changes.
+    stacking_dirty: bool,
     /// The `Reconciler`'s record of what geometry has actually been written to
     /// X11. Every desired placement is diffed against this so
     /// `configure_window` fires only on real changes.
@@ -1007,6 +1009,7 @@ impl WindowManager {
             kbd_refresh_due: None,
             drag: None,
             client_list_dirty: false,
+            stacking_dirty: false,
             applied: crate::backend::x11::reconciler::AppliedState::default(),
             shape_mask_cache: std::collections::HashMap::new(),
             frame_extents: std::collections::HashMap::new(),
