@@ -12,6 +12,7 @@ int main(int argc, char **argv) {
     Window root = DefaultRootWindow(d), dock = None, peer = None;
     Window win = XCreateSimpleWindow(d, root, 0, 0, 400, 300, 0, 0, 0xffffff);
     XStoreName(d, win, "stacking-probe");
+    XSelectInput(d, win, StructureNotifyMask | PropertyChangeMask);
     if (argc == 2) {
         Atom fullscreen = XInternAtom(d, "_NET_WM_STATE_FULLSCREEN", False);
         XChangeProperty(d, win, XInternAtom(d, "_NET_WM_STATE", False), XA_ATOM, 32,
@@ -20,7 +21,7 @@ int main(int argc, char **argv) {
     XMapWindow(d, win);
     XSync(d, False);
     printf("%lu\n", win); fflush(stdout);
-    char cmd[64];
+    char cmd[256];
     while (fgets(cmd, sizeof(cmd), stdin)) {
         if (!strncmp(cmd, "dockid", 6)) {
             printf("%lu\n", dock); fflush(stdout);
@@ -40,6 +41,32 @@ int main(int argc, char **argv) {
         } else if (!strncmp(cmd, "unpeer", 6)) {
             if (peer) XDestroyWindow(d, peer);
             peer = None;
+        } else if (!strncmp(cmd, "events", 6)) {
+            unsigned configures = 0, properties = 0;
+            XSync(d, False);
+            while (XPending(d)) {
+                XEvent event;
+                XNextEvent(d, &event);
+                if (event.type == ConfigureNotify) configures++;
+                if (event.type == PropertyNotify) properties++;
+            }
+            printf("%u %u\n", configures, properties); fflush(stdout);
+            continue;
+        } else if (!strncmp(cmd, "state ", 6)) {
+            long action;
+            char first[64], second[64];
+            int fields = sscanf(cmd + 6, "%ld %63s %63s", &action, first, second);
+            if (fields < 2) return 3;
+            XEvent event = {0};
+            event.xclient.type = ClientMessage;
+            event.xclient.window = win;
+            event.xclient.message_type = XInternAtom(d, "_NET_WM_STATE", False);
+            event.xclient.format = 32;
+            event.xclient.data.l[0] = action;
+            event.xclient.data.l[1] = XInternAtom(d, first, False);
+            event.xclient.data.l[2] = fields == 3 ? XInternAtom(d, second, False) : None;
+            event.xclient.data.l[3] = 1;
+            XSendEvent(d, root, False, SubstructureRedirectMask | SubstructureNotifyMask, &event);
         } else if (!strncmp(cmd, "fs", 2)) {
             XEvent e = {0};
             e.xclient.type = ClientMessage;

@@ -3953,6 +3953,7 @@ mod unit_tests {
         engine.state.monitors[0].focused = Some(1);
         engine.execute(ToggleMaximize(Some(1)));
         engine.state.clients.get_mut(&1).unwrap().geom = maximized;
+        engine.state.clients.get_mut(&1).unwrap().border_w = 0;
         engine.execute(ToggleFullscreen(Some(1)));
         engine.state.clients.get_mut(&1).unwrap().geom = engine.state.monitors[0].screen;
         engine.execute(ToggleFullscreen(Some(1)));
@@ -3962,6 +3963,165 @@ mod unit_tests {
         assert_eq!(client.saved_geom, original);
         engine.execute(ToggleMaximize(Some(1)));
         assert_eq!(engine.state.clients[&1].geom, original);
+        assert_eq!(engine.state.clients[&1].border_w, 2);
+    }
+
+    #[test]
+    fn restore_layout_clears_presentation_once_without_rebuilding_columns() {
+        use crate::core::commands::{apply_maximize, ToggleFullscreen};
+        use crate::core::effect::Effect;
+        use crate::core::ipc::state_json;
+        for mask in 1..8 {
+            for ribbon in [false, true] {
+                let mut engine = column_resize_engine(2, 20, 10);
+                let columns = format!("{:?}", engine.state.monitors[0].ws().columns);
+                apply_maximize(
+                    &mut engine.state,
+                    2,
+                    Some(mask & 1 != 0),
+                    Some(mask & 2 != 0),
+                );
+                if mask & 4 != 0 {
+                    engine.execute(ToggleFullscreen(Some(2)));
+                    if ribbon {
+                        engine.state.clients.get_mut(&2).unwrap().fullscreen_policy =
+                            FullscreenPolicy::Normal;
+                    }
+                }
+                let effects = engine.dispatch(Action::RestoreLayout);
+                let client = &engine.state.clients[&2];
+                assert!(
+                    !client.is_fullscreen()
+                        && !client.is_maximized_v()
+                        && !client.is_maximized_h()
+                        && !client.is_float()
+                );
+                assert!(client.fs_snapshot.is_none());
+                assert_eq!(
+                    format!("{:?}", engine.state.monitors[0].ws().columns),
+                    columns
+                );
+                assert_eq!(
+                    effects
+                        .iter()
+                        .filter(|e| matches!(e, Effect::ArrangeMonitor(0)))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    effects
+                        .iter()
+                        .filter(|e| matches!(e, Effect::SyncWindowPresentation(2)))
+                        .count(),
+                    1
+                );
+                assert!(matches!(effects.last(), Some(Effect::PublishIpcState)));
+                engine.state.monitors[0].ws_mut().camera.retarget(-137.5);
+                let restored = state_json(&engine.state, &engine.cfg);
+                for _ in 0..8 {
+                    assert!(engine.dispatch(Action::RestoreLayout).is_empty());
+                    assert_eq!(state_json(&engine.state, &engine.cfg), restored);
+                }
+                engine.execute(ToggleFullscreen(Some(2)));
+                assert!(engine.state.clients[&2].is_fullscreen());
+            }
+        }
+    }
+
+    #[test]
+    fn fullscreen_retains_zero_border_when_the_client_clears_maximization() {
+        use crate::core::commands::{apply_maximize, ToggleFullscreen};
+        let mut engine = column_resize_engine(2, 20, 10);
+        engine.state.clients.get_mut(&2).unwrap().border_w = 2;
+        apply_maximize(&mut engine.state, 2, Some(true), Some(true));
+        engine.state.clients.get_mut(&2).unwrap().border_w = 0;
+        engine.execute(ToggleFullscreen(Some(2)));
+        apply_maximize(&mut engine.state, 2, Some(false), Some(false));
+        assert!(engine.state.clients[&2].is_fullscreen());
+        assert_eq!(engine.state.clients[&2].border_w, 0);
+        engine.execute(ToggleFullscreen(Some(2)));
+        assert_eq!(engine.state.clients[&2].border_w, 2);
+    }
+
+    #[test]
+    fn restore_layout_returns_a_maximized_fullscreen_float_to_its_original_rect() {
+        use crate::core::commands::{RestoreLayout, ToggleFullscreen, ToggleMaximize};
+        let mut engine = setup_engine();
+        let original = Rect::new(120, 90, 480, 320);
+        let mut client = Client::new(1, 0, ViewId::new(0));
+        client.flags.set(WinFlags::FLOAT);
+        client.geom = original;
+        client.saved_geom = original;
+        client.border_w = 2;
+        engine.state.add_client(client);
+        engine.state.monitors[0].ws_mut().floats.push(1);
+        engine.state.monitors[0].focused = Some(1);
+        engine.execute(ToggleMaximize(Some(1)));
+        engine.state.clients.get_mut(&1).unwrap().geom = engine.state.monitors[0].workarea;
+        engine.execute(ToggleFullscreen(Some(1)));
+        engine.state.clients.get_mut(&1).unwrap().geom = engine.state.monitors[0].screen;
+        engine.execute(RestoreLayout(None));
+        let client = &engine.state.clients[&1];
+        assert!(client.is_float() && !client.is_fullscreen() && !client.is_maximized());
+        assert_eq!(client.geom, original);
+        assert_eq!(client.border_w, 2);
+        assert!(engine.state.monitors[0].ws().columns.is_empty());
+        assert_eq!(engine.state.monitors[0].ws().floats, vec![1]);
+        assert!(engine.execute(RestoreLayout(None)).is_empty());
+    }
+
+    #[test]
+    fn restore_layout_resolves_deferred_focus_with_one_focus_effect() {
+        use crate::core::commands::{RestoreLayout, ToggleFullscreen, ToggleMaximize};
+        use crate::core::effect::Effect;
+        for fullscreen in [false, true] {
+            let mut engine = column_resize_engine(2, 20, 10);
+            engine.execute(ToggleMaximize(Some(2)));
+            if fullscreen {
+                engine.execute(ToggleFullscreen(Some(2)));
+            }
+            engine.state.pending_focus = Some(crate::types::PendingFocus {
+                owner: 2,
+                window: 1,
+                monitor: 0,
+                workspace: ViewId::new(0),
+            });
+            let effects = engine.execute(RestoreLayout(Some(2)));
+            assert!(engine.state.pending_focus.is_none());
+            assert_eq!(engine.state.monitors[0].focused, Some(1));
+            assert_eq!(
+                effects
+                    .iter()
+                    .filter(|e| matches!(e, Effect::FocusWindow(Some(1))))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn restore_layout_handles_absent_targets_and_uses_the_clients_monitor() {
+        use crate::core::commands::{RestoreLayout, ToggleFullscreen};
+        use crate::core::effect::Effect;
+        let mut engine = setup_engine_multi();
+        assert!(engine.execute(RestoreLayout(None)).is_empty());
+        assert!(engine.execute(RestoreLayout(Some(0xdead))).is_empty());
+        engine.state.monitors[0].focused = Some(0xdead);
+        assert!(engine.execute(RestoreLayout(None)).is_empty());
+        engine.state.monitors[0].focused = None;
+        engine.state.add_client(Client::new(1, 1, ViewId::new(0)));
+        engine.state.monitors[1].ws_mut().add_tiled(1, 0.6);
+        engine.state.monitors[1].focused = Some(1);
+        engine.execute(ToggleFullscreen(Some(1)));
+        let effects = engine.execute(RestoreLayout(Some(1)));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::ArrangeMonitor(1))));
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, Effect::ArrangeMonitor(0))));
+        assert_eq!(engine.state.sel_mon, 0);
+        assert!(!engine.state.clients[&1].is_fullscreen());
     }
 
     fn column_resize_engine(columns: u32, inner: u32, outer: u32) -> Engine {
@@ -12464,6 +12624,7 @@ mod unit_tests {
             SetFullscreen(WindowId, bool),
             SetMaximized(WindowId, Option<bool>, Option<bool>),
             SyncWindowPrefs(WindowId),
+            SyncWindowPresentation(WindowId),
             SetCurrentDesktop(usize),
             SetWindowDesktop(WindowId, usize),
             RefreshDesktops,
@@ -12486,6 +12647,7 @@ mod unit_tests {
                     EffectKind::SetMaximized(*win, *vert, *horiz)
                 }
                 Effect::SyncWindowPrefs(w) => EffectKind::SyncWindowPrefs(*w),
+                Effect::SyncWindowPresentation(w) => EffectKind::SyncWindowPresentation(*w),
                 Effect::SetCurrentDesktop(d) => EffectKind::SetCurrentDesktop(*d),
                 Effect::SetWindowDesktop { win, ws } => EffectKind::SetWindowDesktop(*win, *ws),
                 Effect::RefreshDesktops => EffectKind::RefreshDesktops,
@@ -12740,6 +12902,7 @@ mod unit_tests {
                             | Effect::Unfocus(w)
                             | Effect::KillWindow(w)
                             | Effect::SyncWindowPrefs(w)
+                            | Effect::SyncWindowPresentation(w)
                             | Effect::SetFullscreen { win: w, .. }
                             | Effect::ConfigureWindow { win: w, .. }
                             | Effect::SetMaximized { win: w, .. }

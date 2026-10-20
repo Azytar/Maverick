@@ -35,6 +35,11 @@ before it makes no compatibility promise.
 
 ### Added
 
+- `restore_layout`, bound to `Super+Shift+Escape` and available through
+  `maverickctl msg`, explicitly leaves fullscreen and both maximized axes while
+  preserving the underlying layout or floating placement. Repeated restoration
+  on a normal window does no work. Normal fullscreen exit still restores the
+  previous presentation, and subsequent client fullscreen requests remain valid.
 - `general.overview_scale` (`0.05`–`1.0`, default `0.76`): the scale Overview is
   entered at. It is the design point of the mode — the one view that visibly
   shrinks the tiles — and is read once, on entry, by
@@ -46,6 +51,10 @@ before it makes no compatibility promise.
 - A maximized floating window keeps its original floating rectangle across a
   fullscreen cycle. Leaving fullscreen restores maximized presentation; leaving
   maximization afterwards restores the original floating size and position.
+- Floating restore geometry is retained when maximizing on only one axis or
+  changing from two maximized axes to one before returning to normal placement.
+  Presentation with zero-width borders no longer discards the original border
+  width across maximize/fullscreen cycles.
 - Column resize commands that cannot change the width return without arranging
   windows, publishing state or recentering a manually panned camera. Repeated
   input at either size limit does not accumulate pending growth.

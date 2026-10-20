@@ -55,6 +55,7 @@ pub static ACTIONS: &[(&str, ArgKind)] = &[
     ("toggle_float", ArgKind::None),
     ("toggle_fullscreen", ArgKind::None),
     ("toggle_maximize", ArgKind::None),
+    ("restore_layout", ArgKind::None),
     ("set_layout", ArgKind::Layout),
     ("grow_col", ArgKind::I32),
     ("new_column", ArgKind::None),
@@ -88,6 +89,7 @@ pub fn name(a: &Action) -> &'static str {
         Action::ToggleFloat => "toggle_float",
         Action::ToggleFullscreen => "toggle_fullscreen",
         Action::ToggleMaximize => "toggle_maximize",
+        Action::RestoreLayout => "restore_layout",
         Action::FocusWindow(..) => "focus_window",
         Action::MoveWindow(..) => "move_window",
         Action::CloseWindow(..) => "close_window",
@@ -265,6 +267,7 @@ pub fn parse(input: &str) -> Option<Action> {
         "toggle_float" => none_if_arg(has_arg, Action::ToggleFloat),
         "toggle_fullscreen" => none_if_arg(has_arg, Action::ToggleFullscreen),
         "toggle_maximize" => none_if_arg(has_arg, Action::ToggleMaximize),
+        "restore_layout" => none_if_arg(has_arg, Action::RestoreLayout),
         // Window-targeted verbs. Not in the `ACTIONS` table: their target is
         // resolved at dispatch time by whoever asks, so there is no fixed
         // argument to put in a TOML keymap — they exist for the control
@@ -392,6 +395,7 @@ mod tests {
             Action::ToggleFloat,
             Action::ToggleFullscreen,
             Action::ToggleMaximize,
+            Action::RestoreLayout,
             Action::NewColumn,
             Action::CollapseColumn,
             Action::Restart,

@@ -84,6 +84,10 @@ corner_radius = 0
 # key = "Mod4+Shift+m"
 # action = "toggle_maximize"
 
+# [[keybindings]]
+# key = "Mod4+Shift+Escape"
+# action = "restore_layout"
+
 # Focus / move within the ribbon (vim-style)
 # [[keybindings]]
 # key = "Mod4+h"

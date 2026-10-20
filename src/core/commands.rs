@@ -2,7 +2,7 @@
 //!
 //! What owns: the `Command` trait (`&mut State, &mut Cfg` → `CommandReport`)
 //! plus every typed command (`FocusDirection`, `MoveWindow`, `ToggleFullscreen`,
-//! `ToggleMaximize`, `GrowColumn`, `ViewportZoom`, `PageSnap`, …) and the pure
+//! `ToggleMaximize`, `RestoreLayout`, `GrowColumn`, `ViewportZoom`, `PageSnap`, …) and the pure
 //! helpers they share (`apply_fullscreen_topology`, `apply_maximize`,
 //! `decide_manage_focus`, `reconcile_pending_focus_after_transition`).
 //!
@@ -177,7 +177,7 @@ fn fs_of(state: &State, mi: usize, ws_i: usize) -> FsCtx {
 /// window never actually grows. `FS_WAS_FLOAT` remembers the promotion so
 /// leaving fullscreen puts the window back where the user had it.
 ///
-/// `ToggleFullscreen` is the single funnel for this transition, covering both
+/// `apply_fullscreen` shares this transition between toggling and restoration, covering both
 /// the `Mod4+F` keyboard path and the EWMH `_NET_WM_STATE_FULLSCREEN` client
 /// message, so the two channels can never disagree about the topology.
 ///
@@ -213,7 +213,7 @@ pub fn apply_fullscreen_topology(
             // as it runs, so saving it any later would remember the tile instead
             // of where the user had the float.
             // Maximization owns saved_geom; fullscreen has its own snapshot.
-            if !c.is_maximized() {
+            if !c.is_maximized_v() && !c.is_maximized_h() {
                 c.saved_geom = c.geom;
             }
             // Capture the fullscreen snapshot (prior mode + exact rect) so that
@@ -235,7 +235,8 @@ pub fn apply_fullscreen_topology(
         if !client.flags.has(WinFlags::FS_WAS_FLOAT) {
             return false;
         }
-        let maximized_restore = client.is_maximized().then_some(client.saved_geom);
+        let maximized_restore =
+            (client.is_maximized_v() || client.is_maximized_h()).then_some(client.saved_geom);
         state.monitors[mi].workspaces[ws_i].remove_window(win);
         state.monitors[mi].workspaces[ws_i].floats.push(win);
         if let Some(c) = state.clients.get_mut(&win) {
@@ -277,6 +278,66 @@ pub fn apply_fullscreen_geom_restore(
     c.geom = snap.rect;
     c.fullscreen_policy = snap.policy;
     Some(snap.prior)
+}
+
+/// Shared fullscreen transition for toggling and explicit layout restoration.
+fn apply_fullscreen(state: &mut State, cfg: &Cfg, win: WindowId, on: bool) {
+    // Topology: float⇄tiled membership plus `FS_WAS_FLOAT`.
+    apply_fullscreen_topology(state, cfg, win, on);
+
+    // Border, the `FULLSCREEN` flag, and a forced reconfigure. A
+    // fullscreen tile has no border.
+    if let Some(c) = state.clients.get_mut(&win) {
+        if on {
+            if !c.is_maximized_v() && !c.is_maximized_h() {
+                c.old_border_w = c.border_w;
+            }
+            c.border_w = 0;
+        } else {
+            c.border_w = c.old_border_w;
+        }
+        if on {
+            c.flags.set(WinFlags::FULLSCREEN);
+        } else {
+            c.flags.clear(WinFlags::FULLSCREEN);
+        }
+        // Force a reconfigure even when the rect is unchanged: the border
+        // and the state changed without the window moving.
+        c.geometry_dirty = true;
+    }
+
+    // Snapshot the pre-fullscreen rect on enter (tiled/maximized case;
+    // the float case was already snapshotted by
+    // `apply_fullscreen_topology`), or restore it on leave.
+    if on {
+        if let Some(c) = state.clients.get_mut(&win) {
+            if !c.flags.has(WinFlags::FS_WAS_FLOAT) {
+                c.fs_snapshot = Some(FullscreenSnapshot {
+                    prior: if c.is_maximized() {
+                        WindowMode::Maximized
+                    } else {
+                        WindowMode::Tiled
+                    },
+                    rect: c.geom,
+                    policy: c.fullscreen_policy,
+                });
+            }
+        }
+    } else {
+        apply_fullscreen_geom_restore(state, win);
+    }
+
+    // Exclusive-overlay promotion. Entering fullscreen promotes to
+    // `True` so `present` pins it over the screen, `decide_manage_focus`
+    // defers later windows behind it, and the bypass policy can step
+    // aside. Must run AFTER the snapshot above (which has to record the
+    // pre-promotion policy) and is undone by the restore on leave, so a
+    // user rule is never clobbered.
+    if on {
+        if let Some(c) = state.clients.get_mut(&win) {
+            c.fullscreen_policy = crate::types::FullscreenPolicy::True;
+        }
+    }
 }
 
 /// Consume `State::pending_focus` when the overlay that deferred it is gone.
@@ -505,13 +566,19 @@ pub(crate) fn decide_active_window(state: &State, win: WindowId) -> ActiveWindow
 /// logical focus, and the backend's `reconcile_focus` re-asserts a logical focus
 /// that diverges from the server's on the next focus event, which is the
 /// mechanism every state-only focus write already relies on.
-pub fn apply_maximize(state: &mut State, win: WindowId, vert: Option<bool>, horiz: Option<bool>) {
+/// Returns a resolved focus target so commands can emit its X11 focus effect.
+pub fn apply_maximize(
+    state: &mut State,
+    win: WindowId,
+    vert: Option<bool>,
+    horiz: Option<bool>,
+) -> Option<WindowId> {
     if let Some(c) = state.clients.get_mut(&win) {
-        let was_max = c.is_maximized();
+        let was_max = c.is_maximized_v() || c.is_maximized_h();
         let want_v = vert.unwrap_or_else(|| c.is_maximized_v());
         let want_h = horiz.unwrap_or_else(|| c.is_maximized_h());
         if want_v == c.is_maximized_v() && want_h == c.is_maximized_h() {
-            return;
+            return None;
         }
         if want_v {
             c.flags.set(WinFlags::MAXIMIZED_V);
@@ -526,9 +593,15 @@ pub fn apply_maximize(state: &mut State, win: WindowId, vert: Option<bool>, hori
         if !was_max {
             if !c.is_fullscreen() {
                 c.saved_geom = c.geom;
+                c.old_border_w = c.border_w;
             }
-        } else if !c.is_maximized() && c.is_float() {
-            c.geom = c.saved_geom;
+        } else if !c.is_maximized_v() && !c.is_maximized_h() {
+            if !c.is_fullscreen() {
+                c.border_w = c.old_border_w;
+            }
+            if c.is_float() {
+                c.geom = c.saved_geom;
+            }
         }
         c.geometry_dirty = true;
     }
@@ -537,7 +610,7 @@ pub fn apply_maximize(state: &mut State, win: WindowId, vert: Option<bool>, hori
     // resolve anything either: an early return here is the difference between
     // "the EWMH path heals the deferral it orphans" and "the EWMH path orphans a
     // deferral on every repeat of the same client message".
-    let _ = reconcile_pending_focus_after_transition(state);
+    reconcile_pending_focus_after_transition(state)
 }
 
 /// Re-derive the maximize presentation on every monitor that can be showing `win`.
@@ -1194,70 +1267,8 @@ impl Command for ToggleFullscreen {
         }
         let ws_i = state.monitors[mi].active_index();
         if let Some(win) = target {
-            // This command owns ALL fullscreen logical state. The backend's
-            // `SetFullscreen` handler is the X11-only half (the EWMH atom and
-            // the `_NET_WM_BYPASS_COMPOSITOR` hint published for external
-            // compositors) and must not decide topology, border, snapshot, flags
-            // or camera — those belong to the core.
-            let on = !state
-                .clients
-                .get(&win)
-                .is_some_and(crate::types::Client::is_fullscreen);
-
-            // Topology: float⇄tiled membership plus `FS_WAS_FLOAT`.
-            apply_fullscreen_topology(state, cfg, win, on);
-
-            // Border, the `FULLSCREEN` flag, and a forced reconfigure. A
-            // fullscreen tile has no border.
-            if let Some(c) = state.clients.get_mut(&win) {
-                if on {
-                    c.old_border_w = c.border_w;
-                    c.border_w = 0;
-                } else {
-                    c.border_w = c.old_border_w;
-                }
-                if on {
-                    c.flags.set(WinFlags::FULLSCREEN);
-                } else {
-                    c.flags.clear(WinFlags::FULLSCREEN);
-                }
-                // Force a reconfigure even when the rect is unchanged: the border
-                // and the state changed without the window moving.
-                c.geometry_dirty = true;
-            }
-
-            // Snapshot the pre-fullscreen rect on enter (tiled/maximized case;
-            // the float case was already snapshotted by
-            // `apply_fullscreen_topology`), or restore it on leave.
-            if on {
-                if let Some(c) = state.clients.get_mut(&win) {
-                    if !c.flags.has(WinFlags::FS_WAS_FLOAT) {
-                        c.fs_snapshot = Some(FullscreenSnapshot {
-                            prior: if c.is_maximized() {
-                                WindowMode::Maximized
-                            } else {
-                                WindowMode::Tiled
-                            },
-                            rect: c.geom,
-                            policy: c.fullscreen_policy,
-                        });
-                    }
-                }
-            } else {
-                apply_fullscreen_geom_restore(state, win);
-            }
-
-            // Exclusive-overlay promotion. Entering fullscreen promotes to
-            // `True` so `present` pins it over the screen, `decide_manage_focus`
-            // defers later windows behind it, and the bypass policy can step
-            // aside. Must run AFTER the snapshot above (which has to record the
-            // pre-promotion policy) and is undone by the restore on leave, so a
-            // user rule is never clobbered.
-            if on {
-                if let Some(c) = state.clients.get_mut(&win) {
-                    c.fullscreen_policy = crate::types::FullscreenPolicy::True;
-                }
-            }
+            let on = !state.clients[&win].is_fullscreen();
+            apply_fullscreen(state, cfg, win, on);
 
             // Recenter the camera. `scroll_to_focused` folds the newly-set
             // `FULLSCREEN` flag through `fs_ctx`, so the ribbon scrolls the same
@@ -1276,6 +1287,51 @@ impl Command for ToggleFullscreen {
             return CommandReport::with_event(cmds, Event::FullscreenToggled { win, on });
         }
         CommandReport::new(cmds)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RestoreLayout(pub Option<WindowId>);
+
+impl Command for RestoreLayout {
+    fn execute(&mut self, state: &mut State, cfg: &mut Cfg) -> CommandReport {
+        let Some(win) = self.0.or_else(|| {
+            state
+                .monitors
+                .get(state.sel_mon)
+                .and_then(|mon| mon.focused)
+        }) else {
+            return CommandReport::new(Vec::new());
+        };
+        let Some(client) = state.clients.get(&win) else {
+            return CommandReport::new(Vec::new());
+        };
+        let mi = client.monitor;
+        let Some(ws_i) = state
+            .monitors
+            .get(mi)
+            .and_then(|mon| mon.view_index(client.workspace))
+        else {
+            return CommandReport::new(Vec::new());
+        };
+        if !client.is_fullscreen() && !client.is_maximized_v() && !client.is_maximized_h() {
+            return CommandReport::new(Vec::new());
+        }
+        if client.is_fullscreen() {
+            apply_fullscreen(state, cfg, win, false);
+        }
+        let focus = apply_maximize(state, win, Some(false), Some(false));
+        scroll_to_focused(state, cfg, mi, ws_i);
+        let mut effects = vec![
+            Effect::MarkRestack(mi),
+            Effect::ArrangeMonitor(mi),
+            Effect::SyncWindowPrefs(win),
+            Effect::SyncWindowPresentation(win),
+        ];
+        if let Some(win) = focus {
+            effects.push(Effect::FocusWindow(Some(win)));
+        }
+        CommandReport::new(effects)
     }
 }
 

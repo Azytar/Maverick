@@ -102,6 +102,15 @@ impl WindowManager {
             Effect::SetFullscreen { win, on } => self.set_fullscreen(win, on)?,
             Effect::SetMaximized { win, vert, horiz } => self.set_maximized(win, vert, horiz)?,
             Effect::SyncWindowPrefs(win) => self.sync_window_prefs(win),
+            Effect::SyncWindowPresentation(win) => {
+                let fullscreen = self
+                    .engine
+                    .state
+                    .clients
+                    .get(&win)
+                    .is_some_and(crate::types::Client::is_fullscreen);
+                self.set_fullscreen(win, fullscreen)?;
+            }
             Effect::SetCurrentDesktop(ws) => {
                 let _ = self.conn.change_property32(
                     PropMode::REPLACE,

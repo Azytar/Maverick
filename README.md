@@ -124,6 +124,13 @@ focused column in view.
   (`present::present_into`), not separate layouts. A window taking a real
   exclusive fullscreen also gets `_NET_WM_BYPASS_COMPOSITOR` published, so an
   external compositor steps aside for it.
+- `restore_layout` (`Super+Shift+Escape`) explicitly leaves fullscreen and both
+  maximized axes, preserving column sizes or the previous floating placement.
+  Repeating it on a normal window has no effect. It is also available through
+  `maverickctl msg restore_layout`.
+  Normal fullscreen exit, including a video's own exit control, restores the
+  previous presentation instead: a previously maximized window stays maximized.
+  Explicit restoration does not prevent a later video from requesting fullscreen.
 - `LayoutKind` has a single variant, `Column`. `set_layout` accepts only
   `column`, and no second layout exists in this repository.
 
@@ -511,6 +518,7 @@ default** binding set: 33 explicit bindings plus one `Super+<digit>` and one
 | Toggle floating | `Super+Shift+Space` | moves the window in or out of the layout |
 | Toggle fullscreen | `Super+Shift+F` | real exclusive fullscreen overlay |
 | Toggle maximize | `Super+Shift+M` | presentation-only maximize |
+| Restore layout | `Super+Shift+Escape` | leaves fullscreen and maximized presentation |
 | Focus left / down / up / right | `Super+H` / `J` / `K` / `L` | moves focus within the View |
 | Move window left / down / up / right | `Super+Shift+H` / `J` / `K` / `L` | moves the client to a neighbouring column |
 | New column | `Super+Shift+Return` | appends a column to the ribbon |

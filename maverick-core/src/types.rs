@@ -1673,6 +1673,8 @@ pub enum Action {
     /// is only presented while the window is focused (the "peek" overlay in
     /// `core::present`), so it never steals the screen from a background window.
     ToggleMaximize,
+    /// Leave fullscreen and both maximized axes without toggling normal windows.
+    RestoreLayout,
     /// Set layout kind for the active workspace.
     SetLayout(LayoutKind),
     /// Grow/shrink the focused column by `i32` pixels.

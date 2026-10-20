@@ -20,7 +20,7 @@ use crate::config::Cfg;
 use crate::core::commands::{
     CollapseColumn, Command, CreateView, FocusDirection, FocusMonitor, FocusWindow, GrowColumn,
     KillWindow, MoveToWorkspace, MoveWindow, MoveWindowToMonitor, NewColumn, NextView,
-    OverviewEnter, OverviewNav, PageSnap, PreviousView, Quit, RemoveView, Restart,
+    OverviewEnter, OverviewNav, PageSnap, PreviousView, Quit, RemoveView, Restart, RestoreLayout,
     ReturnToOriginView, SetLayout, Spawn, ToggleFloat, ToggleFullscreen, ToggleMaximize,
     ToggleOverview, ViewWorkspace, ViewportZoom,
 };
@@ -273,6 +273,7 @@ impl Engine {
             Action::Quit => self.execute(Quit),
             Action::Restart => self.execute(Restart),
             Action::ToggleFloat => self.execute(ToggleFloat(None)),
+            Action::RestoreLayout => self.execute(RestoreLayout(None)),
             Action::ToggleFullscreen => {
                 let mi = self.state.sel_mon;
                 if let Some(win) = self.state.monitors.get(mi).and_then(|m| m.focused) {

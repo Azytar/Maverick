@@ -62,6 +62,8 @@ pub enum Effect {
     /// restart / `--replace`). A SEMANTIC effect so the backend keeps its
     /// persistence format its own business.
     SyncWindowPrefs(WindowId),
+    /// Reflect the core's presentation flags and compositor bypass on X11.
+    SyncWindowPresentation(WindowId),
     /// Set _`NET_CURRENT_DESKTOP` on the root window.
     SetCurrentDesktop(usize),
     /// Set _`NET_WM_DESKTOP` on a window.

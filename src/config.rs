@@ -244,6 +244,7 @@ pub fn compiled_config() -> Cfg {
 
     // X11 keysym values.
     const XK_RETURN: u32 = 0xff0d;
+    const XK_ESCAPE: u32 = 0xff1b;
     const XK_SPACE: u32 = 0x0020;
     const XK_F5: u32 = 0xffc2;
     const XK_TAB: u32 = 0xff09;
@@ -276,6 +277,7 @@ pub fn compiled_config() -> Cfg {
         (shs, XK_SPACE, Action::ToggleFloat),
         (shs, k!(b'f'), Action::ToggleFullscreen),
         (shs, k!(b'm'), Action::ToggleMaximize),
+        (shs, XK_ESCAPE, Action::RestoreLayout),
         // focus navigation
         (sup, k!(b'h'), Action::FocusDir(Dir::Left)),
         (sup, k!(b'l'), Action::FocusDir(Dir::Right)),

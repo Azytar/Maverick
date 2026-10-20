@@ -147,6 +147,12 @@ It needs `libx11-dev`; the clients stay open throughout the restart checks.
 `--pointer-focus` enables hover focus and cursor warping before restarting;
 the restored selection and camera must survive a stationary pointer.
 
+`python3 tests/xvfb-restore.py` checks client fullscreen exit versus explicit
+layout restoration, tiled/floating geometry, both maximized axes, EWMH flags,
+compositor bypass and the default restoration shortcut. Repeated restoration
+must produce no client configure/property events. It uses its own Xvfb and the
+stacking probe, requiring `libx11-dev` and `xdotool`.
+
 `python3 tests/xvfb-input.py --case protocol` validates ICCCM timestamps;
 `--case ownership` checks transfers and activation protections; `--case child`
 checks cached-time desynchronization; `--case capture` checks core/XI2 keys,
