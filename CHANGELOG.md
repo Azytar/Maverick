@@ -48,6 +48,10 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Nested session shutdown also terminates programs launched with
+  `maverickctl exec` and their verified group members. Group records pair the leader PID with
+  its kernel start time; stale and legacy identities never authorise signals,
+  and live unverified groups are reported instead of silently claiming success.
 - Nested session shutdown distinguishes exited zombies from running processes.
   WM/X-server identity checks remain strict, but unreaped children no longer
   cause false shutdown failures or unnecessary grace-period waits.

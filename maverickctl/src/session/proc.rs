@@ -227,7 +227,7 @@ impl ProcTable {
 /// fixed offset from the start of the line is wrong for some process. Returns
 /// `None` when the process is gone or the line is unparsable — both mean "not
 /// a process to describe", not an error.
-fn read_stat(pid: u32) -> Option<(u32, u32, u64)> {
+pub(super) fn read_stat(pid: u32) -> Option<(u32, u32, u64)> {
     read_stat_with_state(pid).map(|(ppid, pgid, start_time, _)| (ppid, pgid, start_time))
 }
 

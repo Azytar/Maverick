@@ -100,7 +100,10 @@ jobs:
       - name: Shell harness isolation
         run: python3 tests/harness-isolation.py
       - name: Session teardown liveness
-        run: python3 tests/session-teardown.py
+        run: |
+          python3 tests/session-teardown.py
+          python3 tests/session-teardown.py --exec-client
+          python3 tests/session-teardown.py --stale-group
       - name: Live configuration reload
         run: python3 tests/xvfb-reload.py
       - name: Explicit layout restoration

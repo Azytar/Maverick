@@ -126,13 +126,15 @@ Everything after the program word is the program's, unfiltered:
 `maverickctl exec debug alacritty --json` runs `alacritty --json`. A bare `--`
 before the program word hands the rest over untouched.
 
-`exec` puts the program in its own process group and records that group in the
-session. While the session is running, that record is the only thing that keeps
-an `exec`ed program findable by `process list` after this one-shot CLI exits and
-the kernel reparents it to init, where a parent-pointer walk can no longer reach
-it. It is actionable ownership state rather than history, so it is cleared when
-the session stops — see [Limitations](#limitations) for what that means for a
-program still running.
+`exec` puts the program in its own process group and records the leader's PID
+and kernel start time in the session. While the session is running, that record
+keeps an `exec`ed program findable by `process list` after this one-shot CLI
+exits and the kernel reparents it to init, where a parent-pointer walk can no
+longer reach it. Before shutting down the WM, `stop` snapshots members of verified groups
+with their own kernel start times. It terminates those programs before stopping
+the X server, escalating to `SIGKILL` if needed. An exited zombie counts as
+stopped even if its parent has not reaped it. Ownership records are cleared at
+shutdown; incomplete cleanup is reported as an error.
 
 A detached program's output goes to the session's `exec.log` by default rather
 than to the caller's terminal: a caller whose stdout is a pipe nobody reads
@@ -164,10 +166,11 @@ The tree is the union of up to three cheap sets, all read from
 `/proc/<pid>/stat`: descendants of the X server, descendants of the window
 manager, and every process whose process group this session registered. The
 third is what catches `exec`ed programs, and it only applies while the session
-still owns a live root — a stopped session owns no processes, so it claims
-nothing, however many group ids its record carries. A process this session does
-not own is never signalled — `process kill` and `process list` derive both from
-one function, so they cannot disagree about what a session contains.
+still owns a live root and the registered leader's identity matches — a stopped
+session owns no processes, so it claims nothing, however many group ids its
+record carries. A process this session does not own is never signalled —
+`process kill` and `process list` derive both from one function, so they cannot
+disagree about what a session contains.
 
 ### Windows
 
@@ -350,20 +353,16 @@ readiness, liveness, teardown and cleanup are backend-independent, so a future
 
 ## Limitations
 
-- **`stop` does not reach programs started with `exec`.** `exec` puts each
-  program in its own process group, outside the window manager's group, so
-  teardown signals the manager and stops there. Those programs outlive the
-  session, and the record's list of their groups is cleared on the way down —
-  so `process list` then reports them as belonging to nobody and `process kill`
-  correctly refuses to signal them. They are not leaked silently: they keep
-  running, visibly, on a display that no longer exists. Making `stop` total
-  over the graph the record itself created is the obvious fix and is not done.
-- **A process group id is trusted while the session runs.** `pgrps` records a
-  number, not the identity of the group it named. If the kernel reissues that
-  number to an unrelated process *before* the session stops, the record would
-  authorise a signal it should not. Closing this means recording the group
-  leader's start time alongside the id, the same pairing `ProcRef` uses
-  everywhere else.
+- **Process ownership is not daemon supervision.** A program that leaves its
+  registered group, or whose group leader disappears before ownership can be
+  verified, may no longer be attributable to the session. Numeric group ids
+  alone never authorise signals. Shutdown reports a still-running unverified
+  group rather than signalling it.
+- **Legacy group records lack identity proof.** Existing records remain
+  readable, but groups stored without a leader's start time are excluded from
+  process ownership and are not signalled. Close those applications yourself
+  and relaunch them through the updated `maverickctl exec`; reading the current
+  start time would risk adopting an unrelated process with a reused id.
 - **`session create` on an existing name ignores the arguments it is given.**
   The recorded spec is replayed verbatim, so a `create` naming a live session
   is refused and a `create` naming a stopped one restarts the old

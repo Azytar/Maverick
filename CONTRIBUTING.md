@@ -113,6 +113,9 @@ directory. CI runs it with Xvfb, so it needs no active desktop.
 `python3 tests/session-teardown.py` creates a private Xvfb session and adopts
 its orphaned children as a Linux subreaper. Shutdown must succeed even before
 those exited children are reaped, while an unrelated process remains alive.
+`--exec-client` also checks that a registered application and its child stop;
+`--stale-group` verifies that a mismatched group identity grants no authority
+over an unrelated process and makes incomplete shutdown explicit.
 
 For an interactive sandbox, the existing session interface owns the whole
 nested server: create a uniquely named session with

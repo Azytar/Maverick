@@ -701,6 +701,19 @@ fn write_record(session: &Session) -> Result<(), SessionError> {
 /// liveness check below.
 fn teardown(session: &mut Session, mode: StopMode) -> Vec<String> {
     let mut survived: Vec<String> = Vec::new();
+    let table = proc::ProcTable::scan();
+    let groups = session.verified_groups();
+    let application_pids = table.in_groups(&groups);
+    // Preserve each member's identity before shutdown can reap its group leader.
+    let applications: Vec<ProcRef> = table
+        .entries
+        .iter()
+        .filter(|(pid, ..)| application_pids.contains(pid))
+        .map(|(pid, _, _, start_time)| ProcRef {
+            pid: *pid,
+            start_time: *start_time,
+        })
+        .collect();
     // Reasons the session was not fully released, kept apart from `survived`
     // because they are not processes: nothing is still running, but something
     // still owns a display number. Rendered into the same report so a caller
@@ -731,6 +744,44 @@ fn teardown(session: &mut Session, mode: StopMode) -> Vec<String> {
     }
     // Its socket and ficha go with it, so the name can be reused immediately.
     identity::cleanup_meta(session.name.as_str());
+
+    for application in &applications {
+        if mode == StopMode::Hard {
+            let _ = proc::kill_hard(application.pid, application.start_time);
+        } else {
+            let _ = proc::terminate(application.pid, application.start_time);
+        }
+    }
+    wait_until(STOP_GRACE, || {
+        applications.iter().all(|p| !proc::is_running(p))
+    });
+    for application in &applications {
+        if proc::is_running(application) {
+            let _ = proc::kill_hard(application.pid, application.start_time);
+        }
+    }
+    wait_until(STOP_GRACE, || {
+        applications.iter().all(|p| !proc::is_running(p))
+    });
+    for application in &applications {
+        if proc::is_running(application) {
+            survived.push(format!("application {}", application.pid));
+        }
+    }
+    for group in &session.pgrps {
+        if group.pid != 0
+            && !groups.contains(&group.pid)
+            && table.entries.iter().any(|(pid, _, pgid, start)| {
+                *pgid == group.pid
+                    && proc::is_running(&ProcRef {
+                        pid: *pid,
+                        start_time: *start,
+                    })
+            })
+        {
+            survived.push(format!("unverified application group {}", group.pid));
+        }
+    }
 
     // As in `reap_one`: releasing the display is owed whenever the record names
     // an X server, because a server that is already dead still owns the claim
@@ -767,14 +818,7 @@ fn teardown(session: &mut Session, mode: StopMode) -> Vec<String> {
     }
     session.wm = ProcRef::default();
     session.xserver = ProcRef::default();
-    // Registered pgids are actionable ownership state, not history: they exist
-    // so an `exec`ed program stays findable while the session runs. Once it
-    // stops, leaving them behind would let a record that no longer names a
-    // single live process authorise a signal — and a pgid the kernel has since
-    // reissued would be signalled as if it were ours. Nothing reads this list
-    // for reporting (`SessionView` has no such field), and the post-mortem
-    // trail lives in `exec.log` and the session logs, so clearing it destroys
-    // nothing a consumer reads.
+    // A stopped session has no actionable process ownership; logs retain history.
     session.pgrps.clear();
     if mode == StopMode::Hard && session.exit_reason.is_empty() {
         session.exit_reason = StopMode::Hard.label().to_string();

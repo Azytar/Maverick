@@ -340,8 +340,8 @@ pub struct Session {
     /// Carries what [`SessionState`] deliberately has no room for: a signal, a
     /// missing binary, a display that was already taken.
     pub exit_reason: String,
-    /// Process-group ids this session created (see [`proc`]).
-    pub pgrps: Vec<u32>,
+    /// Group leaders this session created, paired with their kernel start times.
+    pub pgrps: Vec<ProcRef>,
 }
 
 impl Session {
@@ -412,6 +412,21 @@ impl Session {
             .into_iter()
             .filter(|proc_ref| proc_ref.is_alive())
             .map(|proc_ref| proc_ref.pid)
+            .collect()
+    }
+
+    /// Numeric group membership is authoritative only while its recorded leader
+    /// still has the same kernel identity. Legacy records carry no such proof.
+    pub fn verified_groups(&self) -> Vec<u32> {
+        self.pgrps
+            .iter()
+            .filter(|leader| {
+                leader.start_time != 0
+                    && proc::read_stat(leader.pid).is_some_and(|(_, pgid, start)| {
+                        pgid == leader.pid && start == leader.start_time
+                    })
+            })
+            .map(|leader| leader.pid)
             .collect()
     }
 
@@ -512,7 +527,11 @@ impl Session {
             wmstart = self.wm.start_time,
             state = self.state.as_str(),
             reason = json_quote(&self.exit_reason),
-            pgrps = quote_array(self.pgrps.iter().map(|g| g.to_string())),
+            pgrps = quote_array(
+                self.pgrps
+                    .iter()
+                    .map(|g| format!("{}:{}", g.pid, g.start_time))
+            ),
         )
     }
 
@@ -588,7 +607,13 @@ impl Session {
             pgrps: get_arr("pgrps")
                 .unwrap_or_default()
                 .iter()
-                .filter_map(|g| g.parse().ok())
+                .filter_map(|g| {
+                    let (pid, start) = g.split_once(':').unwrap_or((g, "0"));
+                    Some(ProcRef {
+                        pid: pid.parse().ok()?,
+                        start_time: start.parse().ok()?,
+                    })
+                })
                 .collect(),
             name,
         })
@@ -1295,12 +1320,51 @@ mod tests {
     fn registered_groups_need_a_live_session() {
         let mut session =
             Session::new(SessionName::parse("groups").expect("name"), Spec::default());
-        session.pgrps = vec![555];
+        session.pgrps = vec![ProcRef {
+            pid: 555,
+            start_time: 123,
+        }];
         // No live root, so the groups are not actionable: the ownership
         // computation drops the term entirely rather than trusting the record.
         assert!(session.owned_roots().is_empty());
         session.wm = ProcRef::of(std::process::id());
         assert_eq!(session.owned_roots(), vec![std::process::id()]);
+    }
+
+    #[test]
+    fn registered_groups_reject_stale_and_unproven_leader_identities() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .expect("private group");
+        let mut session = Session::new(SessionName::parse("group-id").unwrap(), Spec::default());
+        let leader = ProcRef::of(child.id());
+        session.pgrps.push(leader);
+        let verified = session.verified_groups();
+        session.pgrps[0].start_time = leader.start_time + 1;
+        let stale = session.verified_groups();
+        session.pgrps[0].start_time = 0;
+        let unproven = session.verified_groups();
+        child.kill().expect("kill private group leader");
+        child.wait().expect("reap private group leader");
+        assert_eq!(verified, vec![leader.pid]);
+        assert!(stale.is_empty() && unproven.is_empty());
+        assert!(session.verified_groups().is_empty());
+    }
+
+    #[test]
+    fn legacy_group_records_remain_readable_without_signal_authority() {
+        let record = Session::from_json(r#"{"name":"legacy","pgrps":["555"]}"#).unwrap();
+        assert_eq!(
+            record.pgrps,
+            vec![ProcRef {
+                pid: 555,
+                start_time: 0
+            }]
+        );
+        assert!(record.verified_groups().is_empty());
     }
 
     #[test]
@@ -1401,7 +1465,16 @@ mod tests {
             },
             state: SessionState::Running,
             exit_reason: "reason with \"quotes\" and, a comma".into(),
-            pgrps: vec![555, 666],
+            pgrps: vec![
+                ProcRef {
+                    pid: 555,
+                    start_time: 123,
+                },
+                ProcRef {
+                    pid: 666,
+                    start_time: 456,
+                },
+            ],
         };
         let back = Session::from_json(&s.to_json()).expect("round trip");
         assert_eq!(back, s);

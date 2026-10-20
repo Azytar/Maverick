@@ -536,7 +536,13 @@ pub fn exec(c: &Ctl, args: &[String]) -> Result<(), String> {
     // hazard the surrounding comment describes.
     let pgid =
         pgid_of_started_child(pid, &call.session, proc::read(pid)).map_err(|e| e.to_string())?;
-    register_pgrp(&call.session, pgid)?;
+    let leader = session::ProcRef::of(pid);
+    if pgid != pid || leader.start_time == 0 {
+        return Err(format!(
+            "started {pid}, but its process-group identity could not be registered"
+        ));
+    }
+    register_pgrp(&call.session, leader)?;
     if c.json {
         println!(
             "{{\"session\":{},\"pid\":{pid}}}",
@@ -592,17 +598,14 @@ pub fn pgid_of_started_child(
 /// [`session::write`], and the write is verified: a group that is not recorded
 /// is a program the session cannot see, and an `exec` that reports a pid while
 /// the process is invisible to `process list` is worse than one that fails.
-fn register_pgrp(name: &str, pgid: u32) -> Result<(), String> {
-    if pgid == 0 {
-        return Ok(());
-    }
+fn register_pgrp(name: &str, leader: session::ProcRef) -> Result<(), String> {
     // No `SessionName::parse` here: it would validate the name a second time and
     // the result would be unused, because `live_record` is what actually reads
     // the record and it parses the same name through the same rule. So the
     // validation is not discarded — it is performed once, where it is needed.
     let mut record = live_record(name).ok_or_else(|| format!("session '{name}' is gone"))?;
-    if !record.pgrps.contains(&pgid) {
-        record.pgrps.push(pgid);
+    if !record.pgrps.contains(&leader) {
+        record.pgrps.push(leader);
         session::write(&record).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -948,7 +951,7 @@ fn owned_pids(record: &Session, table: &proc::ProcTable) -> std::collections::Ha
     let roots = record.owned_roots();
     let mut pids = table.closure(&roots);
     if !roots.is_empty() {
-        pids.extend(table.in_groups(&record.pgrps));
+        pids.extend(table.in_groups(&record.verified_groups()));
     }
     pids
 }
