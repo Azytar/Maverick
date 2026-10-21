@@ -210,3 +210,39 @@ Do not report a vulnerability through a public issue, a pull request, or
 
 Maverick is licensed under the GNU General Public License, version 3; see
 [LICENSE](LICENSE). Contributions are accepted under the same terms.
+
+### C probe contracts and negative controls
+
+`python3 tests/c-probe-campaign.py --wm target/release/maverick` runs the owned
+Xvfb probes, ASan/UBSan property checks and deliberate faulty probes. A negative
+control passes only when its named check fails (or its expected runtime sanitizer
+report appears); a compile/startup failure does not count as detecting a mutant.
+Add `--extended` for 1024 unmap/remap cycles. `--evidence DIR` retains the per-case
+commands, binary/source hashes, transcripts, process exit statuses and timing.
+
+`python3 tests/probe-contracts.py` needs a C compiler and Xlib headers, but no
+DISPLAY. It checks malformed result streams, argument bounds and decoder errors.
+Both C probes support `--describe` without opening X11; the harness requires every
+inventoried check exactly once, in order, with JSON booleans and a final completion
+marker. Nonzero exit status still fails even if every emitted check says true.
+
+To run only the fullscreen probe's server property checks:
+
+```bash
+python3 tests/xvfb-wine-focus.py --wm target/release/maverick \
+  --probe tests/fullscreen-lifecycle-probe.c --complete fullscreen-lifecycle \
+  --case properties --sanitize
+```
+
+The other cases are `lifecycle` and `publication`. Existing
+`AUDIT_PUBLICATION_ROUNDS=128` invocations remain supported; empty, zero, negative,
+malformed or greater-than-4096 counts fail before connecting to X11. A missing
+`_NET_WM_STATE` can describe a normal window, but a missing client list does not
+prove withdrawal: publication checks wait for a typed list. The idle regression
+uses property queries only, without injecting a client event or IPC barrier to
+wake the WM. Keep that constraint when extending the test.
+
+The tests distinguish selection, real X input focus, map state and geometry.
+Keyboard delivery and XInput2 capture are still tested by `xvfb-input.py`; a focus
+query alone does not prove that the destination receives keys. No test here
+establishes Wine's internal focus or the behavior of a real game.

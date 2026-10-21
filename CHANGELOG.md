@@ -52,6 +52,10 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- X11 C probes reject empty stress runs and incomplete or malformed result
+  streams. Fullscreen lifecycle checks also verify real focus and remap
+  visibility; isolated property tests, sanitizers and deliberate faulty probes
+  check that the test harness detects failures and reaps its own processes.
 - The control accept thread waits for socket readiness instead of checking
   every 50 ms. Short `maverickctl` requests no longer inherit that polling delay,
   and shutdown wakes an idle accept wait explicitly. Handler limits, peer

@@ -129,11 +129,15 @@ jobs:
           python3 tests/xvfb-input.py --case child
           python3 tests/xvfb-input.py --case capture
           python3 tests/xvfb-input.py --case capture --exclusive
-          python3 tests/xvfb-wine-focus.py --wm target/release/maverick
-      - name: Fullscreen lifecycle and idle event queue regression
-        run: |
-          python3 tests/xvfb-wine-focus.py --wm target/release/maverick --probe tests/fullscreen-lifecycle-probe.c --complete fullscreen-lifecycle
-          AUDIT_PUBLICATION_ROUNDS=128 python3 tests/xvfb-wine-focus.py --wm target/release/maverick --probe tests/fullscreen-lifecycle-probe.c --complete fullscreen-lifecycle --honor-initial-state
+      - name: C probe contracts, sanitizers and negative controls
+        run: python3 tests/c-probe-campaign.py --wm target/release/maverick --evidence /tmp/maverick-c-probes
+      - name: Preserve C probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-probe-evidence
+          path: /tmp/maverick-c-probes
+          if-no-files-found: ignore
       - name: Overview rig isolation
         run: python3 tests/overview-isolation.py
       - name: Overview client geometry and image regression

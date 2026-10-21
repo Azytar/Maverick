@@ -21,7 +21,16 @@
 
 static int flap_to_game = 0;
 
-int main(void) {
+int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "--describe") == 0) {
+    puts("[\"game-gets-focus-on-map\",\"or-capture-keeps-focus\","
+         "\"no-focus-flap-to-game\",\"no-take-focus-while-captured\","
+         "\"focus-returns-to-game\",\"globally-active-take-focus-offered\","
+         "\"globally-active-valid-timestamp\",\"globally-active-x-focus-on-root\","
+         "\"globally-active-self-taken-focus-sticks\"]");
+    return 0;
+  }
+  if (argc != 1) { fputs("unknown option\n", stderr); return 2; }
   Display *d = XOpenDisplay(NULL);
   if (!d) { printf("RESULT {\"name\": \"open\", \"passed\": false, \"detail\": \"no display\"}\n"); return 2; }
   int s = DefaultScreen(d);
