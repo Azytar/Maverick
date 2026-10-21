@@ -52,6 +52,11 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- The stacking regression gives Xvfb its own bounded startup deadline, handles
+  partial readiness records and early exits, and preserves the original failure
+  when diagnostic tools cannot run. Startup failures never query an inherited
+  or unclaimed display.
+
 - Input eligibility regressions now use a native Xlib client instead of manual
   ctypes structure serialization, check real focus throughout each observation
   interval, and cover a missing InputHint flag. Invalid query-tree JSON now fails

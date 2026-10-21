@@ -95,6 +95,8 @@ jobs:
         # There is no `default` feature and no compositor to leave out, so this
         # is one command with no feature flags — not "the only build there is".
         run: cargo build --release -p maverick -p maverickctl --locked
+      - name: Stacking startup contracts
+        run: python3 tests/stacking-startup.py
       - name: Xvfb stacking regression
         run: python3 tests/xvfb-stacking.py
       - name: Shell harness isolation

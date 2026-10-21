@@ -45,14 +45,63 @@ def line(pipe):
     return result
 
 
+def wait_display(server, timeout=30):
+    """Read only Xvfb's readiness line, with a deadline for the entire record.
+
+    A first server on a cold CI runner can exceed the probe's five-second
+    response budget. Partial output must not turn readline into an unbounded
+    wait, and an exited server must not be mistaken for a slow startup.
+    """
+    deadline = time.monotonic() + timeout
+    record = b""
+    while True:
+        status = server.poll()
+        if status is not None:
+            raise RuntimeError(f"Xvfb exited before readiness (status {status})")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"Xvfb did not report a display within {timeout:g}s")
+        if not select.select([server.stdout], [], [], min(remaining, 0.1))[0]:
+            continue
+        data = os.read(server.stdout.fileno(), 64)
+        if not data:
+            raise RuntimeError("Xvfb closed its readiness pipe before reporting a display")
+        record += data
+        if len(record) > 32:
+            raise RuntimeError("Xvfb reported an oversized display record")
+        if b"\n" in record:
+            number, _, tail = record.partition(b"\n")
+            if not number.isdigit() or tail:
+                raise RuntimeError(f"Xvfb reported an invalid display record: {record!r}")
+            return ":" + number.decode("ascii")
+
+
+def failure_diagnostics(log, env, display):
+    # Print startup stderr before optional X queries; diagnostics must preserve
+    # the original exception and must never query an inherited desktop display.
+    log.flush()
+    log.seek(0)
+    print(log.read(), flush=True)
+    if display is None:
+        return
+    try:
+        result = subprocess.run(["xwininfo", "-root", "-tree"], env=env, timeout=5,
+                                capture_output=True, text=True)
+        print(result.stdout, end="", flush=True)
+        print(result.stderr, end="", flush=True)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"xwininfo diagnostics unavailable: {exc}", flush=True)
+
+
 def main():
     require_wm_binary()
     processes = []
+    display = None
     with tempfile.TemporaryDirectory(prefix="mst-", dir="/tmp") as tmp:
         tmp = Path(tmp)
         env = os.environ.copy()
         for key in list(env):
-            if key.startswith("MAVERICK_"):
+            if key.startswith("MAVERICK_") or key in ("DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY"):
                 del env[key]
         for key in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "HOME"):
             path = tmp / key
@@ -91,9 +140,10 @@ action = "view:3"
             try:
                 server = subprocess.Popen(["Xvfb", "-displayfd", "1", "-screen", "0", "800x600x24",
                                            "-nolisten", "tcp"], stdout=subprocess.PIPE,
-                                          stderr=log, text=True)
+                                          stderr=log, env=env)
                 processes.append(server)
-                env["DISPLAY"] = ":" + line(server.stdout)
+                display = env["DISPLAY"] = wait_display(server)
+                print(f"Xvfb ready on {display}", flush=True)
                 wm = subprocess.Popen([str(WM_BIN), "--config", str(config)],
                                       env=env, stdout=log, stderr=log)
                 processes.append(wm)
@@ -323,10 +373,7 @@ action = "view:3"
                         process.stdin.flush()
                         process.wait(timeout=3)
             except Exception:
-                subprocess.run(["xwininfo", "-root", "-tree"], env=env, timeout=5)
-                log.flush()
-                log.seek(0)
-                print(log.read())
+                failure_diagnostics(log, env, display)
                 raise
             finally:
                 for process in reversed(processes):
