@@ -246,3 +246,26 @@ The tests distinguish selection, real X input focus, map state and geometry.
 Keyboard delivery and XInput2 capture are still tested by `xvfb-input.py`; a focus
 query alone does not prove that the destination receives keys. No test here
 establishes Wine's internal focus or the behavior of a real game.
+
+The input-eligibility regression keeps its process ownership and WM IPC checks in
+Python, with one persistent native Xlib client for hints and focus queries:
+
+```bash
+python3 tests/input-hint-contracts.py
+python3 tests/xvfb-input-hint.py --wm target/release/maverick --ctl target/release/maverickctl --sanitize
+```
+
+The first command owns an Xvfb without a WM and checks property round trips,
+malformed commands, destroyed windows and wrong property types. The second
+requires both binaries and samples published and real focus every 20ms for
+600ms per check, including refusal, property changes, flagless hints, remap and
+destruction. Positive transitions have a bounded convergence wait. A command
+acknowledgement fences only the client's requests to X11; it does not mean that
+the WM has processed them. Logs remain in the printed `EVIDENCE` directory.
+
+Keep JSON parsing, installer tests and process orchestration in Python unless a
+measurement justifies migration. Existing keyboard, cursor, stacking and input
+rigs already delegate their X11 operations to C. Do not shorten stability windows
+just to reduce their runtimes. See [the measured migration](docs/audits/python-c-tests.md).
+`probe-contracts.py` also verifies that `tree_lines.py` distinguishes a valid empty
+tree from invalid JSON and emits no partial rows for a malformed window.

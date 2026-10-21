@@ -124,6 +124,8 @@ jobs:
           python3 tests/xvfb-cursor-theme.py
       - name: X11 focus and input regressions
         run: |
+          python3 tests/input-hint-contracts.py
+          python3 tests/xvfb-input-hint.py --wm target/release/maverick --ctl target/release/maverickctl --sanitize
           python3 tests/xvfb-input.py --case protocol
           python3 tests/xvfb-input.py --case ownership
           python3 tests/xvfb-input.py --case child

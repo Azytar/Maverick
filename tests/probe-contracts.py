@@ -61,6 +61,38 @@ class ResultContract(unittest.TestCase):
                 harness.inventory(json.dumps(value))
 
 
+class TreeLinesContract(unittest.TestCase):
+    def run_tree(self, text):
+        return subprocess.run(["python3", str(ROOT / "tests/tree_lines.py")],
+                              input=text, capture_output=True, text=True, timeout=5)
+
+    def test_empty_tree_is_valid(self):
+        result = self.run_tree('{"monitors":[]}')
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
+    def test_broken_input_cannot_claim_an_empty_tree(self):
+        for text in ("", "{", "null", "[]", "{}", '{"monitors":{}}'):
+            with self.subTest(text=text):
+                result = self.run_tree(text)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("invalid query tree", result.stderr)
+
+    def test_tiled_and_floating_windows_keep_the_wire_format(self):
+        window = {"id": 42, "monitor": 2, "fullscreen": True,
+                  "geom": [1, 2, 640, 480], "title": "title with spaces"}
+        doc = {"monitors": [{"workspaces": [{"columns": [{"windows": [window]}],
+                                            "floats": [{"id": 43}]}]}]}
+        result = self.run_tree(json.dumps(doc))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "42 2 1 0 1 2 640 480 title with spaces\n43 -1 0 0 0 0 0 0 \n")
+        doc["monitors"][0]["workspaces"][0]["floats"].append({"title": "missing id"})
+        result = self.run_tree(json.dumps(doc))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
+
 class CContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

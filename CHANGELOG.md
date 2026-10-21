@@ -52,6 +52,11 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Input eligibility regressions now use a native Xlib client instead of manual
+  ctypes structure serialization, check real focus throughout each observation
+  interval, and cover a missing InputHint flag. Invalid query-tree JSON now fails
+  the shell test helper instead of appearing to be an empty desktop.
+
 - X11 C probes reject empty stress runs and incomplete or malformed result
   streams. Fullscreen lifecycle checks also verify real focus and remap
   visibility; isolated property tests, sanitizers and deliberate faulty probes

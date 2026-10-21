@@ -24,13 +24,22 @@ def walk(d):
 def main():
     try:
         d = json.load(sys.stdin)
-    except Exception:
-        return 0
-    for w in walk(d):
-        g = w.get('geom', [0, 0, 0, 0])
-        print(w['id'], w.get('monitor', -1),
-              int(bool(w.get('fullscreen'))), int(bool(w.get('maximized'))),
-              g[0], g[1], g[2], g[3], w.get('title', ''))
+        if not isinstance(d, dict) or not isinstance(d.get('monitors'), list):
+            raise ValueError("expected an object containing a monitors array")
+        rows = []
+        for w in walk(d):
+            g = w.get('geom', [0, 0, 0, 0])
+            rows.append(' '.join(map(str, (
+                w['id'], w.get('monitor', -1),
+                int(bool(w.get('fullscreen'))), int(bool(w.get('maximized'))),
+                g[0], g[1], g[2], g[3], w.get('title', '')))))
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+        print(f"tree_lines: invalid query tree: {exc}", file=sys.stderr)
+        return 1
+    # Validate the complete input before emitting rows: a broken tail must not
+    # look like a valid subset of windows to a shell consumer.
+    for row in rows:
+        print(row)
     return 0
 
 
