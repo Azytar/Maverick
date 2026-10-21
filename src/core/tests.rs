@@ -4028,6 +4028,48 @@ mod unit_tests {
         }
     }
 
+    // These are model properties; server focus, visibility and keyboard delivery
+    // are checked separately by the isolated C/Python probes.
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(128))]
+        #[test]
+        fn forensic_passive_sequences_preserve_fullscreen(
+            actions in proptest::collection::vec(0u8..6, 1..160)
+        ) {
+            use crate::core::commands::{RestoreLayout, ToggleFullscreen, ViewWorkspace};
+            let mut engine = setup_engine();
+            t_add(&mut engine, 1);
+            t_add(&mut engine, 2);
+            t_focus(&mut engine, 1);
+            engine.execute(ToggleFullscreen(Some(1)));
+            let snapshot = engine.state.clients[&1].fs_snapshot;
+            for action in actions {
+                match action {
+                    0 => t_focus(&mut engine, 2),
+                    1 => t_focus(&mut engine, 1),
+                    2 => {
+                        engine.execute(ViewWorkspace(1));
+                        engine.execute(ViewWorkspace(0));
+                    }
+                    3 => { let _ = pipeline_desired(&engine, 0); }
+                    4 => { engine.execute(RestoreLayout(Some(0xdead))); }
+                    _ => {
+                        let screen = engine.state.monitors[0].screen;
+                        engine.state.monitors[0].screen = Rect::new(screen.x, screen.y, 1280, 720);
+                        let _ = pipeline_desired(&engine, 0);
+                    }
+                }
+                let client = &engine.state.clients[&1];
+                proptest::prop_assert!(client.is_fullscreen());
+                proptest::prop_assert_eq!(format!("{:?}", client.fs_snapshot), format!("{:?}", snapshot));
+                proptest::prop_assert!(engine.state.check_invariants().is_ok());
+            }
+            engine.execute(RestoreLayout(Some(1)));
+            proptest::prop_assert!(!engine.state.clients[&1].is_fullscreen());
+            proptest::prop_assert!(engine.execute(RestoreLayout(Some(1))).is_empty());
+        }
+    }
+
     #[test]
     fn fullscreen_retains_zero_border_when_the_client_clears_maximization() {
         use crate::core::commands::{apply_maximize, ToggleFullscreen};

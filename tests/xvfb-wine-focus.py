@@ -13,6 +13,7 @@ never touches a live session. Run after `cargo build -p maverick`:
 Exits non-zero if any check fails.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -37,14 +38,24 @@ def line(pipe):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--wm", type=Path, default=ROOT / "target/debug/maverick")
+    parser.add_argument("--wm-revision", help="explicit tested revision; hash is always recorded")
+    parser.add_argument("--probe", type=Path, default=ROOT / "tests/wine-focus-probe.c")
+    parser.add_argument("--complete", default="wine-focus")
+    parser.add_argument("--honor-initial-state", action="store_true")
+    parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--config-via-xdg", action="store_true", help="historical WMs without --config")
+    parser.add_argument("--no-trace", action="store_true", help="verify production behavior without trace recording")
+    parser.add_argument("--observer", action="store_true", help="probe also supports --observe; log external X11 snapshots")
     args = parser.parse_args()
+    started = time.monotonic()
 
-    out = Path(tempfile.mkdtemp(prefix="wine-focus-", dir="/tmp"))
+    out = args.evidence or Path(tempfile.mkdtemp(prefix="wine-focus-", dir="/tmp"))
+    out.mkdir(parents=True, exist_ok=True)
     print(f"EVIDENCE {out}", flush=True)
     helper = out / "wine-focus-probe"
     subprocess.run(
         ["cc", "-Wall", "-Wextra", "-Werror",
-         str(ROOT / "tests/wine-focus-probe.c"),
+         str(args.probe.resolve()),
          "-o", str(helper), "-lX11"],
         check=True,
     )
@@ -59,20 +70,29 @@ def main():
         path = out / name
         path.mkdir(mode=0o700)
         env[name] = str(path)
-    env.update(MAVERICK_LOG="warn",
+    env.update(MAVERICK_TRACE="1", MAVERICK_TRACE_PATH=str(out / "wm.trace"),
+               MAVERICK_LOG="warn",
                DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(out / "no-bus"))
+    if args.no_trace:
+        env.pop("MAVERICK_TRACE", None)
+        env.pop("MAVERICK_TRACE_PATH", None)
     config = out / "config.toml"
     config.write_text(
         "[general]\n"
         "focus_mouse = false\n"
         "warp_cursor = false\n"
+        f"honor_initial_state = {str(args.honor_initial_state).lower()}\n"
         "[autostart]\n"
         'commands = [["/usr/bin/true"]]\n'
     )
+    if args.config_via_xdg:
+        installed = Path(env["XDG_CONFIG_HOME"]) / "maverick/config.toml"
+        installed.parent.mkdir()
+        installed.write_text(config.read_text())
     processes = []
     failures = []
     try:
-        with (out / "events.log").open("w") as events, (out / "wm.log").open("w") as logs:
+        with (out / "events.log").open("w") as events, (out / "wm.log").open("w") as logs, (out / "observer.log").open("w") as observation:
             server = subprocess.Popen(
                 ["Xvfb", "-displayfd", "1", "-screen", "0", "1280x800x24",
                  "-nolisten", "tcp", "-noreset"],
@@ -80,7 +100,7 @@ def main():
             processes.append(server)
             env["DISPLAY"] = ":" + line(server.stdout)
             wm = subprocess.Popen(
-                [str(args.wm.resolve()), "--config", str(config)],
+                [str(args.wm.resolve())] + ([] if args.config_via_xdg else ["--config", str(config)]),
                 env=env, stdout=logs, stderr=logs)
             processes.append(wm)
             deadline = time.monotonic() + 20
@@ -93,7 +113,10 @@ def main():
                 time.sleep(0.1)
             else:
                 raise RuntimeError("the WM never claimed the screen")
-            time.sleep(0.5)
+            if args.observer:
+                observer = subprocess.Popen([str(helper), "--observe", "60"], env=env,
+                                            stdout=observation, stderr=observation)
+                processes.append(observer)
             run = subprocess.run([str(helper)], env=env, capture_output=True,
                                  text=True, timeout=60)
             if wm.poll() is not None:
@@ -104,7 +127,9 @@ def main():
                 print(f"probe exited with status {run.returncode}",
                       file=sys.stderr, flush=True)
                 failures.append("probe-exit-status")
-            if "COMPLETE wine-focus" not in run.stdout.splitlines():
+            (out / "probe.stdout").write_text(run.stdout)
+            (out / "probe.stderr").write_text(run.stderr)
+            if f"COMPLETE {args.complete}" not in run.stdout.splitlines():
                 failures.append("probe-incomplete")
             for raw in run.stdout.splitlines():
                 if not raw.startswith("RESULT "):
@@ -127,6 +152,19 @@ def main():
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+        revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                                  capture_output=True, text=True).stdout.strip()
+        (out / "manifest.json").write_text(json.dumps({
+            "command": sys.argv, "harness_commit": revision, "wm_revision": args.wm_revision,
+            "wm": str(args.wm.resolve()),
+            "wm_sha256": hashlib.sha256(args.wm.read_bytes()).hexdigest(),
+            "probe_sha256": hashlib.sha256(args.probe.read_bytes()).hexdigest(),
+            "publication_rounds": env.get("AUDIT_PUBLICATION_ROUNDS"),
+            "publication_only": env.get("AUDIT_PUBLICATION_ONLY"),
+            "trace_enabled": not args.no_trace,
+            "duration_seconds": time.monotonic() - started,
+            "failures": failures, "exception": str(sys.exc_info()[1]) if sys.exc_info()[1] else None,
+        }, indent=2) + "\n")
     print(json.dumps({"failures": failures}), flush=True)
     return 1 if failures else 0
 

@@ -391,6 +391,25 @@ impl WindowManager {
             trace::input(&ev);
         }
         let _dispatch_trace = trace::Span::new("event_dispatch");
+        let forensic = if trace::enabled() {
+            match &ev {
+                Event::ClientMessage(e) => Some((e.window, "CLIENT_EWMH_REQUEST")),
+                Event::ConfigureRequest(e) => Some((e.window, "CLIENT_CONFIGURE_REQUEST")),
+                Event::ConfigureNotify(e) => Some((e.window, "OTHER")),
+                Event::FocusIn(e) => Some((e.event, "FOCUS_RECONCILIATION")),
+                Event::FocusOut(e) => Some((e.event, "FOCUS_RECONCILIATION")),
+                Event::MapRequest(e) => Some((e.window, "OTHER")),
+                Event::UnmapNotify(e) => Some((e.window, "CLIENT_UNMAP")),
+                Event::DestroyNotify(e) => Some((e.window, "CLIENT_DESTROY")),
+                Event::PropertyNotify(e) => Some((e.window, "OTHER")),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some((win, origin)) = forensic {
+            self.forensic_state(win, "before_dispatch", origin);
+        }
         match ev {
             Event::ButtonPress(e)
                 if e.detail >= 4 && self.overviews.values().any(|o| o.window == e.event) =>
@@ -510,7 +529,40 @@ impl WindowManager {
             Event::Error(e) => log::debug!("X error: {e:?}"),
             _ => {}
         }
+        if let Some((win, origin)) = forensic {
+            self.forensic_state(win, "after_dispatch", origin);
+        }
         Ok(())
+    }
+
+    /// Observations of cached state only: never add a synchronous X11 query.
+    /// Applied geometry is a request cache, not proof the server accepted it.
+    fn forensic_state(&self, win: Window, phase: &str, origin: &str) {
+        if !trace::enabled() {
+            return;
+        }
+        let logical = self
+            .engine
+            .state
+            .monitors
+            .get(self.engine.state.sel_mon)
+            .and_then(|mon| mon.focused);
+        let known = self.engine.state.x11_input_focus;
+        trace!("forensic_focus", "phase={phase} origin={origin} win={win:#x} logical={logical:?} real_managed_known={known:?}");
+        if let Some(c) = self.engine.state.clients.get(&win) {
+            trace!("forensic_client", "phase={phase} win={win:#x} managed=true mon={} view={:?} fs={} policy={:?} hidden={} geom={:?}",
+                c.monitor, c.workspace, c.is_fullscreen(), c.fullscreen_policy, c.wm_hidden, c.geom);
+        } else {
+            trace!(
+                "forensic_client",
+                "phase={phase} win={win:#x} managed=false"
+            );
+        }
+        trace!(
+            "forensic_applied",
+            "phase={phase} win={win:#x} applied={:?}",
+            self.applied.windows.get(&win)
+        );
     }
     /// Arm the debounced keyboard refresh. All three change notifications
     /// (core `MappingNotify`, XKB `MapNotify`, XKB `NewKeyboardNotify`) funnel
@@ -735,8 +787,12 @@ impl WindowManager {
         // it until a pass runs.
         self.flush_pending()?;
 
-        // Drained events can enqueue requests whose replies are the next wakeup.
-        // Send them before waiting, including the timestamp for a focus offer.
+        // The pre-wait drain can manage/unmanage clients or restack windows.
+        // Publish that work before sleeping: property reads by another client
+        // do not wake this connection, so deferring it to the next turn can
+        // leave EWMH membership/stacking stale indefinitely on an idle server.
+        self.flush_client_list()?;
+        // Send all requests before waiting, including focus timestamps.
         self.conn.flush()?;
 
         // Block on X11 plus the control self-pipe. There is no frame deadline:
@@ -744,7 +800,19 @@ impl WindowManager {
         // loop owns lives in `wait_timeout` — never sleep past a pending
         // keyboard refresh or the shutdown deadline.
         let fd = self.conn.as_raw_fd();
-        let timeout = wait_timeout(self.kbd_refresh_due, self.shutdown_deadline);
+        // Reply reads during reconciliation/publication can move events from
+        // the socket into x11rb's queue. FD readiness no longer sees those.
+        // Consume one without sleeping and let the normal turn finish (including
+        // control commands); the next turn drains the remaining queued events.
+        let buffered = self.conn.poll_for_event()?;
+        let timeout = if buffered.is_some() {
+            Some(std::time::Duration::ZERO)
+        } else {
+            wait_timeout(self.kbd_refresh_due, self.shutdown_deadline)
+        };
+        if let Some(event) = buffered {
+            self.dispatch(event)?;
+        }
 
         if timeout != Some(std::time::Duration::ZERO) {
             let wait_trace = trace::Span::new("wait");

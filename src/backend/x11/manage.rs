@@ -677,6 +677,15 @@ impl WindowManager {
         win: Window,
         destroyed: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.forensic_state(
+            win,
+            "unmanage_enter",
+            if destroyed {
+                "CLIENT_DESTROY"
+            } else {
+                "CLIENT_UNMAP"
+            },
+        );
         // A double Unmap+Destroy is routine; a second pass finds nothing to
         // remove and returns here.
         let client = match self.engine.state.remove_client(win) {
@@ -1276,6 +1285,8 @@ impl WindowManager {
         win: Window,
         fs: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.forensic_state(win, "set_fullscreen", "OTHER");
+        super::trace::trace!("fullscreen_effect", "win={win:#x} on={fs}");
         // All logical state — the `FULLSCREEN` flag, border width, `fs_snapshot`
         // and the scroll `camera` — is owned by the `ToggleFullscreen` Command,
         // so this handler must not mutate `State` at all. The Command has already

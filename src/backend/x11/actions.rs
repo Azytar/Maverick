@@ -62,10 +62,36 @@ impl WindowManager {
         }
         let _action_trace = super::trace::Span::new("action");
         super::trace::trace!("action_input", "action={action:?}");
+        let traced = if super::trace::enabled() {
+            let win = match &action {
+                Action::ToggleFullscreenWindow(win) | Action::FocusWindow(win) => Some(*win),
+                _ => self
+                    .engine
+                    .state
+                    .monitors
+                    .get(self.engine.state.sel_mon)
+                    .and_then(|m| m.focused),
+            };
+            let origin = match &action {
+                Action::View(_) | Action::ViewNext | Action::ViewPrev | Action::ViewReturn => {
+                    "VIEW_CHANGE"
+                }
+                _ => "USER_ACTION",
+            };
+            win.map(|win| (win, origin))
+        } else {
+            None
+        };
+        if let Some((win, origin)) = traced {
+            self.forensic_state(win, "before_action", origin);
+        }
         let state_trace = super::trace::Span::new("state_action");
         let effects = self.engine.dispatch(action);
         drop(state_trace);
         self.run_effects(effects)?;
+        if let Some((win, origin)) = traced {
+            self.forensic_state(win, "after_action", origin);
+        }
         Ok(())
     }
 
@@ -84,6 +110,7 @@ impl WindowManager {
     /// A future Wayland backend would provide a different `execute` for the same
     /// effects without the core changing.
     pub(super) fn execute(&mut self, eff: Effect) -> Result<(), Box<dyn std::error::Error>> {
+        super::trace::trace!("effect", "command={eff:?}");
         match eff {
             Effect::ArrangeMonitor(mi) => self.pending.mark(mi, None),
             Effect::MarkRestack(_mi) => {

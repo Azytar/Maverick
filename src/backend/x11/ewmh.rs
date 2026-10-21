@@ -234,8 +234,8 @@ impl WindowManager {
     }
 
     /// Drain the deferred `_NET_CLIENT_LIST` update. Set on manage/unmanage and
-    /// flushed once per event-loop iteration (in `run_once`) so a burst of
-    /// window changes rewrites the property at most once.
+    /// flushed at settled boundaries in `run_once`, before it can wait.
+    /// A call with no dirty state emits no requests.
     pub(super) fn flush_client_list(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.client_list_dirty {
             self.client_list_dirty = false;

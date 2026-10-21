@@ -350,6 +350,45 @@ pub(super) fn input(event: &x11rb::protocol::Event) {
         Event::MotionNotify(e) => ("motion", e.time, e.event, 0, u16::from(e.state)),
         Event::EnterNotify(e) => ("enter", e.time, e.event, 0, u16::from(e.state)),
         Event::LeaveNotify(e) => ("leave", e.time, e.event, 0, u16::from(e.state)),
+        Event::ClientMessage(e) => {
+            record(
+                "client_message",
+                format_args!(
+                    "win={:#x} type={} format={} data={:?} sequence={} synthetic={}",
+                    e.window,
+                    e.type_,
+                    e.format,
+                    e.data.as_data32(),
+                    e.sequence,
+                    e.response_type & 0x80 != 0
+                ),
+            );
+            return;
+        }
+        Event::UnmapNotify(e) => {
+            record(
+                "unmap_receipt",
+                format_args!(
+                    "win={:#x} event={:#x} from_configure={} sequence={} synthetic={}",
+                    e.window,
+                    e.event,
+                    e.from_configure,
+                    e.sequence,
+                    e.response_type & 0x80 != 0
+                ),
+            );
+            return;
+        }
+        Event::DestroyNotify(e) => {
+            record(
+                "destroy_receipt",
+                format_args!(
+                    "win={:#x} event={:#x} sequence={}",
+                    e.window, e.event, e.sequence
+                ),
+            );
+            return;
+        }
         Event::FocusIn(e) => {
             record(
                 "focus_receipt",

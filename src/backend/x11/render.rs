@@ -1443,6 +1443,7 @@ impl WindowManager {
             },
             Err(_) => self.engine.state.x11_input_focus,
         };
+        trace!("focus_probe", "raw_real={probed:?}");
         self.settle_focus(probed)
     }
 
