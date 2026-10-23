@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "renderer_sha256": "8a18012318b4dd52fa16b402ed788f30fe5e23f913f3ffc3659b6cb721f29a04",
+  "manifest_sha256": "890f3a25d8d2bf7e45d66dc4e27378fa311897aa2cf05f6f13ad25c670cf8c09",
+  "raw_sha256": "7af70c2d820528975f1104a40625b210d8c7659b895e9a9d05b78248779a07e8",
+  "outputs": {
+    "comparison.png": "be6c915097ee4aadd99fbd0dac666334e52d0d6b76a1aa09f457fc6319629b6b",
+    "comparison.svg": "61bf418014fa9c4b0aa6d660b60400fde3976f99f4ad18f4c5cb4348bb817700",
+    "comparison.pdf": "e812798351572869f26f8731a0cdda6644f979f61464b279eb424e6eace3a420"
+  },
+  "timezone": "America/Lima",
+  "notes": "Display labels and local date corrected after measurement; original sources retained in source-at-measurement."
+}

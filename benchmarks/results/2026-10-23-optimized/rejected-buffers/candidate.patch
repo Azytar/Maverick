@@ -1,0 +1,431 @@
+diff --git a/src/backend/x11/manage.rs b/src/backend/x11/manage.rs
+index 74dce05..f215bdf 100644
+--- a/src/backend/x11/manage.rs
++++ b/src/backend/x11/manage.rs
+@@ -8,10 +8,9 @@
+ //!
+ //! # Manage pipeline (pipelined property read)
+ //!
+-//! All 8 `get_property` cookies are pipelined before any
+-//! `.reply()` is called — one RTT for all properties,
+-//! not 8. The properties are: title, class, instance,
+-//! window type, state, hints, size hints.
++//! Geometry and property requests are pipelined before any
++//! `.reply()` is called. This includes transient ownership along with title,
++//! class, window type, state, PID, hints and size hints.
+ //!
+ //! # Transient deferral
+ //!
+@@ -125,20 +124,6 @@ impl WindowManager {
+             return Ok(());
+         }
+ 
+-        let geom_r = match self.conn.get_geometry(win)?.reply() {
+-            Ok(g) => g,
+-            Err(e) => {
+-                log::warn!("Failed to get geometry for window {}: {}", win, e);
+-                return Ok(());
+-            }
+-        };
+-        let geom = Rect::new(
+-            geom_r.x as i32,
+-            geom_r.y as i32,
+-            geom_r.width as u32,
+-            geom_r.height as u32,
+-        );
+-
+         let mon_idx = self.engine.state.sel_mon;
+         // A new window joins the selected monitor's *current* View, resolved to its
+         // identity so the placement below is keyed on the same `ViewId` the client
+@@ -146,15 +131,23 @@ impl WindowManager {
+         let view = self.engine.state.monitors[mon_idx].ws().id;
+ 
+         let mut client = Client::new(win, mon_idx, view);
+-        client.geom = geom;
+-        client.saved_geom = geom;
+         client.border_w = self.engine.cfg.border_w;
+ 
+         let mut unmanaged = false;
++        let transient_reply;
+ 
+         // Pipeline all property reads — fire all requests before any reply.
+         // Scoped so Cookies (which borrow self.conn) are dropped before &mut self calls below.
+         {
++            let c_geometry = self.conn.get_geometry(win)?;
++            let c_transient = self.conn.get_property(
++                false,
++                win,
++                AtomEnum::WM_TRANSIENT_FOR,
++                AtomEnum::WINDOW,
++                0,
++                1,
++            )?;
+             let c_title_net = self.conn.get_property(
+                 false,
+                 win,
+@@ -214,6 +207,24 @@ impl WindowManager {
+                 18,
+             )?;
+ 
++            let geom_r = match c_geometry.reply() {
++                Ok(g) => g,
++                Err(e) => {
++                    log::warn!("Failed to get geometry for window {}: {}", win, e);
++                    return Ok(());
++                }
++            };
++            client.geom = Rect::new(
++                geom_r.x as i32,
++                geom_r.y as i32,
++                geom_r.width as u32,
++                geom_r.height as u32,
++            );
++            client.saved_geom = client.geom;
++            // Keep the error until after the unmanaged-window branch, which
++            // never required a transient property in the first place.
++            transient_reply = c_transient.reply();
++
+             if let Ok(ref prop) = c_title_net.reply() {
+                 if !prop.value.is_empty() {
+                     client.name = String::from_utf8_lossy(&prop.value).into_owned();
+@@ -347,7 +358,11 @@ impl WindowManager {
+         // hidden coordinates if a workspace switch is racing this manage() call
+         // (see hide_offscreen() in render.rs).
+         let mut transient_parent_geom: Option<Rect> = None;
+-        if let Some(parent) = self.transient_for(win)? {
++        if let Some(parent) = transient_reply?
++            .value32()
++            .and_then(|mut values| values.next())
++            .filter(|&parent| parent != 0 && parent != self.root)
++        {
+             // Always record the intended parent, even if it isn't managed yet —
+             // a popup (KakaoTalk / Telegram / file pickers) can map *before* its
+             // owner. We relink the child once the parent appears
+@@ -1083,27 +1098,6 @@ impl WindowManager {
+         }
+     }
+ 
+-    pub(super) fn transient_for(
+-        &self,
+-        win: Window,
+-    ) -> Result<Option<Window>, Box<dyn std::error::Error>> {
+-        let prop = self
+-            .conn
+-            .get_property(
+-                false,
+-                win,
+-                AtomEnum::WM_TRANSIENT_FOR,
+-                AtomEnum::WINDOW,
+-                0,
+-                1,
+-            )?
+-            .reply()?;
+-        Ok(prop
+-            .value32()
+-            .and_then(|mut v| v.next())
+-            .filter(|&w| w != 0 && w != self.root))
+-    }
+-
+     /// Re-home every deferred transient whose `WM_TRANSIENT_FOR` parent is now
+     /// managed. Called at the end of `manage` (so managing the parent triggers
+     /// it) and is idempotent across calls. Each relinked child inherits the
+diff --git a/src/backend/x11/mod.rs b/src/backend/x11/mod.rs
+index 9b4c520..2477662 100644
+--- a/src/backend/x11/mod.rs
++++ b/src/backend/x11/mod.rs
+@@ -240,6 +240,8 @@ pub struct WindowManager {
+     /// The `Reconciler` diffs this `Desired` against `AppliedState` to decide what
+     /// to write to X11. Reusable buffer — avoids allocation per `arrange()`.
+     desired: Placements,
++    desired_state: crate::core::desired::DesiredState,
++    reconcile_scratch: reconciler::ReconcileScratch,
+     /// Reusable scratch for the per-arrange column projection (`ribbon_geom`).
+     /// Without it every `arrange` would allocate the per-column table. Owned by
+     /// the WM and threaded through `arrange` → `Layout::arrange`.
+@@ -1084,6 +1086,8 @@ impl WindowManager {
+             hide_ws_set: std::collections::HashSet::with_capacity(32),
+             hide_mon_vec: Vec::with_capacity(64),
+             desired: Placements::with_capacity(32),
++            desired_state: crate::core::desired::DesiredState::default(),
++            reconcile_scratch: reconciler::ReconcileScratch::default(),
+             ribbon_scratch: RibbonScratch::default(),
+             last_key_times: std::collections::BTreeMap::new(),
+             control: None,
+diff --git a/src/backend/x11/reconciler.rs b/src/backend/x11/reconciler.rs
+index 1760411..8109e5b 100644
+--- a/src/backend/x11/reconciler.rs
++++ b/src/backend/x11/reconciler.rs
+@@ -182,17 +182,26 @@ pub enum GeometryEffect {
+     },
+ }
+ 
++/// Storage reused by successive monitors and layout passes. Clear the index on
++/// each pass: removed windows and duplicate placements must not leak into the next.
++#[derive(Default)]
++pub(super) struct ReconcileScratch {
++    last_index: std::collections::HashMap<WindowId, usize>,
++    pub effects: Vec<GeometryEffect>,
++}
++
+ /// Diff the explicit `Desired` against the recorded `Applied` and produce the X11 geometry
+ /// effects required to make X11 match Desired.
+ ///
+ /// Pure with respect to logical state: it reads `client.geometry_dirty` only as an input
+ /// flag and mutates ONLY `applied` (the last-X11-geometry record). It must never modify
+ /// `State` logical geometry, decide layout, or read X11 events.
+-pub fn reconcile(
++pub(super) fn reconcile_into(
+     desired: &DesiredState,
+     state: &State,
+     applied: &mut AppliedState,
+-) -> Vec<GeometryEffect> {
++    scratch: &mut ReconcileScratch,
++) {
+     // Coalesce before diffing. A window reachable from two placements is illegal
+     // — `check_invariants` #4 rejects it by name and no producer creates one —
+     // but the reconciler must still converge if it happens, because that check
+@@ -204,13 +213,17 @@ pub fn reconcile(
+     // is ordered back-to-front, so the *last* entry for a window is the one
+     // nearest the top of the stack, and last-write-wins is both the cheapest
+     // deterministic policy and the one that matches the stacking order.
+-    let mut last_index: std::collections::HashMap<WindowId, usize> =
+-        std::collections::HashMap::with_capacity(desired.windows.len());
++    let ReconcileScratch {
++        last_index,
++        effects: out,
++    } = scratch;
++    last_index.clear();
++    last_index.reserve(desired.windows.len());
++    out.clear();
+     for (i, dw) in desired.windows.iter().enumerate() {
+         last_index.insert(dw.window, i);
+     }
+ 
+-    let mut out = Vec::new();
+     for (i, dw) in desired.windows.iter().enumerate() {
+         if last_index[&dw.window] != i {
+             continue;
+@@ -234,7 +247,6 @@ pub fn reconcile(
+         out.len(),
+         applied.windows.len()
+     );
+-    out
+ }
+ 
+ /// Repair a window whose reported geometry contradicts the record.
+@@ -305,12 +317,90 @@ pub(crate) fn classify_configure(
+     }
+ }
+ 
++#[cfg(test)]
++pub fn reconcile(
++    desired: &DesiredState,
++    state: &State,
++    applied: &mut AppliedState,
++) -> Vec<GeometryEffect> {
++    let mut scratch = ReconcileScratch::default();
++    reconcile_into(desired, state, applied, &mut scratch);
++    scratch.effects
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+     use crate::core::desired::DesiredWindow;
+     use crate::types::{Client, ViewId, WinFlags};
+ 
++    // window-trace deliberately formats and allocates a log line per reconcile.
++    // Measure the shipped build; the traced build tests geometry separately.
++    #[cfg(not(feature = "window-trace"))]
++    #[test]
++    fn warmed_reconciliation_allocates_nothing_while_geometry_changes() {
++        use crate::core::framebench::CountAllocs;
++        for count in [1, 10, 50, 256] {
++            let state = State::new();
++            let mut placements: Vec<_> = (1..=count)
++                .map(|win| (win, Rect::new(0, 0, 640, 480), 2))
++                .collect();
++            let mut desired = DesiredState::default();
++            let mut applied = AppliedState::default();
++            let mut scratch = ReconcileScratch::default();
++            desired.update_from_placements(&placements);
++            reconcile_into(&desired, &state, &mut applied, &mut scratch);
++            let counter = CountAllocs::start();
++            for x in 1..=100 {
++                for (_, rect, _) in &mut placements {
++                    rect.x = x;
++                }
++                desired.update_from_placements(&placements);
++                reconcile_into(&desired, &state, &mut applied, &mut scratch);
++                assert_eq!(scratch.effects.len(), count as usize);
++            }
++            let allocations = counter.finish();
++            assert_eq!(allocations, 0, "population {count}");
++        }
++    }
++
++    #[test]
++    fn reused_buffers_forget_previous_monitors_and_keep_last_duplicate() {
++        let state = State::new();
++        let mut applied = AppliedState::default();
++        let mut scratch = ReconcileScratch::default();
++        let mut desired = DesiredState::default();
++        let a = Rect::new(1, 2, 640, 480);
++        let b = Rect::new(20, 30, 800, 600);
++        desired.update_from_placements(&[(1, a, 2), (2, a, 2), (1, b, 0)]);
++        reconcile_into(&desired, &state, &mut applied, &mut scratch);
++        let windows: Vec<_> = scratch
++            .effects
++            .iter()
++            .map(|e| match e {
++                GeometryEffect::Configure { win, .. } => *win,
++            })
++            .collect();
++        assert_eq!(windows, [2, 1]);
++        assert_eq!(applied.windows[&1].rect, b);
++        assert_eq!(applied.windows[&1].border_w, 0);
++        desired.update_from_placements(&[(1, a, 2)]);
++        reconcile_into(&desired, &state, &mut applied, &mut scratch);
++        assert_eq!(scratch.effects.len(), 1);
++        assert_eq!(applied.windows[&1].rect, a);
++        desired.update_from_placements(&[]);
++        reconcile_into(&desired, &state, &mut applied, &mut scratch);
++        assert!(scratch.effects.is_empty());
++        assert!(scratch.last_index.is_empty());
++        assert!(desired.windows.is_empty());
++        desired.update_from_placements(&[(1, a, 2)]);
++        reconcile_into(&desired, &state, &mut applied, &mut scratch);
++        assert!(
++            scratch.effects.is_empty(),
++            "identical geometry must stay a no-op"
++        );
++    }
++
+     #[test]
+     fn first_apply_always_emits() {
+         let mut s = AppliedState::default();
+diff --git a/src/backend/x11/render.rs b/src/backend/x11/render.rs
+index 2bd2fa3..010b21e 100644
+--- a/src/backend/x11/render.rs
++++ b/src/backend/x11/render.rs
+@@ -10,7 +10,7 @@
+ //! arrange_full
+ //!     → layout::arrange (Placements)
+ //!     → present::present_into (fullscreen/max rewrite)
+-//!     → DesiredState::from_placements
++//!     → DesiredState::update_from_placements
+ //!     → reconciler::reconcile (diff vs AppliedState)
+ //!     → emit_geometry (single X sink)
+ //!     → stack_overlay (focus order)
+@@ -69,9 +69,8 @@
+ //! the silent error handler).
+ 
+ use super::*;
+-use crate::backend::x11::reconciler::{reconcile, wire_geometry, GeometryEffect};
++use crate::backend::x11::reconciler::{reconcile_into, wire_geometry, GeometryEffect};
+ use crate::core::commands::retarget_focus_to_window;
+-use crate::core::desired::DesiredState;
+ use crate::core::layout::{clamp_float_geom, normalize_float_geom};
+ use crate::core::present::present_into;
+ use crate::types::StateExt;
+@@ -642,28 +641,35 @@ impl WindowManager {
+             &self.engine.state.monitors[mon_idx],
+             &mut self.desired,
+         );
+-        // Collect into a local so the immutable borrow of `desired`
+-        // ends before `apply_geom` mutates `self`.
+-        let desired = DesiredState::from_placements(&self.desired);
+-        let effects = reconcile(&desired, &self.engine.state, &mut self.applied);
++        // Retain snapshot/index/effect storage across passes. Taking only the
++        // effects releases the borrow before the geometry sink mutates self.
++        self.desired_state.update_from_placements(&self.desired);
++        reconcile_into(
++            &self.desired_state,
++            &self.engine.state,
++            &mut self.applied,
++            &mut self.reconcile_scratch,
++        );
++        let mut effects = std::mem::take(&mut self.reconcile_scratch.effects);
+         #[cfg(feature = "window-trace")]
+         let effect_count = effects.len();
+         // Observability only: mirror the per-window *desired* rect. Never read
+         // back for layout, focus or overlay decisions.
+-        for dw in &desired.windows {
++        for dw in &self.desired_state.windows {
+             if let Some(c) = self.engine.state.clients.get_mut(&dw.window) {
+                 c.last_desired = Some(dw.rect);
+             }
+         }
+-        for e in effects {
++        for e in effects.drain(..) {
+             let GeometryEffect::Configure { win, rect, border } = e;
+             self.emit_geometry(win, rect, border, true)?;
+         }
++        self.reconcile_scratch.effects = effects;
+         #[cfg(feature = "window-trace")]
+         wtrace!(
+             "arrange mon={} desired={} effects={} x11_focus={:?} sel_mon={}",
+             mon_idx,
+-            desired.windows.len(),
++            self.desired_state.windows.len(),
+             effect_count,
+             self.engine.state.x11_input_focus,
+             self.engine.state.sel_mon
+@@ -1754,6 +1760,8 @@ impl WindowManager {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use crate::backend::x11::reconciler::reconcile;
++    use crate::core::desired::DesiredState;
+     use crate::types::ViewId;
+ 
+     #[test]
+diff --git a/src/core/desired.rs b/src/core/desired.rs
+index e356414..0cad5af 100644
+--- a/src/core/desired.rs
++++ b/src/core/desired.rs
+@@ -9,7 +9,7 @@
+ //! against `AppliedState` (what X11 actually has) and emits only the
+ //! `ConfigureWindow` deltas. The backend owns `AppliedState` and applies them.
+ //!
+-//! Invariants: `from_placements` is the only path that builds the explicit
++//! Invariants: `update_from_placements` is the only production path that builds the explicit
+ //! form, so the pipeline stays greppable.
+ 
+ use crate::types::{Rect, WindowId};
+@@ -41,17 +41,24 @@ pub struct DesiredState {
+ }
+ 
+ impl DesiredState {
+-    /// Explicit conversion from the internal `Placements` tuple-vec.
+-    /// This is the ONLY place the tuple-vec becomes the explicit Desired representation.
++    /// Replace the snapshot while retaining storage across layout passes.
++    pub fn update_from_placements(&mut self, placements: &[(WindowId, Rect, u32)]) {
++        self.windows.clear();
++        self.windows.extend(
++            placements
++                .iter()
++                .map(|&(window, rect, border)| DesiredWindow {
++                    window,
++                    rect,
++                    border,
++                }),
++        );
++    }
++    /// Convenience constructor for tests of the same production conversion.
++    #[cfg(test)]
+     pub fn from_placements(placements: &[(WindowId, Rect, u32)]) -> DesiredState {
+-        let windows = placements
+-            .iter()
+-            .map(|&(w, r, b)| DesiredWindow {
+-                window: w,
+-                rect: r,
+-                border: b,
+-            })
+-            .collect();
+-        DesiredState { windows }
++        let mut desired = Self::default();
++        desired.update_from_placements(placements);
++        desired
+     }
+ }

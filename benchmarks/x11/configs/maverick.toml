@@ -1,0 +1,5 @@
+[general]
+focus_mouse = false
+warp_cursor = false
+[autostart]
+commands = []

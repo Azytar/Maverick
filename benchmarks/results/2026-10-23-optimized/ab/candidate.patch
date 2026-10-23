@@ -1,0 +1,131 @@
+diff --git a/src/backend/x11/manage.rs b/src/backend/x11/manage.rs
+index 74dce05..f215bdf 100644
+--- a/src/backend/x11/manage.rs
++++ b/src/backend/x11/manage.rs
+@@ -8,10 +8,9 @@
+ //!
+ //! # Manage pipeline (pipelined property read)
+ //!
+-//! All 8 `get_property` cookies are pipelined before any
+-//! `.reply()` is called — one RTT for all properties,
+-//! not 8. The properties are: title, class, instance,
+-//! window type, state, hints, size hints.
++//! Geometry and property requests are pipelined before any
++//! `.reply()` is called. This includes transient ownership along with title,
++//! class, window type, state, PID, hints and size hints.
+ //!
+ //! # Transient deferral
+ //!
+@@ -125,20 +124,6 @@ impl WindowManager {
+             return Ok(());
+         }
+ 
+-        let geom_r = match self.conn.get_geometry(win)?.reply() {
+-            Ok(g) => g,
+-            Err(e) => {
+-                log::warn!("Failed to get geometry for window {}: {}", win, e);
+-                return Ok(());
+-            }
+-        };
+-        let geom = Rect::new(
+-            geom_r.x as i32,
+-            geom_r.y as i32,
+-            geom_r.width as u32,
+-            geom_r.height as u32,
+-        );
+-
+         let mon_idx = self.engine.state.sel_mon;
+         // A new window joins the selected monitor's *current* View, resolved to its
+         // identity so the placement below is keyed on the same `ViewId` the client
+@@ -146,15 +131,23 @@ impl WindowManager {
+         let view = self.engine.state.monitors[mon_idx].ws().id;
+ 
+         let mut client = Client::new(win, mon_idx, view);
+-        client.geom = geom;
+-        client.saved_geom = geom;
+         client.border_w = self.engine.cfg.border_w;
+ 
+         let mut unmanaged = false;
++        let transient_reply;
+ 
+         // Pipeline all property reads — fire all requests before any reply.
+         // Scoped so Cookies (which borrow self.conn) are dropped before &mut self calls below.
+         {
++            let c_geometry = self.conn.get_geometry(win)?;
++            let c_transient = self.conn.get_property(
++                false,
++                win,
++                AtomEnum::WM_TRANSIENT_FOR,
++                AtomEnum::WINDOW,
++                0,
++                1,
++            )?;
+             let c_title_net = self.conn.get_property(
+                 false,
+                 win,
+@@ -214,6 +207,24 @@ impl WindowManager {
+                 18,
+             )?;
+ 
++            let geom_r = match c_geometry.reply() {
++                Ok(g) => g,
++                Err(e) => {
++                    log::warn!("Failed to get geometry for window {}: {}", win, e);
++                    return Ok(());
++                }
++            };
++            client.geom = Rect::new(
++                geom_r.x as i32,
++                geom_r.y as i32,
++                geom_r.width as u32,
++                geom_r.height as u32,
++            );
++            client.saved_geom = client.geom;
++            // Keep the error until after the unmanaged-window branch, which
++            // never required a transient property in the first place.
++            transient_reply = c_transient.reply();
++
+             if let Ok(ref prop) = c_title_net.reply() {
+                 if !prop.value.is_empty() {
+                     client.name = String::from_utf8_lossy(&prop.value).into_owned();
+@@ -347,7 +358,11 @@ impl WindowManager {
+         // hidden coordinates if a workspace switch is racing this manage() call
+         // (see hide_offscreen() in render.rs).
+         let mut transient_parent_geom: Option<Rect> = None;
+-        if let Some(parent) = self.transient_for(win)? {
++        if let Some(parent) = transient_reply?
++            .value32()
++            .and_then(|mut values| values.next())
++            .filter(|&parent| parent != 0 && parent != self.root)
++        {
+             // Always record the intended parent, even if it isn't managed yet —
+             // a popup (KakaoTalk / Telegram / file pickers) can map *before* its
+             // owner. We relink the child once the parent appears
+@@ -1083,27 +1098,6 @@ impl WindowManager {
+         }
+     }
+ 
+-    pub(super) fn transient_for(
+-        &self,
+-        win: Window,
+-    ) -> Result<Option<Window>, Box<dyn std::error::Error>> {
+-        let prop = self
+-            .conn
+-            .get_property(
+-                false,
+-                win,
+-                AtomEnum::WM_TRANSIENT_FOR,
+-                AtomEnum::WINDOW,
+-                0,
+-                1,
+-            )?
+-            .reply()?;
+-        Ok(prop
+-            .value32()
+-            .and_then(|mut v| v.next())
+-            .filter(|&w| w != 0 && w != self.root))
+-    }
+-
+     /// Re-home every deferred transient whose `WM_TRANSIENT_FOR` parent is now
+     /// managed. Called at the end of `manage` (so managing the parent triggers
+     /// it) and is idempotent across calls. Each relinked child inherits the

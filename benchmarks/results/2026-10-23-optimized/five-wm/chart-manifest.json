@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "renderer_sha256": "8a18012318b4dd52fa16b402ed788f30fe5e23f913f3ffc3659b6cb721f29a04",
+  "manifest_sha256": "bae5a97a85e448c7b555a3deac8dab7792831634af5a40e2c83d29943bcaf508",
+  "raw_sha256": "c5e74bd1851034e82f71e0898fbe7968b7c1fa81eecffcbcfc1b672e34e164a0",
+  "outputs": {
+    "comparison.png": "01addc77052c0bba4c31497684c8e617454f45ce79e61f8e06589d14b49dd14b",
+    "comparison.svg": "8045953ddd6dfa847342c185267d44dd21f5b944b93c36d16f059a95f4cfeec5",
+    "comparison.pdf": "0bf0a296f1ac381071315d35b0cfc758c86d4c6654de5f68e6b8cb279cf3e703"
+  },
+  "timezone": "America/Lima",
+  "notes": "Graph rendered from this run's complete raw data. The renderer and output hashes above identify the original files; this note was corrected for this campaign."
+}

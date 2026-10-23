@@ -1,0 +1,59 @@
+{
+  "complete": true,
+  "command": [
+    "tests/benchmark-ab.py",
+    "--harness",
+    "benchmarks/x11",
+    "--base",
+    "/workspace/maverick-performance-evidence/bin/maverick-base",
+    "--candidate",
+    "/workspace/maverick-performance-evidence/bin/maverick-manage",
+    "--out",
+    "/workspace/maverick-performance-evidence/pair-manage",
+    "--repeats",
+    "7"
+  ],
+  "binary_sha256": {
+    "base": "819547a9080939ef4c4749faa70eee7edf5f196c7b6465eec431e2edd058e82c",
+    "candidate": "3ad7261a23fa780b93684184d00afada02d4a1aa332b3e6c9b33e7bc4d02e2ec"
+  },
+  "source_sha256": {
+    "README.md": "7ce63f20f1243f5da84661da921528895680a2e6a74080329a1988745bbcc786",
+    "configs/bspwm.json": "34b683a9fe8e78570c4ae55417a5fe2c04a32264a39b7f878731f6c6724acd71",
+    "configs/i3.conf": "03ee14df6fd69b1042ff0dac693f32530f3be72a6f9f7c53a03d50d5401d8046",
+    "configs/maverick.toml": "ed4aac63a8c7c1cf99a77c4411f19d2d03774a5cb6dc41bc05d4e6d52581d34f",
+    "configs/openbox.xml": "a79d7aeac8323d043ab3eef779dc9e0de60eb137c01f33f90a98016d6318925c",
+    "plot.py": "8a18012318b4dd52fa16b402ed788f30fe5e23f913f3ffc3659b6cb721f29a04",
+    "probe.c": "8622da87ba368bffdbddd469bdf891a291a65f0b6c22d4c1a336c8f0d5e32688",
+    "run.py": "1e6c832603c514b3497c8f5e973e404198a42fea28d61e5bd24c752bcca2273e"
+  },
+  "source_revision": "807218896c05e3ffdaa565799ab523fca84e418e",
+  "candidate_patch_sha256": "6feff7629d313af56f7fdc82b7ebae77abb9a3f4a580763b88a20406c12b5569",
+  "runner_sha256": "3fc5b08d0661f2859bb14d88b81355153b88ffca47b54d17c13244f605745940",
+  "xvfb_sha256": "14e8ec7d8209bbaf105f9ade27a80b65f01709346690d18fbadb6116ada34912",
+  "compiler_version": "cc (Debian 14.2.0-19) 14.2.0",
+  "kernel": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "affinity": [
+    0,
+    1,
+    2
+  ],
+  "clock_ticks": 100,
+  "library_path": "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu",
+  "cpuinfo": "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 207\nmodel name\t: INTEL(R) XEON(R) PLATINUM 8573C\nstepping\t: 2\nmicrocode\t: 0x1\ncpu MHz\t\t: 2299.998\ncache size\t: 266240 KB\nphysical id\t: 0\nsiblings\t: 3\ncore id\t\t: 0\ncpu cores\t: 3\napicid\t\t: 0\ninitial apicid\t: 0\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 28\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 arat avx512vbmi umip waitpkg avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid cldemote movdiri movdir64b fsrm serialize tsxldtrk avx512_fp16 arch_capabilities\nbugs\t\t: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed bhi spectre_v2_user its\nbogomips\t: 4599.99\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 46 bits physical, 57 bits virtual\npower management:\n\nprocessor\t: 1\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 207\nmodel name\t: INTEL(R) XEON(R) PLATINUM 8573C\nstepping\t: 2\nmicrocode\t: 0x1\ncpu MHz\t\t: 2299.998\ncache size\t: 266240 KB\nphysical id\t: 0\nsiblings\t: 3\ncore id\t\t: 1\ncpu cores\t: 3\napicid\t\t: 1\ninitial apicid\t: 1\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 28\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 arat avx512vbmi umip waitpkg avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid cldemote movdiri movdir64b fsrm serialize tsxldtrk avx512_fp16 arch_capabilities\nbugs\t\t: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed bhi spectre_v2_user its\nbogomips\t: 4599.99\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 46 bits physical, 57 bits virtual\npower management:\n\nprocessor\t: 2\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 207\nmodel name\t: INTEL(R) XEON(R) PLATINUM 8573C\nstepping\t: 2\nmicrocode\t: 0x1\ncpu MHz\t\t: 2299.998\ncache size\t: 266240 KB\nphysical id\t: 0\nsiblings\t: 3\ncore id\t\t: 2\ncpu cores\t: 3\napicid\t\t: 2\ninitial apicid\t: 2\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 28\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 arat avx512vbmi umip waitpkg avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid cldemote movdiri movdir64b fsrm serialize tsxldtrk avx512_fp16 arch_capabilities\nbugs\t\t: spectre_v1 spectre_v2 spec_store_bypass swapgs retbleed bhi spectre_v2_user its\nbogomips\t: 4599.99\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 46 bits physical, 57 bits virtual\npower management:\n\n",
+  "cpu_max": "200000 100000\n",
+  "memory_max": "8589934592\n",
+  "parameters": {
+    "clients": [
+      10,
+      50
+    ],
+    "focus": 500,
+    "fullscreen": 40,
+    "idle_seconds": 2,
+    "repeats": 7,
+    "warmups": 1,
+    "seed": 20261023
+  },
+  "raw_sha256": "afd2d074750ea567317c3b29b8a508eb692bfe3be21dce5233346db522905692"
+}
