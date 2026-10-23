@@ -123,4 +123,7 @@ Se probó también agrupar la escritura de `_NET_CLIENT_LIST` con la consulta de
 se descartó reutilizar buffers del backend tras empeorar foco, fullscreen y
 retirada. Sus parches, muestras y manifiestos están en los directorios
 `rejected-ewmh/` y `rejected-buffers/` del mismo conjunto de resultados.
+Otra prueba eliminó la confirmación síncrona de `WM_STATE`: mejoró la mediana
+de apertura en esa serie, pero solo ganó 3/7 parejas y empeoró apertura p95 y
+foco p95. Se descartó y quedó archivada en `rejected-wmstate/`.
 La meta de ganar las nueve métricas sigue pendiente.

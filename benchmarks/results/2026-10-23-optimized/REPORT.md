@@ -44,6 +44,12 @@ que agrupaba publicación EWMH: apertura p50 pasó de 2.247 a 2.658 ms (solo
 directorio conserva `candidate.patch`, `manifest.json`, `raw.json` y
 `summary.json`; ninguno de esos cambios está en el código final.
 
+`rejected-wmstate/` registra otra comparación de siete parejas: quitar la
+espera síncrona de `WM_STATE` dio 2.735 → 2.349 ms en apertura p50 con 50
+ventanas, pero solo ganó 3/7 parejas; apertura p95 empeoró 4.543 → 4.758 ms
+y foco p95 3.656 → 4.800 ms. Se descartó antes de incorporar además el
+tratamiento de errores asíncronos que habría exigido esta variante.
+
 ## Matriz de cinco gestores
 
 La tabla muestra la mediana de cada gestor en los nueve paneles del gráfico.

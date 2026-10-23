@@ -1,0 +1,23 @@
+diff --git a/src/backend/x11/manage.rs b/src/backend/x11/manage.rs
+index f215bdf..76b8c87 100644
+--- a/src/backend/x11/manage.rs
++++ b/src/backend/x11/manage.rs
+@@ -504,7 +504,17 @@ impl WindowManager {
+         // geometry sink) when the `arrange` below applies the first configure, so
+         // it always mirrors the border actually in effect — including later
+         // fullscreen/maximize transitions that change it.
+-        let _ = self.set_wm_state(win, 1);
++        // The caller has never used the checked result here. Queue WM_STATE
++        // before the map on this connection: X11 processes the property write
++        // first, while the later map/readiness work provides the observation
++        // barrier. Avoid waiting for an otherwise unused void-cookie check.
++        let _ = self.conn.change_property32(
++            PropMode::REPLACE,
++            win,
++            self.atoms.wm_state,
++            self.atoms.wm_state,
++            &[1, x11rb::NONE],
++        );
+ 
+         let view = client.workspace;
+         let mon_i = client.monitor;
