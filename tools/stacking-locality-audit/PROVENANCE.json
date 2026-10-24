@@ -1,0 +1,16 @@
+{
+  "reference_commit": "e6c67fdaaddbe1093dcd0914bc536ecb86ecc41d",
+  "audit_delivery_sha256": "39eefc1686566c85c06e6f5cc06e0d33e57d8f521f22ca0c868e7f75cfe57d0b",
+  "origin": "definitive source/ from the stacking locality audit; not pilot versions",
+  "imported_source_sha256": {
+    "audit.py": "e8e568ed2ba259b925eb00662a78700ef1ffd196749e85d4df23064dd7aca550",
+    "observer.c": "fe4e591c1449695f78d879ee18fa48d93e80db33d7acc0ff01eb737517c8780f",
+    "validate.py": "1e8950d0675d20ad1b3143cc2692138b90ce399bc3a3c6514de0838a1a9baaa2",
+    "analyze.py": "1ac298aa8504c450ea63373a422791fa269e7953754b74f144678f3c875bb8be",
+    "fixture.c": "618c562aa449f2b3b131c521723dc8004cba77d1e7020c521ed2c8daf8245566",
+    "test_audit.py": "70a17f83cdcb705b2e92709014dd6669f4f1e615bf1b930def1f4274bf5fc107",
+    "guard.c": "b57b9d24df8039e297570db264eda94076250aaa03672566d913465e4da788ea",
+    "guard-negative.c": "e98341b4a0f6fd258032a17b45541bb0088c7ce36c0b225d46c486ecac48bf8a"
+  },
+  "adaptations": "Packaging, launcher, endpoint verification, privacy checker and portable test paths are reviewed in the tools commit. No audit captures imported."
+}
