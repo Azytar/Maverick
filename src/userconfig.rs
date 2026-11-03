@@ -112,7 +112,7 @@ struct GeneralCfg {
     gaps_outer: Option<u32>,
     smart_gaps: Option<bool>,
     corner_radius: Option<u32>,
-    n_tags: Option<usize>,
+    view_count: Option<usize>,
     /// Width of a freshly created column as a fraction (0.1–1.0) of the
     /// workarea.
     column_width: Option<f32>,
@@ -126,10 +126,10 @@ struct GeneralCfg {
     overview_scale: Option<f32>,
     /// Auto-generate `Super+1..n` / `Super+Shift+1..n` workspace binds.
     /// Defaults to `true`; when `false` no workspace binds are added.
-    auto_workspace_binds: Option<bool>,
+    auto_view_binds: Option<bool>,
     focus_mouse: Option<bool>,
     warp_cursor: Option<bool>,
-    tag_names: Option<Vec<String>>,
+    view_names: Option<Vec<String>>,
     /// Global policy for the client's map-time `_NET_WM_STATE`. `false` (the
     /// default) normalizes away a window's initial maximized/fullscreen request
     /// so it opens as a normal tile; `true` honours it. See `Cfg::honor_initial_state`.
@@ -159,7 +159,7 @@ struct RuleEntry {
     title: Option<String>,
     float: bool,
     sticky: bool,
-    workspace: Option<usize>,
+    view: Option<usize>,
     /// `[width, height]` in pixels for forced floating size.
     size: Option<[u32; 2]>,
     /// `[x, y]` relative to the monitor workarea origin, for forced position.
@@ -230,8 +230,8 @@ pub fn load_config(path: Option<&Path>) -> Cfg {
 /// broken TOML) returns this, so a WM that never reads a config file still
 /// starts with a reachable workspace keymap. A file that *does* parse is never
 /// merged onto it: `merge_config` takes [`compiled_config`] as its baseline and
-/// adds the generated binds itself, so they reflect the file's `n_tags` and
-/// `auto_workspace_binds`. The compiled baseline therefore stays free of
+/// adds the generated binds itself, so they reflect the file's `view_count` and
+/// `auto_view_binds`. The compiled baseline therefore stays free of
 /// workspace binds — they are generated, never configured.
 fn default_config() -> Cfg {
     let mut cfg = compiled_config();
@@ -333,7 +333,7 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
     log::config_trace("validation_start", format_args!("phase=semantic_merge"));
     // The merge baseline is the compiled keymap, NOT the fail-safe `fallback`
     // above: `merge_config` generates the workspace binds itself, for the
-    // `n_tags` the file ended up with and only when `auto_workspace_binds`
+    // `view_count` the file ended up with and only when `auto_view_binds`
     // allows it. Starting from `fallback` would pre-seed a bind for every digit
     // of the compiled tag count, which no flag could then take away — the
     // generated binds are indistinguishable from the user's own once merged in.
@@ -522,7 +522,7 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         ),
         "smart_gaps" => set_bool(&mut g.smart_gaps, key, value, diag),
         "corner_radius" => set_u32(&mut g.corner_radius, key, value, diag),
-        "n_tags" => set_usize_range(&mut g.n_tags, key, value, 1, 9, diag),
+        "view_count" => set_usize_range(&mut g.view_count, key, value, 1, 9, diag),
         "column_width" => set_f32_range(&mut g.column_width, key, value, 0.1, 1.0, diag),
         "accordion_boost" => {
             set_f32_range(&mut g.accordion_boost, key, value, 0.0, 0.9, diag);
@@ -533,13 +533,13 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         "overview_scale" => {
             set_f32_range(&mut g.overview_scale, key, value, 0.05, 1.0, diag);
         }
-        "auto_workspace_binds" => set_bool(&mut g.auto_workspace_binds, key, value, diag),
+        "auto_view_binds" => set_bool(&mut g.auto_view_binds, key, value, diag),
         "focus_mouse" => set_bool(&mut g.focus_mouse, key, value, diag),
         "warp_cursor" => set_bool(&mut g.warp_cursor, key, value, diag),
         "honor_initial_state" => set_bool(&mut g.honor_initial_state, key, value, diag),
-        "tag_names" => {
+        "view_names" => {
             if let Some(list) = value.as_str_list() {
-                g.tag_names = Some(list.iter().map(|s| s.as_ref().to_string()).collect());
+                g.view_names = Some(list.iter().map(|s| s.as_ref().to_string()).collect());
             } else {
                 warn_bad(diag, key);
             }
@@ -586,7 +586,7 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
         "title" => set_string(&mut row.title, key, value, diag),
         "float" => set_rule_bool(&mut row.float, key, value, diag),
         "sticky" => set_rule_bool(&mut row.sticky, key, value, diag),
-        "workspace" => set_usize(&mut row.workspace, key, value, diag),
+        "view" => set_usize(&mut row.view, key, value, diag),
         "size" => {
             if let Some([w, h]) = positive_u32_pair(value) {
                 row.size = Some([w, h]);
@@ -806,16 +806,16 @@ const GENERAL_KEYS: &[&str] = &[
     "gaps_outer",
     "smart_gaps",
     "corner_radius",
-    "n_tags",
+    "view_count",
     "column_width",
     "accordion_boost",
     "overview_zoom_min",
     "overview_scale",
-    "auto_workspace_binds",
+    "auto_view_binds",
     "focus_mouse",
     "warp_cursor",
     "honor_initial_state",
-    "tag_names",
+    "view_names",
 ];
 
 const COLOR_KEYS: &[&str] = &["normal", "focused", "urgent"];
@@ -829,7 +829,7 @@ const RULE_KEYS: &[&str] = &[
     "title",
     "float",
     "sticky",
-    "workspace",
+    "view",
     "size",
     "position",
     "opacity",
@@ -910,8 +910,11 @@ fn removed_key_replacement(section: &str, key: &str) -> Option<&'static str> {
         ("[colors]", "col_focused") => "focused",
         ("[colors]", "col_urgent") => "urgent",
         ("[autostart]", "apps" | "programs") => "commands",
+        ("[general]", "n_tags") => "view_count",
+        ("[general]", "tag_names") => "view_names",
+        ("[general]", "auto_workspace_binds") => "auto_view_binds",
         ("[[rules]]", "type") => "window_type",
-        ("[[rules]]", "ws") => "workspace",
+        ("[[rules]]", "workspace" | "ws") => "view",
         ("[[rules]]", "border_w") => "border_width",
         ("[[rules]]", "no_initial_state" | "no_maximize") => "ignore_initial_state",
         ("[[rules]]", "no_fullscreen") => "deny_fullscreen",
@@ -941,7 +944,7 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
     let auto_ws = user
         .general
         .as_ref()
-        .is_none_or(|g| g.auto_workspace_binds.unwrap_or(true));
+        .is_none_or(|g| g.auto_view_binds.unwrap_or(true));
 
     if let Some(general) = user.general {
         apply_general(&mut cfg, general, diag);
@@ -986,8 +989,8 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     if let Some(v) = general.corner_radius {
         cfg.corner_radius = v;
     }
-    if let Some(v) = general.n_tags {
-        cfg.n_tags = v;
+    if let Some(v) = general.view_count {
+        cfg.view_count = v;
     }
     if let Some(v) = general.column_width {
         cfg.column_width = v;
@@ -1021,12 +1024,12 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     if let Some(v) = general.warp_cursor {
         cfg.warp_cursor = v;
     }
-    if let Some(names) = general.tag_names {
+    if let Some(names) = general.view_names {
         if names.is_empty() || names.iter().any(String::is_empty) {
             diag.warnings
-                .push("general.tag_names must contain non-empty names; ignoring it".into());
+                .push("general.view_names must contain non-empty names; ignoring it".into());
         } else {
-            cfg.tag_names = names;
+            cfg.view_names = names;
         }
     }
     if let Some(v) = general.honor_initial_state {
@@ -1046,7 +1049,7 @@ fn apply_colors(cfg: &mut Cfg, colors: ColorsCfg, _diag: &mut Diagnostics) {
     }
 }
 
-/// Force `tag_names` to be exactly `n_tags` long: surplus names are dropped and
+/// Force `tag_names` to be exactly `view_count` long: surplus names are dropped and
 /// missing ones are auto-numbered, so the bar/IPC can index it by workspace
 /// without a range check.
 fn normalize_tag_names(cfg: &mut Cfg) {
@@ -1089,11 +1092,11 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
                 }
             }
             // `workspace` is 1-based in the file, 0-based in `Rule::ws`; a
-            // reload that shrinks `n_tags` re-clamps it at manage time.
-            let ws = match entry.workspace {
-                Some(ws) if ws == 0 || ws > n_tags => {
+            // reload that shrinks `view_count` re-clamps it at manage time.
+            let ws = match entry.view {
+                Some(ws) if ws == 0 || ws > view_count => {
                     diag.errors.push(format!(
-                        "line {}: discarded rule #{}: workspace {ws} is outside 1..={n_tags}",
+                        "line {}: discarded rule #{}: view {ws} is outside 1..={n_tags}",
                         entry.line,
                         index + 1
                     ));
@@ -1133,7 +1136,7 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
 /// *free* slots only, so they never clobber a combination the user already
 /// claimed. Duplicate `(mods, keysym)` pairs within the user's own list resolve
 /// first-wins, and the loser is reported via `diag`. A bind whose action targets
-/// a workspace beyond `n_tags` is dropped: `n_tags` is known here, so there is
+/// a workspace beyond `view_count` is dropped: `view_count` is known here, so there is
 /// no reason to keep a shortcut that can only ever be a no-op.
 fn parse_keybindings(
     entries: &[KeybindEntry],
@@ -1202,7 +1205,7 @@ fn action_workspace_is_valid(action: &Action, n_tags: usize) -> bool {
     }
 }
 
-/// Add `Super+1..n` / `Super+Shift+1..n` for `n_tags`, capped at 9 because the
+/// Add `Super+1..n` / `Super+Shift+1..n` for `view_count`, capped at 9 because the
 /// digit row has no tenth key. Only unclaimed combinations are filled, so a
 /// user bind on e.g. `Super+1` wins and the generated `View(0)` is skipped.
 fn append_numeric_keybindings(keybinds: &mut Vec<(u16, u32, Action)>, n_tags: usize) {
@@ -1532,7 +1535,7 @@ mod tests {
     fn row_semantic_errors_keep_their_table_header_line() {
         let path = write_temp(
             "[[keybindings]]\nkey = \"Mod4+q\"\naction = \"not-real\"\n\n\
-             [[rules]]\nclass = \"x\"\nworkspace = 99\n",
+             [[rules]]\nclass = \"x\"\nview = 99\n",
         );
         let (_source, _cfg, diag) = load_from_path_classified(&path);
         let _ = std::fs::remove_file(path);
@@ -1545,7 +1548,7 @@ mod tests {
         assert!(
             diag.errors
                 .iter()
-                .any(|e| e.starts_with("line 5:") && e.contains("workspace 99")),
+                .any(|e| e.starts_with("line 5:") && e.contains("view 99")),
             "{diag:?}"
         );
     }
@@ -1624,7 +1627,7 @@ action = "view:2"
         let user = parse_string(
             r"
 [general]
-auto_workspace_binds = false
+auto_view_binds = false
 ",
         );
         let mut diag = Diagnostics::default();
@@ -1637,7 +1640,7 @@ auto_workspace_binds = false
         let user = parse_string(
             r#"
 [general]
-auto_workspace_binds = false
+auto_view_binds = false
 
 [[keybindings]]
 key = "super+q"
@@ -1649,7 +1652,7 @@ action = "quit"
         assert!(matches!(cfg.keybinds[0].2, Action::Quit));
     }
 
-    /// `auto_workspace_binds = false` has to hold on the config the loader
+    /// `auto_view_binds = false` has to hold on the config the loader
     /// actually returns. The merge baseline is the compiled keymap, which never
     /// contained a workspace bind; the fail-safe `default_config` does, so a
     /// baseline that already carried them would make every generated chord
@@ -1657,7 +1660,7 @@ action = "quit"
     /// merged, so nothing downstream could take them away again.
     #[test]
     fn auto_workspace_binds_false_survives_the_loader() {
-        let path = write_temp("[general]\nauto_workspace_binds = false\n");
+        let path = write_temp("[general]\nauto_view_binds = false\n");
         let (cfg, diag) = load_from_path(&path);
         assert!(
             diag.is_clean(),
@@ -1676,12 +1679,12 @@ action = "quit"
         let _ = std::fs::remove_file(path);
     }
 
-    /// Generated binds must cover the file's own `n_tags`. A baseline that
+    /// Generated binds must cover the file's own `view_count`. A baseline that
     /// generated them before the file was read would keep chords for workspaces
     /// the user just removed (`View(8)` on a three-tag WM).
     #[test]
     fn generated_workspace_binds_follow_the_files_n_tags() {
-        let path = write_temp("[general]\nn_tags = 3\n");
+        let path = write_temp("[general]\nview_count = 3\n");
         let (cfg, diag) = load_from_path(&path);
         assert!(diag.is_clean(), "{diag:?}");
         assert_eq!(cfg.n_tags, 3);
@@ -1712,7 +1715,7 @@ action = "quit"
         let user = parse_string(
             r"
 [general]
-n_tags = 3
+view_count = 3
 ",
         );
         let mut diag = Diagnostics::default();
@@ -1906,7 +1909,7 @@ commands = [["example", "--flag"]]
     #[test]
     fn simple_general_range_errors_report_the_source_line() {
         let path = write_temp(
-            "[general]\ncolumn_width = 2.0\naccordion_boost = -0.1\nn_tags = 42\n",
+            "[general]\ncolumn_width = 2.0\naccordion_boost = -0.1\nview_count = 42\n",
         );
         let (_source, cfg, diag) = load_from_path_classified(&path);
         let _ = std::fs::remove_file(path);
@@ -2298,7 +2301,7 @@ commands = [["picom"], ["polybar", "main"]]
         // `diag.errors` is NOT an unusable signal: a rejected value is recorded
         // while every other value in the file is merged in, so a reload must
         // still adopt this config.
-        let path = write_temp("[general]\ngaps_inner = 17\ngaps_outer = 17\nn_tags = 42\n");
+        let path = write_temp("[general]\ngaps_inner = 17\ngaps_outer = 17\nview_count = 42\n");
         let (source, cfg, diag) = load_from_path_classified(&path);
         assert_eq!(source, ConfigSource::UserFile);
         assert_eq!(cfg.gaps_inner, 17);

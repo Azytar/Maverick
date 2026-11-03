@@ -139,7 +139,7 @@ impl<'a> Value<'a> {
         }
     }
 
-    /// A flat string array, e.g. `tag_names = ["web", "code"]`.
+    /// A flat string array, e.g. `view_names = ["web", "code"]`.
     #[must_use]
     pub fn as_str_list(&self) -> Option<&[Cow<'a, str>]> {
         match self {
@@ -792,8 +792,8 @@ mod tests {
 
     #[test]
     fn flat_string_list() {
-        let e = all(r#"tag_names = ["web", "code", "chat"]"#);
-        let v = kv(&e, "tag_names").unwrap();
+        let e = all(r#"view_names = ["web", "code", "chat"]"#);
+        let v = kv(&e, "view_names").unwrap();
         let list = v.as_str_list().unwrap();
         assert_eq!(list.len(), 3);
         assert_eq!(list[0], Cow::Borrowed("web"));
