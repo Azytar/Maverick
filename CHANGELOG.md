@@ -13,10 +13,12 @@ before it makes no compatibility promise.
 
 ### Changed
 
-- The TOML configuration now has one canonical spelling per setting. Legacy
-  aliases (`border_w`, `gaps`, `default_col_width`, `split_bias`, `col_*`,
-  `[autostart].apps/programs` and rule aliases) are ignored with migration
-  diagnostics instead of extending the public vocabulary indefinitely.
+- The TOML configuration now uses View terminology: `view_count`,
+  `view_names`, `auto_view_binds` and `[[rules]].view` replace the old
+  tag/workspace names. Configuration has one canonical spelling per setting;
+  legacy aliases (`border_w`, `gaps`, `default_col_width`, `split_bias`,
+  `col_*`, `[autostart].apps/programs` and rule aliases) are ignored with
+  migration diagnostics instead of extending the public vocabulary indefinitely.
 - Border theme presets were removed. Border configuration remains available
   directly through `border_width` and `[colors] normal/focused/urgent`; with
   zero-width borders the color values remain inert.
@@ -50,7 +52,9 @@ before it makes no compatibility promise.
   compatibility, while close mistakes such as `[genreal]` are reported.
 - The zero-copy TOML event parser exposes each event's source line, allowing
   schema/type diagnostics to identify where an invalid setting came from
-  without building an AST.
+  without building an AST. Keybinding and rule rows retain their header line so
+  later semantic checks (invalid actions, duplicate binds, rule targets) keep
+  useful source locations too.
 - An optional isolated performance workload reports WM CPU/RSS and control
   round trips, with existing runtime traces available for internal spans.
   Documentation distinguishes those measurements from visible frame rate and
@@ -72,6 +76,12 @@ before it makes no compatibility promise.
   conversion, so negative sizes or out-of-range coordinates cannot wrap into
   unrelated values. Rule `opacity` is validated in the config layer and must
   be within `0.0..=1.0` instead of relying on a later backend clamp.
+- Scalar general settings are range-checked while parsing, so diagnostics keep
+  their source line. Gap and border values above the layout's existing safety
+  ceiling are rejected instead of being accepted and silently clamped later.
+- Autostart argv lists are validated on the `commands` line; rows without an
+  executable are reported and discarded before the runtime configuration is
+  built.
 - The stacking regression gives Xvfb its own bounded startup deadline, handles
   partial readiness records and early exits, and preserves the original failure
   when diagnostic tools cannot run. Startup failures never query an inherited
