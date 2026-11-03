@@ -2328,7 +2328,7 @@ commands = [["picom"], ["polybar", "main"]]
         assert_eq!(cfg.gaps_inner, 17);
         assert_eq!(cfg.gaps_outer, 17);
         assert!(
-            diag.errors.iter().any(|e| e.contains("n_tags")),
+            diag.errors.iter().any(|e| e.contains("view_count")),
             "{:?}",
             diag.errors
         );
