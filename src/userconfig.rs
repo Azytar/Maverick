@@ -376,7 +376,11 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
     let mut user = UserConfig::default();
     let mut cur: Option<Cur<'_>> = None;
 
-    for event in parse(source) {
+    let mut parser = parse(source);
+    while let Some(event) = parser.next() {
+        let line = parser.event_line();
+        let warning_start = diag.warnings.len();
+        let error_start = diag.errors.len();
         let event = event?;
         match event {
             Event::Section(name) => {
@@ -445,8 +449,23 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                 _ => {}
             },
         }
+        annotate_event_diagnostics(diag, warning_start, error_start, line);
     }
     Ok(user)
+}
+
+fn annotate_event_diagnostics(
+    diag: &mut Diagnostics,
+    warning_start: usize,
+    error_start: usize,
+    line: usize,
+) {
+    for message in &mut diag.warnings[warning_start..] {
+        *message = format!("line {line}: {message}");
+    }
+    for message in &mut diag.errors[error_start..] {
+        *message = format!("line {line}: {message}");
+    }
 }
 
 /// Map one `[general]` key onto the model. A wrong-typed value is skipped
@@ -2094,8 +2113,9 @@ border_width = 0
         assert_eq!(diag.warnings.len(), 1, "{:?}", diag.warnings);
         let warning = &diag.warnings[0];
         assert!(
-            warning.contains("[general].honour_initial_state"),
-            "the warning must name the table and the key: {warning}"
+            warning.contains("line 2")
+                && warning.contains("[general].honour_initial_state"),
+            "the warning must name the line, table and key: {warning}"
         );
         // `--check-config` exits on `!is_clean()`, so a warning alone is enough
         // to fail the CI gate: "the file loads" is not "the file is what you
