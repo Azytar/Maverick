@@ -712,20 +712,6 @@ fn set_string(slot: &mut Option<String>, key: &str, value: &Value<'_>, diag: &mu
     }
 }
 
-/// Assign `key`'s float value into `slot`. Accepts a decimal float *or* an
-/// integer literal (e.g. `column_width = 1`) and coerces it to `f32` — the
-/// strict TOML-subset parser keeps the two types separate, but config should
-/// not force a trailing `.0` on integer-valued fractions.
-fn set_f32(slot: &mut Option<f32>, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
-    if let Some(v) = value.as_f64() {
-        *slot = Some(v as f32);
-    } else if let Some(i) = value.as_i64() {
-        *slot = Some(i as f32);
-    } else {
-        warn_bad(diag, key);
-    }
-}
-
 fn set_u32_range(
     slot: &mut Option<u32>,
     key: &str,
