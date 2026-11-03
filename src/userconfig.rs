@@ -976,7 +976,7 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
         cfg.corner_radius = v;
     }
     if let Some(v) = general.view_count {
-        cfg.view_count = v;
+        cfg.n_tags = v;
     }
     if let Some(v) = general.column_width {
         cfg.column_width = v;
@@ -1015,7 +1015,7 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
             diag.warnings
                 .push("general.view_names must contain non-empty names; ignoring it".into());
         } else {
-            cfg.view_names = names;
+            cfg.tag_names = names;
         }
     }
     if let Some(v) = general.honor_initial_state {
