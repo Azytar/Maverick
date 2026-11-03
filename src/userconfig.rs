@@ -45,10 +45,9 @@
 //! What is reported is scoped to what Maverick can name. A key inside a table
 //! it knows (`[general]`, `[colors]`, `[autostart]`, `[[keybindings]]`,
 //! `[[rules]]`) with no field behind it is a warning: the file still loads, but
-//! the user is told which setting did not take. A *table* it has never heard of
-//! is skipped without a word, because that is the shape a config written for a
-//! newer Maverick takes, and refusing to load it (or nagging about it) would
-//! break forward compatibility for no benefit.
+//! the user is told which setting did not take. An unrelated *table* it has never
+//! heard of stays silent for forward compatibility; a name close to a known
+//! table is reported as a likely typo instead of disappearing.
 
 use std::path::{Path, PathBuf};
 
@@ -1404,7 +1403,7 @@ mod tests {
 
     #[test]
     fn broken_toml_uses_entire_compiled_config() {
-        let path = write_temp("[general\ngaps = nope");
+        let path = write_temp("[general\ngaps_inner = nope");
         let (cfg, _diag) = load_from_path(&path);
         let baseline = default_config();
         assert_eq!(cfg.gaps_inner, baseline.gaps_inner);
@@ -1454,7 +1453,8 @@ mod tests {
         let path = write_temp(
             r#"
 [general]
-gaps = 17
+gaps_inner = 17
+gaps_outer = 17
 
 [[keybindings]]
 key = "super+not-a-key"
@@ -2106,7 +2106,7 @@ commands = [["picom"], ["polybar", "main"]]
 
     #[test]
     fn classified_load_marks_a_broken_file_as_the_compiled_baseline() {
-        let path = write_temp("[general\ngaps = nope");
+        let path = write_temp("[general\ngaps_inner = nope");
         let (source, cfg, diag) = load_from_path_classified(&path);
         assert_eq!(source, ConfigSource::CompiledBaseline);
         assert_eq!(cfg.keybinds.len(), default_config().keybinds.len());
@@ -2142,7 +2142,7 @@ commands = [["picom"], ["polybar", "main"]]
         // `diag.errors` is NOT an unusable signal: a rejected value is recorded
         // while every other value in the file is merged in, so a reload must
         // still adopt this config.
-        let path = write_temp("[general]\ngaps = 17\nn_tags = 42\n");
+        let path = write_temp("[general]\ngaps_inner = 17\ngaps_outer = 17\nn_tags = 42\n");
         let (source, cfg, diag) = load_from_path_classified(&path);
         assert_eq!(source, ConfigSource::UserFile);
         assert_eq!(cfg.gaps_inner, 17);
