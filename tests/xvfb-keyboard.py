@@ -91,7 +91,7 @@ def main():
     text = '''[general]
 focus_mouse = false
 warp_cursor = false
-auto_workspace_binds = false
+auto_view_binds = false
 [autostart]
 commands = [["/usr/bin/true"]]
 '''
