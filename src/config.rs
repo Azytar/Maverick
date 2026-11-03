@@ -87,8 +87,7 @@ pub struct Cfg {
     /// further.
     pub overview_scale: f32,
 
-    // Catppuccin Mocha; also the `Default` baseline below and the values
-    // `theme_palette` returns for the same preset. Stored as 0xRRGGBB.
+    // Border colors stored as 0xRRGGBB. They are inert while `border_w == 0`.
     pub col_normal: u32,
     pub col_focused: u32,
     pub col_urgent: u32,
@@ -328,22 +327,6 @@ pub fn compiled_config() -> Cfg {
 /// see `userconfig` for the fail-safe loading rules.
 pub fn load_config(path: Option<&Path>) -> Cfg {
     crate::userconfig::load_config(path)
-}
-
-/// Named color-theme presets for `[general].theme` in the TOML config.
-/// Returns `(normal, focused, urgent)` as `0xRRGGBB`, or `None` for an unknown
-/// name (the caller then keeps the compiled colors and warns).
-pub fn theme_palette(name: &str) -> Option<(u32, u32, u32)> {
-    Some(match name.to_ascii_lowercase().as_str() {
-        "catppuccin-mocha" => (0x45475a, 0x89b4fa, 0xf38ba8),
-        "catppuccin-latte" => (0xd9d9e0, 0x1e90ff, 0xd30066),
-        "gruvbox" => (0xfbf1c7, 0x4c79a6, 0xea6962),
-        "nord" => (0x4c566a, 0x81a1c1, 0xa3be8c),
-        "dracula" => (0x282a36, 0xbd93f9, 0xff5555),
-        "everforest" => (0x3c434e, 0x7fbbb3, 0xdb7070),
-        "solarized" => (0x837c73, 0x268bd2, 0xdc322f),
-        _ => return None,
-    })
 }
 
 #[cfg(test)]

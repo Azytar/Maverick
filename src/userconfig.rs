@@ -23,8 +23,6 @@
 //! only the keys it actually sets, and everything else keeps the compiled
 //! value. The order-sensitive cases are:
 //!
-//! * `[general].theme` is applied before `[colors]`, so an explicit color
-//!   always beats the palette the theme selected.
 //! * `[[keybindings]]`, `[[rules]]` and `[autostart].commands` *replace* the
 //!   compiled lists wholesale. A file with no `[[keybindings]]`/`[[rules]]`
 //!   keeps the compiled keymap/rules; a file that declares one of them drops
@@ -69,9 +67,8 @@ use crate::types::Action;
 /// * `errors`   — a value that could not be applied at all: unknown keysym,
 ///   unknown action, binding conflict, workspace out of range, unknown
 ///   `window_type`, numeric value out of range, rule with no criteria.
-/// * `warnings` — a value that was accepted-but-degraded: deprecated alias,
-///   wrong-typed field, unknown key in a known table, empty entry discarded,
-///   unknown theme.
+/// * `warnings` — a value that was accepted-but-degraded: wrong-typed field,
+///   unknown key in a known table or empty entry discarded.
 ///
 /// A warning still makes `--check-config` exit non-zero (`is_clean` requires
 /// both lists empty), so "the file loads" is never mistaken for "the file is
@@ -116,10 +113,6 @@ struct GeneralCfg {
     gaps_outer: Option<u32>,
     smart_gaps: Option<bool>,
     corner_radius: Option<u32>,
-    /// Named color-scheme preset (see `config::theme_palette`). Applied
-    /// before `[colors]`, so an explicit `[colors]` entry always wins over
-    /// whatever the theme sets.
-    theme: Option<String>,
     n_tags: Option<usize>,
     /// Width of a freshly created column as a fraction (0.1–1.0) of the
     /// workarea.
@@ -366,7 +359,7 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
 /// The reload path must NOT use this view. A reload *replaces* the
 /// configuration that is already live, and a compiled baseline returned for a
 /// missing, unreadable or unparseable file is not that configuration — adopting
-/// it would silently swap the user's keybinds, rules, theme and tag count for
+/// it would silently swap the user's keybinds, rules and tag count for
 /// the compiled ones. `reload_config` therefore calls
 /// [`load_from_path_classified`] and keeps the configuration it is already
 /// running when the source is [`ConfigSource::CompiledBaseline`].
@@ -466,7 +459,6 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         "gaps_outer" => set_u32(&mut g.gaps_outer, key, value, diag),
         "smart_gaps" => set_bool(&mut g.smart_gaps, key, value, diag),
         "corner_radius" => set_u32(&mut g.corner_radius, key, value, diag),
-        "theme" => set_string(&mut g.theme, key, value, diag),
         "n_tags" => set_usize(&mut g.n_tags, key, value, diag),
         "column_width" => set_f32(&mut g.column_width, key, value, diag),
         "accordion_boost" => set_f32(&mut g.accordion_boost, key, value, diag),
@@ -678,7 +670,6 @@ const GENERAL_KEYS: &[&str] = &[
     "gaps_outer",
     "smart_gaps",
     "corner_radius",
-    "theme",
     "n_tags",
     "column_width",
     "accordion_boost",
@@ -870,20 +861,6 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     }
     if let Some(v) = general.corner_radius {
         cfg.corner_radius = v;
-    }
-    if let Some(name) = &general.theme {
-        match crate::config::theme_palette(name) {
-            Some((normal, focused, urgent)) => {
-                cfg.col_normal = normal;
-                cfg.col_focused = focused;
-                cfg.col_urgent = urgent;
-            }
-            None => {
-                diag.warnings.push(format!(
-                    "general.theme '{name}' is not a known preset; ignoring it"
-                ));
-            }
-        }
     }
     if let Some(v) = general.n_tags {
         if (1..=9).contains(&v) {
@@ -1765,49 +1742,6 @@ commands = [["example", "--flag"]]
         let user = parse_string("[[rules]]\nclass = \"firefox\"\n");
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(!cfg.rules[0].ignore_initial_state);
-    }
-
-    #[test]
-    fn theme_preset_fills_colors_but_explicit_colors_win() {
-        let user = parse_string(
-            r#"
-[general]
-theme = "nord"
-"#,
-        );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        let (normal, focused, urgent) = crate::config::theme_palette("nord").unwrap();
-        assert_eq!(cfg.col_normal, normal);
-        assert_eq!(cfg.col_focused, focused);
-        assert_eq!(cfg.col_urgent, urgent);
-
-        // [colors] applied after [general], so it overrides the theme.
-        let user = parse_string(
-            r#"
-[general]
-theme = "nord"
-
-[colors]
-focused = 0x00ff00
-"#,
-        );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        assert_eq!(cfg.col_focused, 0x00ff00);
-        assert_eq!(cfg.col_normal, normal); // untouched field still from the theme
-    }
-
-    #[test]
-    fn unknown_theme_name_is_ignored() {
-        let baseline = compiled_config();
-        let user = parse_string(
-            r#"
-[general]
-theme = "not-a-real-theme"
-"#,
-        );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        assert_eq!(cfg.col_normal, baseline.col_normal);
-        assert_eq!(cfg.col_focused, baseline.col_focused);
     }
 
     /// A floor above the target is contradictory: the parser diagnoses it and
