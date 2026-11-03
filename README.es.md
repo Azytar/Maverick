@@ -558,7 +558,7 @@ Defaults compilados de las claves públicas `[general]`:
 | `warp_cursor` | `false` | si un cambio de foco por teclado puede recentrar el puntero |
 | `honor_initial_state` | `false` | respetar el estado maximizado/fullscreen pedido al mapearse |
 | `auto_view_binds` | `true` | generar los atajos de View `Super+<dígito>` |
-| `view_names` | `["1"]` … `["9"]` | etiquetas de View publicadas como `_NET_DESKTOP_NAMES` |
+| `view_names` | `["1"]` … `["9"]` | etiquetas no vacías; las que faltan se numeran y las sobrantes se avisan e ignoran |
 | `overview_scale` | `0.76` | escala objetivo al entrar en Overview |
 | `overview_zoom_min` | `0.25` | escala mínima si el tile enfocado necesita reducirse más |
 
