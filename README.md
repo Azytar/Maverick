@@ -61,7 +61,7 @@ them apart:
 
 ### Views and View identity
 
-- Every monitor owns a list of Views. A monitor starts with `n_tags` of them
+- Every monitor owns a list of Views. A monitor starts with `view_count` of them
   (default 9, maximum 9 — the value is clamped at 9).
 - Each View carries a `ViewId`: a `u32` minted by that monitor's Carousel,
   strictly increasing and never reused. A deleted View frees its id permanently,
@@ -543,11 +543,11 @@ a new column. These shortcuts act on keysyms in the active keyboard layout.
 | Overview toggle / enter / next / previous | `Super+O` / `Super+E` / `Super+N` / `Super+Shift+O` | fixed-scale navigation viewport for picking a column |
 | Viewport zoom in / out | `Super+=` / `Super+-` | enlarges or restores the ribbon |
 | Page-snap right / left | `Super+]` / `Super+[` | scrolls the camera one screen-width |
-| Select View | `Super+1` … `Super+9` | generated per View, up to `n_tags` |
+| Select View | `Super+1` … `Super+9` | generated per View, up to `view_count` |
 | Send window to View | `Super+Shift+1` … `Super+Shift+9` | generated per View |
 
-The generated digit bindings follow `n_tags`. Setting
-`auto_workspace_binds = false` in `[general]` suppresses them, leaving the digit
+The generated digit bindings follow `view_count`. Setting
+`auto_view_binds = false` in `[general]` suppresses them, leaving the digit
 row entirely unmanaged.
 
 Carousel stepping (`view_next`, `view_prev`, `view_return`) and View lifecycle
@@ -584,7 +584,7 @@ Compiled defaults for the public `[general]` keys:
 
 | key | default | meaning |
 | --- | --- | --- |
-| `n_tags` | `9` | Views per monitor at startup; valid range `1..=9` |
+| `view_count` | `9` | Views per monitor at startup; valid range `1..=9` |
 | `column_width` | `0.6` | new-column width as a fraction of the monitor workarea; `0.1..=1.0` |
 | `gaps_inner` | `4` | gap between adjacent tiles |
 | `gaps_outer` | `8` | gap between tiles and the screen edge |
@@ -595,8 +595,8 @@ Compiled defaults for the public `[general]` keys:
 | `focus_mouse` | `false` | whether genuine pointer motion changes focus |
 | `warp_cursor` | `false` | whether keyboard focus changes may recenter the pointer |
 | `honor_initial_state` | `false` | honour a client's map-time maximized/fullscreen state instead of normalising it |
-| `auto_workspace_binds` | `true` | generate the `Super+<digit>` View bindings |
-| `tag_names` | `["1"]` … `["9"]` | View labels published as `_NET_DESKTOP_NAMES` |
+| `auto_view_binds` | `true` | generate the `Super+<digit>` View bindings |
+| `view_names` | `["1"]` … `["9"]` | View labels published as `_NET_DESKTOP_NAMES` |
 | `overview_scale` | `0.76` | target scale when Overview is entered |
 | `overview_zoom_min` | `0.25` | minimum Overview entry scale when the focused tile needs further fitting |
 
@@ -605,7 +605,7 @@ must not exceed the target. Set both to `1.0` for a full-size Overview.
 
 Configuration has one public spelling per setting. Historical spellings such as
 `border_w`, `gaps`, `default_col_width`, `split_bias`, the `col_*` color names,
-`[autostart].apps/programs`, and rule aliases are no longer applied.
+`[autostart].apps/programs`, the old tag/workspace names, and rule aliases are no longer applied.
 `maverick --check-config` reports the canonical replacement instead of silently
 preserving multiple vocabularies.
 
@@ -661,7 +661,7 @@ position = [120, 100]
 | `window_type` | one complete normalised `_NET_WM_WINDOW_TYPE` name |
 | `float` | manage the window as a floating client |
 | `sticky` | show the window on every View of its monitor |
-| `workspace` | place the window on this 1-based View |
+| `view` | place the window on this 1-based View |
 | `size` | positive `[width, height]` values for a floating window |
 | `position` | signed 32-bit `[x, y]` relative to the workarea origin |
 | `opacity` | window opacity in the inclusive range `0.0..=1.0` |
@@ -922,7 +922,7 @@ compatibility.
   subsystem, desktop shell, blur or shadows.
 - **Layouts:** Scroll is the only layout. `LayoutKind` has one variant; a second
   layout is not implemented and is not documented as if it were.
-- **Views:** at most 9 per monitor. `n_tags` sets how many exist at startup, and
+- **Views:** at most 9 per monitor. `view_count` sets how many exist at startup, and
   the digit row has no tenth key.
 - **Compatibility:** ICCCM and EWMH are implemented for what the window manager
   needs, which is not a claim of complete protocol or application coverage.
@@ -936,7 +936,7 @@ compatibility.
   change. The in-tree TOML parser supports a subset of TOML, not the whole
   specification.
 - **Naming:** the action vocabulary says `view`; the configuration still says
-  `n_tags` and `workspace` for the same objects. Both spellings are live.
+  `view_count` and `workspace` for the same objects. Both spellings are live.
 
 Before using Maverick as the only window manager for important work, validate a
 disposable X11 session on the target machine: login and clean exit, application
