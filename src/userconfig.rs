@@ -833,7 +833,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
     for (i, a_byte) in a.bytes().enumerate() {
         current[0] = i + 1;
         for (j, b_byte) in b.bytes().enumerate() {
-            let substitution = previous[j] + usize::from(a_byte != b_byte);
+            let substitution = previous[j] + if a_byte == b_byte { 0 } else { 1 };
             current[j + 1] = (previous[j + 1] + 1)
                 .min(current[j] + 1)
                 .min(substitution);
