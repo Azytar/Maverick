@@ -168,6 +168,7 @@ pub fn parse(src: &str) -> Parser<'_> {
         src,
         pos: 0,
         line: 1,
+        event_line: 1,
         done: false,
         seen: Vec::new(),
     }
@@ -180,6 +181,8 @@ pub struct Parser<'a> {
     pos: usize,
     /// 1-based current line (bumped whenever a `\n` is consumed).
     line: usize,
+    /// 1-based start line of the last item returned by next().
+    event_line: usize,
     done: bool,
     /// Keys observed in the *current* table — for duplicate-key detection.
     seen: Vec<&'a str>,
@@ -204,6 +207,7 @@ impl<'a> Iterator for Parser<'a> {
             self.done = true;
             return None;
         }
+        self.event_line = self.line;
         if self.byte(self.pos) == b'[' {
             match self.parse_header() {
                 Ok(h) => {
@@ -224,7 +228,7 @@ impl<'a> Iterator for Parser<'a> {
                     if self.seen.contains(&key) {
                         self.done = true;
                         return Some(Err(ParseError {
-                            line: self.line,
+                            line: self.event_line,
                             kind: "duplicate-key",
                         }));
                     }
@@ -241,6 +245,15 @@ impl<'a> Iterator for Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// Start line of the most recent item yielded by this parser.
+    ///
+    /// This stays as parser metadata rather than inflating every Event variant,
+    /// so zero-copy consumers keep the same event representation.
+    #[must_use]
+    pub fn event_line(&self) -> usize {
+        self.event_line
+    }
+
     fn bytes(&self) -> &[u8] {
         self.src.as_bytes()
     }
@@ -693,6 +706,18 @@ mod tests {
             Event::KeyValue(k, v) if *k == key => Some(v),
             _ => None,
         })
+    }
+
+    #[test]
+    fn reports_the_start_line_of_each_streamed_event() {
+        let mut parser = parse("# heading\n\n[general]\n# note\ngaps_inner = 4\n");
+        assert!(matches!(parser.next(), Some(Ok(Event::Section("general")))));
+        assert_eq!(parser.event_line(), 3);
+        assert!(matches!(
+            parser.next(),
+            Some(Ok(Event::KeyValue("gaps_inner", Value::Integer(4))))
+        ));
+        assert_eq!(parser.event_line(), 5);
     }
 
     #[test]
