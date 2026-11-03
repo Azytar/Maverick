@@ -112,8 +112,6 @@ struct UserConfig {
 #[derive(Debug, Default)]
 struct GeneralCfg {
     border_width: Option<u32>,
-    /// Legacy alias: sets both `gaps_inner` and `gaps_outer` at once.
-    gaps: Option<u32>,
     gaps_inner: Option<u32>,
     gaps_outer: Option<u32>,
     smart_gaps: Option<bool>,
@@ -123,17 +121,9 @@ struct GeneralCfg {
     /// whatever the theme sets.
     theme: Option<String>,
     n_tags: Option<usize>,
-    /// New-style column width: fraction (0.1–1.0) of the workarea given to a
-    /// freshly created column. Replaces the old `default_col_width` (px) and
-    /// `split_bias` (fraction) keys, which are kept as deprecated aliases.
+    /// Width of a freshly created column as a fraction (0.1–1.0) of the
+    /// workarea.
     column_width: Option<f32>,
-    /// Legacy alias: pixel column width, converted to `column_width` against a
-    /// fixed 1920px workarea (no monitor is known at parse time); emits a
-    /// deprecation warning.
-    default_col_width: Option<u32>,
-    /// Legacy alias: fraction of the workarea for a new column. Maps directly
-    /// onto `column_width`; emits a deprecation warning.
-    split_bias: Option<f32>,
     /// Accordion focus-expansion factor (0.0–0.9), see `Cfg::accordion_boost`.
     accordion_boost: Option<f32>,
     /// Overview zoom-out floor (0.05–1.0): the smallest scale Overview may use,
@@ -419,7 +409,7 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                     apply_color_key(c, key, &value, diag);
                 }
                 Some(Cur::Plain("autostart")) => {
-                    if matches!(key, "commands" | "apps" | "programs") {
+                    if key == "commands" {
                         user.autostart.get_or_insert_with(AutostartCfg::default);
                         if let Some(grid) = grid_strings(&value) {
                             user.autostart.as_mut().unwrap().commands = grid;
@@ -466,14 +456,12 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
     Ok(user)
 }
 
-/// Map one `[general]` key onto the model. Deprecated spellings (`border_w`,
-/// `default_col_w`, …) resolve to their canonical field here, a
-/// wrong-typed value is skipped with a warning rather than rejecting the file,
-/// and a key this table has no field for is reported instead of dropped.
+/// Map one `[general]` key onto the model. A wrong-typed value is skipped
+/// with a warning rather than rejecting the file, and a key this table has no
+/// field for is reported instead of dropped.
 fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "border_width" | "border_w" => set_u32(&mut g.border_width, key, value, diag),
-        "gaps" => set_u32(&mut g.gaps, key, value, diag),
+        "border_width" => set_u32(&mut g.border_width, key, value, diag),
         "gaps_inner" => set_u32(&mut g.gaps_inner, key, value, diag),
         "gaps_outer" => set_u32(&mut g.gaps_outer, key, value, diag),
         "smart_gaps" => set_bool(&mut g.smart_gaps, key, value, diag),
@@ -481,10 +469,6 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         "theme" => set_string(&mut g.theme, key, value, diag),
         "n_tags" => set_usize(&mut g.n_tags, key, value, diag),
         "column_width" => set_f32(&mut g.column_width, key, value, diag),
-        "default_col_width" | "default_col_w" => {
-            set_u32(&mut g.default_col_width, key, value, diag)
-        }
-        "split_bias" => set_f32(&mut g.split_bias, key, value, diag),
         "accordion_boost" => set_f32(&mut g.accordion_boost, key, value, diag),
         "overview_zoom_min" => set_f32(&mut g.overview_zoom_min, key, value, diag),
         "overview_scale" => set_f32(&mut g.overview_scale, key, value, diag),
@@ -506,9 +490,9 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
 /// Map one `[colors]` key onto the model.
 fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "normal" | "col_normal" => set_u32(&mut c.normal, key, value, diag),
-        "focused" | "col_focused" => set_u32(&mut c.focused, key, value, diag),
-        "urgent" | "col_urgent" => set_u32(&mut c.urgent, key, value, diag),
+        "normal" => set_u32(&mut c.normal, key, value, diag),
+        "focused" => set_u32(&mut c.focused, key, value, diag),
+        "urgent" => set_u32(&mut c.urgent, key, value, diag),
         _ => warn_unknown_key(diag, "[colors]", key),
     }
 }
@@ -537,11 +521,11 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
     match key {
         "class" => set_string(&mut row.class, key, value, diag),
         "instance" => set_string(&mut row.instance, key, value, diag),
-        "window_type" | "type" => set_string(&mut row.window_type, key, value, diag),
+        "window_type" => set_string(&mut row.window_type, key, value, diag),
         "title" => set_string(&mut row.title, key, value, diag),
         "float" => set_rule_bool(&mut row.float, key, value, diag),
         "sticky" => set_rule_bool(&mut row.sticky, key, value, diag),
-        "workspace" | "ws" => set_usize(&mut row.workspace, key, value, diag),
+        "workspace" => set_usize(&mut row.workspace, key, value, diag),
         "size" => {
             if let Some([w, h]) = positive_u32_pair(value) {
                 row.size = Some([w, h]);
@@ -575,15 +559,15 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
                 warn_bad(diag, key);
             }
         },
-        "border_width" | "border_w" => set_u32(&mut row.border_width, key, value, diag),
-        "ignore_initial_state" | "no_initial_state" | "no_maximize" => {
+        "border_width" => set_u32(&mut row.border_width, key, value, diag),
+        "ignore_initial_state" => {
             set_rule_bool(&mut row.ignore_initial_state, key, value, diag);
         }
         "honor_initial_state" => set_bool(&mut row.honor_initial_state, key, value, diag),
-        "deny_fullscreen" | "no_fullscreen" => {
+        "deny_fullscreen" => {
             set_rule_bool(&mut row.deny_fullscreen, key, value, diag);
         }
-        "true_fullscreen" | "exclusive_fullscreen" => {
+        "true_fullscreen" => {
             set_rule_bool(&mut row.true_fullscreen, key, value, diag);
         }
         _ => warn_unknown_key(diag, "[[rules]]", key),
@@ -690,7 +674,6 @@ fn warn_bad(diag: &mut Diagnostics, key: &str) {
 
 const GENERAL_KEYS: &[&str] = &[
     "border_width",
-    "gaps",
     "gaps_inner",
     "gaps_outer",
     "smart_gaps",
@@ -698,9 +681,6 @@ const GENERAL_KEYS: &[&str] = &[
     "theme",
     "n_tags",
     "column_width",
-    "default_col_width",
-    "default_col_w",
-    "split_bias",
     "accordion_boost",
     "overview_zoom_min",
     "overview_scale",
@@ -711,40 +691,26 @@ const GENERAL_KEYS: &[&str] = &[
     "tag_names",
 ];
 
-const COLOR_KEYS: &[&str] = &[
-    "normal",
-    "focused",
-    "urgent",
-    "col_normal",
-    "col_focused",
-    "col_urgent",
-];
+const COLOR_KEYS: &[&str] = &["normal", "focused", "urgent"];
 
-const AUTOSTART_KEYS: &[&str] = &["commands", "apps", "programs"];
+const AUTOSTART_KEYS: &[&str] = &["commands"];
 const KEYBIND_KEYS: &[&str] = &["key", "action"];
 const RULE_KEYS: &[&str] = &[
     "class",
     "instance",
     "window_type",
-    "type",
     "title",
     "float",
     "sticky",
     "workspace",
-    "ws",
     "size",
     "position",
     "opacity",
     "border_width",
-    "border_w",
     "ignore_initial_state",
-    "no_initial_state",
-    "no_maximize",
     "honor_initial_state",
     "deny_fullscreen",
-    "no_fullscreen",
     "true_fullscreen",
-    "exclusive_fullscreen",
 ];
 
 fn edit_distance(a: &str, b: &str) -> usize {
@@ -808,13 +774,34 @@ fn warn_unknown_section_if_typo(diag: &mut Diagnostics, name: &str, array: bool)
     }
 }
 
+fn removed_key_replacement(section: &str, key: &str) -> Option<&'static str> {
+    Some(match (section, key) {
+        ("[general]", "border_w") => "border_width",
+        ("[general]", "gaps") => "gaps_inner + gaps_outer",
+        ("[general]", "default_col_width" | "default_col_w" | "split_bias") => "column_width",
+        ("[colors]", "col_normal") => "normal",
+        ("[colors]", "col_focused") => "focused",
+        ("[colors]", "col_urgent") => "urgent",
+        ("[autostart]", "apps" | "programs") => "commands",
+        ("[[rules]]", "type") => "window_type",
+        ("[[rules]]", "ws") => "workspace",
+        ("[[rules]]", "border_w") => "border_width",
+        ("[[rules]]", "no_initial_state" | "no_maximize") => "ignore_initial_state",
+        ("[[rules]]", "no_fullscreen") => "deny_fullscreen",
+        ("[[rules]]", "exclusive_fullscreen") => "true_fullscreen",
+        _ => return None,
+    })
+}
+
 /// Report a key that a known table has no field for. The value is accepted and
 /// the rest of the file still merges, so this is a warning rather than an error.
 /// Close spellings name the canonical key explicitly; unrelated unknown keys are
 /// still reported without guessing.
 fn warn_unknown_key(diag: &mut Diagnostics, section: &str, key: &str) {
     let mut message = format!("unknown key '{section}.{key}'; ignoring it");
-    if let Some(suggestion) = nearest_name(key, known_keys(section)) {
+    if let Some(replacement) = removed_key_replacement(section, key) {
+        message.push_str(&format!("; this spelling was removed, use '{replacement}'"));
+    } else if let Some(suggestion) = nearest_name(key, known_keys(section)) {
         message.push_str(&format!("; did you mean '{section}.{suggestion}'?"));
     }
     diag.warnings.push(message);
@@ -872,10 +859,6 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     if let Some(v) = general.border_width {
         cfg.border_w = v;
     }
-    if let Some(v) = general.gaps {
-        cfg.gaps_inner = v;
-        cfg.gaps_outer = v;
-    }
     if let Some(v) = general.gaps_inner {
         cfg.gaps_inner = v;
     }
@@ -917,39 +900,6 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
         } else {
             diag.errors.push(format!(
                 "general.column_width must be between 0.1 and 1.0; ignoring {v}"
-            ));
-        }
-    }
-    // Legacy `default_col_width` / `default_col_w` (pixels) → fraction. The
-    // conversion needs a workarea width that does not exist at parse time, so
-    // it assumes 1920px and then clamps into the valid fraction range.
-    if let Some(px) = general.default_col_width {
-        if px > 0 {
-            cfg.column_width = (px as f32 / 1920.0).clamp(0.1, 1.0);
-            diag.warnings.push(
-                "general.default_col_width is deprecated; use [general].column_width \
-                 (fraction 0.1–1.0)"
-                    .into(),
-            );
-        } else {
-            diag.errors
-                .push("general.default_col_width must be greater than zero".into());
-        }
-    }
-    // Legacy `split_bias` (fraction) → column_width. A 0.0 `split_bias` is
-    // accepted here and clamped up to the 0.1 minimum, which is why this key
-    // validates over 0.0–1.0 but never stores 0.0.
-    if let Some(v) = general.split_bias {
-        if (0.0..=1.0).contains(&v) {
-            cfg.column_width = v.clamp(0.1, 1.0);
-            diag.warnings.push(
-                "general.split_bias is deprecated; use [general].column_width \
-                 (fraction 0.1–1.0)"
-                    .into(),
-            );
-        } else {
-            diag.errors.push(format!(
-                "general.split_bias must be between 0.0 and 1.0; ignoring {v}"
             ));
         }
     }
@@ -1699,17 +1649,12 @@ n_tags = 3
     }
 
     #[test]
-    fn empty_autostart_list_disables_compiled_commands_without_warnings() {
-        for key in ["commands", "apps", "programs"] {
-            let path = write_temp(&format!("[autostart]\n{key} = []\n"));
-            let (cfg, diag) = load_from_path(&path);
-            std::fs::remove_file(path).expect("remove config fixture");
-            assert!(
-                cfg.autostart.is_empty(),
-                "{key} must clear the compiled list"
-            );
-            assert!(diag.is_clean(), "valid empty {key} list: {diag:?}");
-        }
+    fn empty_autostart_commands_disable_compiled_commands_without_warnings() {
+        let path = write_temp("[autostart]\ncommands = []\n");
+        let (cfg, diag) = load_from_path(&path);
+        std::fs::remove_file(path).expect("remove config fixture");
+        assert!(cfg.autostart.is_empty());
+        assert!(diag.is_clean(), "valid empty command list: {diag:?}");
     }
 
     #[test]
@@ -1740,34 +1685,15 @@ commands = [["example", "--flag"]]
     }
 
     #[test]
-    fn rule_fullscreen_policy_parses_and_all_aliases_agree() {
-        // Deny — refuse the app's own runtime fullscreen (F11/EWMH), but leave
-        // the built-in `Mod4+Shift+F` working.
-        for key in ["deny_fullscreen", "no_fullscreen"] {
-            let user = parse_string(&format!("[[rules]]\nclass = \"firefox\"\n{key} = true\n"));
-            let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-            assert_eq!(cfg.rules.len(), 1);
-            assert!(
-                cfg.rules[0].deny_fullscreen,
-                "'{key}' must set Rule::deny_fullscreen"
-            );
-            assert!(!cfg.rules[0].true_fullscreen);
-        }
-        // True — exclusive, ribbon-free fullscreen for games. `True` wins over
-        // `Deny` when both are set.
-        for key in ["true_fullscreen", "exclusive_fullscreen"] {
-            let user = parse_string(&format!(
-                "[[rules]]\nclass = \"game\"\n{key} = true\ndeny_fullscreen = true\n"
-            ));
-            let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-            assert_eq!(cfg.rules.len(), 1);
-            assert!(
-                cfg.rules[0].true_fullscreen,
-                "'{key}' must set Rule::true_fullscreen"
-            );
-            assert!(cfg.rules[0].deny_fullscreen);
-        }
-        // Defaults stay false.
+    fn rule_fullscreen_policy_uses_one_canonical_spelling() {
+        let user = parse_string(
+            "[[rules]]\nclass = \"game\"\ndeny_fullscreen = true\ntrue_fullscreen = true\n",
+        );
+        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
+        assert_eq!(cfg.rules.len(), 1);
+        assert!(cfg.rules[0].deny_fullscreen);
+        assert!(cfg.rules[0].true_fullscreen);
+
         let user = parse_string("[[rules]]\nclass = \"firefox\"\n");
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(!cfg.rules[0].deny_fullscreen);
@@ -1828,17 +1754,14 @@ commands = [["example", "--flag"]]
     }
 
     #[test]
-    fn rule_ignore_initial_state_parses_and_all_aliases_agree() {
-        for key in ["ignore_initial_state", "no_initial_state", "no_maximize"] {
-            let user = parse_string(&format!("[[rules]]\nclass = \"firefox\"\n{key} = true\n"));
-            let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-            assert_eq!(cfg.rules.len(), 1);
-            assert!(
-                cfg.rules[0].ignore_initial_state,
-                "'{key}' must set Rule::ignore_initial_state"
-            );
-        }
-        // Default (key absent) stays false.
+    fn rule_ignore_initial_state_uses_one_canonical_spelling() {
+        let user = parse_string(
+            "[[rules]]\nclass = \"firefox\"\nignore_initial_state = true\n",
+        );
+        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
+        assert_eq!(cfg.rules.len(), 1);
+        assert!(cfg.rules[0].ignore_initial_state);
+
         let user = parse_string("[[rules]]\nclass = \"firefox\"\n");
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(!cfg.rules[0].ignore_initial_state);
@@ -1927,16 +1850,30 @@ theme = "not-a-real-theme"
     }
 
     #[test]
-    fn gaps_legacy_alias_sets_both_inner_and_outer() {
-        let user = parse_string(
-            r"
-[general]
-gaps = 20
-",
-        );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        assert_eq!(cfg.gaps_inner, 20);
-        assert_eq!(cfg.gaps_outer, 20);
+    fn removed_aliases_are_ignored_with_canonical_replacements() {
+        let cases = [
+            ("[general]\nborder_w = 3\n", "border_width"),
+            ("[general]\ngaps = 12\n", "gaps_inner + gaps_outer"),
+            ("[general]\nsplit_bias = 0.5\n", "column_width"),
+            ("[colors]\ncol_focused = 0x123456\n", "focused"),
+            ("[autostart]\napps = []\n", "commands"),
+            ("[[rules]]\nclass = \"x\"\nws = 2\n", "workspace"),
+            (
+                "[[rules]]\nclass = \"x\"\nexclusive_fullscreen = true\n",
+                "true_fullscreen",
+            ),
+        ];
+        for (body, replacement) in cases {
+            let mut diag = Diagnostics::default();
+            parse_user(body, &mut diag).expect("valid TOML");
+            assert_eq!(diag.warnings.len(), 1, "{body}: {diag:?}");
+            assert!(
+                diag.warnings[0].contains("was removed")
+                    && diag.warnings[0].contains(replacement),
+                "{body}: {:?}",
+                diag.warnings
+            );
+        }
     }
 
     #[test]
