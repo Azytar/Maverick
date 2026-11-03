@@ -700,12 +700,12 @@ Select the GTK backend in `~/.config/xdg-desktop-portal/portals.conf`:
 default=gtk
 ```
 
-Packages normally provide D-Bus activation. If you prefer to start the services
-explicitly, uncomment only the two portal entries in the sample's existing
-`[autostart].commands` array. The sample uses Arch Linux's `/usr/lib` paths;
-Debian/Ubuntu normally use `/usr/libexec`. Check the paths installed by your
-packages before enabling them. Start each service once; do not add `--replace`
-or run another copy if the session already manages it.
+Packages normally provide D-Bus activation. If the session needs explicit
+startup, add the installed portal executables to `[autostart].commands` as
+ordinary argv lists. Arch commonly installs them under `/usr/lib`;
+Debian/Ubuntu commonly use `/usr/libexec`. Check the actual package paths and
+start each service once; do not add `--replace` or run another copy when the
+session already manages it.
 
 Services started by Maverick inherit its X11 environment. For services activated
 by an existing D-Bus session, publish the session environment from its launcher
@@ -725,8 +725,8 @@ dbus-send --session --print-reply --dest=org.freedesktop.portal.Desktop \
 
 A successful reply contains a version number. Then open and cancel a file
 chooser in the application you use. The GTK backend provides file dialogs;
-screen sharing may require another backend. Removing the portal entries from
-autostart does not disable services activated independently by the session.
+screen sharing may require another backend. Removing explicit portal commands
+from autostart does not disable services activated independently by the session.
 
 ## maverickctl
 
