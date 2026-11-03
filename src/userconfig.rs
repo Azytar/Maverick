@@ -145,12 +145,14 @@ struct ColorsCfg {
 
 #[derive(Debug, Default)]
 struct KeybindEntry {
+    line: usize,
     key: String,
     action: String,
 }
 
 #[derive(Debug, Default)]
 struct RuleEntry {
+    line: usize,
     class: Option<String>,
     instance: Option<String>,
     window_type: Option<String>,
@@ -162,9 +164,7 @@ struct RuleEntry {
     size: Option<[u32; 2]>,
     /// `[x, y]` relative to the monitor workarea origin, for forced position.
     position: Option<[i32; 2]>,
-    /// 0.0-1.0, not validated here: `manage::apply_rules` clamps it when the
-    /// `_NET_WM_WINDOW_OPACITY` property is written, so a typo degrades the
-    /// window instead of discarding the whole rule.
+    /// 0.0-1.0, validated while reading the TOML row.
     opacity: Option<f32>,
     border_width: Option<u32>,
     /// Forces the window's map-time `_NET_WM_STATE` to be normalized away.
@@ -389,8 +389,14 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
             Event::ArraySection(name) => {
                 warn_unknown_section_if_typo(diag, name, true);
                 match name {
-                    "keybindings" => user.keybindings.push(KeybindEntry::default()),
-                    "rules" => user.rules.push(RuleEntry::default()),
+                    "keybindings" => user.keybindings.push(KeybindEntry {
+                        line,
+                        ..KeybindEntry::default()
+                    }),
+                    "rules" => user.rules.push(RuleEntry {
+                        line,
+                        ..RuleEntry::default()
+                    }),
                     _ => {}
                 }
                 cur = Some(Cur::Row(name));
@@ -1007,7 +1013,8 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
                 && entry.title.as_deref().is_none_or(str::is_empty)
             {
                 diag.errors.push(format!(
-                    "discarded rule #{}: class, instance, window_type and title are all empty",
+                    "line {}: discarded rule #{}: class, instance, window_type and title are all empty",
+                    entry.line,
                     index + 1
                 ));
                 return None;
@@ -1020,7 +1027,8 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
                 ];
                 if !KNOWN_TYPES.contains(&wt.to_ascii_lowercase().as_str()) {
                     diag.errors.push(format!(
-                        "discarded rule #{}: unknown window_type '{wt}'",
+                        "line {}: discarded rule #{}: unknown window_type '{wt}'",
+                        entry.line,
                         index + 1
                     ));
                     return None;
@@ -1031,7 +1039,8 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
             let ws = match entry.workspace {
                 Some(ws) if ws == 0 || ws > n_tags => {
                     diag.errors.push(format!(
-                        "discarded rule #{}: workspace {ws} is outside 1..={n_tags}",
+                        "line {}: discarded rule #{}: workspace {ws} is outside 1..={n_tags}",
+                        entry.line,
                         index + 1
                     ));
                     return None;
@@ -1083,30 +1092,31 @@ fn parse_keybindings(
     for entry in entries {
         let Some((mods, keysym)) = keybind_from_str(&entry.key) else {
             diag.errors.push(format!(
-                "discarded keybinding '{}': invalid key combination",
-                entry.key
+                "line {}: discarded keybinding '{}': invalid key combination",
+                entry.line, entry.key
             ));
             continue;
         };
         let Some(action) = action_from_str(&entry.action) else {
             diag.errors.push(format!(
-                "discarded keybinding '{}': invalid action '{}'",
-                entry.key, entry.action
+                "line {}: discarded keybinding '{}': invalid action '{}'",
+                entry.line, entry.key, entry.action
             ));
             continue;
         };
         if !action_workspace_is_valid(&action, n_tags) {
             diag.errors.push(format!(
-                "discarded keybinding '{}': action workspace is outside 1..={n_tags}",
-                entry.key
+                "line {}: discarded keybinding '{}': action workspace is outside 1..={n_tags}",
+                entry.line, entry.key
             ));
             continue;
         }
         // First-wins on duplicate combinations; later entries are dropped.
         if parsed.iter().any(|(m, k, _)| *m == mods && *k == keysym) {
             diag.errors.push(format!(
-                "keybinding '{}' (mods={mods:#x}, keysym={keysym:#x}) duplicates an earlier \
+                "line {}: keybinding '{}' (mods={mods:#x}, keysym={keysym:#x}) duplicates an earlier \
                  bind and was ignored; keeping {}",
+                entry.line,
                 entry.key,
                 action_name_of(&parsed, mods, keysym)
             ));
@@ -1462,6 +1472,28 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    #[test]
+    fn row_semantic_errors_keep_their_table_header_line() {
+        let path = write_temp(
+            "[[keybindings]]\nkey = \"Mod4+q\"\naction = \"not-real\"\n\n\
+             [[rules]]\nclass = \"x\"\nworkspace = 99\n",
+        );
+        let (_source, _cfg, diag) = load_from_path_classified(&path);
+        let _ = std::fs::remove_file(path);
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 1:") && e.contains("invalid action")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 5:") && e.contains("workspace 99")),
+            "{diag:?}"
+        );
     }
 
     #[test]
