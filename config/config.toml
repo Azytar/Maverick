@@ -4,6 +4,8 @@
 # square corners, no borders, no application rules and no autostart programs.
 # Commented settings show their defaults unless an alternative is described.
 # Validate edits with: maverick --check-config ~/.config/maverick/config.toml
+# Only canonical setting names are accepted; the checker names replacements for
+# removed historical spellings.
 #
 # Ordinary values override only the fields you set. A [[keybindings]] entry
 # replaces the default keymap: uncomment the whole keybinding section before
@@ -130,11 +132,6 @@ corner_radius = 0
 # key = "Mod4+Control+j"
 # action = "collapse_column"
 
-# Layout — Column is the only layout there is to select.
-# [[keybindings]]
-# key = "Mod4+t"
-# action = "layout:column"
-
 # Session — `quit` is the WM's own clean shutdown: no confirmation dialog and
 # no auxiliary process on the quit path.
 # [[keybindings]]
@@ -201,14 +198,10 @@ corner_radius = 0
 # true_fullscreen = true
 
 # Autostart — nothing is launched unless you add an entry.
-# Each entry is a program and separate arguments, not a shell command.
+# Each entry is a program plus separate argv elements, never a shell command.
+# Session-specific setup such as file chooser portals is documented in README.md.
 [autostart]
 commands = [
-  # Optional GTK file chooser portals, using Arch Linux paths.
-  # Debian/Ubuntu normally use /usr/libexec instead of /usr/lib.
-  # See README.md "Optional file chooser portals" for prerequisites and checks.
-  # ["/usr/lib/xdg-desktop-portal-gtk"],
-  # ["/usr/lib/xdg-desktop-portal"],
   # ["polybar", "main"],
   # ["picom"],
   # ["feh", "--bg-fill", "/path/to/wallpaper.png"],
