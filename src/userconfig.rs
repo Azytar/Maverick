@@ -478,9 +478,30 @@ fn annotate_event_diagnostics(
 /// field for is reported instead of dropped.
 fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "border_width" => set_u32(&mut g.border_width, key, value, diag),
-        "gaps_inner" => set_u32(&mut g.gaps_inner, key, value, diag),
-        "gaps_outer" => set_u32(&mut g.gaps_outer, key, value, diag),
+        "border_width" => set_u32_range(
+            &mut g.border_width,
+            key,
+            value,
+            0,
+            crate::core::layout::MAX_CFG_BORDER as u32,
+            diag,
+        ),
+        "gaps_inner" => set_u32_range(
+            &mut g.gaps_inner,
+            key,
+            value,
+            0,
+            crate::core::layout::MAX_CFG_GAP as u32,
+            diag,
+        ),
+        "gaps_outer" => set_u32_range(
+            &mut g.gaps_outer,
+            key,
+            value,
+            0,
+            crate::core::layout::MAX_CFG_GAP as u32,
+            diag,
+        ),
         "smart_gaps" => set_bool(&mut g.smart_gaps, key, value, diag),
         "corner_radius" => set_u32(&mut g.corner_radius, key, value, diag),
         "n_tags" => set_usize_range(&mut g.n_tags, key, value, 1, 9, diag),
@@ -581,7 +602,14 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
                 warn_bad(diag, key);
             }
         },
-        "border_width" => set_u32(&mut row.border_width, key, value, diag),
+        "border_width" => set_u32_range(
+            &mut row.border_width,
+            key,
+            value,
+            0,
+            crate::core::layout::MAX_CFG_BORDER as u32,
+            diag,
+        ),
         "ignore_initial_state" => {
             set_rule_bool(&mut row.ignore_initial_state, key, value, diag);
         }
@@ -677,6 +705,26 @@ fn set_f32(slot: &mut Option<f32>, key: &str, value: &Value<'_>, diag: &mut Diag
         *slot = Some(i as f32);
     } else {
         warn_bad(diag, key);
+    }
+}
+
+fn set_u32_range(
+    slot: &mut Option<u32>,
+    key: &str,
+    value: &Value<'_>,
+    min: u32,
+    max: u32,
+    diag: &mut Diagnostics,
+) {
+    let Some(v) = value.as_u32() else {
+        warn_bad(diag, key);
+        return;
+    };
+    if (min..=max).contains(&v) {
+        *slot = Some(v);
+    } else {
+        diag.errors
+            .push(format!("{key} must be between {min} and {max}; ignoring {v}"));
     }
 }
 
@@ -1809,6 +1857,28 @@ commands = [["example", "--flag"]]
         let user = parse_string("[[rules]]\nclass = \"firefox\"\n");
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(!cfg.rules[0].ignore_initial_state);
+    }
+
+    #[test]
+    fn gaps_and_borders_reject_values_above_the_layout_contract() {
+        let max_gap = crate::core::layout::MAX_CFG_GAP as u32;
+        let max_border = crate::core::layout::MAX_CFG_BORDER as u32;
+        let path = write_temp(&format!(
+            "[general]\ngaps_inner = {}\ngaps_outer = {}\nborder_width = {}\n",
+            max_gap + 1,
+            max_gap + 1,
+            max_border + 1,
+        ));
+        let (_source, cfg, diag) = load_from_path_classified(&path);
+        let _ = std::fs::remove_file(path);
+        let baseline = compiled_config();
+        assert_eq!(cfg.gaps_inner, baseline.gaps_inner);
+        assert_eq!(cfg.gaps_outer, baseline.gaps_outer);
+        assert_eq!(cfg.border_w, baseline.border_w);
+        assert_eq!(diag.errors.len(), 3, "{diag:?}");
+        assert!(diag.errors.iter().any(|e| e.starts_with("line 2:") && e.contains("gaps_inner")), "{diag:?}");
+        assert!(diag.errors.iter().any(|e| e.starts_with("line 3:") && e.contains("gaps_outer")), "{diag:?}");
+        assert!(diag.errors.iter().any(|e| e.starts_with("line 4:") && e.contains("border_width")), "{diag:?}");
     }
 
     #[test]
