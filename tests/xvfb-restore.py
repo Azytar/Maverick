@@ -48,7 +48,7 @@ def main():
             path.mkdir(mode=0o700)
             env[key] = str(path)
         config = directory / "config.toml"
-        config.write_text("[general]\nn_tags = 3\nfocus_mouse = false\nwarp_cursor = false\n"
+        config.write_text("[general]\nview_count = 3\nfocus_mouse = false\nwarp_cursor = false\n"
                           "gaps_outer = 10\nborder_width = 2\n[autostart]\ncommands = []\n")
         helper = directory / "probe"
         subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(ROOT / "tests/stacking-probe.c"),
