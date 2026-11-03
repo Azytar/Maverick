@@ -1915,6 +1915,90 @@ border_width = 0
     }
 
     #[test]
+    fn practical_custom_keymap_and_autostart_remain_supported() {
+        let path = write_temp(
+            r#"
+[general]
+border_width = 0
+corner_radius = 0
+
+[[keybindings]]
+key = "Mod4+Return"
+action = "spawn:aura"
+
+[[keybindings]]
+key = "Mod4+Shift+p"
+action = "spawn:rofi -show run"
+
+[[keybindings]]
+key = "Mod4+p"
+action = "spawn:rofi -show drun"
+
+[[keybindings]]
+key = "Mod4+Shift+c"
+action = "kill"
+
+[[keybindings]]
+key = "Mod4+Shift+space"
+action = "toggle_float"
+
+[[keybindings]]
+key = "Mod4+Shift+f"
+action = "toggle_fullscreen"
+
+[[keybindings]]
+key = "Mod4+h"
+action = "focus:left"
+
+[[keybindings]]
+key = "Mod4+l"
+action = "focus:right"
+
+[[keybindings]]
+key = "Mod4+Shift+h"
+action = "move:left"
+
+[[keybindings]]
+key = "Mod4+Shift+l"
+action = "move:right"
+
+[[keybindings]]
+key = "Mod4+Control+h"
+action = "grow_col:-50"
+
+[[keybindings]]
+key = "Mod4+Control+l"
+action = "grow_col:50"
+
+[[keybindings]]
+key = "Mod4+Shift+q"
+action = "quit"
+
+[[keybindings]]
+key = "Mod4+o"
+action = "toggle_overview"
+
+[autostart]
+commands = [["picom"], ["polybar", "main"]]
+"#,
+        );
+        let (cfg, diag) = load_from_path(&path);
+        let _ = std::fs::remove_file(path);
+        assert!(diag.is_clean(), "{diag:?}");
+        assert_eq!(cfg.border_w, 0);
+        assert_eq!(cfg.corner_radius, 0);
+        assert_eq!(cfg.autostart.len(), 2);
+        assert_eq!(cfg.keybinds.len(), 32, "14 custom + 18 generated View binds");
+        assert!(cfg.keybinds.iter().any(|(_, _, action)| {
+            matches!(action, Action::Spawn(argv) if argv.first().is_some_and(|bin| bin == "aura"))
+        }));
+        assert!(cfg
+            .keybinds
+            .iter()
+            .any(|(_, _, action)| matches!(action, Action::ToggleOverview)));
+    }
+
+    #[test]
     fn shipped_example_config_parses() {
         // Copying the sample must preserve the neutral runtime defaults.
         let (cfg, diag) = load_from_path(Path::new("config/config.toml"));
