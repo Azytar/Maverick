@@ -1077,8 +1077,8 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
                     return None;
                 }
             }
-            // `workspace` is 1-based in the file, 0-based in `Rule::ws`; a
-            // reload that shrinks `view_count` re-clamps it at manage time.
+            // `view` is 1-based in the file, 0-based in `Rule::ws`; a reload
+            // that shrinks `view_count` re-clamps it at manage time.
             let ws = match entry.view {
                 Some(ws) if ws == 0 || ws > view_count => {
                     diag.errors.push(format!(
@@ -1117,12 +1117,12 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
 
 /// Parse `[[keybindings]]` rows into the `(mods, keysym, action)` list.
 ///
-/// Workspace binds (Super+1..n view, Super+Shift+1..n move) are auto-generated
-/// whenever `[general].auto_workspace_binds` is true (the default) — in the
+/// View binds (Super+1..n view, Super+Shift+1..n move) are auto-generated
+/// whenever `[general].auto_view_binds` is true (the default) — in the
 /// *free* slots only, so they never clobber a combination the user already
 /// claimed. Duplicate `(mods, keysym)` pairs within the user's own list resolve
 /// first-wins, and the loser is reported via `diag`. A bind whose action targets
-/// a workspace beyond `view_count` is dropped: `view_count` is known here, so there is
+/// a View beyond `view_count` is dropped: `view_count` is known here, so there is
 /// no reason to keep a shortcut that can only ever be a no-op.
 fn parse_keybindings(
     entries: &[KeybindEntry],
@@ -1905,7 +1905,7 @@ commands = [["example", "--flag"]]
         assert_eq!(diag.errors.len(), 3, "{diag:?}");
         assert!(diag.errors.iter().any(|e| e.starts_with("line 2:") && e.contains("column_width")), "{diag:?}");
         assert!(diag.errors.iter().any(|e| e.starts_with("line 3:") && e.contains("accordion_boost")), "{diag:?}");
-        assert!(diag.errors.iter().any(|e| e.starts_with("line 4:") && e.contains("n_tags")), "{diag:?}");
+        assert!(diag.errors.iter().any(|e| e.starts_with("line 4:") && e.contains("view_count")), "{diag:?}");
     }
 
     /// A floor above the target is contradictory: the parser diagnoses it and
@@ -1955,7 +1955,7 @@ commands = [["example", "--flag"]]
             ("[general]\nsplit_bias = 0.5\n", "column_width"),
             ("[colors]\ncol_focused = 0x123456\n", "focused"),
             ("[autostart]\napps = []\n", "commands"),
-            ("[[rules]]\nclass = \"x\"\nws = 2\n", "workspace"),
+            ("[[rules]]\nclass = \"x\"\nws = 2\n", "view"),
             (
                 "[[rules]]\nclass = \"x\"\nexclusive_fullscreen = true\n",
                 "true_fullscreen",
