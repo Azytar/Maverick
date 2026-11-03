@@ -27,9 +27,9 @@ corner_radius = 0
 
 # Views per monitor, their labels and automatic numeric bindings.
 # Super+1..9 selects a View; Super+Shift+1..9 moves the focused window.
-# n_tags = 9
-# tag_names = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
-# auto_workspace_binds = true
+# view_count = 9
+# view_names = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+# auto_view_binds = true
 
 # Pointer focus and automatic cursor warping are opt-in.
 # focus_mouse = false
@@ -194,7 +194,7 @@ corner_radius = 0
 # Optional per-application placement or fullscreen policy:
 # [[rules]]
 # class = "my-game"
-# workspace = 2
+# view = 2
 # true_fullscreen = true
 
 # Autostart — nothing is launched unless you add an entry.
