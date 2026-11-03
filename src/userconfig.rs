@@ -543,20 +543,38 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
         "sticky" => set_rule_bool(&mut row.sticky, key, value, diag),
         "workspace" | "ws" => set_usize(&mut row.workspace, key, value, diag),
         "size" => {
-            if let Some([w, h]) = int_pair(value) {
-                row.size = Some([w as u32, h as u32]);
+            if let Some([w, h]) = positive_u32_pair(value) {
+                row.size = Some([w, h]);
             } else {
-                warn_bad(diag, key);
+                diag.errors.push(
+                    "rule.size must be [width, height] with both values between 1 and 4294967295; ignoring it"
+                        .into(),
+                );
             }
         }
         "position" => {
-            if let Some([x, y]) = int_pair(value) {
-                row.position = Some([x as i32, y as i32]);
+            if let Some([x, y]) = i32_pair(value) {
+                row.position = Some([x, y]);
+            } else {
+                diag.errors.push(
+                    "rule.position must be [x, y] with both values inside the signed 32-bit range; ignoring it"
+                        .into(),
+                );
+            }
+        }
+        "opacity" => {
+            if let Some(v) = number_f32(value) {
+                if v.is_finite() && (0.0..=1.0).contains(&v) {
+                    row.opacity = Some(v);
+                } else {
+                    diag.errors.push(format!(
+                        "rule.opacity must be between 0.0 and 1.0; ignoring {v}"
+                    ));
+                }
             } else {
                 warn_bad(diag, key);
             }
-        }
-        "opacity" => set_f32(&mut row.opacity, key, value, diag),
+        },
         "border_width" | "border_w" => set_u32(&mut row.border_width, key, value, diag),
         "ignore_initial_state" | "no_initial_state" | "no_maximize" => {
             set_rule_bool(&mut row.ignore_initial_state, key, value, diag);
@@ -578,7 +596,27 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
 /// Parse a two-element integer array, e.g. `size`/`position`.
 fn int_pair(value: &Value<'_>) -> Option<[i64; 2]> {
     let list = value.as_int_list()?;
-    Some([*list.first()?, *list.get(1)?])
+    (list.len() == 2).then(|| [list[0], list[1]])
+}
+
+fn positive_u32_pair(value: &Value<'_>) -> Option<[u32; 2]> {
+    let [a, b] = int_pair(value)?;
+    let a = u32::try_from(a).ok()?;
+    let b = u32::try_from(b).ok()?;
+    (a > 0 && b > 0).then_some([a, b])
+}
+
+fn i32_pair(value: &Value<'_>) -> Option<[i32; 2]> {
+    let [a, b] = int_pair(value)?;
+    Some([i32::try_from(a).ok()?, i32::try_from(b).ok()?])
+}
+
+fn number_f32(value: &Value<'_>) -> Option<f32> {
+    if let Some(v) = value.as_f64() {
+        Some(v as f32)
+    } else {
+        value.as_i64().map(|v| v as f32)
+    }
 }
 
 fn grid_strings(value: &Value<'_>) -> Option<Vec<Vec<String>>> {
@@ -1917,6 +1955,56 @@ corner_radius = 10
         assert_eq!(cfg.gaps_outer, 12);
         assert!(cfg.smart_gaps);
         assert_eq!(cfg.corner_radius, 10);
+    }
+
+    #[test]
+    fn rule_numeric_fields_reject_lossy_or_out_of_range_values() {
+        let user = parse_string(
+            r#"
+[[rules]]
+class = "broken"
+float = true
+size = [-1, 300]
+position = [2147483648, 0]
+opacity = 1.5
+"#,
+        );
+        let mut diag = Diagnostics::default();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(cfg.rules.len(), 1, "the rule itself remains useful");
+        let rule = &cfg.rules[0];
+        assert_eq!(rule.size, None);
+        assert_eq!(rule.position, None);
+        assert_eq!(rule.opacity, None);
+        assert_eq!(diag.errors.len(), 3, "{diag:?}");
+        assert!(diag.errors.iter().any(|e| e.contains("rule.size")), "{diag:?}");
+        assert!(
+            diag.errors.iter().any(|e| e.contains("rule.position")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.errors.iter().any(|e| e.contains("rule.opacity")),
+            "{diag:?}"
+        );
+    }
+
+    #[test]
+    fn rule_numeric_fields_accept_exact_boundaries_without_casting() {
+        let user = parse_string(
+            r#"
+[[rules]]
+class = "exact"
+size = [1, 4294967295]
+position = [-2147483648, 2147483647]
+opacity = 1
+"#,
+        );
+        let mut diag = Diagnostics::default();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert!(diag.is_clean(), "{diag:?}");
+        assert_eq!(cfg.rules[0].size, Some((1, u32::MAX)));
+        assert_eq!(cfg.rules[0].position, Some((i32::MIN, i32::MAX)));
+        assert_eq!(cfg.rules[0].opacity, Some(1.0));
     }
 
     #[test]
