@@ -596,7 +596,7 @@ Compiled defaults for the public `[general]` keys:
 | `warp_cursor` | `false` | whether keyboard focus changes may recenter the pointer |
 | `honor_initial_state` | `false` | honour a client's map-time maximized/fullscreen state instead of normalising it |
 | `auto_view_binds` | `true` | generate the `Super+<digit>` View bindings |
-| `view_names` | `["1"]` … `["9"]` | View labels published as `_NET_DESKTOP_NAMES` |
+| `view_names` | `["1"]` … `["9"]` | non-blank View labels; missing labels are numbered, surplus labels are reported and ignored |
 | `overview_scale` | `0.76` | target scale when Overview is entered |
 | `overview_zoom_min` | `0.25` | minimum Overview entry scale when the focused tile needs further fitting |
 
