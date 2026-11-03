@@ -341,11 +341,10 @@ esa línea no nombra ninguno de los dos.
 Para una sesión X11 arrancada con `startx` también hacen falta `xorg-server` y
 `xorg-xinit` (Arch: `xorg-server xorg-xinit`).
 
-Los atajos compilados por defecto lanzan `alacritty` y `rofi`, y el autostart
-compilado lanza `/usr/lib/xdg-desktop-portal` y `/usr/lib/xdg-desktop-portal-gtk`
-mediante ruta absoluta. Son conveniencias, no requisitos: los atajos pueden
-sobrescribirse y la lista `[autostart] commands` reemplazarse. El motor de layout
-no necesita ninguna de ellas.
+Los atajos compilados por defecto lanzan `alacritty` y `rofi`. El autostart
+compilado está vacío: paneles, compositor, wallpaper o servicios opcionales se
+declaran explícitamente en `[autostart].commands`. Son conveniencias, no
+requisitos; el motor de layout no necesita ninguno de esos programas.
 
 Variables de entorno relevantes:
 
