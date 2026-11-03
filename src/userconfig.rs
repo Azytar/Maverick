@@ -414,7 +414,25 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                     if key == "commands" {
                         user.autostart.get_or_insert_with(AutostartCfg::default);
                         if let Some(grid) = grid_strings(&value) {
-                            user.autostart.as_mut().unwrap().commands = grid;
+                            let commands = grid
+                                .into_iter()
+                                .enumerate()
+                                .filter_map(|(index, command)| {
+                                    if command
+                                        .first()
+                                        .is_some_and(|bin| !bin.trim().is_empty())
+                                    {
+                                        Some(command)
+                                    } else {
+                                        diag.warnings.push(format!(
+                                            "[autostart].commands entry #{} has no executable; ignoring it",
+                                            index + 1
+                                        ));
+                                        None
+                                    }
+                                })
+                                .collect();
+                            user.autostart.as_mut().unwrap().commands = commands;
                         } else {
                             diag.warnings.push(format!(
                                 "[autostart].{key} must be a list of string lists; ignoring it"
@@ -946,19 +964,7 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
         cfg.rules = parse_rules(user.rules, cfg.n_tags, diag);
     }
     if let Some(autostart) = user.autostart {
-        cfg.autostart = autostart
-            .commands
-            .into_iter()
-            .filter(|cmd| {
-                if cmd.first().is_some_and(|bin| !bin.trim().is_empty()) {
-                    true
-                } else {
-                    diag.warnings
-                        .push("discarded empty autostart command".into());
-                    false
-                }
-            })
-            .collect();
+        cfg.autostart = autostart.commands;
     }
     normalize_tag_names(&mut cfg);
     cfg
@@ -1747,6 +1753,22 @@ n_tags = 3
         std::fs::remove_file(path).expect("remove config fixture");
         assert!(cfg.autostart.is_empty());
         assert!(diag.is_clean(), "valid empty command list: {diag:?}");
+    }
+
+    #[test]
+    fn empty_autostart_rows_are_diagnosed_at_the_commands_line() {
+        let path = write_temp(
+            "[autostart]\ncommands = [[\"\", \"ignored\"], [\"picom\"]]\n",
+        );
+        let (cfg, diag) = load_from_path(&path);
+        let _ = std::fs::remove_file(path);
+        assert_eq!(cfg.autostart, vec![vec!["picom"]]);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(
+            diag.warnings[0].starts_with("line 2:")
+                && diag.warnings[0].contains("entry #1 has no executable"),
+            "{diag:?}"
+        );
     }
 
     #[test]
