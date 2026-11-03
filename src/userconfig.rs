@@ -477,11 +477,17 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         "gaps_outer" => set_u32(&mut g.gaps_outer, key, value, diag),
         "smart_gaps" => set_bool(&mut g.smart_gaps, key, value, diag),
         "corner_radius" => set_u32(&mut g.corner_radius, key, value, diag),
-        "n_tags" => set_usize(&mut g.n_tags, key, value, diag),
-        "column_width" => set_f32(&mut g.column_width, key, value, diag),
-        "accordion_boost" => set_f32(&mut g.accordion_boost, key, value, diag),
-        "overview_zoom_min" => set_f32(&mut g.overview_zoom_min, key, value, diag),
-        "overview_scale" => set_f32(&mut g.overview_scale, key, value, diag),
+        "n_tags" => set_usize_range(&mut g.n_tags, key, value, 1, 9, diag),
+        "column_width" => set_f32_range(&mut g.column_width, key, value, 0.1, 1.0, diag),
+        "accordion_boost" => {
+            set_f32_range(&mut g.accordion_boost, key, value, 0.0, 0.9, diag);
+        }
+        "overview_zoom_min" => {
+            set_f32_range(&mut g.overview_zoom_min, key, value, 0.05, 1.0, diag);
+        }
+        "overview_scale" => {
+            set_f32_range(&mut g.overview_scale, key, value, 0.05, 1.0, diag);
+        }
         "auto_workspace_binds" => set_bool(&mut g.auto_workspace_binds, key, value, diag),
         "focus_mouse" => set_bool(&mut g.focus_mouse, key, value, diag),
         "warp_cursor" => set_bool(&mut g.warp_cursor, key, value, diag),
@@ -665,6 +671,46 @@ fn set_f32(slot: &mut Option<f32>, key: &str, value: &Value<'_>, diag: &mut Diag
         *slot = Some(i as f32);
     } else {
         warn_bad(diag, key);
+    }
+}
+
+fn set_f32_range(
+    slot: &mut Option<f32>,
+    key: &str,
+    value: &Value<'_>,
+    min: f32,
+    max: f32,
+    diag: &mut Diagnostics,
+) {
+    let Some(v) = number_f32(value) else {
+        warn_bad(diag, key);
+        return;
+    };
+    if v.is_finite() && (min..=max).contains(&v) {
+        *slot = Some(v);
+    } else {
+        diag.errors
+            .push(format!("{key} must be between {min} and {max}; ignoring {v}"));
+    }
+}
+
+fn set_usize_range(
+    slot: &mut Option<usize>,
+    key: &str,
+    value: &Value<'_>,
+    min: usize,
+    max: usize,
+    diag: &mut Diagnostics,
+) {
+    let Some(v) = value.as_u32().map(|v| v as usize) else {
+        warn_bad(diag, key);
+        return;
+    };
+    if (min..=max).contains(&v) {
+        *slot = Some(v);
+    } else {
+        diag.errors
+            .push(format!("{key} must be between {min} and {max}; ignoring {v}"));
     }
 }
 
@@ -881,49 +927,19 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
         cfg.corner_radius = v;
     }
     if let Some(v) = general.n_tags {
-        if (1..=9).contains(&v) {
-            cfg.n_tags = v;
-        } else {
-            diag.errors.push(format!(
-                "general.n_tags must be between 1 and 9; ignoring {v}"
-            ));
-        }
+        cfg.n_tags = v;
     }
     if let Some(v) = general.column_width {
-        if (0.1..=1.0).contains(&v) {
-            cfg.column_width = v;
-        } else {
-            diag.errors.push(format!(
-                "general.column_width must be between 0.1 and 1.0; ignoring {v}"
-            ));
-        }
+        cfg.column_width = v;
     }
     if let Some(v) = general.accordion_boost {
-        if (0.0..=0.9).contains(&v) {
-            cfg.accordion_boost = v;
-        } else {
-            diag.errors.push(format!(
-                "general.accordion_boost must be between 0.0 and 0.9; ignoring {v}"
-            ));
-        }
+        cfg.accordion_boost = v;
     }
     if let Some(v) = general.overview_zoom_min {
-        if (0.05..=1.0).contains(&v) {
-            cfg.overview_zoom_min = v;
-        } else {
-            diag.errors.push(format!(
-                "general.overview_zoom_min must be between 0.05 and 1.0; ignoring {v}"
-            ));
-        }
+        cfg.overview_zoom_min = v;
     }
     if let Some(v) = general.overview_scale {
-        if (0.05..=1.0).contains(&v) {
-            cfg.overview_scale = v;
-        } else {
-            diag.errors.push(format!(
-                "general.overview_scale must be between 0.05 and 1.0; ignoring {v}"
-            ));
-        }
+        cfg.overview_scale = v;
     }
     // The pair invariant `ALPHA_MIN <= floor <= target <= 1.0` (see
     // `layout::sanitized_overview_scales`, the runtime backstop for a `Cfg`
@@ -1761,6 +1777,22 @@ commands = [["example", "--flag"]]
         let user = parse_string("[[rules]]\nclass = \"firefox\"\n");
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(!cfg.rules[0].ignore_initial_state);
+    }
+
+    #[test]
+    fn simple_general_range_errors_report_the_source_line() {
+        let path = write_temp(
+            "[general]\ncolumn_width = 2.0\naccordion_boost = -0.1\nn_tags = 42\n",
+        );
+        let (_source, cfg, diag) = load_from_path_classified(&path);
+        let _ = std::fs::remove_file(path);
+        assert_eq!(cfg.column_width, compiled_config().column_width);
+        assert_eq!(cfg.accordion_boost, compiled_config().accordion_boost);
+        assert_eq!(cfg.n_tags, compiled_config().n_tags);
+        assert_eq!(diag.errors.len(), 3, "{diag:?}");
+        assert!(diag.errors.iter().any(|e| e.starts_with("line 2:") && e.contains("column_width")), "{diag:?}");
+        assert!(diag.errors.iter().any(|e| e.starts_with("line 3:") && e.contains("accordion_boost")), "{diag:?}");
+        assert!(diag.errors.iter().any(|e| e.starts_with("line 4:") && e.contains("n_tags")), "{diag:?}");
     }
 
     /// A floor above the target is contradictory: the parser diagnoses it and
