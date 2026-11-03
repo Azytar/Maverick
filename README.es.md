@@ -64,7 +64,7 @@ mantenerlas separadas:
 
 ### Views e identidad de View
 
-- Cada monitor posee una lista de Views. Un monitor arranca con `n_tags` de ellas
+- Cada monitor posee una lista de Views. Un monitor arranca con `view_count` de ellas
   (9 por defecto, 9 como máximo; el valor se recorta a 9).
 - Cada View lleva un `ViewId`: un `u32` acuñado por el Carousel de ese monitor,
   estrictamente creciente y nunca reutilizado. Una View eliminada libera su id
@@ -502,11 +502,11 @@ maverick --help
 | Overview: alternar / entrar / siguiente / anterior | `Super+O` / `Super+E` / `Super+N` / `Super+Shift+O` | viewport de escala fija para elegir columna |
 | Zoom del viewport dentro / fuera | `Super+=` / `Super+-` | agranda o restaura el ribbon |
 | Page-snap derecha / izquierda | `Super+]` / `Super+[` | mueve la cámara una pantalla |
-| Seleccionar View | `Super+1` … `Super+9` | generados por View, hasta `n_tags` |
+| Seleccionar View | `Super+1` … `Super+9` | generados por View, hasta `view_count` |
 | Enviar ventana a una View | `Super+Shift+1` … `Super+Shift+9` | generados por View |
 
-Los atajos de dígitos generados siguen a `n_tags`. Fijar
-`auto_workspace_binds = false` en `[general]` los suprime, dejando la fila de
+Los atajos de dígitos generados siguen a `view_count`. Fijar
+`auto_view_binds = false` en `[general]` los suprime, dejando la fila de
 dígitos completamente sin gestionar.
 
 Los pasos del carousel (`view_next`, `view_prev`, `view_return`) y el ciclo de
@@ -546,7 +546,7 @@ Defaults compilados de las claves públicas `[general]`:
 
 | clave | default | significado |
 | --- | --- | --- |
-| `n_tags` | `9` | Views por monitor al arrancar; rango válido `1..=9` |
+| `view_count` | `9` | Views por monitor al arrancar; rango válido `1..=9` |
 | `column_width` | `0.6` | ancho de una columna nueva como fracción del workarea; `0.1..=1.0` |
 | `gaps_inner` | `4` | hueco entre tiles adyacentes |
 | `gaps_outer` | `8` | hueco entre los tiles y el borde de la pantalla |
@@ -557,8 +557,8 @@ Defaults compilados de las claves públicas `[general]`:
 | `focus_mouse` | `false` | si el movimiento real del puntero cambia el foco |
 | `warp_cursor` | `false` | si un cambio de foco por teclado puede recentrar el puntero |
 | `honor_initial_state` | `false` | respetar el estado maximizado/fullscreen pedido al mapearse |
-| `auto_workspace_binds` | `true` | generar los atajos de View `Super+<dígito>` |
-| `tag_names` | `["1"]` … `["9"]` | etiquetas de View publicadas como `_NET_DESKTOP_NAMES` |
+| `auto_view_binds` | `true` | generar los atajos de View `Super+<dígito>` |
+| `view_names` | `["1"]` … `["9"]` | etiquetas de View publicadas como `_NET_DESKTOP_NAMES` |
 | `overview_scale` | `0.76` | escala objetivo al entrar en Overview |
 | `overview_zoom_min` | `0.25` | escala mínima si el tile enfocado necesita reducirse más |
 
@@ -621,7 +621,7 @@ position = [120, 100]
 | `window_type` | un nombre `_NET_WM_WINDOW_TYPE` normalizado y completo |
 | `float` | gestionar la ventana como cliente flotante |
 | `sticky` | mostrar la ventana en todas las Views de su monitor |
-| `workspace` | colocar la ventana en esta View, numerada desde 1 |
+| `view` | colocar la ventana en esta View, numerada desde 1 |
 | `size` | `[ancho, alto]` positivos para una ventana flotante |
 | `position` | `[x, y]` dentro del rango entero con signo de 32 bits |
 | `opacity` | opacidad en el rango inclusivo `0.0..=1.0` |
@@ -835,7 +835,7 @@ de aplicaciones.
   animación, shell de escritorio, desenfoque ni sombras.
 - **Layouts:** Scroll es el único layout. `LayoutKind` tiene una variante; un
   segundo layout no está implementado y no se documenta como si lo estuviera.
-- **Views:** como máximo 9 por monitor. `n_tags` fija cuántas existen al arrancar, y
+- **Views:** como máximo 9 por monitor. `view_count` fija cuántas existen al arrancar, y
   la fila de dígitos no tiene décima tecla.
 - **Compatibilidad:** ICCCM y EWMH están implementados para lo que el gestor de
   ventanas necesita, lo que no equivale a una cobertura completa del protocolo o
@@ -851,7 +851,7 @@ de aplicaciones.
   presentación pueden cambiar. El parser TOML del repo soporta un subconjunto de
   TOML, no la especificación completa.
 - **Nomenclatura:** el vocabulario de acciones dice `view`; la configuración sigue
-  diciendo `n_tags` y `workspace` para los mismos objetos. Ambas grafías están
+  diciendo `view_count` y `workspace` para los mismos objetos. Ambas grafías están
   vivas.
 
 Antes de usar Maverick como único gestor de ventanas para trabajo importante,
