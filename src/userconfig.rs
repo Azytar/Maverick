@@ -27,7 +27,7 @@
 //!   compiled lists wholesale. A file with no `[[keybindings]]`/`[[rules]]`
 //!   keeps the compiled keymap/rules; a file that declares one of them drops
 //!   the compiled list entirely (there is no "append" or "clear" form).
-//! * Generated workspace binds are appended last within the keybind list, and
+//! * Generated View binds are appended last within the keybind list, and
 //!   only into unclaimed slots (see `append_numeric_keybindings`).
 //!
 //! # Failure policy
@@ -90,10 +90,12 @@ impl Diagnostics {
 /// regardless, so a broken config costs a warning, never a session.
 pub fn dump_diagnostics(diag: &Diagnostics) {
     for w in &diag.warnings {
-        log::warn!("config: {w}");
+        log::warn!("config warning: {w}");
     }
     for e in &diag.errors {
-        log::warn!("config: {e}");
+        // Config faults are non-fatal at runtime, so they stay on the warning
+        // log channel; keep the semantic severity explicit in the message.
+        log::warn!("config error: {e}");
     }
 }
 #[derive(Debug, Default)]
@@ -124,8 +126,8 @@ struct GeneralCfg {
     /// Overview entry scale (0.05–1.0): the scale the mode is entered at, see
     /// `Cfg::overview_scale`.
     overview_scale: Option<f32>,
-    /// Auto-generate `Super+1..n` / `Super+Shift+1..n` workspace binds.
-    /// Defaults to `true`; when `false` no workspace binds are added.
+    /// Auto-generate `Super+1..n` / `Super+Shift+1..n` View binds.
+    /// Defaults to `true`; when `false` no View binds are added.
     auto_view_binds: Option<bool>,
     focus_mouse: Option<bool>,
     warp_cursor: Option<bool>,
@@ -224,15 +226,15 @@ pub fn load_config(path: Option<&Path>) -> Cfg {
 }
 
 /// The complete fail-safe default: the compiled baseline plus the auto-generated
-/// numeric workspace keybindings (`Super+1..n` → view, `Super+Shift+1..n` → move).
+/// numeric View keybindings (`Super+1..n` → view, `Super+Shift+1..n` → move).
 ///
 /// Every fallback path in the loader (no path, missing file, unreadable file,
 /// broken TOML) returns this, so a WM that never reads a config file still
-/// starts with a reachable workspace keymap. A file that *does* parse is never
+/// starts with a reachable View keymap. A file that *does* parse is never
 /// merged onto it: `merge_config` takes [`compiled_config`] as its baseline and
 /// adds the generated binds itself, so they reflect the file's `view_count` and
 /// `auto_view_binds`. The compiled baseline therefore stays free of
-/// workspace binds — they are generated, never configured.
+/// View binds — they are generated, never configured.
 fn default_config() -> Cfg {
     let mut cfg = compiled_config();
     append_numeric_keybindings(&mut cfg.keybinds, cfg.n_tags);
@@ -332,7 +334,7 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
 
     log::config_trace("validation_start", format_args!("phase=semantic_merge"));
     // The merge baseline is the compiled keymap, NOT the fail-safe `fallback`
-    // above: `merge_config` generates the workspace binds itself, for the
+    // above: `merge_config` generates the View binds itself, for the
     // `view_count` the file ended up with and only when `auto_view_binds`
     // allows it. Starting from `fallback` would pre-seed a bind for every digit
     // of the compiled tag count, which no flag could then take away — the
@@ -539,7 +541,14 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         "honor_initial_state" => set_bool(&mut g.honor_initial_state, key, value, diag),
         "view_names" => {
             if let Some(list) = value.as_str_list() {
-                g.view_names = Some(list.iter().map(|s| s.as_ref().to_string()).collect());
+                let names: Vec<String> = list.iter().map(|s| s.as_ref().to_string()).collect();
+                if names.is_empty() || names.iter().any(|name| name.trim().is_empty()) {
+                    diag.warnings.push(
+                        "view_names must contain at least one non-blank name; ignoring it".into(),
+                    );
+                } else {
+                    g.view_names = Some(names);
+                }
             } else {
                 warn_bad(diag, key);
             }
@@ -941,7 +950,7 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
 
     if !user.keybindings.is_empty() {
         // Any user keybinding discards the compiled keymap entirely; the
-        // generated workspace binds are re-added into the free slots.
+        // generated View binds are re-added into the free slots.
         cfg.keybinds = parse_keybindings(&user.keybindings, cfg.n_tags, auto_ws, diag);
     } else if auto_ws {
         // No user keybindings: keep the compiled binds and still synthesize the
@@ -1011,12 +1020,15 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
         cfg.warp_cursor = v;
     }
     if let Some(names) = general.view_names {
-        if names.is_empty() || names.iter().any(String::is_empty) {
-            diag.warnings
-                .push("general.view_names must contain non-empty names; ignoring it".into());
-        } else {
-            cfg.tag_names = names;
+        if names.len() > cfg.n_tags {
+            diag.warnings.push(format!(
+                "view_names has {} entries but view_count is {}; ignoring {} trailing name(s)",
+                names.len(),
+                cfg.n_tags,
+                names.len() - cfg.n_tags
+            ));
         }
+        cfg.tag_names = names;
     }
     if let Some(v) = general.honor_initial_state {
         cfg.honor_initial_state = v;
@@ -1563,14 +1575,14 @@ action = "kill"
             .keybinds
             .iter()
             .any(|(_, key, action)| { *key == u32::from(b'q') && matches!(action, Action::Kill) }));
-        assert_eq!(cfg.keybinds.len(), 19); // valid q plus 18 generated workspace binds
+        assert_eq!(cfg.keybinds.len(), 19); // valid q plus 18 generated View binds
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn user_numeric_bind_keeps_other_auto_binds() {
         // A user binding on a digit slot claims only that slot; the other
-        // auto-generated workspace binds survive (there is no full
+        // auto-generated View binds survive (there is no full
         // suppression), and the claimed slot keeps the user's action.
         let user = parse_string(
             r#"
@@ -1975,6 +1987,32 @@ commands = [["example", "--flag"]]
     }
 
     #[test]
+    fn view_names_reject_blank_entries_at_the_source_line() {
+        let path = write_temp("[general]\nview_names = [\"web\", \"   \"]\n");
+        let (_source, cfg, diag) = load_from_path_classified(&path);
+        let _ = std::fs::remove_file(path);
+        assert_eq!(cfg.tag_names, compiled_config().tag_names);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(
+            diag.warnings[0].starts_with("line 2:")
+                && diag.warnings[0].contains("non-blank"),
+            "{diag:?}"
+        );
+    }
+
+    #[test]
+    fn surplus_view_names_are_explicitly_reported() {
+        let user = parse_string(
+            "[general]\nview_count = 2\nview_names = [\"web\", \"code\", \"chat\"]\n",
+        );
+        let mut diag = Diagnostics::default();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(cfg.tag_names, vec!["web", "code"]);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(diag.warnings[0].contains("1 trailing name"), "{diag:?}");
+    }
+
+    #[test]
     fn gaps_inner_outer_can_be_set_independently() {
         let user = parse_string(
             r"
@@ -2165,7 +2203,7 @@ commands = [["picom"], ["polybar", "main"]]
         assert!(cfg.rules.is_empty());
         assert!(cfg.autostart.is_empty());
         assert_eq!(cfg.keybinds, default_config().keybinds);
-        // Numeric workspace binds are auto-restored when no digit keybinds exist.
+        // Numeric View binds are auto-restored when no digit keybinds exist.
         assert!(cfg
             .keybinds
             .iter()
