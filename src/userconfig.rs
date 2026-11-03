@@ -964,7 +964,7 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
     if let Some(autostart) = user.autostart {
         cfg.autostart = autostart.commands;
     }
-    normalize_tag_names(&mut cfg);
+    normalize_view_names(&mut cfg);
     cfg
 }
 
@@ -1047,17 +1047,17 @@ fn apply_colors(cfg: &mut Cfg, colors: ColorsCfg, _diag: &mut Diagnostics) {
     }
 }
 
-/// Force `tag_names` to be exactly `view_count` long: surplus names are dropped and
-/// missing ones are auto-numbered, so the bar/IPC can index it by workspace
-/// without a range check.
-fn normalize_tag_names(cfg: &mut Cfg) {
+/// Force the runtime View-name vector to be exactly `view_count` long: surplus
+/// names are dropped and missing ones are auto-numbered, so bar/IPC consumers
+/// can index it without a range check.
+fn normalize_view_names(cfg: &mut Cfg) {
     cfg.tag_names.truncate(cfg.n_tags);
     while cfg.tag_names.len() < cfg.n_tags {
         cfg.tag_names.push((cfg.tag_names.len() + 1).to_string());
     }
 }
 
-fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -> Vec<Rule> {
+fn parse_rules(entries: Vec<RuleEntry>, view_count: usize, diag: &mut Diagnostics) -> Vec<Rule> {
     entries
         .into_iter()
         .enumerate()
@@ -1094,7 +1094,7 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
             let ws = match entry.view {
                 Some(ws) if ws == 0 || ws > view_count => {
                     diag.errors.push(format!(
-                        "line {}: discarded rule #{}: view {ws} is outside 1..={n_tags}",
+                        "line {}: discarded rule #{}: view {ws} is outside 1..={view_count}",
                         entry.line,
                         index + 1
                     ));
@@ -1138,8 +1138,8 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
 /// no reason to keep a shortcut that can only ever be a no-op.
 fn parse_keybindings(
     entries: &[KeybindEntry],
-    n_tags: usize,
-    auto_workspace_binds: bool,
+    view_count: usize,
+    auto_view_binds: bool,
     diag: &mut Diagnostics,
 ) -> Vec<(u16, u32, Action)> {
     let mut parsed: Vec<(u16, u32, Action)> = Vec::new();
@@ -1159,9 +1159,9 @@ fn parse_keybindings(
             ));
             continue;
         };
-        if !action_workspace_is_valid(&action, n_tags) {
+        if !action_view_is_valid(&action, view_count) {
             diag.errors.push(format!(
-                "line {}: discarded keybinding '{}': action workspace is outside 1..={n_tags}",
+                "line {}: discarded keybinding '{}': action workspace is outside 1..={view_count}",
                 entry.line, entry.key
             ));
             continue;
@@ -1180,8 +1180,8 @@ fn parse_keybindings(
         parsed.push((mods, keysym, action));
     }
 
-    if auto_workspace_binds {
-        append_numeric_keybindings(&mut parsed, n_tags);
+    if auto_view_binds {
+        append_numeric_keybindings(&mut parsed, view_count);
     }
     parsed
 }
@@ -1196,9 +1196,9 @@ fn action_name_of(list: &[(u16, u32, Action)], mods: u16, keysym: u32) -> String
         })
 }
 
-fn action_workspace_is_valid(action: &Action, n_tags: usize) -> bool {
+fn action_view_is_valid(action: &Action, view_count: usize) -> bool {
     match action {
-        Action::View(ws) | Action::MoveToWs(ws) | Action::ViewRemove(ws) => *ws < n_tags,
+        Action::View(ws) | Action::MoveToWs(ws) | Action::ViewRemove(ws) => *ws < view_count,
         _ => true,
     }
 }
@@ -1206,10 +1206,10 @@ fn action_workspace_is_valid(action: &Action, n_tags: usize) -> bool {
 /// Add `Super+1..n` / `Super+Shift+1..n` for `view_count`, capped at 9 because the
 /// digit row has no tenth key. Only unclaimed combinations are filled, so a
 /// user bind on e.g. `Super+1` wins and the generated `View(0)` is skipped.
-fn append_numeric_keybindings(keybinds: &mut Vec<(u16, u32, Action)>, n_tags: usize) {
+fn append_numeric_keybindings(keybinds: &mut Vec<(u16, u32, Action)>, view_count: usize) {
     let sup = u16::from(ModMask::M4);
     let shift_sup = sup | u16::from(ModMask::SHIFT);
-    for ws in 0..n_tags.min(9) {
+    for ws in 0..view_count.min(9) {
         let keysym = b'1' as u32 + ws as u32;
         let view = (sup, keysym);
         let move_to = (shift_sup, keysym);
