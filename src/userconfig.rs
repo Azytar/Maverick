@@ -2212,26 +2212,23 @@ commands = [["picom"], ["polybar", "main"]]
     }
 
     #[test]
-    fn portal_autostart_example_is_opt_in_and_parses_as_argv() {
+    fn shipped_autostart_examples_are_generic_and_opt_in() {
         let sample = include_str!("../config/config.toml");
-        let commands = sample
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("# [\"/usr/lib/"))
-            .filter(|line| line.starts_with("xdg-desktop-portal"))
-            .map(|line| format!("[\"/usr/lib/{line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let source = format!("[autostart]\ncommands = [\n{commands}\n]\n");
-        let mut diag = Diagnostics::default();
-        let user = parse_user(&source, &mut diag).expect("portal example parses");
-        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert!(
+            !sample.contains("xdg-desktop-portal"),
+            "the generic sample must not hard-code distribution-specific portal paths"
+        );
+        assert!(
+            sample.contains("# [\"picom\"]")
+                && sample.contains("# [\"polybar\", \"main\"]"),
+            "the sample should still demonstrate ordinary argv-style autostart entries"
+        );
+
+        let (cfg, diag) = load_from_path(Path::new("config/config.toml"));
         assert!(diag.is_clean(), "{diag:?}");
-        assert_eq!(
-            cfg.autostart,
-            vec![
-                vec!["/usr/lib/xdg-desktop-portal-gtk".to_string()],
-                vec!["/usr/lib/xdg-desktop-portal".to_string()],
-            ]
+        assert!(
+            cfg.autostart.is_empty(),
+            "commented sample commands must stay opt-in"
         );
     }
 
