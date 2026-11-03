@@ -131,7 +131,7 @@ class Sandbox:
                      self.repo / "target/release", self.target / "release"):
             path.mkdir(parents=True)
         shutil.copytree(INSTALLER_DIR, self.repo / "installer")
-        (self.repo / "config/config.toml").write_text("[general]\nn_tags = 4\n")
+        (self.repo / "config/config.toml").write_text("[general]\nview_count = 4\n")
         self.stubs = base / "stubs"
         self.stubs.mkdir()
         self.seed_build()
