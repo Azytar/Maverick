@@ -82,6 +82,10 @@ before it makes no compatibility promise.
 - Autostart argv lists are validated on the `commands` line; rows without an
   executable are reported and discarded before the runtime configuration is
   built.
+- `view_names` rejects blank labels at the source line and reports surplus
+  names instead of silently truncating them to `view_count`. Runtime logging
+  distinguishes configuration warnings from configuration errors while keeping
+  both non-fatal to the running session.
 - The stacking regression gives Xvfb its own bounded startup deadline, handles
   partial readiness records and early exits, and preserves the original failure
   when diagnostic tools cannot run. Startup failures never query an inherited
