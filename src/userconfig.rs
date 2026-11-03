@@ -396,8 +396,12 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
     for event in parse(source) {
         let event = event?;
         match event {
-            Event::Section(name) => cur = Some(Cur::Plain(name)),
+            Event::Section(name) => {
+                warn_unknown_section_if_typo(diag, name, false);
+                cur = Some(Cur::Plain(name));
+            }
             Event::ArraySection(name) => {
+                warn_unknown_section_if_typo(diag, name, true);
                 match name {
                     "keybindings" => user.keybindings.push(KeybindEntry::default()),
                     "rules" => user.rules.push(RuleEntry::default()),
@@ -646,18 +650,136 @@ fn warn_bad(diag: &mut Diagnostics, key: &str) {
     ));
 }
 
+const GENERAL_KEYS: &[&str] = &[
+    "border_width",
+    "gaps",
+    "gaps_inner",
+    "gaps_outer",
+    "smart_gaps",
+    "corner_radius",
+    "theme",
+    "n_tags",
+    "column_width",
+    "default_col_width",
+    "default_col_w",
+    "split_bias",
+    "accordion_boost",
+    "overview_zoom_min",
+    "overview_scale",
+    "auto_workspace_binds",
+    "focus_mouse",
+    "warp_cursor",
+    "honor_initial_state",
+    "tag_names",
+];
+
+const COLOR_KEYS: &[&str] = &[
+    "normal",
+    "focused",
+    "urgent",
+    "col_normal",
+    "col_focused",
+    "col_urgent",
+];
+
+const AUTOSTART_KEYS: &[&str] = &["commands", "apps", "programs"];
+const KEYBIND_KEYS: &[&str] = &["key", "action"];
+const RULE_KEYS: &[&str] = &[
+    "class",
+    "instance",
+    "window_type",
+    "type",
+    "title",
+    "float",
+    "sticky",
+    "workspace",
+    "ws",
+    "size",
+    "position",
+    "opacity",
+    "border_width",
+    "border_w",
+    "ignore_initial_state",
+    "no_initial_state",
+    "no_maximize",
+    "honor_initial_state",
+    "deny_fullscreen",
+    "no_fullscreen",
+    "true_fullscreen",
+    "exclusive_fullscreen",
+];
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0; b.len() + 1];
+
+    for (i, a_byte) in a.bytes().enumerate() {
+        current[0] = i + 1;
+        for (j, b_byte) in b.bytes().enumerate() {
+            let substitution = previous[j] + usize::from(a_byte != b_byte);
+            current[j + 1] = (previous[j + 1] + 1)
+                .min(current[j] + 1)
+                .min(substitution);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
+}
+
+fn nearest_name<'a>(name: &str, candidates: &'a [&str]) -> Option<&'a str> {
+    let mut best: Option<(&str, usize)> = None;
+    for candidate in candidates {
+        let distance = edit_distance(name, candidate);
+        if best.is_none_or(|(_, best_distance)| distance < best_distance) {
+            best = Some((candidate, distance));
+        }
+    }
+    let (candidate, distance) = best?;
+    let threshold = if name.len().max(candidate.len()) <= 6 { 1 } else { 2 };
+    (distance <= threshold).then_some(candidate)
+}
+
+fn known_keys(section: &str) -> &'static [&'static str] {
+    match section {
+        "[general]" => GENERAL_KEYS,
+        "[colors]" => COLOR_KEYS,
+        "[autostart]" => AUTOSTART_KEYS,
+        "[[keybindings]]" => KEYBIND_KEYS,
+        "[[rules]]" => RULE_KEYS,
+        _ => &[],
+    }
+}
+
+/// Unknown tables stay silent for forward compatibility, except when their name
+/// is close enough to a table Maverick already owns that it is almost certainly
+/// a typo. That keeps a future `[compositor]` harmless while making `[genreal]`
+/// actionable.
+fn warn_unknown_section_if_typo(diag: &mut Diagnostics, name: &str, array: bool) {
+    const PLAIN: &[&str] = &["general", "colors", "autostart"];
+    const ROWS: &[&str] = &["keybindings", "rules"];
+    let candidates = if array { ROWS } else { PLAIN };
+    if candidates.contains(&name) {
+        return;
+    }
+    if let Some(suggestion) = nearest_name(name, candidates) {
+        let open = if array { "[[" } else { "[" };
+        let close = if array { "]]" } else { "]" };
+        diag.warnings.push(format!(
+            "unknown table '{open}{name}{close}'; did you mean '{open}{suggestion}{close}'?"
+        ));
+    }
+}
+
 /// Report a key that a known table has no field for. The value is accepted and
-/// the rest of the file still merges, so this is a warning rather than an error:
-/// what the user gets is a configuration that works minus the one setting they
-/// believe they made, which is exactly the case a silent drop hides best.
-/// Naming the table and the key is what makes it fixable — `honour_initial_state`
-/// and `[general].honor_initial_state` are one keystroke apart.
-///
-/// Unknown *tables* are not reported: see `parse_user`, where forward
-/// compatibility with a config written for a newer Maverick takes precedence.
+/// the rest of the file still merges, so this is a warning rather than an error.
+/// Close spellings name the canonical key explicitly; unrelated unknown keys are
+/// still reported without guessing.
 fn warn_unknown_key(diag: &mut Diagnostics, section: &str, key: &str) {
-    diag.warnings
-        .push(format!("unknown key '{section}.{key}'; ignoring it"));
+    let mut message = format!("unknown key '{section}.{key}'; ignoring it");
+    if let Some(suggestion) = nearest_name(key, known_keys(section)) {
+        message.push_str(&format!("; did you mean '{section}.{suggestion}'?"));
+    }
+    diag.warnings.push(message);
 }
 
 /// Fold [`UserConfig`] into the baseline [`Cfg`], recording per-entry
@@ -2020,6 +2142,39 @@ border_width = 0
         // to fail the CI gate: "the file loads" is not "the file is what you
         // wrote".
         assert!(!diag.is_clean(), "{diag:?}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn likely_table_typos_are_reported_but_future_tables_stay_silent() {
+        let typo = write_temp("[genreal]\ngaps_inner = 17\n[general]\ngaps_outer = 11\n");
+        let (_source, cfg, diag) = load_from_path_classified(&typo);
+        assert_eq!(cfg.gaps_outer, 11);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(
+            diag.warnings[0].contains("did you mean '[general]'"),
+            "{:?}",
+            diag.warnings
+        );
+        let _ = std::fs::remove_file(typo);
+
+        let future = write_temp("[compositor]\nenabled = true\n[general]\ngaps_inner = 13\n");
+        let (_source, cfg, diag) = load_from_path_classified(&future);
+        assert_eq!(cfg.gaps_inner, 13);
+        assert!(diag.is_clean(), "unrelated future table must stay silent: {diag:?}");
+        let _ = std::fs::remove_file(future);
+    }
+
+    #[test]
+    fn unknown_key_diagnostic_suggests_the_canonical_spelling() {
+        let path = write_temp("[general]\nhonour_initial_state = true\n");
+        let (_source, _cfg, diag) = load_from_path_classified(&path);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(
+            diag.warnings[0].contains("did you mean '[general].honor_initial_state'"),
+            "{:?}",
+            diag.warnings
+        );
         let _ = std::fs::remove_file(path);
     }
 
