@@ -1618,9 +1618,13 @@ mod tests {
 
     #[test]
     fn tail_returns_the_end_of_a_file() {
+        use std::fmt::Write;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("log");
-        let body: String = (1..=100).map(|i| format!("line {i}\n")).collect();
+        let mut body = String::new();
+        for i in 1..=100 {
+            writeln!(body, "line {i}").unwrap();
+        }
         std::fs::write(&path, &body).expect("write");
         let got = tail(&path, 5).expect("tail");
         assert_eq!(
@@ -1634,13 +1638,15 @@ mod tests {
     /// wrong (losing a line, or reporting a phantom empty one).
     #[test]
     fn tail_survives_chunk_boundaries_and_a_missing_final_newline() {
+        use std::fmt::Write;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("big");
         let long = "x".repeat(5_000);
-        let body: String = (1..=200)
-            .map(|i| format!("{i:04} {long}\n"))
-            .collect::<String>()
-            + "no newline at the end";
+        let mut body = String::new();
+        for i in 1..=200 {
+            writeln!(body, "{i:04} {long}").unwrap();
+        }
+        body.push_str("no newline at the end");
         std::fs::write(&path, body).expect("write");
         let got = tail(&path, 3).expect("tail");
         assert_eq!(got.len(), 3);

@@ -844,17 +844,21 @@ impl Workspace {
                 let focused_row = col.focused;
                 col.windows.remove(wi);
                 if !col.windows.is_empty() {
-                    if wi < focused_row {
-                        // A row before the focused one was removed: the focused
-                        // row shifts down by one, so the focus pointer must shift
-                        // with it. Without this, `col.focused` would silently point
-                        // at a *different* window in the same column.
-                        col.focused = col.focused.saturating_sub(1);
-                    } else if wi == focused_row {
-                        // The focused window itself was removed: clamp to the new
-                        // tail. The exact window that takes its place is
-                        // re-derived from `mon.focused` by `State::remove_client`.
-                        col.focused = col.focused.min(col.windows.len() - 1);
+                    match wi.cmp(&focused_row) {
+                        std::cmp::Ordering::Less => {
+                            // A row before the focused one was removed: the focused
+                            // row shifts down by one, so the focus pointer must shift
+                            // with it. Without this, `col.focused` would silently point
+                            // at a *different* window in the same column.
+                            col.focused = col.focused.saturating_sub(1);
+                        }
+                        std::cmp::Ordering::Equal => {
+                            // The focused window itself was removed: clamp to the new
+                            // tail. The exact window that takes its place is
+                            // re-derived from `mon.focused` by `State::remove_client`.
+                            col.focused = col.focused.min(col.windows.len() - 1);
+                        }
+                        std::cmp::Ordering::Greater => {}
                     }
                 }
                 break;
