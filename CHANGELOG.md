@@ -72,6 +72,16 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Configuration validation checks floating-point ranges before narrowing to
+  runtime precision, rejects empty shortcut components and NoSymbol bindings,
+  and diagnoses known tables written with the wrong header kind. Invalid
+  autostart list types preserve the compiled commands instead of clearing them.
+- The TOML subset rejects negative hexadecimal literals, literal line breaks
+  in basic strings, and grid rows without an opening bracket. Legacy
+  `shrink-col` actions reject integer negation overflow instead of panicking.
+- Configuration diagnostics include the file path and expected field type;
+  cross-field general diagnostics retain the section's location. Checker
+  integration tests pin exit codes and the absence of command execution.
 - Rule `size` and `position` values are range-checked before integer
   conversion, so negative sizes or out-of-range coordinates cannot wrap into
   unrelated values. Rule `opacity` is validated in the config layer and must
