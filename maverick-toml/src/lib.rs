@@ -421,6 +421,10 @@ impl<'a> Parser<'a> {
             self.bytes().get(digits..digits + 2),
             Some(b"0x") | Some(b"0X")
         ) {
+            // Hex literals are unsigned; never consume and then lose a sign.
+            if digits != start {
+                return Err(self.err("value"));
+            }
             self.pos += 2;
             let hex_start = self.pos;
             while self.byte(self.pos).is_ascii_hexdigit() {
@@ -495,7 +499,7 @@ impl<'a> Parser<'a> {
                     }
                     self.pos += 1;
                 }
-                0 => return Err(self.err("string")),
+                0 | b'\n' | b'\r' => return Err(self.err("string")),
                 _ => self.pos += 1,
             }
         }
@@ -569,7 +573,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A single integer array element: decimal or hex, optional sign.
+    /// A single integer array element: signed decimal or unsigned hex.
     /// Bounded like [`Self::parse_number`].
     fn parse_int_elem(&mut self) -> Result<i64, ParseError> {
         let start = self.pos;
@@ -581,6 +585,9 @@ impl<'a> Parser<'a> {
             self.bytes().get(digits..digits + 2),
             Some(b"0x") | Some(b"0X")
         ) {
+            if digits != start {
+                return Err(self.err("array"));
+            }
             self.pos += 2;
             let hex_start = self.pos;
             while self.byte(self.pos).is_ascii_hexdigit() {
@@ -635,6 +642,9 @@ impl<'a> Parser<'a> {
                 let mut total = 0usize;
                 loop {
                     if grid.len() >= MAX_ARRAY_ELEMS {
+                        return Err(self.err("array"));
+                    }
+                    if self.byte(self.pos) != b'[' {
                         return Err(self.err("array"));
                     }
                     self.pos += 1;
@@ -750,6 +760,30 @@ mod tests {
     fn negative_integers() {
         let e = all("v = -50\n");
         assert!(matches!(kv(&e, "v"), Some(Value::Integer(-50))));
+    }
+
+    #[test]
+    fn negative_hex_is_rejected_in_scalars_and_arrays() {
+        for src in ["v = -0x10\n", "v = [-0x10]\n"] {
+            assert!(parse(src).collect::<Result<Vec<_>, _>>().is_err(), "{src}");
+        }
+    }
+
+    #[test]
+    fn every_grid_row_requires_an_opening_bracket() {
+        for src in ["v = [[\"a\"], x\"b\"]]\n", "v = [[\"a\"], x]\n"] {
+            assert!(parse(src).collect::<Result<Vec<_>, _>>().is_err(), "{src}");
+        }
+    }
+
+    #[test]
+    fn basic_strings_reject_literal_line_breaks() {
+        for newline in ["\n", "\r", "\r\n"] {
+            let src = format!("v = \"a{newline}b\"\n");
+            let err = parse(&src).collect::<Result<Vec<_>, _>>().unwrap_err();
+            assert_eq!(err.kind, "string");
+            assert_eq!(err.line, 1);
+        }
     }
 
     #[test]
