@@ -174,6 +174,12 @@ fn escape(s: &str) -> String {
 }
 
 proptest! {
+    #[test]
+    fn arbitrary_utf8_is_total_and_deterministic(chars in prop::collection::vec(any::<char>(), 0..512)) {
+        let source: String = chars.into_iter().collect();
+        prop_assert_eq!(stream(&source), stream(&source));
+    }
+
     /// Parsing is total, and every event it does produce is a member of the
     /// documented grammar: a bare key, a trimmed non-empty header name, a
     /// well-known diagnostic tag.

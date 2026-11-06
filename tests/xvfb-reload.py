@@ -108,8 +108,8 @@ def main():
                     wait_for(lambda: log_path.read_text().count("[INFO]  reload:") >= reloads,
                              "reload did not complete")
 
-                def assert_visible(label):
-                    outer = min(values["gaps_outer"], 300)
+                def assert_visible(label, expected_outer=None):
+                    outer = min(values["gaps_outer"] if expected_outer is None else expected_outer, 300)
                     border = values["border_width"]
 
                     def visible():
@@ -130,12 +130,15 @@ def main():
                     print("PASS:", label, actual, "camera=", camera(), flush=True)
 
                 assert_visible("initial layout")
-                for inner, outer in ((200, 40), (500, 100), (0, 0), (40, 16),
-                                     (4294967295, 4294967295), (4, 8)):
+                # Out-of-range settings are discarded by the loader, so that
+                # case uses the compiled outer gap (8), not a runtime clamp.
+                for inner, outer, expected_outer in ((200, 40, 40), (500, 100, 100),
+                                                     (0, 0, 0), (40, 16, 16),
+                                                     (4294967295, 4294967295, 8), (4, 8, 8)):
                     values.update(gaps_inner=inner, gaps_outer=outer)
                     write_config()
                     reload()
-                    assert_visible(f"reload gaps {inner}/{outer}")
+                    assert_visible(f"reload gaps {inner}/{outer}", expected_outer)
 
                 rng = random.Random(20261018)
                 for case in range(16):
@@ -154,13 +157,26 @@ def main():
                     "an unchanged reload reset a deliberate camera pan")
                 print("PASS: unchanged reload preserves a deliberate pan", flush=True)
 
-                config.write_text("[general\ngaps_inner = broken\n")
-                before_camera, before_geometry = camera(), geometry()
-                ctl("reload")
-                wait_for(lambda: "keeping current config" in log_path.read_text(),
-                         "invalid reload was not rejected")
-                assert camera() == before_camera and geometry() == before_geometry
-                print("PASS: malformed reload preserves the live layout", flush=True)
+                def assert_rejected_reload(label):
+                    before_camera, before_geometry = camera(), geometry()
+                    rejections = log_path.read_text().count("keeping current config")
+                    ctl("reload")
+                    wait_for(lambda: log_path.read_text().count("keeping current config") > rejections,
+                             f"{label}: invalid reload was not rejected")
+                    assert camera() == before_camera and geometry() == before_geometry
+                    assert wm.poll() is None
+                    print(f"PASS: {label} preserves the live layout", flush=True)
+
+                for source in ("[general\ngaps_inner = broken\n",
+                               "[general]\ngaps_inner = -0x10\n",
+                               '[autostart]\ncommands = [["touch"], x"marker"]]\n'):
+                    config.write_text(source)
+                    assert_rejected_reload("malformed reload")
+                config.unlink()
+                assert_rejected_reload("missing file reload")
+                config.mkdir()
+                assert_rejected_reload("unreadable file reload")
+                config.rmdir()
 
                 values.update(gaps_inner=4, gaps_outer=8, border_width=0,
                               smart_gaps=False, accordion_boost=0.0)
