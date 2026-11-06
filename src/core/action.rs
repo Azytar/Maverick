@@ -234,7 +234,7 @@ pub fn parse(input: &str) -> Option<Action> {
     }
     if let Some(rest) = input.strip_prefix("shrink-col") {
         let n = rest.trim().parse::<i32>().ok()?;
-        return Some(Action::GrowCol(-n));
+        return n.checked_neg().map(Action::GrowCol);
     }
 
     // Colon/space separated: `verb:arg` or `verb arg`.
@@ -367,6 +367,15 @@ fn none_if_arg(has_arg: bool, action: Action) -> Option<Action> {
 mod tests {
     use super::*;
     use crate::types::Action;
+
+    #[test]
+    fn shrink_col_rejects_an_unrepresentable_negation() {
+        assert!(parse("shrink-col -2147483648").is_none());
+        assert_eq!(
+            parse("shrink-col 2147483647"),
+            Some(Action::GrowCol(-2147483647))
+        );
+    }
 
     #[test]
     fn every_canonical_name_parses() {
