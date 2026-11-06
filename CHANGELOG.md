@@ -72,6 +72,16 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Config loading reuses one compiled baseline instead of constructing and
+  discarding a complete fallback on every successful read. Typo scoring skips
+  impossible length matches and reuses one edit-distance row; suggestions keep
+  their existing thresholds and tie order.
+- The X11 wait loop uses fixed descriptor storage, the poll adapter no longer
+  builds an intermediate descriptor vector, and Overview resource lookup uses
+  existing map entries directly. Logging and Xauthority cookie formatting avoid
+  intermediate strings. No rendering or event-order policy is changed.
+- Release-mode tests use the invariant checker available in both profiles;
+  workspace Clippy diagnostics are resolved without lint suppressions.
 - Configuration validation checks floating-point ranges before narrowing to
   runtime precision, rejects empty shortcut components and NoSymbol bindings,
   and diagnoses known tables written with the wrong header kind. Invalid

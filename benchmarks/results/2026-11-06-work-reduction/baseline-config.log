@@ -1,0 +1,12 @@
+   Compiling maverick v1.1.1 (/workspace/scratch/1fde90dd44ca/Maverick)
+    Finished `release` profile [optimized] target(s) in 50.83s
+     Running unittests src/main.rs (target/release/deps/maverick-e9a7c56e19eeb36b)
+
+running 1 test
+config_load name=small iterations=4000 median_ns=2882 min_ns=2842 max_ns=2971
+config_load name=sample iterations=1000 median_ns=5538 min_ns=5473 max_ns=5682
+config_load name=long_unknown_key iterations=32 median_ns=621730 min_ns=614667 max_ns=638187
+test userconfig::tests::config_load_workload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 571 filtered out; finished in 0.26s
+

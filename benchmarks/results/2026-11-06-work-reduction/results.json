@@ -1,0 +1,324 @@
+{
+  "environment": {
+    "platform": "Linux x86-64 container; not the target laptop",
+    "rust": "1.85.1",
+    "profile": "release",
+    "batches": 7,
+    "phase": "sequential before/after; no randomized A/B"
+  },
+  "baseline_source": "3692c2794d75d1d45e2a5a7b9158a875536d6f62",
+  "baseline_workload_tree": "3ca619a365090f875f65a7768d74642fa9fc4662",
+  "config": {
+    "small": {
+      "before": {
+        "iterations_per_batch": 4000,
+        "median_ns": 2882,
+        "min_ns": 2842,
+        "max_ns": 2971
+      },
+      "after": {
+        "iterations_per_batch": 4000,
+        "median_ns": 1897,
+        "min_ns": 1852,
+        "max_ns": 1979
+      }
+    },
+    "sample": {
+      "before": {
+        "iterations_per_batch": 1000,
+        "median_ns": 5538,
+        "min_ns": 5473,
+        "max_ns": 5682
+      },
+      "after": {
+        "iterations_per_batch": 1000,
+        "median_ns": 4824,
+        "min_ns": 4775,
+        "max_ns": 4979
+      }
+    },
+    "long_unknown_key": {
+      "before": {
+        "iterations_per_batch": 32,
+        "median_ns": 621730,
+        "min_ns": 614667,
+        "max_ns": 638187
+      },
+      "after": {
+        "iterations_per_batch": 32,
+        "median_ns": 5381,
+        "min_ns": 5348,
+        "max_ns": 6562
+      }
+    }
+  },
+  "poll": {
+    "before": {
+      "iterations_per_batch": 50000,
+      "median_ns": 116,
+      "min_ns": 113,
+      "max_ns": 120
+    },
+    "after": {
+      "iterations_per_batch": 50000,
+      "median_ns": 108,
+      "min_ns": 103,
+      "max_ns": 121
+    }
+  },
+  "validation": [
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "tests-default",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--locked",
+        "--no-fail-fast"
+      ],
+      "exit_code": 101,
+      "passed": 928,
+      "failed": 63,
+      "ignored": 2,
+      "failing_tests": [
+        "a_child_that_started_but_could_not_be_read_is_reported_as_untracked",
+        "a_dropped_recording_server_leaves_nothing_discoverable",
+        "a_dropped_recording_server_spares_the_others",
+        "a_dropped_refusal_fixture_leaves_nothing_discoverable",
+        "a_dropped_refusal_fixture_spares_the_others",
+        "a_formatting_option_never_reaches_the_action_line",
+        "a_handoff_leaves_the_session_addressable",
+        "a_json_reply_is_a_successful_command",
+        "a_reachable_peer_that_answers_nothing_is_a_failed_command",
+        "a_rebound_socket_that_publishes_no_snapshot_is_not_a_finished_restart",
+        "a_recording_server_can_be_created_and_dropped_repeatedly",
+        "a_refused_dispatch_fails_and_a_receipt_does_not",
+        "a_refused_inspect_query_fails_the_command",
+        "a_refused_tree_read_names_the_reason",
+        "a_refused_window_action_is_a_failed_command",
+        "a_refused_window_inspect_query_fails_the_command",
+        "a_replacement_that_serves_a_snapshot_finishes_the_restart",
+        "a_silent_peer_is_a_failed_command",
+        "a_stale_record_is_still_a_resolvable_target",
+        "an_accepted_window_action_is_a_successful_command",
+        "an_announced_departure_finishes_the_restart_without_ever_unbinding",
+        "an_announced_departure_that_never_returns_is_not_a_finished_restart",
+        "an_error_reply_is_a_failed_command",
+        "an_instance_that_never_hands_off_is_not_a_finished_restart",
+        "an_instance_that_never_returns_is_not_a_finished_restart",
+        "backend::x11::teardown::tests::the_local_half_removes_the_record_and_the_socket",
+        "client::tests::a_peer_that_never_answers_is_bounded_by_the_client_timeout",
+        "client::tests::server_full_protocol",
+        "client::tests::subscribe_cap_rejects_beyond_max",
+        "client::tests::subscribe_receives_events",
+        "control::tests::shutdown_wakes_and_releases_the_idle_accept_thread",
+        "control::tests::subscribe_cap_rejects_extras_from_concurrent_connections",
+        "control::tests::subscribers_streaming_oversized_events_leave_the_server_serving",
+        "control::tests::the_server_records_this_process_uid_as_the_only_authorised_peer",
+        "dropping_a_published_instance_leaves_the_other_serving",
+        "dropping_a_socket_only_fixture_leaves_the_other_answering",
+        "dropping_the_last_owner_unpublishes_the_session",
+        "exec_reads_wait_from_before_the_command_word_only",
+        "identity::tests::start_time_reads_self",
+        "json_output_stays_a_single_document_on_stdout",
+        "retiring_one_instance_leaves_another_serving",
+        "session::proc::tests::a_real_scan_sees_this_process",
+        "session::proc::tests::a_signal_that_was_not_delivered_is_an_error",
+        "session::proc::tests::a_zombie_is_the_same_process_but_not_a_running_one",
+        "session::proc::tests::cpu_percent_is_bounded_by_the_process_lifetime",
+        "session::proc::tests::pid_is_gates_on_the_recorded_start_time",
+        "session::proc::tests::reads_this_process",
+        "session::proc::tests::stat_parsing_is_anchored_at_the_last_paren",
+        "session::tests::a_pid_ref_is_live_only_for_the_exact_process",
+        "session::tests::a_root_without_a_start_time_is_not_a_root",
+        "session::tests::a_stopped_session_owns_nothing",
+        "session::tests::registered_groups_need_a_live_session",
+        "session::tests::registered_groups_reject_stale_and_unproven_leader_identities",
+        "session::xserver::tests::a_dead_handle_does_not_release_a_live_servers_display",
+        "session::xserver::tests::a_dead_server_is_not_ready_just_because_its_display_is_serving",
+        "session::xserver::tests::a_live_server_on_a_serving_display_is_ready_at_once",
+        "session::xserver::tests::release::an_unremovable_artifact_fails_the_whole_release",
+        "session::xserver::tests::release::both_artifacts_are_removed",
+        "the_account_maverick_treats_as_its_own_is_the_real_uid",
+        "the_documented_process_orders_reach_the_session_they_name",
+        "the_reason_the_instance_gave_reaches_the_caller",
+        "the_socket_only_ownership_boundary_holds_in_either_direction",
+        "the_uid_a_control_socket_authorises_is_the_uid_that_owns_it"
+      ],
+      "new_failures_vs_prior_stage": [],
+      "unexecuted_target": "config_check: Permission denied (os error 13)"
+    },
+    {
+      "name": "tests-features",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-features",
+        "--locked",
+        "--no-fail-fast"
+      ],
+      "exit_code": 101,
+      "passed": 930,
+      "failed": 63,
+      "ignored": 2,
+      "failing_tests": [
+        "a_child_that_started_but_could_not_be_read_is_reported_as_untracked",
+        "a_dropped_recording_server_leaves_nothing_discoverable",
+        "a_dropped_recording_server_spares_the_others",
+        "a_dropped_refusal_fixture_leaves_nothing_discoverable",
+        "a_dropped_refusal_fixture_spares_the_others",
+        "a_formatting_option_never_reaches_the_action_line",
+        "a_handoff_leaves_the_session_addressable",
+        "a_json_reply_is_a_successful_command",
+        "a_reachable_peer_that_answers_nothing_is_a_failed_command",
+        "a_rebound_socket_that_publishes_no_snapshot_is_not_a_finished_restart",
+        "a_recording_server_can_be_created_and_dropped_repeatedly",
+        "a_refused_dispatch_fails_and_a_receipt_does_not",
+        "a_refused_inspect_query_fails_the_command",
+        "a_refused_tree_read_names_the_reason",
+        "a_refused_window_action_is_a_failed_command",
+        "a_refused_window_inspect_query_fails_the_command",
+        "a_replacement_that_serves_a_snapshot_finishes_the_restart",
+        "a_silent_peer_is_a_failed_command",
+        "a_stale_record_is_still_a_resolvable_target",
+        "an_accepted_window_action_is_a_successful_command",
+        "an_announced_departure_finishes_the_restart_without_ever_unbinding",
+        "an_announced_departure_that_never_returns_is_not_a_finished_restart",
+        "an_error_reply_is_a_failed_command",
+        "an_instance_that_never_hands_off_is_not_a_finished_restart",
+        "an_instance_that_never_returns_is_not_a_finished_restart",
+        "backend::x11::teardown::tests::the_local_half_removes_the_record_and_the_socket",
+        "client::tests::a_peer_that_never_answers_is_bounded_by_the_client_timeout",
+        "client::tests::server_full_protocol",
+        "client::tests::subscribe_cap_rejects_beyond_max",
+        "client::tests::subscribe_receives_events",
+        "control::tests::shutdown_wakes_and_releases_the_idle_accept_thread",
+        "control::tests::subscribe_cap_rejects_extras_from_concurrent_connections",
+        "control::tests::subscribers_streaming_oversized_events_leave_the_server_serving",
+        "control::tests::the_server_records_this_process_uid_as_the_only_authorised_peer",
+        "dropping_a_published_instance_leaves_the_other_serving",
+        "dropping_a_socket_only_fixture_leaves_the_other_answering",
+        "dropping_the_last_owner_unpublishes_the_session",
+        "exec_reads_wait_from_before_the_command_word_only",
+        "identity::tests::start_time_reads_self",
+        "json_output_stays_a_single_document_on_stdout",
+        "retiring_one_instance_leaves_another_serving",
+        "session::proc::tests::a_real_scan_sees_this_process",
+        "session::proc::tests::a_signal_that_was_not_delivered_is_an_error",
+        "session::proc::tests::a_zombie_is_the_same_process_but_not_a_running_one",
+        "session::proc::tests::cpu_percent_is_bounded_by_the_process_lifetime",
+        "session::proc::tests::pid_is_gates_on_the_recorded_start_time",
+        "session::proc::tests::reads_this_process",
+        "session::proc::tests::stat_parsing_is_anchored_at_the_last_paren",
+        "session::tests::a_pid_ref_is_live_only_for_the_exact_process",
+        "session::tests::a_root_without_a_start_time_is_not_a_root",
+        "session::tests::a_stopped_session_owns_nothing",
+        "session::tests::registered_groups_need_a_live_session",
+        "session::tests::registered_groups_reject_stale_and_unproven_leader_identities",
+        "session::xserver::tests::a_dead_handle_does_not_release_a_live_servers_display",
+        "session::xserver::tests::a_dead_server_is_not_ready_just_because_its_display_is_serving",
+        "session::xserver::tests::a_live_server_on_a_serving_display_is_ready_at_once",
+        "session::xserver::tests::release::an_unremovable_artifact_fails_the_whole_release",
+        "session::xserver::tests::release::both_artifacts_are_removed",
+        "the_account_maverick_treats_as_its_own_is_the_real_uid",
+        "the_documented_process_orders_reach_the_session_they_name",
+        "the_reason_the_instance_gave_reaches_the_caller",
+        "the_socket_only_ownership_boundary_holds_in_either_direction",
+        "the_uid_a_control_socket_authorises_is_the_uid_that_owns_it"
+      ],
+      "new_failures_vs_prior_stage": []
+    },
+    {
+      "name": "tests-release-root",
+      "command": [
+        "cargo",
+        "test",
+        "--release",
+        "-p",
+        "maverick",
+        "--bin",
+        "maverick",
+        "--locked"
+      ],
+      "exit_code": 101,
+      "passed": 573,
+      "failed": 1,
+      "ignored": 1,
+      "failing_tests": [
+        "backend::x11::teardown::tests::the_local_half_removes_the_record_and_the_socket"
+      ],
+      "new_failures_vs_prior_stage": []
+    },
+    {
+      "name": "build-release",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "build-tools",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "-p",
+        "maverick",
+        "-p",
+        "maverickctl",
+        "--locked"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "xvfb-reload",
+      "command": [
+        "python3",
+        "tests/xvfb-reload.py"
+      ],
+      "exit_code": 1
+    },
+    {
+      "name": "clippy-clean",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "target_dir": "/tmp/maverick-work-clippy-clean",
+      "exit_code": 0
+    }
+  ]
+}

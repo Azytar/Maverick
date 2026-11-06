@@ -1,0 +1,14 @@
+   Compiling maverick-sys v1.1.1 (/workspace/scratch/1fde90dd44ca/Maverick/maverick-sys)
+   Compiling maverick-core v1.1.1 (/workspace/scratch/1fde90dd44ca/Maverick/maverick-core)
+   Compiling maverick v1.1.1 (/workspace/scratch/1fde90dd44ca/Maverick)
+    Finished `release` profile [optimized] target(s) in 53.95s
+     Running unittests src/main.rs (target/release/deps/maverick-e9a7c56e19eeb36b)
+
+running 1 test
+config_load name=small iterations=4000 median_ns=1897 min_ns=1852 max_ns=1979
+config_load name=sample iterations=1000 median_ns=4824 min_ns=4775 max_ns=4979
+config_load name=long_unknown_key iterations=32 median_ns=5381 min_ns=5348 max_ns=6562
+test userconfig::tests::config_load_workload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 574 filtered out; finished in 0.09s
+
