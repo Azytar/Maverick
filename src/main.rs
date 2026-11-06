@@ -175,7 +175,7 @@ fn main() {
                 }),
         };
         let (cfg, diag) = crate::userconfig::load_from_path(&path);
-        crate::userconfig::dump_diagnostics(&diag);
+        crate::userconfig::dump_diagnostics(&path, &diag);
         println!(
             "maverick: config check {}: {} warning(s), {} error(s), {} keybind(s)",
             path.display(),

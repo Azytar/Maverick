@@ -390,7 +390,7 @@ impl WindowManager {
         // before anything is mutated for a rejected reload to leave the session
         // untouched.
         let (source, cfg, diag) = crate::userconfig::load_from_path_classified(&path);
-        crate::userconfig::dump_diagnostics(&diag);
+        crate::userconfig::dump_diagnostics(&path, &diag);
         if source != crate::userconfig::ConfigSource::UserFile {
             log::warn!(
                 "reload: '{}' is missing, unreadable or not valid TOML; keeping current config (run `maverickctl restart` to fall back to compiled defaults)",

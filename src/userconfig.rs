@@ -88,14 +88,14 @@ impl Diagnostics {
 
 /// Emit every diagnostic via `log::warn`; the runtime path keeps going
 /// regardless, so a broken config costs a warning, never a session.
-pub fn dump_diagnostics(diag: &Diagnostics) {
+pub fn dump_diagnostics(path: &Path, diag: &Diagnostics) {
     for w in &diag.warnings {
-        log::warn!("config warning: {w}");
+        log::warn!("config warning: {}: {w}", path.display());
     }
     for e in &diag.errors {
         // Config faults are non-fatal at runtime, so they stay on the warning
         // log channel; keep the semantic severity explicit in the message.
-        log::warn!("config error: {e}");
+        log::warn!("config error: {}: {e}", path.display());
     }
 }
 #[derive(Debug, Default)]
@@ -109,6 +109,8 @@ struct UserConfig {
 
 #[derive(Debug, Default)]
 struct GeneralCfg {
+    /// Header location for diagnostics involving more than one setting.
+    line: usize,
     border_width: Option<u32>,
     gaps_inner: Option<u32>,
     gaps_outer: Option<u32>,
@@ -221,7 +223,7 @@ pub fn load_config(path: Option<&Path>) -> Cfg {
         return cfg;
     };
     let (cfg, diag) = load_from_path(&path);
-    dump_diagnostics(&diag);
+    dump_diagnostics(&path, &diag);
     cfg
 }
 
@@ -288,8 +290,7 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
         }
         Err(e) => {
             diag.errors.push(format!(
-                "cannot read '{}': {e}; using compiled defaults",
-                path.display()
+                "cannot read configuration: {e}; using compiled defaults"
             ));
             return (ConfigSource::CompiledBaseline, fallback, diag);
         }
@@ -323,10 +324,8 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
         Ok(user) => user,
         Err(e) => {
             diag.errors.push(format!(
-                "invalid TOML in '{}' (line {}, {}); using compiled defaults",
-                path.display(),
-                e.line,
-                e.kind
+                "line {}: invalid TOML ({}); using compiled defaults",
+                e.line, e.kind
             ));
             return (ConfigSource::CompiledBaseline, fallback, diag);
         }
@@ -386,6 +385,12 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
         match event {
             Event::Section(name) => {
                 warn_unknown_section_if_typo(diag, name, false);
+                if name == "general" {
+                    user.general.get_or_insert_with(|| GeneralCfg {
+                        line,
+                        ..GeneralCfg::default()
+                    });
+                }
                 cur = Some(Cur::Plain(name));
             }
             Event::ArraySection(name) => {
@@ -414,7 +419,6 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                 }
                 Some(Cur::Plain("autostart")) => {
                     if key == "commands" {
-                        user.autostart.get_or_insert_with(AutostartCfg::default);
                         if let Some(grid) = grid_strings(&value) {
                             let commands = grid
                                 .into_iter()
@@ -434,7 +438,7 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                                     }
                                 })
                                 .collect();
-                            user.autostart.as_mut().unwrap().commands = commands;
+                            user.autostart = Some(AutostartCfg { commands });
                         } else {
                             diag.warnings.push(format!(
                                 "[autostart].{key} must be a list of string lists; ignoring it"
@@ -550,7 +554,7 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
                     g.view_names = Some(names);
                 }
             } else {
-                warn_bad(diag, key);
+                warn_bad(diag, key, "a list of strings");
             }
         }
         _ => warn_unknown_key(diag, "[general]", key),
@@ -570,8 +574,18 @@ fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>, diag: &mut D
 /// Map one `[[keybindings]]` key onto the current row.
 fn apply_keybind_key(row: &mut KeybindEntry, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "key" => row.key = value.as_str().map_or_else(String::new, str::to_string),
-        "action" => row.action = value.as_str().map_or_else(String::new, str::to_string),
+        "key" | "action" => {
+            if let Some(text) = value.as_str() {
+                let slot = if key == "key" {
+                    &mut row.key
+                } else {
+                    &mut row.action
+                };
+                *slot = text.to_string();
+            } else {
+                warn_bad(diag, key, "a string");
+            }
+        }
         _ => warn_unknown_key(diag, "[[keybindings]]", key),
     }
 }
@@ -585,7 +599,7 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
         if let Some(v) = value.as_bool() {
             *slot = v;
         } else {
-            warn_bad(diag, key);
+            warn_bad(diag, key, "a boolean");
         }
     }
     match key {
@@ -617,18 +631,18 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
             }
         }
         "opacity" => {
-            if let Some(v) = number_f32(value) {
+            if let Some(v) = number_f64(value) {
                 if v.is_finite() && (0.0..=1.0).contains(&v) {
-                    row.opacity = Some(v);
+                    row.opacity = Some(v as f32);
                 } else {
                     diag.errors.push(format!(
                         "rule.opacity must be between 0.0 and 1.0; ignoring {v}"
                     ));
                 }
             } else {
-                warn_bad(diag, key);
+                warn_bad(diag, key, "a number between 0.0 and 1.0");
             }
-        },
+        }
         "border_width" => set_u32_range(
             &mut row.border_width,
             key,
@@ -672,12 +686,8 @@ fn i32_pair(value: &Value<'_>) -> Option<[i32; 2]> {
     Some([i32::try_from(a).ok()?, i32::try_from(b).ok()?])
 }
 
-fn number_f32(value: &Value<'_>) -> Option<f32> {
-    if let Some(v) = value.as_f64() {
-        Some(v as f32)
-    } else {
-        value.as_i64().map(|v| v as f32)
-    }
+fn number_f64(value: &Value<'_>) -> Option<f64> {
+    value.as_f64().or_else(|| value.as_i64().map(|v| v as f64))
 }
 
 fn grid_strings(value: &Value<'_>) -> Option<Vec<Vec<String>>> {
@@ -701,7 +711,7 @@ fn set_u32(slot: &mut Option<u32>, key: &str, value: &Value<'_>, diag: &mut Diag
     if let Some(v) = value.as_u32() {
         *slot = Some(v);
     } else {
-        warn_bad(diag, key);
+        warn_bad(diag, key, "an unsigned 32-bit integer");
     }
 }
 
@@ -709,7 +719,7 @@ fn set_bool(slot: &mut Option<bool>, key: &str, value: &Value<'_>, diag: &mut Di
     if let Some(v) = value.as_bool() {
         *slot = Some(v);
     } else {
-        warn_bad(diag, key);
+        warn_bad(diag, key, "a boolean");
     }
 }
 
@@ -717,7 +727,7 @@ fn set_string(slot: &mut Option<String>, key: &str, value: &Value<'_>, diag: &mu
     if let Some(v) = value.as_str() {
         *slot = Some(v.to_string());
     } else {
-        warn_bad(diag, key);
+        warn_bad(diag, key, "a string");
     }
 }
 
@@ -730,14 +740,15 @@ fn set_u32_range(
     diag: &mut Diagnostics,
 ) {
     let Some(v) = value.as_u32() else {
-        warn_bad(diag, key);
+        warn_bad(diag, key, "an unsigned 32-bit integer");
         return;
     };
     if (min..=max).contains(&v) {
         *slot = Some(v);
     } else {
-        diag.errors
-            .push(format!("{key} must be between {min} and {max}; ignoring {v}"));
+        diag.errors.push(format!(
+            "{key} must be between {min} and {max}; ignoring {v}"
+        ));
     }
 }
 
@@ -745,19 +756,21 @@ fn set_f32_range(
     slot: &mut Option<f32>,
     key: &str,
     value: &Value<'_>,
-    min: f32,
-    max: f32,
+    min: f64,
+    max: f64,
     diag: &mut Diagnostics,
 ) {
-    let Some(v) = number_f32(value) else {
-        warn_bad(diag, key);
+    let Some(v) = number_f64(value) else {
+        warn_bad(diag, key, "a number");
         return;
     };
     if v.is_finite() && (min..=max).contains(&v) {
-        *slot = Some(v);
+        // Check the source precision before rounding to the runtime type.
+        *slot = Some(v as f32);
     } else {
-        diag.errors
-            .push(format!("{key} must be between {min} and {max}; ignoring {v}"));
+        diag.errors.push(format!(
+            "{key} must be between {min} and {max}; ignoring {v}"
+        ));
     }
 }
 
@@ -770,14 +783,15 @@ fn set_usize_range(
     diag: &mut Diagnostics,
 ) {
     let Some(v) = value.as_u32().map(|v| v as usize) else {
-        warn_bad(diag, key);
+        warn_bad(diag, key, "an unsigned 32-bit integer");
         return;
     };
     if (min..=max).contains(&v) {
         *slot = Some(v);
     } else {
-        diag.errors
-            .push(format!("{key} must be between {min} and {max}; ignoring {v}"));
+        diag.errors.push(format!(
+            "{key} must be between {min} and {max}; ignoring {v}"
+        ));
     }
 }
 
@@ -785,13 +799,13 @@ fn set_usize(slot: &mut Option<usize>, key: &str, value: &Value<'_>, diag: &mut 
     if let Some(v) = value.as_u32() {
         *slot = Some(v as usize);
     } else {
-        warn_bad(diag, key);
+        warn_bad(diag, key, "an unsigned 32-bit integer");
     }
 }
 
-fn warn_bad(diag: &mut Diagnostics, key: &str) {
+fn warn_bad(diag: &mut Diagnostics, key: &str, expected: &str) {
     diag.warnings.push(format!(
-        "value for '{key}' has an unexpected type; ignoring it"
+        "value for '{key}' has an unexpected type; expected {expected}; ignoring it"
     ));
 }
 
@@ -843,9 +857,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
         current[0] = i + 1;
         for (j, b_byte) in b.bytes().enumerate() {
             let substitution = previous[j] + if a_byte == b_byte { 0 } else { 1 };
-            current[j + 1] = (previous[j + 1] + 1)
-                .min(current[j] + 1)
-                .min(substitution);
+            current[j + 1] = (previous[j + 1] + 1).min(current[j] + 1).min(substitution);
         }
         std::mem::swap(&mut previous, &mut current);
     }
@@ -861,7 +873,11 @@ fn nearest_name<'a>(name: &str, candidates: &'a [&str]) -> Option<&'a str> {
         }
     }
     let (candidate, distance) = best?;
-    let threshold = if name.len().max(candidate.len()) <= 6 { 1 } else { 2 };
+    let threshold = if name.len().max(candidate.len()) <= 6 {
+        1
+    } else {
+        2
+    };
     (distance <= threshold).then_some(candidate)
 }
 
@@ -885,6 +901,18 @@ fn warn_unknown_section_if_typo(diag: &mut Diagnostics, name: &str, array: bool)
     const ROWS: &[&str] = &["keybindings", "rules"];
     let candidates = if array { ROWS } else { PLAIN };
     if candidates.contains(&name) {
+        return;
+    }
+    let other_kind = if array { PLAIN } else { ROWS };
+    if other_kind.contains(&name) {
+        let (open, close, expected_open, expected_close) = if array {
+            ("[[", "]]", "[", "]")
+        } else {
+            ("[", "]", "[[", "]]")
+        };
+        diag.warnings.push(format!(
+            "unknown table '{open}{name}{close}'; use '{expected_open}{name}{expected_close}' instead"
+        ));
         return;
     }
     if let Some(suggestion) = nearest_name(name, candidates) {
@@ -1007,9 +1035,9 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     // instead of pretending the combination is valid.
     if cfg.overview_zoom_min > cfg.overview_scale {
         diag.errors.push(format!(
-            "general.overview_zoom_min ({}) must not exceed general.overview_scale ({}); \
+            "line {}: general.overview_zoom_min ({}) must not exceed general.overview_scale ({}); \
              using {} as the floor",
-            cfg.overview_zoom_min, cfg.overview_scale, cfg.overview_scale
+            general.line, cfg.overview_zoom_min, cfg.overview_scale, cfg.overview_scale
         ));
         cfg.overview_zoom_min = cfg.overview_scale;
     }
@@ -1022,7 +1050,8 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     if let Some(names) = general.view_names {
         if names.len() > cfg.n_tags {
             diag.warnings.push(format!(
-                "view_names has {} entries but view_count is {}; ignoring {} trailing name(s)",
+                "line {}: view_names has {} entries but view_count is {}; ignoring {} trailing name(s)",
+                general.line,
                 names.len(),
                 cfg.n_tags,
                 names.len() - cfg.n_tags
@@ -1406,15 +1435,15 @@ pub fn mods_name(mask: u16) -> String {
 /// modifier (`Super+Super+a`) is rejected rather than folded, so a typo cannot
 /// silently change which chord is grabbed.
 fn keybind_from_str(input: &str) -> Option<(u16, u32)> {
-    let parts: Vec<_> = input
-        .split('+')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .collect();
-    let (key, modifiers) = parts.split_last()?;
+    let mut parts = input.rsplit('+').map(str::trim);
+    let key = parts.next()?;
     let keysym = keysym_from_name(key)?;
+    // X11 reserves zero for NoSymbol; it cannot name a key to grab.
+    if keysym == 0 {
+        return None;
+    }
     let mut mask = 0;
-    for modifier in modifiers {
+    for modifier in parts {
         let bit = match modifier.to_ascii_lowercase().as_str() {
             "super" | "mod" | "mod4" => u16::from(ModMask::M4),
             "shift" => u16::from(ModMask::SHIFT),
@@ -1471,6 +1500,104 @@ mod tests {
             keybind_from_str("Mod+Ctrl+h"),
             keybind_from_str("Super+Ctrl+h")
         );
+    }
+
+    #[test]
+    fn bindings_reject_empty_chord_parts_and_no_symbol() {
+        for chord in ["+a", "Super++a", "Super+a+", "Super+ +a", "0x0"] {
+            assert!(keybind_from_str(chord).is_none(), "{chord}");
+        }
+        assert_eq!(
+            keybind_from_str(" Super + Control + a "),
+            keybind_from_str("Ctrl+Super+a")
+        );
+    }
+
+    #[test]
+    fn floats_are_validated_before_narrowing() {
+        for (key, value) in [
+            ("column_width", "1.0000000001"),
+            ("column_width", "0.0999999999"),
+            ("accordion_boost", "0.9000000001"),
+            ("overview_zoom_min", "0.0499999999"),
+            ("overview_scale", "1.0000000001"),
+        ] {
+            let mut diag = Diagnostics::default();
+            let user = parse_user(&format!("[general]\n{key} = {value}\n"), &mut diag).unwrap();
+            let _cfg = merge_config(compiled_config(), user, &mut diag);
+            assert_eq!(diag.errors.len(), 1, "{key}={value}: {diag:?}");
+        }
+        for value in [
+            "1.0000000001",
+            "-0.000000000000000000000000000000000000000000000000000000000001",
+        ] {
+            let mut diag = Diagnostics::default();
+            let user = parse_user(
+                &format!("[[rules]]\nclass = \"x\"\nopacity = {value}\n"),
+                &mut diag,
+            )
+            .unwrap();
+            let cfg = merge_config(compiled_config(), user, &mut diag);
+            assert_eq!(cfg.rules[0].opacity, None, "{value}: {diag:?}");
+            assert_eq!(diag.errors.len(), 1, "{value}: {diag:?}");
+        }
+    }
+
+    #[test]
+    fn known_tables_with_the_wrong_header_kind_are_diagnosed() {
+        for (header, replacement) in [
+            ("[rules]", "[[rules]]"),
+            ("[keybindings]", "[[keybindings]]"),
+            ("[[general]]", "[general]"),
+            ("[[colors]]", "[colors]"),
+            ("[[autostart]]", "[autostart]"),
+        ] {
+            let mut diag = Diagnostics::default();
+            parse_user(&format!("{header}\n"), &mut diag).unwrap();
+            assert_eq!(diag.warnings.len(), 1, "{header}: {diag:?}");
+            assert!(diag.warnings[0].starts_with("line 1:"), "{diag:?}");
+            assert!(diag.warnings[0].contains(replacement), "{diag:?}");
+        }
+    }
+
+    #[test]
+    fn wrongly_typed_autostart_keeps_the_baseline_commands() {
+        let mut baseline = compiled_config();
+        baseline.autostart = vec![vec!["baseline-command".into()]];
+        let mut diag = Diagnostics::default();
+        let user = parse_user("[autostart]\ncommands = true\n", &mut diag).unwrap();
+        let cfg = merge_config(baseline.clone(), user, &mut diag);
+        assert_eq!(cfg.autostart, baseline.autostart);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+    }
+
+    #[test]
+    fn cross_field_diagnostics_locate_the_general_table() {
+        let mut diag = Diagnostics::default();
+        let user = parse_user(
+            "# configuration\n\n[general]\nview_count = 1\n\
+             view_names = [\"a\", \"b\"]\noverview_zoom_min = 1.0\n",
+            &mut diag,
+        )
+        .unwrap();
+        let _cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert_eq!(diag.errors.len(), 1, "{diag:?}");
+        assert!(diag.warnings[0].starts_with("line 3:"), "{diag:?}");
+        assert!(diag.errors[0].starts_with("line 3:"), "{diag:?}");
+    }
+
+    #[test]
+    fn wrongly_typed_binding_fields_report_the_expected_type_at_the_value_line() {
+        let mut diag = Diagnostics::default();
+        let _user = parse_user("[[keybindings]]\nkey = false\naction = 12\n", &mut diag).unwrap();
+        assert_eq!(diag.warnings.len(), 2, "{diag:?}");
+        assert!(diag.warnings[0].starts_with("line 2:"), "{diag:?}");
+        assert!(diag.warnings[1].starts_with("line 3:"), "{diag:?}");
+        assert!(diag
+            .warnings
+            .iter()
+            .all(|message| message.contains("expected a string")));
     }
 
     #[test]
@@ -1758,9 +1885,7 @@ view_count = 3
 
     #[test]
     fn empty_autostart_rows_are_diagnosed_at_the_commands_line() {
-        let path = write_temp(
-            "[autostart]\ncommands = [[\"\", \"ignored\"], [\"picom\"]]\n",
-        );
+        let path = write_temp("[autostart]\ncommands = [[\"\", \"ignored\"], [\"picom\"]]\n");
         let (cfg, diag) = load_from_path(&path);
         let _ = std::fs::remove_file(path);
         assert_eq!(cfg.autostart, vec![vec!["picom"]]);
@@ -1870,9 +1995,7 @@ commands = [["example", "--flag"]]
 
     #[test]
     fn rule_ignore_initial_state_uses_one_canonical_spelling() {
-        let user = parse_string(
-            "[[rules]]\nclass = \"firefox\"\nignore_initial_state = true\n",
-        );
+        let user = parse_string("[[rules]]\nclass = \"firefox\"\nignore_initial_state = true\n");
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert_eq!(cfg.rules.len(), 1);
         assert!(cfg.rules[0].ignore_initial_state);
@@ -1899,25 +2022,54 @@ commands = [["example", "--flag"]]
         assert_eq!(cfg.gaps_outer, baseline.gaps_outer);
         assert_eq!(cfg.border_w, baseline.border_w);
         assert_eq!(diag.errors.len(), 3, "{diag:?}");
-        assert!(diag.errors.iter().any(|e| e.starts_with("line 2:") && e.contains("gaps_inner")), "{diag:?}");
-        assert!(diag.errors.iter().any(|e| e.starts_with("line 3:") && e.contains("gaps_outer")), "{diag:?}");
-        assert!(diag.errors.iter().any(|e| e.starts_with("line 4:") && e.contains("border_width")), "{diag:?}");
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 2:") && e.contains("gaps_inner")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 3:") && e.contains("gaps_outer")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 4:") && e.contains("border_width")),
+            "{diag:?}"
+        );
     }
 
     #[test]
     fn simple_general_range_errors_report_the_source_line() {
-        let path = write_temp(
-            "[general]\ncolumn_width = 2.0\naccordion_boost = -0.1\nview_count = 42\n",
-        );
+        let path =
+            write_temp("[general]\ncolumn_width = 2.0\naccordion_boost = -0.1\nview_count = 42\n");
         let (_source, cfg, diag) = load_from_path_classified(&path);
         let _ = std::fs::remove_file(path);
         assert_eq!(cfg.column_width, compiled_config().column_width);
         assert_eq!(cfg.accordion_boost, compiled_config().accordion_boost);
         assert_eq!(cfg.n_tags, compiled_config().n_tags);
         assert_eq!(diag.errors.len(), 3, "{diag:?}");
-        assert!(diag.errors.iter().any(|e| e.starts_with("line 2:") && e.contains("column_width")), "{diag:?}");
-        assert!(diag.errors.iter().any(|e| e.starts_with("line 3:") && e.contains("accordion_boost")), "{diag:?}");
-        assert!(diag.errors.iter().any(|e| e.starts_with("line 4:") && e.contains("view_count")), "{diag:?}");
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 2:") && e.contains("column_width")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 3:") && e.contains("accordion_boost")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 4:") && e.contains("view_count")),
+            "{diag:?}"
+        );
     }
 
     /// A floor above the target is contradictory: the parser diagnoses it and
@@ -1978,8 +2130,7 @@ commands = [["example", "--flag"]]
             parse_user(body, &mut diag).expect("valid TOML");
             assert_eq!(diag.warnings.len(), 1, "{body}: {diag:?}");
             assert!(
-                diag.warnings[0].contains("was removed")
-                    && diag.warnings[0].contains(replacement),
+                diag.warnings[0].contains("was removed") && diag.warnings[0].contains(replacement),
                 "{body}: {:?}",
                 diag.warnings
             );
@@ -1994,17 +2145,15 @@ commands = [["example", "--flag"]]
         assert_eq!(cfg.tag_names, compiled_config().tag_names);
         assert_eq!(diag.warnings.len(), 1, "{diag:?}");
         assert!(
-            diag.warnings[0].starts_with("line 2:")
-                && diag.warnings[0].contains("non-blank"),
+            diag.warnings[0].starts_with("line 2:") && diag.warnings[0].contains("non-blank"),
             "{diag:?}"
         );
     }
 
     #[test]
     fn surplus_view_names_are_explicitly_reported() {
-        let user = parse_string(
-            "[general]\nview_count = 2\nview_names = [\"web\", \"code\", \"chat\"]\n",
-        );
+        let user =
+            parse_string("[general]\nview_count = 2\nview_names = [\"web\", \"code\", \"chat\"]\n");
         let mut diag = Diagnostics::default();
         let cfg = merge_config(compiled_config(), user, &mut diag);
         assert_eq!(cfg.tag_names, vec!["web", "code"]);
@@ -2032,7 +2181,8 @@ corner_radius = 10
 
     #[test]
     fn rule_numeric_fields_reject_lossy_or_out_of_range_values() {
-        let user = parse_string(
+        let mut diag = Diagnostics::default();
+        let user = parse_user(
             r#"
 [[rules]]
 class = "broken"
@@ -2041,8 +2191,9 @@ size = [-1, 300]
 position = [2147483648, 0]
 opacity = 1.5
 "#,
-        );
-        let mut diag = Diagnostics::default();
+            &mut diag,
+        )
+        .expect("valid TOML");
         let cfg = merge_config(compiled_config(), user, &mut diag);
         assert_eq!(cfg.rules.len(), 1, "the rule itself remains useful");
         let rule = &cfg.rules[0];
@@ -2050,7 +2201,10 @@ opacity = 1.5
         assert_eq!(rule.position, None);
         assert_eq!(rule.opacity, None);
         assert_eq!(diag.errors.len(), 3, "{diag:?}");
-        assert!(diag.errors.iter().any(|e| e.contains("rule.size")), "{diag:?}");
+        assert!(
+            diag.errors.iter().any(|e| e.contains("rule.size")),
+            "{diag:?}"
+        );
         assert!(
             diag.errors.iter().any(|e| e.contains("rule.position")),
             "{diag:?}"
@@ -2171,7 +2325,11 @@ commands = [["picom"], ["polybar", "main"]]
         assert_eq!(cfg.border_w, 0);
         assert_eq!(cfg.corner_radius, 0);
         assert_eq!(cfg.autostart.len(), 2);
-        assert_eq!(cfg.keybinds.len(), 32, "14 custom + 18 generated View binds");
+        assert_eq!(
+            cfg.keybinds.len(),
+            32,
+            "14 custom + 18 generated View binds"
+        );
         assert!(cfg.keybinds.iter().any(|(_, _, action)| {
             matches!(action, Action::Spawn(argv) if argv.first().is_some_and(|bin| bin == "aura"))
         }));
@@ -2246,7 +2404,16 @@ commands = [["picom"], ["polybar", "main"]]
         let user = parse_user(&bindings, &mut diag).expect("keybinding examples parse");
         let cfg = merge_config(compiled_config(), user, &mut diag);
         assert!(diag.is_clean(), "{diag:?}");
-        assert_eq!(cfg.keybinds, default_config().keybinds);
+        let mut expected = default_config().keybinds;
+        // The sample intentionally omits the no-op layout selector.
+        let omitted = (
+            u16::from(ModMask::M4),
+            u32::from(b't'),
+            Action::SetLayout(crate::types::LayoutKind::Column),
+        );
+        assert!(expected.contains(&omitted));
+        expected.retain(|binding| binding != &omitted);
+        assert_eq!(cfg.keybinds, expected);
     }
 
     #[test]
@@ -2257,8 +2424,7 @@ commands = [["picom"], ["polybar", "main"]]
             "the generic sample must not hard-code distribution-specific portal paths"
         );
         assert!(
-            sample.contains("# [\"picom\"]")
-                && sample.contains("# [\"polybar\", \"main\"]"),
+            sample.contains("# [\"picom\"]") && sample.contains("# [\"polybar\", \"main\"]"),
             "the sample should still demonstrate ordinary argv-style autostart entries"
         );
 
@@ -2377,8 +2543,7 @@ commands = [["picom"], ["polybar", "main"]]
         assert_eq!(diag.warnings.len(), 1, "{:?}", diag.warnings);
         let warning = &diag.warnings[0];
         assert!(
-            warning.contains("line 2")
-                && warning.contains("[general].honour_initial_state"),
+            warning.contains("line 2") && warning.contains("[general].honour_initial_state"),
             "the warning must name the line, table and key: {warning}"
         );
         // `--check-config` exits on `!is_clean()`, so a warning alone is enough
@@ -2404,7 +2569,10 @@ commands = [["picom"], ["polybar", "main"]]
         let future = write_temp("[compositor]\nenabled = true\n[general]\ngaps_inner = 13\n");
         let (_source, cfg, diag) = load_from_path_classified(&future);
         assert_eq!(cfg.gaps_inner, 13);
-        assert!(diag.is_clean(), "unrelated future table must stay silent: {diag:?}");
+        assert!(
+            diag.is_clean(),
+            "unrelated future table must stay silent: {diag:?}"
+        );
         let _ = std::fs::remove_file(future);
     }
 
