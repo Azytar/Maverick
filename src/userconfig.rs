@@ -238,7 +238,10 @@ pub fn load_config(path: Option<&Path>) -> Cfg {
 /// `auto_view_binds`. The compiled baseline therefore stays free of
 /// View binds — they are generated, never configured.
 fn default_config() -> Cfg {
-    let mut cfg = compiled_config();
+    with_numeric_view_binds(compiled_config())
+}
+
+fn with_numeric_view_binds(mut cfg: Cfg) -> Cfg {
     append_numeric_keybindings(&mut cfg.keybinds, cfg.n_tags);
     cfg
 }
@@ -272,7 +275,7 @@ pub enum ConfigSource {
 /// it is for.
 pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics) {
     log::config_trace("defaults_start", format_args!("path={}", path.display()));
-    let fallback = default_config();
+    let baseline = compiled_config();
     log::config_trace("defaults_end", format_args!(""));
     let mut diag = Diagnostics::default();
 
@@ -285,6 +288,7 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
     let source = match read_result {
         Ok(source) => source,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let fallback = with_numeric_view_binds(baseline);
             log::config_snapshot("normalized_missing_file", &fallback);
             return (ConfigSource::CompiledBaseline, fallback, diag);
         }
@@ -292,7 +296,11 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
             diag.errors.push(format!(
                 "cannot read configuration: {e}; using compiled defaults"
             ));
-            return (ConfigSource::CompiledBaseline, fallback, diag);
+            return (
+                ConfigSource::CompiledBaseline,
+                with_numeric_view_binds(baseline),
+                diag,
+            );
         }
     };
 
@@ -327,18 +335,21 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
                 "line {}: invalid TOML ({}); using compiled defaults",
                 e.line, e.kind
             ));
-            return (ConfigSource::CompiledBaseline, fallback, diag);
+            return (
+                ConfigSource::CompiledBaseline,
+                with_numeric_view_binds(baseline),
+                diag,
+            );
         }
     };
 
     log::config_trace("validation_start", format_args!("phase=semantic_merge"));
-    // The merge baseline is the compiled keymap, NOT the fail-safe `fallback`
-    // above: `merge_config` generates the View binds itself, for the
+    // Keep the baseline free of generated View binds: merge_config adds them for the
     // `view_count` the file ended up with and only when `auto_view_binds`
-    // allows it. Starting from `fallback` would pre-seed a bind for every digit
+    // allows it. Pre-generating them would seed a bind for every digit
     // of the compiled tag count, which no flag could then take away — the
     // generated binds are indistinguishable from the user's own once merged in.
-    let cfg = merge_config(compiled_config(), user, &mut diag);
+    let cfg = merge_config(baseline, user, &mut diag);
     log::config_trace(
         "validation_end",
         format_args!(
@@ -849,25 +860,39 @@ const RULE_KEYS: &[&str] = &[
     "true_fullscreen",
 ];
 
-fn edit_distance(a: &str, b: &str) -> usize {
-    let mut previous: Vec<usize> = (0..=b.len()).collect();
-    let mut current = vec![0; b.len() + 1];
-
-    for (i, a_byte) in a.bytes().enumerate() {
-        current[0] = i + 1;
-        for (j, b_byte) in b.bytes().enumerate() {
-            let substitution = previous[j] + if a_byte == b_byte { 0 } else { 1 };
-            current[j + 1] = (previous[j + 1] + 1).min(current[j] + 1).min(substitution);
-        }
-        std::mem::swap(&mut previous, &mut current);
+fn edit_distance(a: &str, b: &str, row: &mut [usize]) -> usize {
+    for (index, cell) in row.iter_mut().enumerate() {
+        *cell = index;
     }
-    previous[b.len()]
+    for (i, a_byte) in a.bytes().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, b_byte) in b.bytes().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1)
+                .min(row[j] + 1)
+                .min(diagonal + usize::from(a_byte != b_byte));
+            diagonal = above;
+        }
+    }
+    row[b.len()]
 }
 
 fn nearest_name<'a>(name: &str, candidates: &'a [&str]) -> Option<&'a str> {
+    // No accepted suggestion can be more than two edits away. Length alone
+    // rules out unrelated long keys without scanning them for every candidate.
+    let width = candidates
+        .iter()
+        .filter(|candidate| name.len().abs_diff(candidate.len()) <= 2)
+        .map(|candidate| candidate.len())
+        .max()?;
+    let mut row = vec![0; width + 1];
     let mut best: Option<(&str, usize)> = None;
     for candidate in candidates {
-        let distance = edit_distance(name, candidate);
+        if name.len().abs_diff(candidate.len()) > 2 {
+            continue;
+        }
+        let distance = edit_distance(name, candidate, &mut row[..=candidate.len()]);
         if best.is_none_or(|(_, best_distance)| distance < best_distance) {
             best = Some((candidate, distance));
         }
@@ -1103,13 +1128,14 @@ fn parse_rules(entries: Vec<RuleEntry>, view_count: usize, diag: &mut Diagnostic
                 ));
                 return None;
             }
-            if let Some(wt) = entry.window_type.as_deref() {
+            let window_type = if let Some(wt) = entry.window_type {
                 // The EWMH atom names only; a typo would otherwise become a
                 // criterion that silently never matches.
                 const KNOWN_TYPES: [&str; 8] = [
                     "normal", "desktop", "dock", "toolbar", "menu", "utility", "splash", "dialog",
                 ];
-                if !KNOWN_TYPES.contains(&wt.to_ascii_lowercase().as_str()) {
+                let normalized = wt.to_ascii_lowercase();
+                if !KNOWN_TYPES.contains(&normalized.as_str()) {
                     diag.errors.push(format!(
                         "line {}: discarded rule #{}: unknown window_type '{wt}'",
                         entry.line,
@@ -1117,7 +1143,10 @@ fn parse_rules(entries: Vec<RuleEntry>, view_count: usize, diag: &mut Diagnostic
                     ));
                     return None;
                 }
-            }
+                Some(normalized)
+            } else {
+                None
+            };
             // `view` is 1-based in the file, 0-based in `Rule::ws`; a reload
             // that shrinks `view_count` re-clamps it at manage time.
             let ws = match entry.view {
@@ -1135,10 +1164,7 @@ fn parse_rules(entries: Vec<RuleEntry>, view_count: usize, diag: &mut Diagnostic
             Some(Rule {
                 class: entry.class.filter(|s| !s.is_empty()),
                 instance: entry.instance.filter(|s| !s.is_empty()),
-                window_type: entry
-                    .window_type
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_ascii_lowercase()),
+                window_type,
                 title: entry.title.filter(|s| !s.is_empty()),
                 float: entry.float,
                 sticky: entry.sticky,
@@ -1196,13 +1222,13 @@ fn parse_keybindings(
             continue;
         }
         // First-wins on duplicate combinations; later entries are dropped.
-        if parsed.iter().any(|(m, k, _)| *m == mods && *k == keysym) {
+        if let Some((_, _, action)) = parsed.iter().find(|(m, k, _)| *m == mods && *k == keysym) {
             diag.errors.push(format!(
                 "line {}: keybinding '{}' (mods={mods:#x}, keysym={keysym:#x}) duplicates an earlier \
                  bind and was ignored; keeping {}",
                 entry.line,
                 entry.key,
-                action_name_of(&parsed, mods, keysym)
+                crate::core::action::name(action)
             ));
             continue;
         }
@@ -1213,16 +1239,6 @@ fn parse_keybindings(
         append_numeric_keybindings(&mut parsed, view_count);
     }
     parsed
-}
-
-/// Human-readable name of the action already bound to `(mods, keysym)`, for the
-/// conflict diagnostic.
-fn action_name_of(list: &[(u16, u32, Action)], mods: u16, keysym: u32) -> String {
-    list.iter()
-        .find(|(m, k, _)| *m == mods && *k == keysym)
-        .map_or_else(String::new, |(_, _, a)| {
-            crate::core::action::name(a).to_string()
-        })
 }
 
 fn action_view_is_valid(action: &Action, view_count: usize) -> bool {
@@ -1474,6 +1490,82 @@ pub fn action_from_str(input: &str) -> Option<Action> {
 mod tests {
     use super::*;
     use crate::types::Dir;
+
+    fn reference_suggestion<'a>(name: &str, candidates: &'a [&str]) -> Option<&'a str> {
+        let mut best = None;
+        for &candidate in candidates {
+            let mut previous: Vec<_> = (0..=candidate.len()).collect();
+            let mut current = vec![0; candidate.len() + 1];
+            for (i, a) in name.bytes().enumerate() {
+                current[0] = i + 1;
+                for (j, b) in candidate.bytes().enumerate() {
+                    current[j + 1] = (previous[j + 1] + 1)
+                        .min(current[j] + 1)
+                        .min(previous[j] + usize::from(a != b));
+                }
+                std::mem::swap(&mut previous, &mut current);
+            }
+            let distance = previous[candidate.len()];
+            if best.is_none_or(|(_, old)| distance < old) {
+                best = Some((candidate, distance));
+            }
+        }
+        let (candidate, distance) = best?;
+        let threshold = if name.len().max(candidate.len()) <= 6 {
+            1
+        } else {
+            2
+        };
+        (distance <= threshold).then_some(candidate)
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn suggestions_preserve_reference_ties_and_thresholds(
+            name in "[a-z_-]{0,28}",
+            candidates in proptest::collection::vec("[a-z_-]{0,20}", 0..12)
+        ) {
+            let candidates: Vec<_> = candidates.iter().map(String::as_str).collect();
+            proptest::prop_assert_eq!(nearest_name(&name, &candidates), reference_suggestion(&name, &candidates));
+        }
+    }
+
+    #[test]
+    fn suggestions_preserve_single_edits_of_every_general_key() {
+        for name in GENERAL_KEYS {
+            for index in 0..name.len() {
+                let mut typo = name.to_string();
+                typo.remove(index);
+                assert_eq!(
+                    nearest_name(&typo, GENERAL_KEYS),
+                    reference_suggestion(&typo, GENERAL_KEYS)
+                );
+                typo.insert(index, 'z');
+                assert_eq!(
+                    nearest_name(&typo, GENERAL_KEYS),
+                    reference_suggestion(&typo, GENERAL_KEYS)
+                );
+            }
+        }
+        assert_eq!(
+            nearest_name("ab", &["", "abcd"]),
+            reference_suggestion("ab", &["", "abcd"])
+        );
+        assert_eq!(nearest_name("", &[]), None);
+    }
+
+    #[test]
+    fn rule_type_normalization_keeps_the_original_diagnostic() {
+        let mut diag = Diagnostics::default();
+        let user = parse_user("[[rules]]\nwindow_type = \"DiAlOg\"\n", &mut diag).unwrap();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(cfg.rules[0].window_type.as_deref(), Some("dialog"));
+        assert!(diag.is_clean());
+        let user = parse_user("[[rules]]\nwindow_type = \"BAD_TYPE\"\n", &mut diag).unwrap();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert!(cfg.rules.is_empty());
+        assert!(diag.errors[0].contains("'BAD_TYPE'"));
+    }
 
     #[test]
     #[ignore = "manual timing workload; run with --release --ignored --nocapture"]
