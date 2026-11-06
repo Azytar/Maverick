@@ -69,7 +69,7 @@ pub(crate) fn enabled(level: u8) -> bool {
 macro_rules! info {
     ($($arg:tt)*) => {
         if $crate::log::enabled($crate::log::INFO) {
-            eprintln!("[INFO]  {}", format!($($arg)*));
+            eprintln!("[INFO]  {}", format_args!($($arg)*));
         }
     };
 }
@@ -77,7 +77,7 @@ macro_rules! info {
 macro_rules! warn_ {
     ($($arg:tt)*) => {
         if $crate::log::enabled($crate::log::WARN) {
-            eprintln!("[WARN]  {}", format!($($arg)*));
+            eprintln!("[WARN]  {}", format_args!($($arg)*));
         }
     };
 }
@@ -85,7 +85,7 @@ macro_rules! warn_ {
 macro_rules! error {
     ($($arg:tt)*) => {
         if $crate::log::enabled($crate::log::ERROR) {
-            eprintln!("[ERROR] {}", format!($($arg)*));
+            eprintln!("[ERROR] {}", format_args!($($arg)*));
         }
     };
 }
@@ -93,7 +93,7 @@ macro_rules! error {
 macro_rules! debug {
     ($($arg:tt)*) => {
         if $crate::log::enabled($crate::log::DEBUG) {
-            eprintln!("[DEBUG] {}", format!($($arg)*));
+            eprintln!("[DEBUG] {}", format_args!($($arg)*));
         }
     };
 }

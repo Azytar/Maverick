@@ -102,6 +102,22 @@ mod poll_timeout_tests {
     use super::*;
 
     #[test]
+    fn waits_on_every_descriptor_without_restricting_the_public_slice_size() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        assert!(wait_readable_fds(&[], None));
+        for count in [1, 2, 5] {
+            let mut pairs: Vec<_> = (0..count)
+                .map(|_| std::os::unix::net::UnixStream::pair().unwrap())
+                .collect();
+            let fds: Vec<_> = pairs.iter().map(|(read, _)| read.as_raw_fd()).collect();
+            assert!(!wait_readable_fds(&fds, Some(std::time::Duration::ZERO)));
+            pairs[count - 1].1.write_all(b"x").unwrap();
+            assert!(wait_readable_fds(&fds, Some(std::time::Duration::ZERO)));
+        }
+    }
+
+    #[test]
     #[ignore = "manual timing workload; run with --release --ignored --nocapture"]
     fn poll_workload() {
         use std::os::fd::AsRawFd;
@@ -484,17 +500,14 @@ pub fn wait_readable_fds(
     if fds.is_empty() {
         return true;
     }
-    let borrowed: Vec<std::os::unix::io::BorrowedFd<'_>> = fds
+    let mut pfds: Vec<rustix::event::PollFd<'_>> = fds
         .iter()
         .copied()
         // SAFETY: every descriptor here is one the caller is already holding
         // open and passes in solely to be waited on, and the borrow does not
         // outlive this call.
         .map(|fd| unsafe { std::os::unix::io::BorrowedFd::borrow_raw(fd) })
-        .collect();
-    let mut pfds: Vec<rustix::event::PollFd<'_>> = borrowed
-        .iter()
-        .map(|fd| rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN))
+        .map(|fd| rustix::event::PollFd::from_borrowed_fd(fd, rustix::event::PollFlags::IN))
         .collect();
     let ts = timeout.map(|v| {
         // `tv_nsec` is a remainder, not a total: `poll(2)` reads the pair as

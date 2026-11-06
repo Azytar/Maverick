@@ -493,7 +493,12 @@ pub fn generate_cookie() -> io::Result<String> {
     rustix::rand::getrandom(&mut bytes, rustix::rand::GetRandomFlags::empty()).map_err(|e| {
         io::Error::other(format!("could not read random bytes for the X cookie: {e}"))
     })?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    let mut cookie = String::with_capacity(32);
+    for byte in bytes {
+        use std::fmt::Write;
+        write!(cookie, "{byte:02x}").expect("formatting into a String cannot fail");
+    }
+    Ok(cookie)
 }
 
 /// Write a `.Xauthority` file granting `cookie` for `display`.
