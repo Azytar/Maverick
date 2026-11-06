@@ -1475,6 +1475,44 @@ mod tests {
     use super::*;
     use crate::types::Dir;
 
+    #[test]
+    #[ignore = "manual timing workload; run with --release --ignored --nocapture"]
+    fn config_load_workload() {
+        for (name, source, iterations) in [
+            (
+                "small",
+                "[general]\nview_count = 3\nauto_view_binds = false\n".to_string(),
+                4_000,
+            ),
+            (
+                "sample",
+                include_str!("../config/config.toml").to_string(),
+                1_000,
+            ),
+            (
+                "long_unknown_key",
+                format!("[general]\n{} = 1\n", "x".repeat(4096)),
+                32,
+            ),
+        ] {
+            let path = write_temp(&source);
+            let mut samples = Vec::new();
+            for _ in 0..7 {
+                let start = std::time::Instant::now();
+                for _ in 0..iterations {
+                    std::hint::black_box(load_from_path_classified(std::hint::black_box(&path)));
+                }
+                samples.push(start.elapsed().as_nanos() / iterations);
+            }
+            samples.sort_unstable();
+            println!(
+                "config_load name={name} iterations={iterations} median_ns={} min_ns={} max_ns={}",
+                samples[3], samples[0], samples[6]
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
     /// Parse TOML text straight into the user model, panicking on a syntax
     /// error: these tests only ever feed well-formed input.
     fn parse_string(source: &str) -> UserConfig {
