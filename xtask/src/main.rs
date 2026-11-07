@@ -95,6 +95,21 @@ const TEST_DEFAULT_FEATURES: Step = Step {
 
 const X11_STEPS: &[Step] = &[
     Step {
+        label: "Rust Xvfb stacking regression",
+        program: "cargo",
+        args: &[
+            "test",
+            "-p",
+            "maverick-testkit",
+            "--test",
+            "owned_xvfb",
+            "--locked",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    },
+    Step {
         label: "stacking startup contracts",
         program: "python3",
         args: &["tests/stacking-startup.py"],

@@ -1,0 +1,16 @@
+[package]
+name = "maverick-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Private process-isolated integration fixtures for Maverick"
+
+[dependencies]
+tempfile.workspace = true
+
+[dev-dependencies]
+x11rb = { version = "0.13", default-features = false }
