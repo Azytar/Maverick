@@ -1,0 +1,663 @@
+{
+  "date_utc": "2026-11-07",
+  "baseline_revision": "7c67e20e6e84cfdaa25b36fb469f649ac644b573",
+  "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "cpu": "AMD EPYC 9V74 80-Core Processor",
+  "kernel": "6.18.57",
+  "cpu_quota": "800000 100000",
+  "clock": "Instant (monotonic)",
+  "profile": "release, default features",
+  "seed": 20261107,
+  "batches_per_process": 9,
+  "process_pairs": 6,
+  "method": "Balanced shuffled AB/BA pairs; median of six process medians. Each batch uses 20000 real reconcile calls, after warmup. Includes warm hash maps, real state lookups, geometry diff and effect allocation on changing snapshots. No X11, scanout or application latency measured.",
+  "binary_sha256": {
+    "baseline": "0bf16a3714afcc8437c8ce212b792d07a5daf38297783ce34a4dee67bf4a832e",
+    "candidate": "3029ce3aed7e54c8d8aaa1b2c72166e8db8e5bcb77820af4d4cf9a338cdf25be"
+  },
+  "runs": [
+    {
+      "variant": "candidate",
+      "samples_ns": [
+        [
+          35,
+          34,
+          36
+        ],
+        [
+          155,
+          154,
+          241
+        ],
+        [
+          309,
+          309,
+          391
+        ],
+        [
+          1477,
+          1470,
+          1483
+        ],
+        [
+          5899,
+          5891,
+          5923
+        ],
+        [
+          1755,
+          1750,
+          1769
+        ],
+        [
+          1675,
+          1673,
+          1803
+        ]
+      ]
+    },
+    {
+      "variant": "baseline",
+      "samples_ns": [
+        [
+          39,
+          38,
+          40
+        ],
+        [
+          179,
+          178,
+          189
+        ],
+        [
+          361,
+          355,
+          374
+        ],
+        [
+          1758,
+          1715,
+          1808
+        ],
+        [
+          8138,
+          8061,
+          8258
+        ],
+        [
+          1879,
+          1855,
+          1994
+        ],
+        [
+          2182,
+          2168,
+          2302
+        ]
+      ]
+    },
+    {
+      "variant": "baseline",
+      "samples_ns": [
+        [
+          39,
+          39,
+          40
+        ],
+        [
+          182,
+          181,
+          188
+        ],
+        [
+          373,
+          358,
+          473
+        ],
+        [
+          1727,
+          1713,
+          1953
+        ],
+        [
+          6983,
+          6930,
+          7170
+        ],
+        [
+          1743,
+          1715,
+          1953
+        ],
+        [
+          1993,
+          1966,
+          2060
+        ]
+      ]
+    },
+    {
+      "variant": "candidate",
+      "samples_ns": [
+        [
+          35,
+          34,
+          36
+        ],
+        [
+          154,
+          153,
+          180
+        ],
+        [
+          324,
+          307,
+          331
+        ],
+        [
+          1531,
+          1498,
+          1562
+        ],
+        [
+          6159,
+          6021,
+          6206
+        ],
+        [
+          1829,
+          1764,
+          2007
+        ],
+        [
+          1704,
+          1674,
+          1941
+        ]
+      ]
+    },
+    {
+      "variant": "baseline",
+      "samples_ns": [
+        [
+          40,
+          39,
+          43
+        ],
+        [
+          180,
+          179,
+          185
+        ],
+        [
+          355,
+          353,
+          361
+        ],
+        [
+          1751,
+          1709,
+          1790
+        ],
+        [
+          7006,
+          6890,
+          7356
+        ],
+        [
+          1752,
+          1745,
+          1857
+        ],
+        [
+          1977,
+          1963,
+          2072
+        ]
+      ]
+    },
+    {
+      "variant": "candidate",
+      "samples_ns": [
+        [
+          36,
+          34,
+          41
+        ],
+        [
+          156,
+          152,
+          166
+        ],
+        [
+          321,
+          308,
+          346
+        ],
+        [
+          1542,
+          1532,
+          1590
+        ],
+        [
+          6148,
+          6062,
+          6250
+        ],
+        [
+          1824,
+          1769,
+          1905
+        ],
+        [
+          1738,
+          1686,
+          1769
+        ]
+      ]
+    },
+    {
+      "variant": "candidate",
+      "samples_ns": [
+        [
+          35,
+          34,
+          37
+        ],
+        [
+          155,
+          154,
+          157
+        ],
+        [
+          311,
+          307,
+          318
+        ],
+        [
+          1496,
+          1479,
+          1515
+        ],
+        [
+          6015,
+          6006,
+          6084
+        ],
+        [
+          1782,
+          1765,
+          1818
+        ],
+        [
+          1691,
+          1673,
+          1741
+        ]
+      ]
+    },
+    {
+      "variant": "baseline",
+      "samples_ns": [
+        [
+          41,
+          39,
+          48
+        ],
+        [
+          191,
+          184,
+          200
+        ],
+        [
+          372,
+          354,
+          392
+        ],
+        [
+          1807,
+          1754,
+          1960
+        ],
+        [
+          7054,
+          6878,
+          7142
+        ],
+        [
+          1767,
+          1745,
+          1803
+        ],
+        [
+          2240,
+          2201,
+          2314
+        ]
+      ]
+    },
+    {
+      "variant": "candidate",
+      "samples_ns": [
+        [
+          36,
+          35,
+          39
+        ],
+        [
+          164,
+          157,
+          182
+        ],
+        [
+          321,
+          312,
+          334
+        ],
+        [
+          1528,
+          1516,
+          1556
+        ],
+        [
+          6095,
+          6022,
+          6184
+        ],
+        [
+          1796,
+          1790,
+          1852
+        ],
+        [
+          1703,
+          1680,
+          1799
+        ]
+      ]
+    },
+    {
+      "variant": "baseline",
+      "samples_ns": [
+        [
+          40,
+          39,
+          47
+        ],
+        [
+          183,
+          179,
+          189
+        ],
+        [
+          366,
+          354,
+          375
+        ],
+        [
+          1747,
+          1725,
+          1783
+        ],
+        [
+          7052,
+          6990,
+          7323
+        ],
+        [
+          1751,
+          1726,
+          1937
+        ],
+        [
+          1986,
+          1964,
+          2034
+        ]
+      ]
+    },
+    {
+      "variant": "baseline",
+      "samples_ns": [
+        [
+          41,
+          39,
+          52
+        ],
+        [
+          188,
+          181,
+          191
+        ],
+        [
+          367,
+          359,
+          385
+        ],
+        [
+          1759,
+          1719,
+          2017
+        ],
+        [
+          6996,
+          6933,
+          7087
+        ],
+        [
+          1763,
+          1741,
+          1796
+        ],
+        [
+          2023,
+          1976,
+          2054
+        ]
+      ]
+    },
+    {
+      "variant": "candidate",
+      "samples_ns": [
+        [
+          35,
+          34,
+          47
+        ],
+        [
+          157,
+          153,
+          163
+        ],
+        [
+          314,
+          311,
+          325
+        ],
+        [
+          1507,
+          1471,
+          1544
+        ],
+        [
+          6430,
+          6352,
+          6690
+        ],
+        [
+          1817,
+          1796,
+          1848
+        ],
+        [
+          1715,
+          1690,
+          1810
+        ]
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "windows": 1,
+      "duplicates": false,
+      "changing": false,
+      "baseline_median_ns": 40.0,
+      "candidate_median_ns": 35.0,
+      "baseline_range_ns": [
+        39,
+        41
+      ],
+      "candidate_range_ns": [
+        35,
+        36
+      ],
+      "reduction_percent": 12.5
+    },
+    {
+      "windows": 5,
+      "duplicates": false,
+      "changing": false,
+      "baseline_median_ns": 182.5,
+      "candidate_median_ns": 155.5,
+      "baseline_range_ns": [
+        179,
+        191
+      ],
+      "candidate_range_ns": [
+        154,
+        164
+      ],
+      "reduction_percent": 14.79
+    },
+    {
+      "windows": 10,
+      "duplicates": false,
+      "changing": false,
+      "baseline_median_ns": 366.5,
+      "candidate_median_ns": 317.5,
+      "baseline_range_ns": [
+        355,
+        373
+      ],
+      "candidate_range_ns": [
+        309,
+        324
+      ],
+      "reduction_percent": 13.37
+    },
+    {
+      "windows": 50,
+      "duplicates": false,
+      "changing": false,
+      "baseline_median_ns": 1754.5,
+      "candidate_median_ns": 1517.5,
+      "baseline_range_ns": [
+        1727,
+        1807
+      ],
+      "candidate_range_ns": [
+        1477,
+        1542
+      ],
+      "reduction_percent": 13.51
+    },
+    {
+      "windows": 200,
+      "duplicates": false,
+      "changing": false,
+      "baseline_median_ns": 7029.0,
+      "candidate_median_ns": 6121.5,
+      "baseline_range_ns": [
+        6983,
+        8138
+      ],
+      "candidate_range_ns": [
+        5899,
+        6430
+      ],
+      "reduction_percent": 12.91
+    },
+    {
+      "windows": 50,
+      "duplicates": true,
+      "changing": false,
+      "baseline_median_ns": 1757.5,
+      "candidate_median_ns": 1806.5,
+      "baseline_range_ns": [
+        1743,
+        1879
+      ],
+      "candidate_range_ns": [
+        1755,
+        1829
+      ],
+      "reduction_percent": -2.79
+    },
+    {
+      "windows": 50,
+      "duplicates": false,
+      "changing": true,
+      "baseline_median_ns": 2008.0,
+      "candidate_median_ns": 1703.5,
+      "baseline_range_ns": [
+        1977,
+        2240
+      ],
+      "candidate_range_ns": [
+        1675,
+        1738
+      ],
+      "reduction_percent": 15.16
+    }
+  ],
+  "cases": [
+    {
+      "windows": 1,
+      "duplicates": false,
+      "changing": false,
+      "iterations": 20000
+    },
+    {
+      "windows": 5,
+      "duplicates": false,
+      "changing": false,
+      "iterations": 20000
+    },
+    {
+      "windows": 10,
+      "duplicates": false,
+      "changing": false,
+      "iterations": 20000
+    },
+    {
+      "windows": 50,
+      "duplicates": false,
+      "changing": false,
+      "iterations": 20000
+    },
+    {
+      "windows": 200,
+      "duplicates": false,
+      "changing": false,
+      "iterations": 20000
+    },
+    {
+      "windows": 50,
+      "duplicates": true,
+      "changing": false,
+      "iterations": 20000
+    },
+    {
+      "windows": 50,
+      "duplicates": false,
+      "changing": true,
+      "iterations": 20000
+    }
+  ],
+  "sample_columns": [
+    "median_ns",
+    "min_ns",
+    "max_ns"
+  ]
+}

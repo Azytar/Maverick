@@ -13,6 +13,8 @@ needed to continue staged work without reconstructing it from chat history.
 | 3 — reliability | active | View reconciliation fixed-point property and minimal `RemoveView` contracts added |
 | 4 — performance | active | steady-state reconcile reduced from two allocations to zero with full X11 equivalence |
 | 7 — security | active | dependency advisories/sources gate and explicit MSRV enforcement added |
+| 9 — integration | complete | merged tree verified in CI; default-feature lint gap repaired and regression coverage extended |
+| 10 — measured continuation | active | unique-placement reconcile avoids a redundant lookup; reproducible CPU workload added |
 
 ## Stage 0 baseline
 
@@ -217,8 +219,63 @@ suite (7 tests), stacking-audit unit tests (26 tests), Bash syntax and Python
 compilation pass. This runtime denies Unix socket `bind()` with EPERM:
 workspace IPC tests fail and Xvfb cannot open a listener. The installer suite
 requires a non-root user. Those environment failures are not skipped or
-converted to passes; the updated branch must pass CI before Stage 10 starts.
+converted to passes; the updated branch passed all four jobs in [CI run 42393108260](https://github.com/Azytar/Maverick/actions/runs/42393108260)
+before Stage 10 started: **1,005 tests passed per feature configuration**,
+release, installer, MSRV and all 29 X11 steps, including the new alias reload.
+Local Rust 1.85 all-target/all-feature checking also passed. The new borrowed
+scratch regression and 46 release reconciliation tests passed locally; the
+model/parser suite passed 93 tests with `PROPTEST_CASES=1024`, and release
+configuration tests passed 54 tests (one manual workload ignored).
 No physical-session, latency or performance result is claimed here.
+
+## Stage 10: unique-placement reconciliation
+
+The duplicate-coalescing map was built on every reconciliation and then looked
+up again for **every** desired window, even when every placement was unique.
+The map length already answers whether any duplicate exists. Reconciliation
+now uses that answer to avoid the second lookup for unique snapshots; duplicate
+snapshots retain last-write-wins, request ordering and the existing filter.
+The map is still cleared and rebuilt on each pass. No persistent validity flag,
+new cache, unsafe code, dependency or allocation policy was introduced.
+
+A manual release workload was added **before** changing production. Baseline
+commit: `7c67e20e6e84cfdaa25b36fb469f649ac644b573`. It exercises the real
+borrowed DesiredState/reconcile path with 1, 5, 10, 50 and 200 windows, a duplicate
+snapshot, and continuously changing geometry. Assertions check effect counts;
+ordinary tests keep timing out of CI. Reproduce at the baseline and candidate:
+
+```sh
+cargo test --release -p maverick --bin maverick --locked reconcile_workload -- --ignored --nocapture
+```
+
+Measurements used Rust 1.99.1, release/default features, AMD EPYC 9V74 in this
+container. Six balanced, shuffled AB/BA process pairs each ran nine batches of
+20,000 calls per case after warm-up. The table is the median of the six process
+medians; raw process summaries, order, environment and binary hashes are in
+[`2026-11-07-reconcile.json`](../../benchmarks/results/2026-11-07-reconcile.json).
+
+| Snapshot | Before, ns/call | After, ns/call | Reduction |
+| --- | ---: | ---: | ---: |
+| 1 unique window, settled | 40 | 35 | 12.5% |
+| 5 unique windows, settled | 182.5 | 155.5 | 14.8% |
+| 10 unique windows, settled | 366.5 | 317.5 | 13.4% |
+| 50 unique windows, settled | 1754.5 | 1517.5 | 13.5% |
+| 200 unique windows, settled | 7029 | 6121.5 | 12.9% |
+| 50 windows plus a duplicate, settled | 1757.5 | 1806.5 | -2.8% |
+| 50 unique windows, changing | 2008 | 1703.5 | 15.2% |
+
+The unique-case ranges do not overlap in this experiment. Duplicate-case
+ranges overlap (1743–1879 vs 1755–1829 ns), so no improvement is claimed for
+that defensive path. The result measures CPU reconciliation with warm maps,
+including real client lookups and effect allocation when geometry changes.
+It does not measure X11 latency, scanout, input latency, physical desktop
+performance or battery use. Both versions already allocate zero on the settled
+path: the timing result is independent of that allocation invariant.
+
+Local validation passes both strict Clippy configurations, 39 reconciler tests
+with `PROPTEST_CASES=1024`, and both arrange/reconcile allocation guards.
+The publication gate remains the same complete CI campaign, including native C
+X11 clients; environment-dependent local failures remain documented above.
 
 ## Next work
 
@@ -226,8 +283,8 @@ No physical-session, latency or performance result is claimed here.
    do not duplicate the existing independent Carousel model.
 2. Preserve Python/C harnesses whose measured role is process orchestration or
    an independent ABI/protocol oracle.
-3. Begin Stage 4 with a deterministic allocation baseline for the
-   `Placements -> DesiredState -> reconcile` path before changing it.
+3. Extend measurements only when a new profile identifies another real cost;
+   preserve the established zero-allocation and reconciliation contracts.
 4. Compare any Stage 4 change against the existing Xvfb profile workload and
    retain before/after evidence; no performance claim follows from allocation
    counts alone.

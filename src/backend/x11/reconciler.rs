@@ -212,10 +212,15 @@ pub fn reconcile(
     for (i, dw) in desired.iter().enumerate() {
         applied.last_index_scratch.insert(dw.window, i);
     }
+    // The map already tells us whether coalescing is necessary. In the normal
+    // unique-placement case every entry survives, so avoid hashing each window
+    // again just to rediscover that fact. Duplicate snapshots keep the same
+    // last-write-wins filter and output order.
+    let has_duplicates = applied.last_index_scratch.len() != desired.len();
 
     let mut out = Vec::new();
     for (i, dw) in desired.iter().enumerate() {
-        if applied.last_index_scratch.get(&dw.window).copied() != Some(i) {
+        if has_duplicates && applied.last_index_scratch.get(&dw.window).copied() != Some(i) {
             continue;
         }
         let dirty = state
