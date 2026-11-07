@@ -13,4 +13,4 @@ description = "Private process-isolated integration fixtures for Maverick"
 tempfile.workspace = true
 
 [dev-dependencies]
-x11rb = { version = "0.13", default-features = false }
+x11rb = { version = "0.13", default-features = false, features = ["xtest"] }

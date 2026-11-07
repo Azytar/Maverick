@@ -84,6 +84,7 @@ jobs:
   x11-smoke:
     name: X11 smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -114,8 +115,8 @@ jobs:
         # is one command with no feature flags — not "the only build there is".
         run: cargo run -p maverick-xtask --locked -- release
       - name: X11 regression campaign
-        # The Rust runner owns orchestration only. Python/C remain the current
-        # behavior oracles until each migration is independently proven.
+        # Explicitly includes ignored Rust Xvfb tests. Python/C retain external
+        # client, pixel, input-capture and control-protocol coverage.
         run: cargo run -p maverick-xtask --locked -- x11
       - name: Preserve C probe evidence
         if: always()

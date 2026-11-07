@@ -4,10 +4,15 @@
 //! guessed display number. Children inherit no desktop display, Xauthority
 //! cookie, Maverick session variables, or real HOME/XDG directories.
 
+#![forbid(unsafe_code)]
+
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
+use std::net::Shutdown;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -32,27 +37,33 @@ impl Drop for OwnedChild {
 /// An owned Xvfb and optional WM. Fields drop in WM, server, sandbox order.
 pub struct XvfbSession {
     wm: Option<OwnedChild>,
-    _server: OwnedChild,
+    server: OwnedChild,
     _sandbox: TempDir,
     display: String,
     config: PathBuf,
     root: PathBuf,
+    deadlines: Vec<ConnectionDeadline>,
 }
 
 impl XvfbSession {
     /// Spawn one private X11 server, never selecting or probing a host display.
     pub fn start() -> io::Result<Self> {
+        Self::with_config(
+            "[general]\nfocus_mouse = false\nwarp_cursor = false\n[autostart]\ncommands = []\n",
+        )
+    }
+
+    /// Start with a test-specific config in the private sandbox.
+    pub fn with_config(contents: &str) -> io::Result<Self> {
         let sandbox = Builder::new().prefix("maverick-test-").tempdir()?;
         let root = sandbox.path().to_path_buf();
         for name in ["home", "runtime", "config", "state", "cache"] {
             fs::create_dir(root.join(name))?;
+            fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o700))?;
         }
 
         let config = root.join("maverick.toml");
-        fs::write(
-            &config,
-            "[general]\nfocus_mouse = false\nwarp_cursor = false\n[autostart]\ncommands = []\n",
-        )?;
+        fs::write(&config, contents)?;
 
         let mut command = isolated_command(&root, None, OsStr::new("Xvfb"));
         command.args([
@@ -94,21 +105,43 @@ impl XvfbSession {
             }
         };
         let _ = reader.join();
-        let display = result?;
+        let display = result.map_err(|error| {
+            let log = read_log(&root.join("xvfb.log"));
+            io::Error::new(
+                error.kind(),
+                format!("Xvfb readiness failed: {error}\n{log}"),
+            )
+        })?;
 
         Ok(Self {
             wm: None,
-            _server: server,
+            server,
             _sandbox: sandbox,
             display,
             config,
             root,
+            deadlines: Vec::new(),
         })
     }
 
     /// The private display name, e.g. `:93`.
     pub fn display(&self) -> &str {
         &self.display
+    }
+
+    /// Connect only to this server. A total connection deadline also unblocks
+    /// synchronous X11 replies if the server stops responding mid-request.
+    pub fn connect_stream(&mut self) -> io::Result<UnixStream> {
+        let number = self
+            .display
+            .strip_prefix(':')
+            .ok_or_else(|| io::Error::other("invalid private display"))?;
+        let stream = UnixStream::connect(format!("/tmp/.X11-unix/X{number}"))?;
+        self.deadlines.push(ConnectionDeadline::new(
+            stream.try_clone()?,
+            Duration::from_secs(60),
+        ));
+        Ok(stream)
     }
 
     /// Start the requested WM binary without passing control-plane variables.
@@ -130,6 +163,45 @@ impl XvfbSession {
         Ok(())
     }
 
+    /// Replace only this session's config (e.g. before a keyboard reload).
+    pub fn write_config(&self, contents: &str) -> io::Result<()> {
+        fs::write(&self.config, contents)
+    }
+
+    /// The log belongs to this sandbox; useful as an exec/restart barrier.
+    pub fn wm_log_path(&self) -> PathBuf {
+        self.root.join("maverick.log")
+    }
+
+    /// Diagnostics are read before RAII removes the private sandbox.
+    pub fn diagnostics(&self) -> String {
+        let mut result = String::new();
+        for name in ["maverick.log", "xvfb.log"] {
+            result.push_str(name);
+            result.push_str(":\n");
+            result.push_str(&read_log(&self.root.join(name)));
+            result.push('\n');
+        }
+        result
+    }
+
+    /// Observe only the server created by this fixture.
+    pub fn server_exit_status(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.server.0.try_wait()
+    }
+
+    /// Stop this fixture's WM, keeping clients and the server alive.
+    pub fn stop_wm(&mut self) {
+        self.wm.take();
+    }
+
+    /// Simulate loss of this fixture's server, never signalling a host display.
+    pub fn stop_server(&mut self) -> io::Result<()> {
+        self.server.0.kill()?;
+        self.server.0.wait()?;
+        Ok(())
+    }
+
     /// Return the observed WM exit, if any, without reaping unrelated children.
     pub fn wm_exit_status(&mut self) -> io::Result<Option<ExitStatus>> {
         match &mut self.wm {
@@ -137,6 +209,53 @@ impl XvfbSession {
             None => Ok(None),
         }
     }
+}
+
+/// A cancellable watchdog owns a duplicate of a test socket, never a PID.
+/// Shutdown wakes blocked readers; dropping the fixture cancels and joins it.
+struct ConnectionDeadline {
+    cancel: Option<mpsc::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl ConnectionDeadline {
+    fn new(stream: UnixStream, timeout: Duration) -> Self {
+        let (cancel, receiver) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            if matches!(
+                receiver.recv_timeout(timeout),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ) {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        });
+        Self {
+            cancel: Some(cancel),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for ConnectionDeadline {
+    fn drop(&mut self) {
+        self.cancel.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Keep startup failures bounded even when Xvfb prints a line per port.
+fn read_log(path: &Path) -> String {
+    let result = (|| -> io::Result<String> {
+        let mut file = File::open(path)?;
+        let start = file.metadata()?.len().saturating_sub(16 * 1024);
+        file.seek(SeekFrom::Start(start))?;
+        let mut bytes = Vec::new();
+        file.take(16 * 1024).read_to_end(&mut bytes)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    })();
+    result.unwrap_or_default()
 }
 
 fn isolated_command(root: &Path, display: Option<&str>, binary: &OsStr) -> Command {
@@ -154,6 +273,9 @@ fn isolated_command(root: &Path, display: Option<&str>, binary: &OsStr) -> Comma
                     | "XDG_CONFIG_HOME"
                     | "XDG_STATE_HOME"
                     | "XDG_CACHE_HOME"
+                    | "DBUS_SESSION_BUS_ADDRESS"
+                    | "SESSION_MANAGER"
+                    | "LD_PRELOAD"
             )
         {
             command.env_remove(key);
@@ -198,8 +320,39 @@ fn read_display_record(mut input: impl Read) -> io::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_display_record;
+    use super::{read_display_record, ConnectionDeadline};
     use std::io::ErrorKind;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    #[test]
+    fn connection_deadline_unblocks_a_stalled_reply() {
+        let (mut client, _server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let _deadline =
+            ConnectionDeadline::new(client.try_clone().unwrap(), Duration::from_millis(20));
+        let mut byte = [0];
+        assert_eq!(client.read(&mut byte).unwrap(), 0);
+    }
+
+    #[test]
+    fn cancelling_deadline_keeps_socket_usable() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        drop(ConnectionDeadline::new(
+            client.try_clone().unwrap(),
+            Duration::from_secs(60),
+        ));
+        server.write_all(b"x").unwrap();
+        let mut byte = [0];
+        client.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, *b"x");
+    }
 
     #[test]
     fn display_record_accepts_only_a_bounded_decimal_line() {

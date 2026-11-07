@@ -95,7 +95,7 @@ const TEST_DEFAULT_FEATURES: Step = Step {
 
 const X11_STEPS: &[Step] = &[
     Step {
-        label: "Rust Xvfb stacking regression",
+        label: "Rust Xvfb protocol and lifecycle regressions",
         program: "cargo",
         args: &[
             "test",
@@ -107,6 +107,7 @@ const X11_STEPS: &[Step] = &[
             "--",
             "--ignored",
             "--nocapture",
+            "--test-threads=2",
         ],
     },
     Step {
@@ -343,6 +344,14 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
+    // Always resolve fixtures and release artifacts from the workspace, even
+    // when invoked with --manifest-path from another directory.
+    env::set_current_dir(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .ok_or("missing workspace directory")?,
+    )
+    .map_err(|error| format!("cannot enter workspace: {error}"))?;
     let mut args = env::args().skip(1);
     let task = Task::parse(args.next().as_deref())?;
     if let Some(extra) = args.next() {
