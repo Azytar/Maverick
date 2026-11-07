@@ -261,12 +261,7 @@ fn run() -> Result<(), String> {
     }
 
     match task {
-        Task::Check => run_steps(&[
-            FMT,
-            CLIPPY,
-            TEST_ALL_FEATURES,
-            TEST_DEFAULT_FEATURES,
-        ]),
+        Task::Check => run_steps(&[FMT, CLIPPY, TEST_ALL_FEATURES, TEST_DEFAULT_FEATURES]),
         Task::Fmt => run_steps(&[FMT]),
         Task::Clippy => run_steps(&[CLIPPY]),
         Task::Test => run_steps(&[TEST_ALL_FEATURES, TEST_DEFAULT_FEATURES]),
@@ -295,9 +290,10 @@ fn run_steps(steps: &[Step]) -> Result<(), String> {
             return Err(format!(
                 "'{}' failed with status {}",
                 step.label,
-                status
-                    .code()
-                    .map_or_else(|| "terminated by signal".to_string(), |code| code.to_string())
+                status.code().map_or_else(
+                    || "terminated by signal".to_string(),
+                    |code| code.to_string()
+                )
             ));
         }
     }
