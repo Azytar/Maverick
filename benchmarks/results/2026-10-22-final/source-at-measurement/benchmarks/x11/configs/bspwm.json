@@ -1,0 +1,1 @@
+{"commands":[["monitor","-d","bench"],["config","border_width","0"],["config","window_gap","0"],["config","focus_follows_pointer","false"],["config","pointer_follows_focus","false"],["config","ignore_ewmh_focus","false"]]}

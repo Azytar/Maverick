@@ -101,6 +101,47 @@ static NEED_REGRAB: AtomicBool = AtomicBool::new(false);
 mod poll_timeout_tests {
     use super::*;
 
+    #[test]
+    fn waits_on_every_descriptor_without_restricting_the_public_slice_size() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        assert!(wait_readable_fds(&[], None));
+        for count in [1, 2, 5] {
+            let mut pairs: Vec<_> = (0..count)
+                .map(|_| std::os::unix::net::UnixStream::pair().unwrap())
+                .collect();
+            let fds: Vec<_> = pairs.iter().map(|(read, _)| read.as_raw_fd()).collect();
+            assert!(!wait_readable_fds(&fds, Some(std::time::Duration::ZERO)));
+            pairs[count - 1].1.write_all(b"x").unwrap();
+            assert!(wait_readable_fds(&fds, Some(std::time::Duration::ZERO)));
+        }
+    }
+
+    #[test]
+    #[ignore = "manual timing workload; run with --release --ignored --nocapture"]
+    fn poll_workload() {
+        use std::os::fd::AsRawFd;
+        let (first, _first_writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (second, _second_writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fds = [first.as_raw_fd(), second.as_raw_fd()];
+        let mut samples = Vec::new();
+        for _ in 0..7 {
+            let start = std::time::Instant::now();
+            for _ in 0..50_000 {
+                assert!(!wait_readable_fds(
+                    std::hint::black_box(&fds),
+                    Some(std::time::Duration::ZERO)
+                ));
+            }
+            samples.push(start.elapsed().as_nanos() / 50_000);
+        }
+        samples.sort_unstable();
+        println!(
+            "poll iterations=50000 median_ns={} min_ns={} max_ns={}",
+            samples[3], samples[0], samples[6]
+        );
+    }
+
     fn wait_on_idle(fd: std::os::unix::io::RawFd, d: std::time::Duration) -> bool {
         wait_readable_fds(&[fd], Some(d))
     }

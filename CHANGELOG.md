@@ -13,6 +13,18 @@ before it makes no compatibility promise.
 
 ### Changed
 
+- The TOML configuration now uses View terminology: `view_count`,
+  `view_names`, `auto_view_binds` and `[[rules]].view` replace the old
+  tag/workspace names. Configuration has one canonical spelling per setting;
+  legacy aliases (`border_w`, `gaps`, `default_col_width`, `split_bias`,
+  `col_*`, `[autostart].apps/programs` and rule aliases) are ignored with
+  migration diagnostics instead of extending the public vocabulary indefinitely.
+- Border theme presets were removed. Border configuration remains available
+  directly through `border_width` and `[colors] normal/focused/urgent`; with
+  zero-width borders the color values remain inert.
+- The shipped `config.toml` is a smaller starting configuration: it no longer
+  advertises the no-op `layout:column` binding or hard-codes distribution-
+  specific portal paths in autostart.
 - Column resize commands are ignored while the target column or focused window
   is fullscreen. Leaving fullscreen preserves the previous column width instead
   of applying size changes made invisibly during fullscreen.
@@ -35,6 +47,14 @@ before it makes no compatibility promise.
 
 ### Added
 
+- Configuration diagnostics suggest canonical spellings for likely key and
+  table typos. Unrelated unknown tables remain silent for forward
+  compatibility, while close mistakes such as `[genreal]` are reported.
+- The zero-copy TOML event parser exposes each event's source line, allowing
+  schema/type diagnostics to identify where an invalid setting came from
+  without building an AST. Keybinding and rule rows retain their header line so
+  later semantic checks (invalid actions, duplicate binds, rule targets) keep
+  useful source locations too.
 - An optional isolated performance workload reports WM CPU/RSS and control
   round trips, with existing runtime traces available for internal spans.
   Documentation distinguishes those measurements from visible frame rate and
@@ -52,6 +72,40 @@ before it makes no compatibility promise.
 
 ### Fixed
 
+- Config loading reuses one compiled baseline instead of constructing and
+  discarding a complete fallback on every successful read. Typo scoring skips
+  impossible length matches and reuses one edit-distance row; suggestions keep
+  their existing thresholds and tie order.
+- The X11 wait loop uses fixed descriptor storage, the poll adapter no longer
+  builds an intermediate descriptor vector, and Overview resource lookup uses
+  existing map entries directly. Logging and Xauthority cookie formatting avoid
+  intermediate strings. No rendering or event-order policy is changed.
+- Release-mode tests use the invariant checker available in both profiles;
+  workspace Clippy diagnostics are resolved without lint suppressions.
+- Configuration validation checks floating-point ranges before narrowing to
+  runtime precision, rejects empty shortcut components and NoSymbol bindings,
+  and diagnoses known tables written with the wrong header kind. Invalid
+  autostart list types preserve the compiled commands instead of clearing them.
+- The TOML subset rejects negative hexadecimal literals, literal line breaks
+  in basic strings, and grid rows without an opening bracket. Legacy
+  `shrink-col` actions reject integer negation overflow instead of panicking.
+- Configuration diagnostics include the file path and expected field type;
+  cross-field general diagnostics retain the section's location. Checker
+  integration tests pin exit codes and the absence of command execution.
+- Rule `size` and `position` values are range-checked before integer
+  conversion, so negative sizes or out-of-range coordinates cannot wrap into
+  unrelated values. Rule `opacity` is validated in the config layer and must
+  be within `0.0..=1.0` instead of relying on a later backend clamp.
+- Scalar general settings are range-checked while parsing, so diagnostics keep
+  their source line. Gap and border values above the layout's existing safety
+  ceiling are rejected instead of being accepted and silently clamped later.
+- Autostart argv lists are validated on the `commands` line; rows without an
+  executable are reported and discarded before the runtime configuration is
+  built.
+- `view_names` rejects blank labels at the source line and reports surplus
+  names instead of silently truncating them to `view_count`. Runtime logging
+  distinguishes configuration warnings from configuration errors while keeping
+  both non-fatal to the running session.
 - The stacking regression gives Xvfb its own bounded startup deadline, handles
   partial readiness records and early exits, and preserves the original failure
   when diagnostic tools cannot run. Startup failures never query an inherited
@@ -148,9 +202,9 @@ before it makes no compatibility promise.
 - Startup now defines a visible standard arrow on the root window, including
   when the inherited cursor is transparent and no applications are open.
   Client cursors remain independent; shutdown restores the server default.
-- An empty `[autostart].commands = []` (including the `apps` and `programs`
-  aliases) no longer reports a type warning. It remains a valid way to disable
-  the compiled autostart list; nonempty flat lists still report a warning.
+- An empty `[autostart].commands = []` is accepted without a type warning and
+  remains the explicit way to disable the compiled autostart list; nonempty
+  flat lists still report a warning.
 - Hover selection can no longer cascade down the ribbon on its own: an
   `EnterNotify` that arrives with the pointer exactly where the last motion
   or press left it (a camera pan slid another tile underneath a stationary

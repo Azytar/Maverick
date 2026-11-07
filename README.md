@@ -61,7 +61,7 @@ them apart:
 
 ### Views and View identity
 
-- Every monitor owns a list of Views. A monitor starts with `n_tags` of them
+- Every monitor owns a list of Views. A monitor starts with `view_count` of them
   (default 9, maximum 9 — the value is clamped at 9).
 - Each View carries a `ViewId`: a `u32` minted by that monitor's Carousel,
   strictly increasing and never reused. A deleted View frees its id permanently,
@@ -543,11 +543,11 @@ a new column. These shortcuts act on keysyms in the active keyboard layout.
 | Overview toggle / enter / next / previous | `Super+O` / `Super+E` / `Super+N` / `Super+Shift+O` | fixed-scale navigation viewport for picking a column |
 | Viewport zoom in / out | `Super+=` / `Super+-` | enlarges or restores the ribbon |
 | Page-snap right / left | `Super+]` / `Super+[` | scrolls the camera one screen-width |
-| Select View | `Super+1` … `Super+9` | generated per View, up to `n_tags` |
+| Select View | `Super+1` … `Super+9` | generated per View, up to `view_count` |
 | Send window to View | `Super+Shift+1` … `Super+Shift+9` | generated per View |
 
-The generated digit bindings follow `n_tags`. Setting
-`auto_workspace_binds = false` in `[general]` suppresses them, leaving the digit
+The generated digit bindings follow `view_count`. Setting
+`auto_view_binds = false` in `[general]` suppresses them, leaving the digit
 row entirely unmanaged.
 
 Carousel stepping (`view_next`, `view_prev`, `view_return`) and View lifecycle
@@ -580,46 +580,38 @@ gaps_outer = 14
 focus_mouse = false
 ```
 
-Compiled defaults for the most relevant `[general]` keys:
+Compiled defaults for the public `[general]` keys:
 
 | key | default | meaning |
 | --- | --- | --- |
-| `n_tags` | `9` | Views per monitor at startup; clamped to a maximum of 9 |
-| `column_width` | `0.6` | column width as a fraction of the monitor workarea; must be between `0.1` and `1.0` |
+| `view_count` | `9` | Views per monitor at startup; valid range `1..=9` |
+| `column_width` | `0.6` | new-column width as a fraction of the monitor workarea; `0.1..=1.0` |
 | `gaps_inner` | `4` | gap between adjacent tiles |
 | `gaps_outer` | `8` | gap between tiles and the screen edge |
-| `border_width` | `0` | tile border width in pixels; zero disables borders |
-| `focus_mouse` | `false` | whether moving the pointer changes focus |
-| `honor_initial_state` | `false` | honour a client's map-time maximized/fullscreen state instead of normalising it |
-| `auto_workspace_binds` | `true` | generate the `Super+<digit>` View bindings |
 | `smart_gaps` | `false` | suppress outer gaps where only one tile is visible |
+| `border_width` | `0` | tile border width in pixels; zero disables borders |
 | `corner_radius` | `0` | tile corner radius in pixels |
-| `tag_names` | `["1"]` … `["9"]` | View labels published as `_NET_DESKTOP_NAMES` |
-| `overview_scale` | `0.76` | the scale Overview is entered at; the one view that visibly shrinks the tiles |
-| `overview_zoom_min` | `0.25` | floor for the Overview entry scale: the smallest it may go when the focused tile would not fit even reduced |
+| `accordion_boost` | `0.0` | focus expansion for the active column; `0.0..=0.9` |
+| `focus_mouse` | `false` | whether genuine pointer motion changes focus |
+| `warp_cursor` | `false` | whether keyboard focus changes may recenter the pointer |
+| `honor_initial_state` | `false` | honour a client's map-time maximized/fullscreen state instead of normalising it |
+| `auto_view_binds` | `true` | generate the `Super+<digit>` View bindings |
+| `view_names` | `["1"]` … `["9"]` | non-blank View labels; missing labels are numbered, surplus labels are reported and ignored |
+| `overview_scale` | `0.76` | target scale when Overview is entered |
+| `overview_zoom_min` | `0.25` | minimum Overview entry scale when the focused tile needs further fitting |
 
-Other accepted `[general]` keys: `gaps`, `accordion_boost` and `warp_cursor`.
-`border_w` is an alias for `border_width`. Both `overview_scale` and
-`overview_zoom_min` take a value between `0.05` and `1.0`; a value outside that
-range is ignored with a diagnostic, as is a floor above the target (the floor
-then normalizes to the target instead of silently cancelling the reduction).
-`overview_scale = 1.0` together with `overview_zoom_min = 1.0` is the
-documented way to ask for a full-size Overview with no reduction at all.
+`overview_scale` and `overview_zoom_min` accept `0.05..=1.0`; the floor
+must not exceed the target. Set both to `1.0` for a full-size Overview.
 
-Two keys are deprecated aliases kept for compatibility. Both still load, and both
-emit a warning:
+Configuration has one public spelling per setting. Historical spellings such as
+`border_w`, `gaps`, `default_col_width`, `split_bias`, the `col_*` color names,
+`[autostart].apps/programs`, the old tag/workspace names, and rule aliases are no longer applied.
+`maverick --check-config` reports the canonical replacement instead of silently
+preserving multiple vocabularies.
 
-| deprecated key | alias | type | superseded by |
-| --- | --- | --- | --- |
-| `default_col_width` | `default_col_w` | pixels | `column_width`, converting against a fixed 1920px workarea |
-| `split_bias` | — | fraction, `0.0`–`1.0` | `column_width` |
-
-`[colors]` accepts `normal`, `focused` and `urgent`, each also readable as
-`col_normal`, `col_focused` and `col_urgent`. These values affect window borders
-only. The older `[general].theme` presets remain accepted for compatibility;
-explicit colors override them. With `border_width = 0`, none of these colors
-is visible.
-
+`[colors]` contains only `normal`, `focused` and `urgent`. These values affect
+borders only and are inert while `border_width = 0`; Maverick does not carry a
+separate border-theme preset layer.
 ### How a file is combined with the defaults
 
 - Ordinary settings are merged field by field.
@@ -634,10 +626,10 @@ is visible.
 - Malformed TOML falls back to the compiled defaults.
 - An invalid individual entry is diagnosed and ignored; the rest of the file
   still loads.
-- An unknown table is skipped silently, so a file written for a different
-  Maverick does not produce noise.
-- An unknown key inside a table Maverick does know is reported as a warning and
-  ignored.
+- An unrelated unknown table is skipped for forward compatibility. A table name
+  close to a known one (for example `[genreal]`) is reported as a likely typo.
+- An unknown key inside a known table is reported with its source line and, when
+  possible, a canonical spelling suggestion.
 
 Validate before relying on any of this:
 
@@ -652,9 +644,8 @@ X11 properties; no application names or titles are singled out by default.
 ### Application rules
 
 `class`, `instance` and `title` match case-insensitive substrings of the
-window's own strings; `window_type` (alias `type`) matches one complete
-normalised `_NET_WM_WINDOW_TYPE` name. Every criterion present in a rule must
-match.
+window's own strings; `window_type` matches one complete normalised
+`_NET_WM_WINDOW_TYPE` name. Every criterion present in a rule must match.
 
 ```toml
 [[rules]]
@@ -664,22 +655,21 @@ size = [480, 360]
 position = [120, 100]
 ```
 
-| rule key | aliases | effect |
-| --- | --- | --- |
-| `class`, `instance`, `title` | — | case-insensitive substring match |
-| `window_type` | `type` | one complete normalised `_NET_WM_WINDOW_TYPE` name |
-| `float` | — | manage the window as a floating client |
-| `sticky` | — | show the window on every View of its monitor |
-| `workspace` | `ws` | place the window on this 1-based View |
-| `size` | — | `[width, height]` for a floating window |
-| `position` | — | `[x, y]` relative to the workarea origin |
-| `opacity` | — | window opacity |
-| `border_width` | `border_w` | per-window border width |
-| `honor_initial_state` | — | opt this window out of initial-state normalisation |
-| `ignore_initial_state` | `no_initial_state`, `no_maximize` | the inverse of the above |
-| `deny_fullscreen` | `no_fullscreen` | refuse the client's own fullscreen requests, not the `Super+Shift+F` binding |
-| `true_fullscreen` | `exclusive_fullscreen` | ask for a real exclusive overlay; takes precedence over `deny_fullscreen` |
-
+| rule key | effect |
+| --- | --- |
+| `class`, `instance`, `title` | case-insensitive substring match |
+| `window_type` | one complete normalised `_NET_WM_WINDOW_TYPE` name |
+| `float` | manage the window as a floating client |
+| `sticky` | show the window on every View of its monitor |
+| `view` | place the window on this 1-based View |
+| `size` | positive `[width, height]` values for a floating window |
+| `position` | signed 32-bit `[x, y]` relative to the workarea origin |
+| `opacity` | window opacity in the inclusive range `0.0..=1.0` |
+| `border_width` | per-window border width |
+| `honor_initial_state` | opt this window out of initial-state normalisation |
+| `ignore_initial_state` | force initial-state normalisation for this window |
+| `deny_fullscreen` | refuse the client's own fullscreen requests, not the `Super+Shift+F` binding |
+| `true_fullscreen` | ask for a real exclusive overlay; takes precedence over `deny_fullscreen` |
 ### Autostart
 
 `[autostart] commands` is a list of argument lists:
@@ -710,12 +700,12 @@ Select the GTK backend in `~/.config/xdg-desktop-portal/portals.conf`:
 default=gtk
 ```
 
-Packages normally provide D-Bus activation. If you prefer to start the services
-explicitly, uncomment only the two portal entries in the sample's existing
-`[autostart].commands` array. The sample uses Arch Linux's `/usr/lib` paths;
-Debian/Ubuntu normally use `/usr/libexec`. Check the paths installed by your
-packages before enabling them. Start each service once; do not add `--replace`
-or run another copy if the session already manages it.
+Packages normally provide D-Bus activation. If the session needs explicit
+startup, add the installed portal executables to `[autostart].commands` as
+ordinary argv lists. Arch commonly installs them under `/usr/lib`;
+Debian/Ubuntu commonly use `/usr/libexec`. Check the actual package paths and
+start each service once; do not add `--replace` or run another copy when the
+session already manages it.
 
 Services started by Maverick inherit its X11 environment. For services activated
 by an existing D-Bus session, publish the session environment from its launcher
@@ -735,8 +725,8 @@ dbus-send --session --print-reply --dest=org.freedesktop.portal.Desktop \
 
 A successful reply contains a version number. Then open and cancel a file
 chooser in the application you use. The GTK backend provides file dialogs;
-screen sharing may require another backend. Removing the portal entries from
-autostart does not disable services activated independently by the session.
+screen sharing may require another backend. Removing explicit portal commands
+from autostart does not disable services activated independently by the session.
 
 ## maverickctl
 
@@ -932,7 +922,7 @@ compatibility.
   subsystem, desktop shell, blur or shadows.
 - **Layouts:** Scroll is the only layout. `LayoutKind` has one variant; a second
   layout is not implemented and is not documented as if it were.
-- **Views:** at most 9 per monitor. `n_tags` sets how many exist at startup, and
+- **Views:** at most 9 per monitor. `view_count` sets how many exist at startup, and
   the digit row has no tenth key.
 - **Compatibility:** ICCCM and EWMH are implemented for what the window manager
   needs, which is not a claim of complete protocol or application coverage.
@@ -946,7 +936,7 @@ compatibility.
   change. The in-tree TOML parser supports a subset of TOML, not the whole
   specification.
 - **Naming:** the action vocabulary says `view`; the configuration still says
-  `n_tags` and `workspace` for the same objects. Both spellings are live.
+  `view_count` and `workspace` for the same objects. Both spellings are live.
 
 Before using Maverick as the only window manager for important work, validate a
 disposable X11 session on the target machine: login and clean exit, application

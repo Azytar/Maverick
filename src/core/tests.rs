@@ -3547,7 +3547,7 @@ mod unit_tests {
             n - 1,
             "previous of the first View must wrap to the last"
         );
-        engine.state.assert_invariants();
+        engine.state.check_invariants().expect("state invariants");
     }
 
     /// Navigation is **instantaneous and layout-independent**.
@@ -3604,7 +3604,7 @@ mod unit_tests {
             "a full lap of previous() must be the identity"
         );
         assert_eq!(layout(&engine), _before);
-        engine.state.assert_invariants();
+        engine.state.check_invariants().expect("state invariants");
     }
 
     /// `origin` is the return point, it stays valid, and `return_to_origin()` can
@@ -3667,7 +3667,7 @@ mod unit_tests {
             "origin must not still name the deleted View"
         );
         assert!(engine.state.monitors[mi].return_to_origin());
-        engine.state.assert_invariants();
+        engine.state.check_invariants().expect("state invariants");
     }
 
     /// Deleting the **current** View selects a deterministic replacement, and
@@ -3718,7 +3718,7 @@ mod unit_tests {
             engine.state.monitors[mi].carousel.current().unwrap(),
             "the single surviving View must be both current and origin"
         );
-        engine.state.assert_invariants();
+        engine.state.check_invariants().expect("state invariants");
     }
 
     /// A client belongs to exactly one View, and moving it changes *only*
@@ -3805,7 +3805,7 @@ mod unit_tests {
                 "floating state must not change"
             );
         }
-        engine.state.assert_invariants();
+        engine.state.check_invariants().expect("state invariants");
     }
 
     /// Creating a View is a purely logical transition: it must not move the
@@ -3845,7 +3845,7 @@ mod unit_tests {
         // own clamp path, so the monitor always has something to activate.
         engine.state.monitors[mi].reconcile_workspaces(1);
         assert_eq!(engine.state.monitors[mi].workspaces.len(), 1);
-        engine.state.assert_invariants();
+        engine.state.check_invariants().expect("state invariants");
     }
 
     // A workspace round trip must preserve both halves of the focus contract:
@@ -13407,7 +13407,7 @@ mod unit_tests {
         let mut eng = Engine::new(Cfg::default());
         eng.state = st;
         eng.execute(crate::core::commands::NewColumn);
-        eng.state.assert_invariants();
+        eng.state.check_invariants().expect("state invariants");
         assert!(
             eng.state.monitors[0].workspaces[0]
                 .columns

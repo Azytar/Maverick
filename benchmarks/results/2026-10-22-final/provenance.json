@@ -1,0 +1,242 @@
+{
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "packages": [
+    {
+      "package": "Package: i3-wm\nVersion: 4.24-1\nArchitecture: amd64",
+      "archive_sha256": "e355c57fe5188b1f5401f9ab48a02e41feaeecbadcade22ceda75b89154a897a"
+    },
+    {
+      "package": "Package: bspwm\nVersion: 0.9.10-3\nArchitecture: amd64",
+      "archive_sha256": "a2916395089dfbef903d49eacc6583aaa7eb3bc60e9b4d7300439ae4c4ea4b6b"
+    },
+    {
+      "package": "Package: openbox\nVersion: 3.6.1-12+b2\nArchitecture: amd64",
+      "archive_sha256": "2250f7758694066d67b622b9612e942a9c0a06edb92c72bb948928320f891853"
+    },
+    {
+      "package": "Package: dwm\nVersion: 6.5-1\nArchitecture: amd64",
+      "archive_sha256": "b3e0b88ddc1bd438d3ffdcb5867b94cec64892de97af747d2137dd81708e9b00"
+    },
+    {
+      "package": "Package: xvfb\nVersion: 2:21.1.16-1.3+deb13u3\nArchitecture: amd64",
+      "archive_sha256": "365da2b6c93339f34337c434a9489bb6411a240fa47b9f49693d3091745f28c2"
+    },
+    {
+      "package": "Package: libxcb-ewmh2\nVersion: 0.4.2-1\nArchitecture: amd64",
+      "archive_sha256": "9dda3db4efb484c7047f0629c14aba9ab0dbe8bde7461e1ed6c90525cfbbc0d4"
+    },
+    {
+      "package": "Package: libxcb-xrm0\nVersion: 1.3+git20230724.a17de57-1\nArchitecture: amd64",
+      "archive_sha256": "c30d84d512da7a06356f6837280943f41b35aa77bd34902094a7c87938b3f545"
+    },
+    {
+      "package": "Package: libobrender32v5\nVersion: 3.6.1-12+b2\nArchitecture: amd64",
+      "archive_sha256": "f84c607b744f672429f310a95e3c85bad58a6002781283af62ea2a74e36c70b1"
+    },
+    {
+      "package": "Package: libobt2v5\nVersion: 3.6.1-12+b2\nArchitecture: amd64",
+      "archive_sha256": "f590a93c50bf7587ba8e6d9999df430566d04dc7447b2135bc7f2eb5ffc34c5a"
+    },
+    {
+      "package": "Package: libimlib2t64\nVersion: 1.12.4-2\nArchitecture: amd64",
+      "archive_sha256": "0abd807eb797a05bbcaa52f30b31f95c348859a110f5f680d7370661158267a4"
+    },
+    {
+      "package": "Package: libid3tag0\nVersion: 0.16.3-1\nArchitecture: amd64",
+      "archive_sha256": "ca25bf355e247fbe3447ff7d9a09a94ff370ec077cdf074b9ca6adc6a61d4bcd"
+    },
+    {
+      "package": "Package: libspectre1\nVersion: 0.2.12-1+b2\nArchitecture: amd64",
+      "archive_sha256": "aa795368f23990b617b4268c05bd4bc0a71bc124f1642e75f4389cc489958f78"
+    },
+    {
+      "package": "Package: libev4t64\nVersion: 1:4.33-2.1+b1\nArchitecture: amd64",
+      "archive_sha256": "29cd370774e5fa88b974f6cf165fffa3f742d697159d50cf223606826211d980"
+    }
+  ],
+  "loaded_libraries": {
+    "maverick": {
+      "ldd": "\tlinux-vdso.so.1 (0x00007fda3d4de000)\n\tlibX11.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11.so.6 (0x00007fda3d22f000)\n\tlibX11-xcb.so.1 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11-xcb.so.1 (0x00007fda3d22a000)\n\tlibxcb.so.1 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb.so.1 (0x00007fda3d1ff000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007fda3d1af000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fda3cfb9000)\n\tlibXau.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXau.so.6 (0x00007fda3cfb4000)\n\tlibXdmcp.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXdmcp.so.6 (0x00007fda3cfac000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007fda3d4e0000)\n",
+      "sha256": {
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11.so.6": "b03e563b316b8b53c7988f0ee91d6656cc425538e00947a8b14482d179e80099",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11-xcb.so.1": "c73c2e98ad556a412dd6eef44b857dbd3cc02f191db8af30968084565f60f311",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb.so.1": "a1cde2cec9b7b8b38e4cca450c55c63651efb80a2458d76964b56b763043f533",
+        "/lib/x86_64-linux-gnu/libgcc_s.so.1": "30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af",
+        "/lib/x86_64-linux-gnu/libc.so.6": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXau.so.6": "4275ec5b14bec21770c44447b3a52977e211c7ba08745008f3a1783878e091bb",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXdmcp.so.6": "761409b24c818719f8c8a2a64a61c8ac6a3067f3d8882485dca64a98d7500040",
+        "/lib64/ld-linux-x86-64.so.2": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+      }
+    },
+    "i3": {
+      "ldd": "\tlinux-vdso.so.1 (0x00007fcca792f000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007fcca7786000)\n\tlibstartup-notification-1.so.0 => /lib/x86_64-linux-gnu/libstartup-notification-1.so.0 (0x00007fcca777b000)\n\tlibxcb.so.1 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb.so.1 (0x00007fcca7750000)\n\tlibxcb-xkb.so.1 => /lib/x86_64-linux-gnu/libxcb-xkb.so.1 (0x00007fcca7731000)\n\tlibxcb-xinerama.so.0 => /lib/x86_64-linux-gnu/libxcb-xinerama.so.0 (0x00007fcca772a000)\n\tlibxcb-randr.so.0 => /lib/x86_64-linux-gnu/libxcb-randr.so.0 (0x00007fcca7718000)\n\tlibxcb-shape.so.0 => /lib/x86_64-linux-gnu/libxcb-shape.so.0 (0x00007fcca7713000)\n\tlibxcb-util.so.1 => /lib/x86_64-linux-gnu/libxcb-util.so.1 (0x00007fcca770b000)\n\tlibxcb-cursor.so.0 => /lib/x86_64-linux-gnu/libxcb-cursor.so.0 (0x00007fcca7704000)\n\tlibxcb-keysyms.so.1 => /lib/x86_64-linux-gnu/libxcb-keysyms.so.1 (0x00007fcca76ff000)\n\tlibxcb-icccm.so.4 => /lib/x86_64-linux-gnu/libxcb-icccm.so.4 (0x00007fcca76f6000)\n\tlibxcb-xrm.so.0 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb-xrm.so.0 (0x00007fcca76ee000)\n\tlibxkbcommon.so.0 => /lib/x86_64-linux-gnu/libxkbcommon.so.0 (0x00007fcca76a3000)\n\tlibxkbcommon-x11.so.0 => /lib/x86_64-linux-gnu/libxkbcommon-x11.so.0 (0x00007fcca7698000)\n\tlibyajl.so.2 => /lib/x86_64-linux-gnu/libyajl.so.2 (0x00007fcca768c000)\n\tlibpcre2-8.so.0 => /lib/x86_64-linux-gnu/libpcre2-8.so.0 (0x00007fcca75dd000)\n\tlibcairo.so.2 => /lib/x86_64-linux-gnu/libcairo.so.2 (0x00007fcca748d000)\n\tlibpangocairo-1.0.so.0 => /lib/x86_64-linux-gnu/libpangocairo-1.0.so.0 (0x00007fcca747c000)\n\tlibpango-1.0.so.0 => /lib/x86_64-linux-gnu/libpango-1.0.so.0 (0x00007fcca740b000)\n\tlibgobject-2.0.so.0 => /lib/x86_64-linux-gnu/libgobject-2.0.so.0 (0x00007fcca73a8000)\n\tlibglib-2.0.so.0 => /lib/x86_64-linux-gnu/libglib-2.0.so.0 (0x00007fcca724f000)\n\tlibev.so.4 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libev.so.4 (0x00007fcca723b000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fcca7047000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007fcca7931000)\n\tlibX11-xcb.so.1 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11-xcb.so.1 (0x00007fcca7042000)\n\tlibXau.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXau.so.6 (0x00007fcca703d000)\n\tlibXdmcp.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXdmcp.so.6 (0x00007fcca7035000)\n\tlibxcb-render-util.so.0 => /lib/x86_64-linux-gnu/libxcb-render-util.so.0 (0x00007fcca702e000)\n\tlibxcb-render.so.0 => /lib/x86_64-linux-gnu/libxcb-render.so.0 (0x00007fcca701d000)\n\tlibxcb-image.so.0 => /lib/x86_64-linux-gnu/libxcb-image.so.0 (0x00007fcca7017000)\n\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007fcca6ff7000)\n\tlibpng16.so.16 => /lib/x86_64-linux-gnu/libpng16.so.16 (0x00007fcca6fbe000)\n\tlibfontconfig.so.1 => /lib/x86_64-linux-gnu/libfontconfig.so.1 (0x00007fcca6f70000)\n\tlibfreetype.so.6 => /lib/x86_64-linux-gnu/libfreetype.so.6 (0x00007fcca6e9e000)\n\tlibX11.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11.so.6 (0x00007fcca6d56000)\n\tlibXext.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXext.so.6 (0x00007fcca6d41000)\n\tlibXrender.so.1 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXrender.so.1 (0x00007fcca6d34000)\n\tlibxcb-shm.so.0 => /lib/x86_64-linux-gnu/libxcb-shm.so.0 (0x00007fcca6d2f000)\n\tlibpixman-1.so.0 => /lib/x86_64-linux-gnu/libpixman-1.so.0 (0x00007fcca6c80000)\n\tlibpangoft2-1.0.so.0 => /lib/x86_64-linux-gnu/libpangoft2-1.0.so.0 (0x00007fcca6c63000)\n\tlibharfbuzz.so.0 => /lib/x86_64-linux-gnu/libharfbuzz.so.0 (0x00007fcca6b22000)\n\tlibgio-2.0.so.0 => /lib/x86_64-linux-gnu/libgio-2.0.so.0 (0x00007fcca692a000)\n\tlibfribidi.so.0 => /lib/x86_64-linux-gnu/libfribidi.so.0 (0x00007fcca690b000)\n\tlibthai.so.0 => /lib/x86_64-linux-gnu/libthai.so.0 (0x00007fcca68fe000)\n\tlibffi.so.8 => /lib/x86_64-linux-gnu/libffi.so.8 (0x00007fcca68f1000)\n\tlibatomic.so.1 => /lib/x86_64-linux-gnu/libatomic.so.1 (0x00007fcca68e7000)\n\tlibexpat.so.1 => /lib/x86_64-linux-gnu/libexpat.so.1 (0x00007fcca68b9000)\n\tlibbz2.so.1.0 => /lib/x86_64-linux-gnu/libbz2.so.1.0 (0x00007fcca68a6000)\n\tlibbrotlidec.so.1 => /lib/x86_64-linux-gnu/libbrotlidec.so.1 (0x00007fcca6896000)\n\tlibgraphite2.so.3 => /lib/x86_64-linux-gnu/libgraphite2.so.3 (0x00007fcca686c000)\n\tlibgmodule-2.0.so.0 => /lib/x86_64-linux-gnu/libgmodule-2.0.so.0 (0x00007fcca6865000)\n\tlibmount.so.1 => /lib/x86_64-linux-gnu/libmount.so.1 (0x00007fcca67e9000)\n\tlibselinux.so.1 => /lib/x86_64-linux-gnu/libselinux.so.1 (0x00007fcca67b5000)\n\tlibdatrie.so.1 => /lib/x86_64-linux-gnu/libdatrie.so.1 (0x00007fcca67a9000)\n\tlibbrotlicommon.so.1 => /lib/x86_64-linux-gnu/libbrotlicommon.so.1 (0x00007fcca6786000)\n\tlibblkid.so.1 => /lib/x86_64-linux-gnu/libblkid.so.1 (0x00007fcca6725000)\n",
+      "sha256": {
+        "/lib/x86_64-linux-gnu/libm.so.6": "6d567d53e895273ca14a1f9dc164fc6c8d39aed2f60aa46a733c2784228915f3",
+        "/lib/x86_64-linux-gnu/libstartup-notification-1.so.0": "7aa04c55d0edcfef41a8bfb9cb2c7378105a28561699a8d8e9b8bd420816dac1",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb.so.1": "a1cde2cec9b7b8b38e4cca450c55c63651efb80a2458d76964b56b763043f533",
+        "/lib/x86_64-linux-gnu/libxcb-xkb.so.1": "594cc3c2ea1d668f34d01d93c676ce0e42553110a4534eba877dd3eba27a7a0c",
+        "/lib/x86_64-linux-gnu/libxcb-xinerama.so.0": "b9fd058b3b2514d249caa461bc5e21ab70f06860c00c80e6e677532e6ca05e13",
+        "/lib/x86_64-linux-gnu/libxcb-randr.so.0": "aa6d39eabd9e5505bfa49e74124878cdc4d3354c816a86277c93952ffc9a1bf7",
+        "/lib/x86_64-linux-gnu/libxcb-shape.so.0": "bb2c3370968c2a0acdf435f19802aff9e10b1a0b8f06fbc3269ba74252d8e1be",
+        "/lib/x86_64-linux-gnu/libxcb-util.so.1": "7b24e07fe033b8e6362dcb78bd632c29a437194723e9020ca3f9104cf8959e88",
+        "/lib/x86_64-linux-gnu/libxcb-cursor.so.0": "54a692c826449c001cddb1282820ba22a44e38fb757decd3139f8944b5de787d",
+        "/lib/x86_64-linux-gnu/libxcb-keysyms.so.1": "697a1afc7ccd64bb1165bd54bf65829c8306d99bd51dfaa27aa94b475f87eeb9",
+        "/lib/x86_64-linux-gnu/libxcb-icccm.so.4": "636df1ff99cc0cddade4966cb97044fc6b3e981373096ea93d3dd7577a4a1164",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb-xrm.so.0": "b62595467acea3315586aaa3a3670dbfbc63e80fb4cc66e93fc1709113d57714",
+        "/lib/x86_64-linux-gnu/libxkbcommon.so.0": "9f26c41577e0e036cbf42352e85b13db6bce953fb730555b4fc7de5362dc93bb",
+        "/lib/x86_64-linux-gnu/libxkbcommon-x11.so.0": "026f10295a4aa9a0a8996c2fa76bc0d4adecb8ef328db48a97ad8d72bc8345fe",
+        "/lib/x86_64-linux-gnu/libyajl.so.2": "d135395a83acc7ba944ff0d9e49614c8b824866f9ff61d844ad85a34c17838a9",
+        "/lib/x86_64-linux-gnu/libpcre2-8.so.0": "8ee551e7f9645d6212c017df0938062ba046608a5378aab7d7c01c47b81a9f50",
+        "/lib/x86_64-linux-gnu/libcairo.so.2": "55e6961d9c35923426aca75b85e10d69977428ffb6569719be13a87eb4fcab66",
+        "/lib/x86_64-linux-gnu/libpangocairo-1.0.so.0": "cd9ea0195bea8dc358774b5c7d3b4ef345d0bfc34c69a76f4e9e6d6d17bc6a91",
+        "/lib/x86_64-linux-gnu/libpango-1.0.so.0": "3aeb194a48f427b907d77986cc8b1d7a2f43f8dab6a91abb3fa0416d5b071132",
+        "/lib/x86_64-linux-gnu/libgobject-2.0.so.0": "3b51ddf0bc62bf076b088e05de2518d3dd99a300f22d5b40e8f13eaaee473416",
+        "/lib/x86_64-linux-gnu/libglib-2.0.so.0": "b084b1bbf7423d056ad21d2ace1f9820942ae7c68381d2de1d6b2fb3d80f2ece",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libev.so.4": "31edba6e0551d8f957a347a23df22a609b1b3d054d4ec026941fc40ec4e62962",
+        "/lib/x86_64-linux-gnu/libc.so.6": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826",
+        "/lib64/ld-linux-x86-64.so.2": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11-xcb.so.1": "c73c2e98ad556a412dd6eef44b857dbd3cc02f191db8af30968084565f60f311",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXau.so.6": "4275ec5b14bec21770c44447b3a52977e211c7ba08745008f3a1783878e091bb",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXdmcp.so.6": "761409b24c818719f8c8a2a64a61c8ac6a3067f3d8882485dca64a98d7500040",
+        "/lib/x86_64-linux-gnu/libxcb-render-util.so.0": "417e351039cd6701d3de6fbe6e48a505cf4e87d71733cfeb31a7cfdae98580c1",
+        "/lib/x86_64-linux-gnu/libxcb-render.so.0": "6ceffcf824902eb4d9566e2c646511d6914073d355016134f1260d8891e563b5",
+        "/lib/x86_64-linux-gnu/libxcb-image.so.0": "4cbc9f5fcf9f935c1eb83f3e9c2b45843d6b4bdc73081036ff41030397d7458a",
+        "/lib/x86_64-linux-gnu/libz.so.1": "85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e",
+        "/lib/x86_64-linux-gnu/libpng16.so.16": "56485ea502d222fa8b0d99f899470c1bacdca815a958d83c1b349d4e8f605255",
+        "/lib/x86_64-linux-gnu/libfontconfig.so.1": "d6344f71a0cfd5fcb154278f0be706021f75f79d1fcc973fc4ddb1dff40ab0ee",
+        "/lib/x86_64-linux-gnu/libfreetype.so.6": "9e376992a91e92d86809893a3b9eea22a4e27849db1686f6ca58032f79cdafb5",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11.so.6": "b03e563b316b8b53c7988f0ee91d6656cc425538e00947a8b14482d179e80099",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXext.so.6": "74cef58f0855cbbe23fce87566249f717e5c8ebeceee09efee393616a9b17697",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXrender.so.1": "39fed75f787ac251cba86e30ccd979e3df1f84dd73c63a75eeb86a18fd413e64",
+        "/lib/x86_64-linux-gnu/libxcb-shm.so.0": "4a57cf736337398b8dda5fd842da9d8d040ff484ee7b418836f499f875623e9c",
+        "/lib/x86_64-linux-gnu/libpixman-1.so.0": "806ef6cd6ff8dace4332b8d611afe2f1c5ec0c1b743ea7ed0ebd48ed307618cd",
+        "/lib/x86_64-linux-gnu/libpangoft2-1.0.so.0": "f0a0ac4128a21eaec63b8d9811ab670cdf1763abfcde5d2d6d4693ecc8c7af99",
+        "/lib/x86_64-linux-gnu/libharfbuzz.so.0": "c0cc41333a8fc0c24428a61ba0af6380aabb1f0d91ac48c13ed743b06c8ccc87",
+        "/lib/x86_64-linux-gnu/libgio-2.0.so.0": "e810958d49398493c33795e0b5326bfcd54a984840899f0409024f2bab99cc80",
+        "/lib/x86_64-linux-gnu/libfribidi.so.0": "bbd962bd1c3ac1c25dc983d2951962caf55acb46a80e33ef93e31392edd5a222",
+        "/lib/x86_64-linux-gnu/libthai.so.0": "68da865e0efbc99eedc429f5e0c93a788cff55e85c0ecd37abc0279044a0cc32",
+        "/lib/x86_64-linux-gnu/libffi.so.8": "922024ec5a23f7de1095b1cff2f6cbfb377b5d58cd51fd0ec2e8fe35427653e2",
+        "/lib/x86_64-linux-gnu/libatomic.so.1": "9558489f171274c220104894258f483055853ed8a23d4ff754c850ce55765aa2",
+        "/lib/x86_64-linux-gnu/libexpat.so.1": "0fd7d092bd0bf5dcc29f31daaba2bad993b0d18a1ab771fb844e0a6dfa8efe18",
+        "/lib/x86_64-linux-gnu/libbz2.so.1.0": "c630f057efedc12f848710d71f40283895591e5b4608539f387895c64e0553da",
+        "/lib/x86_64-linux-gnu/libbrotlidec.so.1": "06530583d5927000480f4214d80d0213fec3d34cc448527f932a6eceb50cefef",
+        "/lib/x86_64-linux-gnu/libgraphite2.so.3": "5c4b17bdbd121d3c65f28c22d9c2a0504ca493d9e8fa7d7d31383c72237416b4",
+        "/lib/x86_64-linux-gnu/libgmodule-2.0.so.0": "e61fbc988c878cc12c122451904fa5094ce6dd2df389ce042f22fb5ead25b4bc",
+        "/lib/x86_64-linux-gnu/libmount.so.1": "1654d2cf948e3608cc0d38340807d4ddac1114315a3a77f7b274c4c859cb2181",
+        "/lib/x86_64-linux-gnu/libselinux.so.1": "5cb5293b4e7590463b94f7b23152d54807a6a2ccaf8cac9e343908c6692c086c",
+        "/lib/x86_64-linux-gnu/libdatrie.so.1": "ce632159af92e1d1ceec68652920c412fb105ea579c97c26896a29d1b876abde",
+        "/lib/x86_64-linux-gnu/libbrotlicommon.so.1": "7b0b0de90d8d3d4f07b99738c0285c6a0dbb6611d774ca44e7ea53a19a01ea68",
+        "/lib/x86_64-linux-gnu/libblkid.so.1": "116b712c143ac68bb59f6d8e32ed8e05e0772c730a9ba55ec544dd28916af58c"
+      }
+    },
+    "bspwm": {
+      "ldd": "\tlinux-vdso.so.1 (0x00007f721197b000)\n\tlibxcb.so.1 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb.so.1 (0x00007f7211915000)\n\tlibxcb-util.so.1 => /lib/x86_64-linux-gnu/libxcb-util.so.1 (0x00007f72118ea000)\n\tlibxcb-keysyms.so.1 => /lib/x86_64-linux-gnu/libxcb-keysyms.so.1 (0x00007f72118e5000)\n\tlibxcb-icccm.so.4 => /lib/x86_64-linux-gnu/libxcb-icccm.so.4 (0x00007f72118de000)\n\tlibxcb-ewmh.so.2 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb-ewmh.so.2 (0x00007f72118ce000)\n\tlibxcb-randr.so.0 => /lib/x86_64-linux-gnu/libxcb-randr.so.0 (0x00007f72118bc000)\n\tlibxcb-xinerama.so.0 => /lib/x86_64-linux-gnu/libxcb-xinerama.so.0 (0x00007f72118b7000)\n\tlibxcb-shape.so.0 => /lib/x86_64-linux-gnu/libxcb-shape.so.0 (0x00007f72118b2000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f72116be000)\n\tlibXau.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXau.so.6 (0x00007f72116b9000)\n\tlibXdmcp.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXdmcp.so.6 (0x00007f72116af000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007f721197d000)\n",
+      "sha256": {
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb.so.1": "a1cde2cec9b7b8b38e4cca450c55c63651efb80a2458d76964b56b763043f533",
+        "/lib/x86_64-linux-gnu/libxcb-util.so.1": "7b24e07fe033b8e6362dcb78bd632c29a437194723e9020ca3f9104cf8959e88",
+        "/lib/x86_64-linux-gnu/libxcb-keysyms.so.1": "697a1afc7ccd64bb1165bd54bf65829c8306d99bd51dfaa27aa94b475f87eeb9",
+        "/lib/x86_64-linux-gnu/libxcb-icccm.so.4": "636df1ff99cc0cddade4966cb97044fc6b3e981373096ea93d3dd7577a4a1164",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb-ewmh.so.2": "6946c82016eb98d884972c497454a002e6e4e1fabaa7b85b4bed59624b84eb12",
+        "/lib/x86_64-linux-gnu/libxcb-randr.so.0": "aa6d39eabd9e5505bfa49e74124878cdc4d3354c816a86277c93952ffc9a1bf7",
+        "/lib/x86_64-linux-gnu/libxcb-xinerama.so.0": "b9fd058b3b2514d249caa461bc5e21ab70f06860c00c80e6e677532e6ca05e13",
+        "/lib/x86_64-linux-gnu/libxcb-shape.so.0": "bb2c3370968c2a0acdf435f19802aff9e10b1a0b8f06fbc3269ba74252d8e1be",
+        "/lib/x86_64-linux-gnu/libc.so.6": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXau.so.6": "4275ec5b14bec21770c44447b3a52977e211c7ba08745008f3a1783878e091bb",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXdmcp.so.6": "761409b24c818719f8c8a2a64a61c8ac6a3067f3d8882485dca64a98d7500040",
+        "/lib64/ld-linux-x86-64.so.2": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+      }
+    },
+    "openbox": {
+      "ldd": "\tlinux-vdso.so.1 (0x00007f2d87899000)\n\tlibXinerama.so.1 => /lib/x86_64-linux-gnu/libXinerama.so.1 (0x00007f2d87807000)\n\tlibXrandr.so.2 => /lib/x86_64-linux-gnu/libXrandr.so.2 (0x00007f2d877fa000)\n\tlibglib-2.0.so.0 => /lib/x86_64-linux-gnu/libglib-2.0.so.0 (0x00007f2d876a1000)\n\tlibSM.so.6 => /lib/x86_64-linux-gnu/libSM.so.6 (0x00007f2d87696000)\n\tlibICE.so.6 => /lib/x86_64-linux-gnu/libICE.so.6 (0x00007f2d87675000)\n\tlibX11.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11.so.6 (0x00007f2d8752d000)\n\tlibXext.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXext.so.6 (0x00007f2d87518000)\n\tlibXcursor.so.1 => /lib/x86_64-linux-gnu/libXcursor.so.1 (0x00007f2d8750b000)\n\tlibstartup-notification-1.so.0 => /lib/x86_64-linux-gnu/libstartup-notification-1.so.0 (0x00007f2d87500000)\n\tlibXi.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXi.so.6 (0x00007f2d874ea000)\n\tlibobrender.so.32 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libobrender.so.32 (0x00007f2d874ce000)\n\tlibobt.so.2 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libobt.so.2 (0x00007f2d874b7000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f2d872c3000)\n\tlibXrender.so.1 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXrender.so.1 (0x00007f2d872b6000)\n\tlibatomic.so.1 => /lib/x86_64-linux-gnu/libatomic.so.1 (0x00007f2d872aa000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f2d871ba000)\n\tlibpcre2-8.so.0 => /lib/x86_64-linux-gnu/libpcre2-8.so.0 (0x00007f2d8710b000)\n\tlibuuid.so.1 => /lib/x86_64-linux-gnu/libuuid.so.1 (0x00007f2d87101000)\n\tlibxcb.so.1 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb.so.1 (0x00007f2d870d6000)\n\tlibXfixes.so.3 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXfixes.so.3 (0x00007f2d870cc000)\n\tlibxcb-util.so.1 => /lib/x86_64-linux-gnu/libxcb-util.so.1 (0x00007f2d870c4000)\n\tlibX11-xcb.so.1 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11-xcb.so.1 (0x00007f2d870bf000)\n\tlibpangoxft-1.0.so.0 => /lib/x86_64-linux-gnu/libpangoxft-1.0.so.0 (0x00007f2d870b4000)\n\tlibXft.so.2 => /lib/x86_64-linux-gnu/libXft.so.2 (0x00007f2d87099000)\n\tlibImlib2.so.1 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libImlib2.so.1 (0x00007f2d8702d000)\n\tlibrsvg-2.so.2 => /lib/x86_64-linux-gnu/librsvg-2.so.2 (0x00007f2d86a3c000)\n\tlibcairo.so.2 => /lib/x86_64-linux-gnu/libcairo.so.2 (0x00007f2d868ee000)\n\tlibpango-1.0.so.0 => /lib/x86_64-linux-gnu/libpango-1.0.so.0 (0x00007f2d8687d000)\n\tlibgobject-2.0.so.0 => /lib/x86_64-linux-gnu/libgobject-2.0.so.0 (0x00007f2d8681a000)\n\tlibxml2.so.2 => /lib/x86_64-linux-gnu/libxml2.so.2 (0x00007f2d86660000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007f2d8789b000)\n\tlibXau.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXau.so.6 (0x00007f2d8665b000)\n\tlibXdmcp.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXdmcp.so.6 (0x00007f2d86653000)\n\tlibpangoft2-1.0.so.0 => /lib/x86_64-linux-gnu/libpangoft2-1.0.so.0 (0x00007f2d86636000)\n\tlibfontconfig.so.1 => /lib/x86_64-linux-gnu/libfontconfig.so.1 (0x00007f2d865e8000)\n\tlibfreetype.so.6 => /lib/x86_64-linux-gnu/libfreetype.so.6 (0x00007f2d86516000)\n\tlibxcb-shm.so.0 => /lib/x86_64-linux-gnu/libxcb-shm.so.0 (0x00007f2d86511000)\n\tlibgio-2.0.so.0 => /lib/x86_64-linux-gnu/libgio-2.0.so.0 (0x00007f2d86319000)\n\tlibgdk_pixbuf-2.0.so.0 => /lib/x86_64-linux-gnu/libgdk_pixbuf-2.0.so.0 (0x00007f2d862eb000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f2d862be000)\n\tlibcairo-gobject.so.2 => /lib/x86_64-linux-gnu/libcairo-gobject.so.2 (0x00007f2d862b1000)\n\tlibdav1d.so.7 => /lib/x86_64-linux-gnu/libdav1d.so.7 (0x00007f2d860cc000)\n\tlibpangocairo-1.0.so.0 => /lib/x86_64-linux-gnu/libpangocairo-1.0.so.0 (0x00007f2d860bb000)\n\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007f2d8609b000)\n\tlibpng16.so.16 => /lib/x86_64-linux-gnu/libpng16.so.16 (0x00007f2d86062000)\n\tlibxcb-render.so.0 => /lib/x86_64-linux-gnu/libxcb-render.so.0 (0x00007f2d86051000)\n\tlibpixman-1.so.0 => /lib/x86_64-linux-gnu/libpixman-1.so.0 (0x00007f2d85fa4000)\n\tlibfribidi.so.0 => /lib/x86_64-linux-gnu/libfribidi.so.0 (0x00007f2d85f85000)\n\tlibthai.so.0 => /lib/x86_64-linux-gnu/libthai.so.0 (0x00007f2d85f7a000)\n\tlibharfbuzz.so.0 => /lib/x86_64-linux-gnu/libharfbuzz.so.0 (0x00007f2d85e39000)\n\tlibffi.so.8 => /lib/x86_64-linux-gnu/libffi.so.8 (0x00007f2d85e2a000)\n\tliblzma.so.5 => /lib/x86_64-linux-gnu/liblzma.so.5 (0x00007f2d85df9000)\n\tlibexpat.so.1 => /lib/x86_64-linux-gnu/libexpat.so.1 (0x00007f2d85dcb000)\n\tlibbz2.so.1.0 => /lib/x86_64-linux-gnu/libbz2.so.1.0 (0x00007f2d85db8000)\n\tlibbrotlidec.so.1 => /lib/x86_64-linux-gnu/libbrotlidec.so.1 (0x00007f2d85daa000)\n\tlibgmodule-2.0.so.0 => /lib/x86_64-linux-gnu/libgmodule-2.0.so.0 (0x00007f2d85da1000)\n\tlibmount.so.1 => /lib/x86_64-linux-gnu/libmount.so.1 (0x00007f2d85d25000)\n\tlibselinux.so.1 => /lib/x86_64-linux-gnu/libselinux.so.1 (0x00007f2d85cf1000)\n\tlibjpeg.so.62 => /lib/x86_64-linux-gnu/libjpeg.so.62 (0x00007f2d85c5a000)\n\tlibdatrie.so.1 => /lib/x86_64-linux-gnu/libdatrie.so.1 (0x00007f2d85c50000)\n\tlibgraphite2.so.3 => /lib/x86_64-linux-gnu/libgraphite2.so.3 (0x00007f2d85c24000)\n\tlibbrotlicommon.so.1 => /lib/x86_64-linux-gnu/libbrotlicommon.so.1 (0x00007f2d85c01000)\n\tlibblkid.so.1 => /lib/x86_64-linux-gnu/libblkid.so.1 (0x00007f2d85ba0000)\n",
+      "sha256": {
+        "/lib/x86_64-linux-gnu/libXinerama.so.1": "d09736be08221c8040cab2b0d407a6b8197d3e337f9b81d9b48515e9e02b09b0",
+        "/lib/x86_64-linux-gnu/libXrandr.so.2": "c99f3f78690b66428f91b5d66fa8531bcce8166e2324d34c911b61206b11ff52",
+        "/lib/x86_64-linux-gnu/libglib-2.0.so.0": "b084b1bbf7423d056ad21d2ace1f9820942ae7c68381d2de1d6b2fb3d80f2ece",
+        "/lib/x86_64-linux-gnu/libSM.so.6": "8bacaea082b2ce4284bff87ab3c2aa9852d97b38e088206394665788d9e7f1b2",
+        "/lib/x86_64-linux-gnu/libICE.so.6": "551550ecec0044de5548693d3feaa53a10c76b95e1bd1ae21476e3481e00da59",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11.so.6": "b03e563b316b8b53c7988f0ee91d6656cc425538e00947a8b14482d179e80099",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXext.so.6": "74cef58f0855cbbe23fce87566249f717e5c8ebeceee09efee393616a9b17697",
+        "/lib/x86_64-linux-gnu/libXcursor.so.1": "0a860c0162ffa5b37d88d2075d143e4e24295416fe85bb868e2daff07d2732fd",
+        "/lib/x86_64-linux-gnu/libstartup-notification-1.so.0": "7aa04c55d0edcfef41a8bfb9cb2c7378105a28561699a8d8e9b8bd420816dac1",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXi.so.6": "8ca60a4e6a90bba494e601e03e792b2d440cced9985deca64431abbd78613adb",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libobrender.so.32": "3dbbfa4ae443053a8b1d7733022aad1f504f69cdf3113c8aca7e3c18566251d4",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libobt.so.2": "f1071227509c9d5565db0384c05d06198dc99fb3598798271447546b50c10384",
+        "/lib/x86_64-linux-gnu/libc.so.6": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXrender.so.1": "39fed75f787ac251cba86e30ccd979e3df1f84dd73c63a75eeb86a18fd413e64",
+        "/lib/x86_64-linux-gnu/libatomic.so.1": "9558489f171274c220104894258f483055853ed8a23d4ff754c850ce55765aa2",
+        "/lib/x86_64-linux-gnu/libm.so.6": "6d567d53e895273ca14a1f9dc164fc6c8d39aed2f60aa46a733c2784228915f3",
+        "/lib/x86_64-linux-gnu/libpcre2-8.so.0": "8ee551e7f9645d6212c017df0938062ba046608a5378aab7d7c01c47b81a9f50",
+        "/lib/x86_64-linux-gnu/libuuid.so.1": "632fd43a9d8d6f3496833b7e62e7840f397163373dddf8b8eb0b2b7f36593117",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb.so.1": "a1cde2cec9b7b8b38e4cca450c55c63651efb80a2458d76964b56b763043f533",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXfixes.so.3": "85e29f4739a349d94d61db7a696f764d21dfe5c8db6ba7444af21416a0339187",
+        "/lib/x86_64-linux-gnu/libxcb-util.so.1": "7b24e07fe033b8e6362dcb78bd632c29a437194723e9020ca3f9104cf8959e88",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11-xcb.so.1": "c73c2e98ad556a412dd6eef44b857dbd3cc02f191db8af30968084565f60f311",
+        "/lib/x86_64-linux-gnu/libpangoxft-1.0.so.0": "a6bcd8426a7a27472fa70ec00e8d6d9697392c25dd15c70ff812dde633b50504",
+        "/lib/x86_64-linux-gnu/libXft.so.2": "ea552c46f6733e75eff8283380e194a45a1e1df3b395ba9c6f1f01beb5271c14",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libImlib2.so.1": "2ace051dccd2588f9830be3b67136a2a5d544777074b31025a65f2a7a767aea4",
+        "/lib/x86_64-linux-gnu/librsvg-2.so.2": "64a3d6a9b3178d9a747a9c8f7691176f43c282f01177c6802627adb5fd779554",
+        "/lib/x86_64-linux-gnu/libcairo.so.2": "55e6961d9c35923426aca75b85e10d69977428ffb6569719be13a87eb4fcab66",
+        "/lib/x86_64-linux-gnu/libpango-1.0.so.0": "3aeb194a48f427b907d77986cc8b1d7a2f43f8dab6a91abb3fa0416d5b071132",
+        "/lib/x86_64-linux-gnu/libgobject-2.0.so.0": "3b51ddf0bc62bf076b088e05de2518d3dd99a300f22d5b40e8f13eaaee473416",
+        "/lib/x86_64-linux-gnu/libxml2.so.2": "8f2643af68a9eba917929046806dabd1848867068d0eee0f6799288a8e886963",
+        "/lib64/ld-linux-x86-64.so.2": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXau.so.6": "4275ec5b14bec21770c44447b3a52977e211c7ba08745008f3a1783878e091bb",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXdmcp.so.6": "761409b24c818719f8c8a2a64a61c8ac6a3067f3d8882485dca64a98d7500040",
+        "/lib/x86_64-linux-gnu/libpangoft2-1.0.so.0": "f0a0ac4128a21eaec63b8d9811ab670cdf1763abfcde5d2d6d4693ecc8c7af99",
+        "/lib/x86_64-linux-gnu/libfontconfig.so.1": "d6344f71a0cfd5fcb154278f0be706021f75f79d1fcc973fc4ddb1dff40ab0ee",
+        "/lib/x86_64-linux-gnu/libfreetype.so.6": "9e376992a91e92d86809893a3b9eea22a4e27849db1686f6ca58032f79cdafb5",
+        "/lib/x86_64-linux-gnu/libxcb-shm.so.0": "4a57cf736337398b8dda5fd842da9d8d040ff484ee7b418836f499f875623e9c",
+        "/lib/x86_64-linux-gnu/libgio-2.0.so.0": "e810958d49398493c33795e0b5326bfcd54a984840899f0409024f2bab99cc80",
+        "/lib/x86_64-linux-gnu/libgdk_pixbuf-2.0.so.0": "e92815ef102d064b64eedf79b5ada7413197cad48432d2b13772724cd2204d30",
+        "/lib/x86_64-linux-gnu/libgcc_s.so.1": "30c61ab012a4241bed033725a09b61f5fdd3bb7df95ee852d0b096520524c7af",
+        "/lib/x86_64-linux-gnu/libcairo-gobject.so.2": "c29e4900b772b0cbafeafbe3fb4ab7d0bc535f25791a5cdad3e821a2970f4c5f",
+        "/lib/x86_64-linux-gnu/libdav1d.so.7": "1d7a4182344230d5f4cf9f58bf4485da2801c411e9c9fd6d8471460c75ae8fbf",
+        "/lib/x86_64-linux-gnu/libpangocairo-1.0.so.0": "cd9ea0195bea8dc358774b5c7d3b4ef345d0bfc34c69a76f4e9e6d6d17bc6a91",
+        "/lib/x86_64-linux-gnu/libz.so.1": "85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e",
+        "/lib/x86_64-linux-gnu/libpng16.so.16": "56485ea502d222fa8b0d99f899470c1bacdca815a958d83c1b349d4e8f605255",
+        "/lib/x86_64-linux-gnu/libxcb-render.so.0": "6ceffcf824902eb4d9566e2c646511d6914073d355016134f1260d8891e563b5",
+        "/lib/x86_64-linux-gnu/libpixman-1.so.0": "806ef6cd6ff8dace4332b8d611afe2f1c5ec0c1b743ea7ed0ebd48ed307618cd",
+        "/lib/x86_64-linux-gnu/libfribidi.so.0": "bbd962bd1c3ac1c25dc983d2951962caf55acb46a80e33ef93e31392edd5a222",
+        "/lib/x86_64-linux-gnu/libthai.so.0": "68da865e0efbc99eedc429f5e0c93a788cff55e85c0ecd37abc0279044a0cc32",
+        "/lib/x86_64-linux-gnu/libharfbuzz.so.0": "c0cc41333a8fc0c24428a61ba0af6380aabb1f0d91ac48c13ed743b06c8ccc87",
+        "/lib/x86_64-linux-gnu/libffi.so.8": "922024ec5a23f7de1095b1cff2f6cbfb377b5d58cd51fd0ec2e8fe35427653e2",
+        "/lib/x86_64-linux-gnu/liblzma.so.5": "01e05a4b5268805a10a2414a8904fb1fb45c60626dce53b5ea19c1d491049b99",
+        "/lib/x86_64-linux-gnu/libexpat.so.1": "0fd7d092bd0bf5dcc29f31daaba2bad993b0d18a1ab771fb844e0a6dfa8efe18",
+        "/lib/x86_64-linux-gnu/libbz2.so.1.0": "c630f057efedc12f848710d71f40283895591e5b4608539f387895c64e0553da",
+        "/lib/x86_64-linux-gnu/libbrotlidec.so.1": "06530583d5927000480f4214d80d0213fec3d34cc448527f932a6eceb50cefef",
+        "/lib/x86_64-linux-gnu/libgmodule-2.0.so.0": "e61fbc988c878cc12c122451904fa5094ce6dd2df389ce042f22fb5ead25b4bc",
+        "/lib/x86_64-linux-gnu/libmount.so.1": "1654d2cf948e3608cc0d38340807d4ddac1114315a3a77f7b274c4c859cb2181",
+        "/lib/x86_64-linux-gnu/libselinux.so.1": "5cb5293b4e7590463b94f7b23152d54807a6a2ccaf8cac9e343908c6692c086c",
+        "/lib/x86_64-linux-gnu/libjpeg.so.62": "0928fd49fa79e10f72eb3276f1cf603d928201a628cd78e0118a2e9c01fd2dac",
+        "/lib/x86_64-linux-gnu/libdatrie.so.1": "ce632159af92e1d1ceec68652920c412fb105ea579c97c26896a29d1b876abde",
+        "/lib/x86_64-linux-gnu/libgraphite2.so.3": "5c4b17bdbd121d3c65f28c22d9c2a0504ca493d9e8fa7d7d31383c72237416b4",
+        "/lib/x86_64-linux-gnu/libbrotlicommon.so.1": "7b0b0de90d8d3d4f07b99738c0285c6a0dbb6611d774ca44e7ea53a19a01ea68",
+        "/lib/x86_64-linux-gnu/libblkid.so.1": "116b712c143ac68bb59f6d8e32ed8e05e0772c730a9ba55ec544dd28916af58c"
+      }
+    },
+    "dwm": {
+      "ldd": "\tlinux-vdso.so.1 (0x00007f60fbb97000)\n\tlibX11.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11.so.6 (0x00007f60fba38000)\n\tlibXinerama.so.1 => /lib/x86_64-linux-gnu/libXinerama.so.1 (0x00007f60fba10000)\n\tlibfontconfig.so.1 => /lib/x86_64-linux-gnu/libfontconfig.so.1 (0x00007f60fb9c2000)\n\tlibXft.so.2 => /lib/x86_64-linux-gnu/libXft.so.2 (0x00007f60fb9a7000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f60fb7b1000)\n\tlibxcb.so.1 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb.so.1 (0x00007f60fb786000)\n\tlibXext.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXext.so.6 (0x00007f60fb771000)\n\tlibfreetype.so.6 => /lib/x86_64-linux-gnu/libfreetype.so.6 (0x00007f60fb6a1000)\n\tlibexpat.so.1 => /lib/x86_64-linux-gnu/libexpat.so.1 (0x00007f60fb673000)\n\tlibXrender.so.1 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXrender.so.1 (0x00007f60fb664000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007f60fbb99000)\n\tlibXau.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXau.so.6 (0x00007f60fb65f000)\n\tlibXdmcp.so.6 => /workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXdmcp.so.6 (0x00007f60fb657000)\n\tlibz.so.1 => /lib/x86_64-linux-gnu/libz.so.1 (0x00007f60fb637000)\n\tlibbz2.so.1.0 => /lib/x86_64-linux-gnu/libbz2.so.1.0 (0x00007f60fb624000)\n\tlibpng16.so.16 => /lib/x86_64-linux-gnu/libpng16.so.16 (0x00007f60fb5e9000)\n\tlibbrotlidec.so.1 => /lib/x86_64-linux-gnu/libbrotlidec.so.1 (0x00007f60fb5db000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f60fb4eb000)\n\tlibbrotlicommon.so.1 => /lib/x86_64-linux-gnu/libbrotlicommon.so.1 (0x00007f60fb4c8000)\n",
+      "sha256": {
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libX11.so.6": "b03e563b316b8b53c7988f0ee91d6656cc425538e00947a8b14482d179e80099",
+        "/lib/x86_64-linux-gnu/libXinerama.so.1": "d09736be08221c8040cab2b0d407a6b8197d3e337f9b81d9b48515e9e02b09b0",
+        "/lib/x86_64-linux-gnu/libfontconfig.so.1": "d6344f71a0cfd5fcb154278f0be706021f75f79d1fcc973fc4ddb1dff40ab0ee",
+        "/lib/x86_64-linux-gnu/libXft.so.2": "ea552c46f6733e75eff8283380e194a45a1e1df3b395ba9c6f1f01beb5271c14",
+        "/lib/x86_64-linux-gnu/libc.so.6": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libxcb.so.1": "a1cde2cec9b7b8b38e4cca450c55c63651efb80a2458d76964b56b763043f533",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXext.so.6": "74cef58f0855cbbe23fce87566249f717e5c8ebeceee09efee393616a9b17697",
+        "/lib/x86_64-linux-gnu/libfreetype.so.6": "9e376992a91e92d86809893a3b9eea22a4e27849db1686f6ca58032f79cdafb5",
+        "/lib/x86_64-linux-gnu/libexpat.so.1": "0fd7d092bd0bf5dcc29f31daaba2bad993b0d18a1ab771fb844e0a6dfa8efe18",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXrender.so.1": "39fed75f787ac251cba86e30ccd979e3df1f84dd73c63a75eeb86a18fd413e64",
+        "/lib64/ld-linux-x86-64.so.2": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXau.so.6": "4275ec5b14bec21770c44447b3a52977e211c7ba08745008f3a1783878e091bb",
+        "/workspace/.maverick-tools/sysroot/usr/lib/x86_64-linux-gnu/libXdmcp.so.6": "761409b24c818719f8c8a2a64a61c8ac6a3067f3d8882485dca64a98d7500040",
+        "/lib/x86_64-linux-gnu/libz.so.1": "85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e",
+        "/lib/x86_64-linux-gnu/libbz2.so.1.0": "c630f057efedc12f848710d71f40283895591e5b4608539f387895c64e0553da",
+        "/lib/x86_64-linux-gnu/libpng16.so.16": "56485ea502d222fa8b0d99f899470c1bacdca815a958d83c1b349d4e8f605255",
+        "/lib/x86_64-linux-gnu/libbrotlidec.so.1": "06530583d5927000480f4214d80d0213fec3d34cc448527f932a6eceb50cefef",
+        "/lib/x86_64-linux-gnu/libm.so.6": "6d567d53e895273ca14a1f9dc164fc6c8d39aed2f60aa46a733c2784228915f3",
+        "/lib/x86_64-linux-gnu/libbrotlicommon.so.1": "7b0b0de90d8d3d4f07b99738c0285c6a0dbb6611d774ca44e7ea53a19a01ea68"
+      }
+    }
+  }
+}

@@ -54,7 +54,7 @@ focus_mouse = true
 warp_cursor = false
 gaps_inner = 8
 gaps_outer = 8
-border_w = 2
+border_width = 2
 accordion_boost = 0.3
 [autostart]
 commands = []

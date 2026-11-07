@@ -64,7 +64,7 @@ mantenerlas separadas:
 
 ### Views e identidad de View
 
-- Cada monitor posee una lista de Views. Un monitor arranca con `n_tags` de ellas
+- Cada monitor posee una lista de Views. Un monitor arranca con `view_count` de ellas
   (9 por defecto, 9 como máximo; el valor se recorta a 9).
 - Cada View lleva un `ViewId`: un `u32` acuñado por el Carousel de ese monitor,
   estrictamente creciente y nunca reutilizado. Una View eliminada libera su id
@@ -341,11 +341,10 @@ esa línea no nombra ninguno de los dos.
 Para una sesión X11 arrancada con `startx` también hacen falta `xorg-server` y
 `xorg-xinit` (Arch: `xorg-server xorg-xinit`).
 
-Los atajos compilados por defecto lanzan `alacritty` y `rofi`, y el autostart
-compilado lanza `/usr/lib/xdg-desktop-portal` y `/usr/lib/xdg-desktop-portal-gtk`
-mediante ruta absoluta. Son conveniencias, no requisitos: los atajos pueden
-sobrescribirse y la lista `[autostart] commands` reemplazarse. El motor de layout
-no necesita ninguna de ellas.
+Los atajos compilados por defecto lanzan `alacritty` y `rofi`. El autostart
+compilado está vacío: paneles, compositor, wallpaper o servicios opcionales se
+declaran explícitamente en `[autostart].commands`. Son conveniencias, no
+requisitos; el motor de layout no necesita ninguno de esos programas.
 
 Variables de entorno relevantes:
 
@@ -503,11 +502,11 @@ maverick --help
 | Overview: alternar / entrar / siguiente / anterior | `Super+O` / `Super+E` / `Super+N` / `Super+Shift+O` | viewport de escala fija para elegir columna |
 | Zoom del viewport dentro / fuera | `Super+=` / `Super+-` | agranda o restaura el ribbon |
 | Page-snap derecha / izquierda | `Super+]` / `Super+[` | mueve la cámara una pantalla |
-| Seleccionar View | `Super+1` … `Super+9` | generados por View, hasta `n_tags` |
+| Seleccionar View | `Super+1` … `Super+9` | generados por View, hasta `view_count` |
 | Enviar ventana a una View | `Super+Shift+1` … `Super+Shift+9` | generados por View |
 
-Los atajos de dígitos generados siguen a `n_tags`. Fijar
-`auto_workspace_binds = false` en `[general]` los suprime, dejando la fila de
+Los atajos de dígitos generados siguen a `view_count`. Fijar
+`auto_view_binds = false` en `[general]` los suprime, dejando la fila de
 dígitos completamente sin gestionar.
 
 Los pasos del carousel (`view_next`, `view_prev`, `view_return`) y el ciclo de
@@ -543,41 +542,37 @@ gaps_outer = 14
 focus_mouse = false
 ```
 
-Defaults compilados de las claves `[general]` más relevantes:
+Defaults compilados de las claves públicas `[general]`:
 
 | clave | default | significado |
 | --- | --- | --- |
-| `n_tags` | `9` | Views por monitor al arrancar; recortado a un máximo de 9 |
-| `column_width` | `0.6` | ancho de columna como fracción del workarea del monitor; debe estar entre `0.1` y `1.0` |
+| `view_count` | `9` | Views por monitor al arrancar; rango válido `1..=9` |
+| `column_width` | `0.6` | ancho de una columna nueva como fracción del workarea; `0.1..=1.0` |
 | `gaps_inner` | `4` | hueco entre tiles adyacentes |
 | `gaps_outer` | `8` | hueco entre los tiles y el borde de la pantalla |
-| `border_width` | `1` | grosor del borde del tile en píxeles |
-| `focus_mouse` | `false` | si mover el puntero cambia el foco |
-| `honor_initial_state` | `false` | respetar el estado maximizado/fullscreen pedido al mapearse, en lugar de normalizarlo |
-| `auto_workspace_binds` | `true` | generar los atajos de View `Super+<dígito>` |
-| `smart_gaps` | `false` | suprimir los huecos exteriores cuando sólo hay un tile visible |
+| `smart_gaps` | `false` | suprimir el hueco exterior cuando solo hay un tile visible |
+| `border_width` | `0` | grosor del borde en píxeles; cero desactiva los bordes |
 | `corner_radius` | `0` | radio de esquina del tile en píxeles |
-| `theme` | `catppuccin-mocha` | nombre del tema integrado |
-| `tag_names` | `["1"]` … `["9"]` | etiquetas de View publicadas como `_NET_DESKTOP_NAMES` |
+| `accordion_boost` | `0.0` | expansión de la columna enfocada; `0.0..=0.9` |
+| `focus_mouse` | `false` | si el movimiento real del puntero cambia el foco |
+| `warp_cursor` | `false` | si un cambio de foco por teclado puede recentrar el puntero |
+| `honor_initial_state` | `false` | respetar el estado maximizado/fullscreen pedido al mapearse |
+| `auto_view_binds` | `true` | generar los atajos de View `Super+<dígito>` |
+| `view_names` | `["1"]` … `["9"]` | etiquetas no vacías; las que faltan se numeran y las sobrantes se avisan e ignoran |
+| `overview_scale` | `0.76` | escala objetivo al entrar en Overview |
+| `overview_zoom_min` | `0.25` | escala mínima si el tile enfocado necesita reducirse más |
 
-Otras claves `[general]` aceptadas: `gaps`, `accordion_boost`,
-`overview_scale`, `overview_zoom_min` y `warp_cursor`. `border_w` es un alias de
-`border_width`. `overview_scale` es la escala a la que se entra en Overview
-(`0.05`–`1.0`, por defecto `0.76`); `overview_zoom_min` es el suelo por debajo
-del cual esa escala no baja cuando el tile enfocado no cabría ni siquiera
-reducido.
+`overview_scale` y `overview_zoom_min` aceptan `0.05..=1.0`; el suelo no puede
+superar el objetivo. Ambos en `1.0` dan un Overview a tamaño completo.
 
-Dos claves son alias obsoletos conservados por compatibilidad. Ambas se siguen
-cargando, y ambas emiten un aviso:
+La configuración tiene una sola grafía pública por ajuste. Las grafías históricas
+`border_w`, `gaps`, `default_col_width`, `split_bias`, los nombres `col_*`,
+`[autostart].apps/programs` y los alias de reglas ya no se aplican.
+`maverick --check-config` indica el nombre canónico que debe usarse.
 
-| clave obsoleta | alias | tipo | sustituida por |
-| --- | --- | --- | --- |
-| `default_col_width` | `default_col_w` | píxeles | `column_width`, convirtiendo contra un workarea fijo de 1920px |
-| `split_bias` | — | fracción, `0.0`–`1.0` | `column_width` |
-
-`[colors]` acepta `normal`, `focused` y `urgent`, legibles también como
-`col_normal`, `col_focused` y `col_urgent`.
-
+`[colors]` contiene únicamente `normal`, `focused` y `urgent`. Solo afectan a
+los bordes y no tienen efecto con `border_width = 0`; Maverick ya no mantiene
+una capa separada de presets de temas para esos tres colores.
 ### Cómo se combina un fichero con los defaults
 
 - Los ajustes ordinarios se fusionan campo a campo.
@@ -590,10 +585,11 @@ cargando, y ambas emiten un aviso:
 - Un TOML mal formado recurre a los defaults compilados.
 - Una entrada individual inválida se diagnostica y se ignora; el resto del
   fichero se carga igualmente.
-- Una tabla desconocida se salta en silencio, de modo que un fichero escrito para
-  otro Maverick no produce ruido.
-- Una clave desconocida dentro de una tabla que Maverick sí conoce se informa como
-  aviso y se ignora.
+- Una tabla desconocida y no relacionada se omite por compatibilidad futura; un
+  nombre parecido a una tabla conocida (por ejemplo `[genreal]`) se marca como
+  probable typo.
+- Una clave desconocida dentro de una tabla conocida indica su línea y, cuando
+  es posible, sugiere la grafía canónica.
 
 Conviene validar antes de depender de cualquiera de estos casos:
 
@@ -606,10 +602,10 @@ vocabulario más amplio. Es un preset, no una copia de los defaults compilados.
 
 ### Reglas de aplicación
 
-`class`, `instance` y `title` coinciden con subcadenas sin distinción de mayúsculas
-de las cadenas propias de la ventana; `window_type` (alias `type`) coincide con un
-nombre `_NET_WM_WINDOW_TYPE` normalizado y completo. Todos los criterios
-presentes en una regla deben coincidir.
+`class`, `instance` y `title` coinciden con subcadenas sin distinguir mayúsculas
+de las cadenas propias de la ventana; `window_type` coincide con un nombre
+`_NET_WM_WINDOW_TYPE` normalizado y completo. Todos los criterios presentes
+deben coincidir.
 
 ```toml
 [[rules]]
@@ -619,22 +615,21 @@ size = [480, 360]
 position = [120, 100]
 ```
 
-| clave de regla | alias | efecto |
-| --- | --- | --- |
-| `class`, `instance`, `title` | — | coincidencia por subcadena sin distinguir mayúsculas |
-| `window_type` | `type` | un nombre `_NET_WM_WINDOW_TYPE` normalizado y completo |
-| `float` | — | gestionar la ventana como cliente flotante |
-| `sticky` | — | mostrar la ventana en todas las Views de su monitor |
-| `workspace` | `ws` | colocar la ventana en esta View, numerada desde 1 |
-| `size` | — | `[ancho, alto]` para una ventana flotante |
-| `position` | — | `[x, y]` respecto al origen del workarea |
-| `opacity` | — | opacidad de la ventana |
-| `border_width` | `border_w` | grosor de borde por ventana |
-| `honor_initial_state` | — | eximir esta ventana de la normalización del estado inicial |
-| `ignore_initial_state` | `no_initial_state`, `no_maximize` | lo contrario de lo anterior |
-| `deny_fullscreen` | `no_fullscreen` | rechazar las peticiones de fullscreen del propio cliente, no el atajo `Super+Shift+F` |
-| `true_fullscreen` | `exclusive_fullscreen` | pedir un overlay realmente exclusivo; tiene precedencia sobre `deny_fullscreen` |
-
+| clave de regla | efecto |
+| --- | --- |
+| `class`, `instance`, `title` | coincidencia por subcadena sin distinguir mayúsculas |
+| `window_type` | un nombre `_NET_WM_WINDOW_TYPE` normalizado y completo |
+| `float` | gestionar la ventana como cliente flotante |
+| `sticky` | mostrar la ventana en todas las Views de su monitor |
+| `view` | colocar la ventana en esta View, numerada desde 1 |
+| `size` | `[ancho, alto]` positivos para una ventana flotante |
+| `position` | `[x, y]` dentro del rango entero con signo de 32 bits |
+| `opacity` | opacidad en el rango inclusivo `0.0..=1.0` |
+| `border_width` | grosor de borde por ventana |
+| `honor_initial_state` | eximir esta ventana de la normalización del estado inicial |
+| `ignore_initial_state` | forzar la normalización del estado inicial para esta ventana |
+| `deny_fullscreen` | rechazar las peticiones de fullscreen del cliente, no el atajo `Super+Shift+F` |
+| `true_fullscreen` | pedir un overlay realmente exclusivo; tiene precedencia sobre `deny_fullscreen` |
 ### Autostart
 
 `[autostart] commands` es una lista de listas de argumentos:
@@ -840,7 +835,7 @@ de aplicaciones.
   animación, shell de escritorio, desenfoque ni sombras.
 - **Layouts:** Scroll es el único layout. `LayoutKind` tiene una variante; un
   segundo layout no está implementado y no se documenta como si lo estuviera.
-- **Views:** como máximo 9 por monitor. `n_tags` fija cuántas existen al arrancar, y
+- **Views:** como máximo 9 por monitor. `view_count` fija cuántas existen al arrancar, y
   la fila de dígitos no tiene décima tecla.
 - **Compatibilidad:** ICCCM y EWMH están implementados para lo que el gestor de
   ventanas necesita, lo que no equivale a una cobertura completa del protocolo o
@@ -856,7 +851,7 @@ de aplicaciones.
   presentación pueden cambiar. El parser TOML del repo soporta un subconjunto de
   TOML, no la especificación completa.
 - **Nomenclatura:** el vocabulario de acciones dice `view`; la configuración sigue
-  diciendo `n_tags` y `workspace` para los mismos objetos. Ambas grafías están
+  diciendo `view_count` y `workspace` para los mismos objetos. Ambas grafías están
   vivas.
 
 Antes de usar Maverick como único gestor de ventanas para trabajo importante,

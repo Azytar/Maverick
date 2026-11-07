@@ -1,0 +1,39 @@
+   Compiling libc v0.2.186
+   Compiling rustix v1.1.4
+    Checking bitflags v2.13.0
+    Checking linux-raw-sys v0.12.1
+    Checking cfg-if v1.0.4
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.59
+   Compiling getrandom v0.4.3
+   Compiling autocfg v1.5.1
+    Checking fastrand v2.5.0
+    Checking once_cell v1.21.4
+    Checking bit-vec v0.8.0
+    Checking fnv v1.0.7
+    Checking quick-error v1.2.3
+    Checking unarray v0.1.4
+   Compiling num-traits v0.2.19
+    Checking regex-syntax v0.8.11
+    Checking xcursor v0.3.11
+    Checking x11rb-protocol v0.13.2
+    Checking bit-set v0.8.0
+    Checking as-raw-xcb-connection v1.0.1
+    Checking maverick-core v1.1.1 (/workspace/scratch/1fde90dd44ca/Maverick/maverick-core)
+    Checking maverick-toml v1.1.1 (/workspace/scratch/1fde90dd44ca/Maverick/maverick-toml)
+    Checking wait-timeout v0.2.1
+    Checking rand_core v0.9.5
+    Checking rand_xorshift v0.4.0
+    Checking rand v0.9.5
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.9.0
+    Checking tempfile v3.27.0
+    Checking maverick-sys v1.1.1 (/workspace/scratch/1fde90dd44ca/Maverick/maverick-sys)
+    Checking gethostname v1.1.0
+    Checking rusty-fork v0.3.1
+    Checking proptest v1.11.0
+    Checking maverickctl v1.1.1 (/workspace/scratch/1fde90dd44ca/Maverick/maverickctl)
+    Checking x11rb v0.13.2
+    Checking maverick-x11 v1.1.1 (/workspace/scratch/1fde90dd44ca/Maverick/maverick-x11)
+    Checking maverick v1.1.1 (/workspace/scratch/1fde90dd44ca/Maverick)
+    Finished `dev` profile [optimized + debuginfo] target(s) in 8.82s

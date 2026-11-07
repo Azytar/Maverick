@@ -1641,7 +1641,7 @@ mod tests {
             state.clients[&8].workspace,
             state.monitors[0].workspaces[1].id
         );
-        state.assert_invariants();
+        state.check_invariants().expect("state invariants");
     }
 
     /// An empty View and a single-tile View both produce valid layout state.
@@ -1763,7 +1763,7 @@ mod tests {
             "changing the layout must leave membership, identity, the carousel and \
              floating state untouched"
         );
-        state.assert_invariants();
+        state.check_invariants().expect("state invariants");
     }
 
     /// Scroll must not have learned about navigation: the layout module contains

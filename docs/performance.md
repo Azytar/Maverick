@@ -82,3 +82,11 @@ It checks warmed-up layout projection and presentation with 1, 5, 10 and 50
 windows. It does not cover allocations in X11 reconciliation, stacking, IPC,
 Overview or client applications. Those paths require profiling; do not infer
 that the entire WM allocates nothing from the core test.
+
+## Comparison with other X11 managers
+
+[The cross-WM benchmark](../benchmarks/x11/README.md) measures Maverick, i3,
+bspwm, Openbox and dwm with common native X11 clients, shuffled repeated trials
+and recorded configurations. It retains raw observations and produces PNG, SVG
+and PDF charts. Unsupported dwm EWMH focus requests remain explicitly missing,
+not zero-valued latency. See the methodology before interpreting the bars.

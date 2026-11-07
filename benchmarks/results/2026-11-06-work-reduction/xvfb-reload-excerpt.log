@@ -1,0 +1,34 @@
+First 12 and last 20 lines; full log had 357229 lines.
+_XSERVTransSocketOpenCOTSServer: Unable to open socket for local
+_XSERVTransOpen: transport open failed for local/ee62938c2682:0
+_XSERVTransMakeAllCOTSServerListeners: failed to open listener for local
+_XSERVTransSocketOpenCOTSServer: Unable to open socket for unix
+_XSERVTransOpen: transport open failed for unix/ee62938c2682:0
+_XSERVTransMakeAllCOTSServerListeners: failed to open listener for unix
+_XSERVTransSocketOpenCOTSServer: Unable to open socket for local
+_XSERVTransOpen: transport open failed for local/ee62938c2682:1
+_XSERVTransMakeAllCOTSServerListeners: failed to open listener for local
+_XSERVTransSocketOpenCOTSServer: Unable to open socket for unix
+_XSERVTransOpen: transport open failed for unix/ee62938c2682:1
+_XSERVTransMakeAllCOTSServerListeners: failed to open listener for unix
+...
+_XSERVTransMakeAllCOTSServerListeners: failed to open listener for unix
+_XSERVTransSocketOpenCOTSServer: Unable to open socket for local
+_XSERVTransOpen: transport open failed for local/ee62938c2682:59535
+_XSERVTransMakeAllCOTSServerListeners: failed to open listener for local
+_XSERVTransSocketOpenCOTSServer: Unable to open socket for unix
+_XSERVTransOpen: transport open failed for unix/ee62938c2682:59535
+_XSERVTransMakeAllCOTSServerListeners: failed to open listener for unix
+(EE) 
+Fatal server error:
+(EE) Failed to find a socket to listen on(EE) 
+
+Traceback (most recent call last):
+  File "/workspace/scratch/1fde90dd44ca/Maverick/tests/xvfb-reload.py", line 204, in <module>
+    main()
+  File "/workspace/scratch/1fde90dd44ca/Maverick/tests/xvfb-reload.py", line 67, in main
+    env["DISPLAY"] = ":" + line(server.stdout)
+                           ^^^^^^^^^^^^^^^^^^^
+  File "/workspace/scratch/1fde90dd44ca/Maverick/tests/xvfb-reload.py", line 22, in line
+    raise RuntimeError("probe or server exited")
+RuntimeError: probe or server exited

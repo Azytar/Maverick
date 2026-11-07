@@ -1,0 +1,40 @@
+   Compiling maverick-sys v1.1.1 (/workspace/scratch/1fde90dd44ca/Maverick/maverick-sys)
+    Finished `release` profile [optimized] target(s) in 14.17s
+     Running unittests src/lib.rs (target/release/deps/maverick_sys-70e7187d6fc439da)
+
+running 1 test
+poll iterations=50000 median_ns=108 min_ns=103 max_ns=121
+test poll_timeout_tests::poll_workload ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.04s
+
+     Running tests/common.rs (target/release/deps/common-013bfb89c28e5e80)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hub_props.rs (target/release/deps/hub_props-4e53b0459583bc01)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/identity_props.rs (target/release/deps/identity_props-64a37072fa5191b4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/json_props.rs (target/release/deps/json_props-e98ec0cd3bccd8cd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/signal_install.rs (target/release/deps/signal_install-2cfe7fccbbdebb6f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
