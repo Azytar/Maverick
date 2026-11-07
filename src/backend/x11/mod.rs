@@ -313,6 +313,8 @@ pub struct WindowManager {
     /// only re-issues `raise()` when the order actually changed, instead of
     /// re-raising every float/popup on every arrange.
     last_stack_order: std::collections::HashMap<usize, Vec<WindowId>>,
+    /// Rebuilt and drained by stack_overlay; capacity is shared across monitors.
+    float_stack_scratch: Vec<(usize, WindowId)>,
     /// Reconcile work the events drained this turn owe, collapsed into at most
     /// one pass per monitor.
     pending: PendingReconcile,
@@ -1118,6 +1120,7 @@ impl WindowManager {
             root_focus_pending: None,
             take_focus_pending: None,
             last_stack_order: std::collections::HashMap::new(),
+            float_stack_scratch: Vec::new(),
             pending: PendingReconcile::default(),
             protocols: std::cell::RefCell::new(std::collections::HashMap::new()),
             focus_probe_due: false,

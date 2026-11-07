@@ -442,8 +442,8 @@ pub(super) fn transient_chain_reaches(
     false
 }
 
-/// Focus recency orders peers; a transient must still follow its parent.
-fn float_stack_order(
+#[cfg(test)]
+fn legacy_float_stack_order(
     mut pending: Vec<WindowId>,
     clients: &std::collections::HashMap<WindowId, Client>,
     focus_stack: &[WindowId],
@@ -473,6 +473,34 @@ fn float_stack_order(
         order.push(pending.remove(next));
     }
     order
+}
+
+/// Append peers by focus recency, keeping transients above their parents.
+/// Scratch ranks are rebuilt on every pass; they are never model state.
+fn append_float_stack_order(
+    pending: &mut Vec<(usize, WindowId)>,
+    clients: &std::collections::HashMap<WindowId, Client>,
+    focus: &[WindowId],
+    order: &mut Vec<WindowId>,
+) {
+    order.reserve(pending.len());
+    for (rank, win) in pending.iter_mut() {
+        *rank = focus.iter().position(|w| w == win).map_or(0, |i| i + 1);
+    }
+    pending.sort_unstable();
+    while !pending.is_empty() {
+        let next = pending
+            .iter()
+            .position(|(_, win)| {
+                clients
+                    .get(win)
+                    .and_then(|c| c.transient_parent)
+                    .is_none_or(|parent| !pending.iter().any(|&(_, win)| win == parent))
+            })
+            // Break client-controlled cycles deterministically.
+            .unwrap_or(0);
+        order.push(pending.remove(next).1);
+    }
 }
 
 impl WindowManager {
@@ -813,22 +841,25 @@ impl WindowManager {
             .filter(|win| self.engine.state.clients.contains_key(win))
             .collect();
 
-        let mut floats: Vec<_> = ws
-            .floats
-            .iter()
-            .copied()
-            .filter(|win| self.engine.state.clients.contains_key(win))
-            .collect();
+        self.float_stack_scratch.clear();
+        self.float_stack_scratch.extend(
+            ws.floats
+                .iter()
+                .copied()
+                .filter(|win| self.engine.state.clients.contains_key(win))
+                .map(|win| (0, win)),
+        );
         for (&win, c) in &self.engine.state.clients {
             if c.monitor == mon_idx && c.workspace != ws.id && c.is_sticky() && c.is_float() {
-                floats.push(win);
+                self.float_stack_scratch.push((0, win));
             }
         }
-        order.extend(float_stack_order(
-            floats,
+        append_float_stack_order(
+            &mut self.float_stack_scratch,
             &self.engine.state.clients,
             &mon.focus_stack,
-        ));
+            &mut order,
+        );
 
         // 2. Presentation overlay — only `FullscreenPolicy::True` exclusive
         // fullscreen (in any layout, already excluded from `fs_ctx`) and focused
@@ -1756,6 +1787,38 @@ mod tests {
     use super::*;
     use crate::types::ViewId;
 
+    fn buffered_float_order(
+        pending: &mut Vec<WindowId>,
+        clients: &std::collections::HashMap<WindowId, Client>,
+        focus: &[WindowId],
+        order: &mut Vec<WindowId>,
+        unstable: bool,
+    ) {
+        let key = |win: &WindowId| {
+            (
+                focus.iter().position(|w| w == win).map_or(0, |i| i + 1),
+                *win,
+            )
+        };
+        if unstable {
+            pending.sort_unstable_by_key(key);
+        } else {
+            pending.sort_by_key(key);
+        }
+        while !pending.is_empty() {
+            let next = pending
+                .iter()
+                .position(|win| {
+                    clients
+                        .get(win)
+                        .and_then(|c| c.transient_parent)
+                        .is_none_or(|parent| !pending.contains(&parent))
+                })
+                .unwrap_or(0);
+            order.push(pending.remove(next));
+        }
+    }
+
     #[test]
     #[ignore = "manual CPU workload; run with --release --ignored --nocapture"]
     fn float_stack_workload() {
@@ -1778,24 +1841,139 @@ mod tests {
                 shifted.rotate_left(1);
                 let focus = [&input[..], &shifted[..]];
                 let iterations = if count == 200 { 2_000 } else { 10_000 };
-                let mut samples = Vec::new();
-                let allocations = CountAllocs::start();
-                black_box(float_stack_order(input.clone(), &clients, focus[0]));
-                let allocations = allocations.finish();
-                for _ in 0..9 {
-                    let start = Instant::now();
-                    for round in 0..iterations {
-                        black_box(float_stack_order(
-                            black_box(input.clone()),
-                            black_box(&clients),
-                            black_box(focus[round % 2]),
-                        ));
+                let mut pending = Vec::with_capacity(input.len());
+                let mut ranked = Vec::with_capacity(input.len());
+                let mut output = Vec::with_capacity(input.len());
+                let mut samples = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+                let mut allocations = [0; 4];
+                for sample in 0..9 {
+                    // Alternate measurement order to reduce drift between variants.
+                    for offset in 0..4 {
+                        let variant = (sample + offset) % 4;
+                        let mut run = |round: usize| {
+                            let focus = black_box(focus[round % 2]);
+                            match variant {
+                                0 => {
+                                    black_box(legacy_float_stack_order(
+                                        black_box(input.clone()),
+                                        black_box(&clients),
+                                        focus,
+                                    ));
+                                }
+                                1 | 2 => {
+                                    pending.clear();
+                                    pending.extend(input.iter().copied());
+                                    output.clear();
+                                    buffered_float_order(
+                                        black_box(&mut pending),
+                                        black_box(&clients),
+                                        focus,
+                                        black_box(&mut output),
+                                        variant == 2,
+                                    );
+                                    black_box(&output);
+                                }
+                                _ => {
+                                    ranked.clear();
+                                    ranked.extend(input.iter().map(|&win| (0, win)));
+                                    output.clear();
+                                    append_float_stack_order(
+                                        black_box(&mut ranked),
+                                        black_box(&clients),
+                                        focus,
+                                        black_box(&mut output),
+                                    );
+                                    black_box(&output);
+                                }
+                            }
+                        };
+                        run(0); // warm buffers and code before counting/timing
+                        if sample == 0 {
+                            let counter = CountAllocs::start();
+                            run(0);
+                            allocations[variant] = counter.finish();
+                        }
+                        let start = Instant::now();
+                        for round in 0..iterations {
+                            run(round);
+                        }
+                        samples[variant].push(start.elapsed().as_nanos() / iterations as u128);
                     }
-                    samples.push(start.elapsed().as_nanos() / iterations as u128);
                 }
-                samples.sort_unstable();
-                println!("float_stack clients={count} transients={transients} iterations={iterations} allocations={allocations} median_ns={} min_ns={} max_ns={}", samples[4], samples[0], samples[8]);
+                for (variant, name) in ["baseline", "buffers-stable", "buffers-unstable", "ranks"]
+                    .iter()
+                    .enumerate()
+                {
+                    samples[variant].sort_unstable();
+                    println!("float_stack variant={name} clients={count} transients={transients} iterations={iterations} allocations={} median_ns={} min_ns={} max_ns={}", allocations[variant], samples[variant][4], samples[variant][0], samples[variant][8]);
+                }
             }
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn floating_order_matches_legacy_with_missing_parents_cycles_and_focus_changes(
+            specs in proptest::collection::vec((1_u32..81, 0_u32..100), 0..80),
+            focus in proptest::collection::vec(1_u32..100, 0..80),
+        ) {
+            let mut clients = std::collections::HashMap::new();
+            for (win, parent) in specs {
+                let mut client = Client::new(win, 0, ViewId::new(0));
+                client.transient_parent = (parent != 0).then_some(parent);
+                clients.insert(win, client);
+            }
+            let input: Vec<_> = clients.keys().copied().collect();
+            let mut pending = Vec::new();
+            let mut output = Vec::new();
+            for (members, focus) in [(&input[..], &focus[..]), (&input[..input.len()/2], &[][..]), (&[][..], &focus[..])] {
+                pending.extend(members.iter().map(|&win| (usize::MAX, win)));
+                output.clear();
+                output.push(500); // The tile layer already assembled by the caller.
+                let mut expected = vec![500];
+                expected.extend(legacy_float_stack_order(members.to_vec(), &clients, focus));
+                append_float_stack_order(&mut pending, &clients, focus, &mut output);
+                proptest::prop_assert_eq!(&output, &expected);
+                proptest::prop_assert!(pending.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn floating_order_reuses_scratch_after_membership_and_focus_changes() {
+        use crate::core::framebench::CountAllocs;
+        for count in [2, 10, 50, 200] {
+            let mut clients = std::collections::HashMap::new();
+            for win in 1..=count {
+                let mut client = Client::new(win, 0, ViewId::new(0));
+                client.transient_parent = (win % 2 == 0).then_some(win - 1);
+                clients.insert(win, client);
+            }
+            let focus: Vec<_> = (1..=count).rev().collect();
+            let mut pending = Vec::with_capacity(count as usize);
+            let mut output = Vec::with_capacity(count as usize + 1);
+            let counter = CountAllocs::start();
+            for round in 0..100 {
+                let members = if round % 3 == 0 { count / 2 } else { count };
+                pending.extend((1..=members).map(|win| (usize::MAX, win)));
+                output.clear();
+                output.push(500);
+                append_float_stack_order(
+                    &mut pending,
+                    &clients,
+                    if round % 2 == 0 { &focus } else { &[] },
+                    &mut output,
+                );
+                assert!(pending.is_empty());
+                assert_eq!(output.len(), members as usize + 1);
+                assert_eq!(output[0], 500);
+                std::hint::black_box(&output);
+            }
+            assert_eq!(
+                counter.finish(),
+                0,
+                "{count} clients: float ordering allocated after warmup"
+            );
         }
     }
 
@@ -1807,7 +1985,9 @@ mod tests {
             client.transient_parent = Some(parent);
             clients.insert(win, client);
         }
-        let order = float_stack_order(vec![1, 2, 3, 4], &clients, &[1, 2, 3, 4]);
+        let mut pending = vec![(0, 1), (0, 2), (0, 3), (0, 4)];
+        let mut order = Vec::new();
+        append_float_stack_order(&mut pending, &clients, &[1, 2, 3, 4], &mut order);
         assert_eq!(order, vec![4, 1, 2, 3]);
     }
 

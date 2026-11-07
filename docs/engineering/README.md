@@ -434,6 +434,59 @@ ordinary waits cannot consume the wake, and verify draining leaves no idle
 spin. This correctness fix adds no timer or dependency; the necessary write
 FFI remains confined to the existing system boundary.
 
+## Stage 12 — floating stack ranks and scratch reuse
+
+The unchanged production helper was measured first in `78f17fd`. The comparison
+workload retains that algorithm as a test-only oracle, alternates two focus
+recency snapshots, and measures nine interleaved batches per variant. Fixtures
+have 2/10/50/200 floating clients, with or without parent/child pairs. Medians
+below are ns/call on this container's AMD EPYC 9V74, Rust 1.99.1, release + LTO;
+they measure CPU computation with Instant, not X11/IPC or laptop latency.
+
+| Clients | Transients | Previous helper | Buffers + same stable sort | Precomputed ranks (chosen) |
+| --- | --- | ---: | ---: | ---: |
+| 2 | no | 45 | 27 | 32 |
+| 2 | yes | 48 | 33 | 39 |
+| 10 | no | 198 | 192 | 159 |
+| 10 | yes | 241 | 243 | 207 |
+| 50 | no | 2970 | 3039 | 1487 |
+| 50 | yes | 3321 | 3442 | 2120 |
+| 200 | no | 34614 | 33307 | 15111 |
+| 200 | yes | 37175 | 36956 | 25617 |
+
+Simple buffer reuse does not address repeated focus-stack position searches
+inside the comparator. Switching to unstable sort with those searches worsened
+50-client flat ordering to 4097 ns and 200-client ordering to 65921 ns, despite
+zero warmed allocations. That variant is rejected. A reusable temporary map or
+persistent order cache adds state without a demonstrated need here.
+
+The chosen pass computes each rank once into one reusable `(rank, window)`
+buffer, sorts the total key, then appends the existing parent-first order to the
+caller's output. Ranks are rebuilt and the scratch is drained on every pass;
+missing parents and cycles retain the previous deterministic behavior. The
+surrounding layer assembly, desired-order cache, raises and authoritative
+QueryTree publication are unchanged. No dependency, framework or unsafe is added.
+
+Warm helper input/output allocation counts change from 2 to 0 in all eight
+fixtures; this is not a zero-allocation claim for the whole `stack_overlay`
+callback. A regression varies membership/focus with a pre-existing tile prefix.
+Differential Proptest covers missing parents, cycles, partial focus histories,
+shrinking and empty membership; it passed 10,000 cases locally. Existing
+projection/reconciliation allocation guards remain in place. Reproduce with:
+
+```sh
+cargo test --release --bin maverick --locked float_stack_workload -- --ignored --nocapture
+PROPTEST_CASES=10000 cargo test --bin maverick --locked floating_order
+```
+
+The signal follow-up also passed all four jobs in
+[CI run 42400050048](https://github.com/Azytar/Maverick/actions/runs/42400050048),
+including clean root-cursor shutdown and the full X11 campaign. Local full Cargo
+tests hit the container's AF_UNIX EPERM restriction; the installer additionally
+requires an unprivileged UID unavailable here. Neither test is weakened. Clean
+release, strict Clippy in both feature modes and MSRV checks pass locally;
+complete live validation uses CI.
+
 ## Next work
 
 1. Keep Stage 3 focused on invariants that detect real state/effect regressions;
@@ -442,6 +495,7 @@ FFI remains confined to the existing system boundary.
    an independent ABI/protocol oracle.
 3. Extend measurements only when a new profile identifies another real cost;
    preserve the established zero-allocation and reconciliation contracts.
-4. Investigate the measured QueryTree per alternating floating focus before
-   introducing any stacking cache; external restacks and transient ordering
-   must remain observable. Preserve uninstrumented controls for timing claims.
+4. Preserve the authoritative QueryTree contract. Further reduction of raises
+   needs evidence and external-order equivalence, not just a smaller counter.
+5. Validate perceived focus behavior on Axiom's Arch/Xorg laptop before making
+   physical latency or power claims; record battery versus mains power.
