@@ -708,7 +708,7 @@ mod tests {
             "forget must drop the applied record"
         );
         let state = State::new();
-        let desired = DesiredState { windows: vec![] };
+        let desired = DesiredState::from_windows(Vec::new());
         let effects = reconcile(&desired, &state, &mut applied);
         assert!(
             effects.is_empty(),
