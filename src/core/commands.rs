@@ -1711,7 +1711,10 @@ impl Command for RemoveView {
         let Some(view) = mon.workspaces.get(pos) else {
             return CommandReport::new(Vec::new());
         };
-        if !view.is_empty() {
+        // A live monitor must always retain one View. The lower-level Carousel
+        // can represent an empty lifecycle state for model testing, but the WM
+        // runtime cannot: Monitor::ws()/ws_mut() deliberately reject zero Views.
+        if mon.workspaces.len() <= 1 || !view.is_empty() {
             return CommandReport::new(Vec::new());
         }
         let from = mon.active_index();
@@ -1734,12 +1737,17 @@ impl Command for RemoveView {
         let mut report = if pos == from {
             finish_view_switch(state, cfg, mi, from)
         } else {
-            state.monitors[mi].focused = state.best_focus(mi);
-            state.sync_presented_maximize(mi);
-            CommandReport::new(vec![
-                Effect::ArrangeMonitor(mi),
-                Effect::FocusWindow(state.best_focus(mi)),
-            ])
+            // The active View is identified by ViewId, so removing some other
+            // View does not change its layout, focus, camera or overlay. The
+            // only possible observable change beyond the View count is its
+            // positional EWMH index when a preceding View disappeared.
+            let to = state.monitors[mi].active_index();
+            let effects = if to != from {
+                vec![Effect::SetCurrentDesktop(to)]
+            } else {
+                Vec::new()
+            };
+            CommandReport::new(effects)
         };
         report.effects.insert(0, Effect::RefreshDesktops);
         report
