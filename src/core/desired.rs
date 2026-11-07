@@ -94,11 +94,13 @@ impl Iterator for DesiredIter<'_> {
 impl DoubleEndedIterator for DesiredIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Borrowed(rows) => rows.next_back().map(|&(window, rect, border)| DesiredWindow {
-                window,
-                rect,
-                border,
-            }),
+            Self::Borrowed(rows) => rows
+                .next_back()
+                .map(|&(window, rect, border)| DesiredWindow {
+                    window,
+                    rect,
+                    border,
+                }),
             Self::Owned(rows) => rows.next_back().copied(),
         }
     }
