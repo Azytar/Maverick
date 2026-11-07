@@ -72,6 +72,9 @@ mod focus_dir_tests;
 pub mod framebench;
 
 #[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 #[global_allocator]
 static COUNTING_ALLOCATOR: framebench::Counting = framebench::Counting;
 

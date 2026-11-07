@@ -483,7 +483,13 @@ mod proptests {
             0u32..=16,
             0u32..=16,
             0u32..=8,
-            prop::collection::vec((0.05f32..=1.0, 0usize..=4), 1..=3),
+            prop::collection::vec(
+                (
+                    crate::core::test_support::positive_f32(0.05, 1.0),
+                    0usize..=4,
+                ),
+                1..=3,
+            ),
             prop::collection::vec(window, 1..=6),
             0usize..=5,
             any::<bool>(),
