@@ -429,7 +429,7 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                     apply_color_key(c, key, &value, diag);
                 }
                 Some(Cur::Plain("autostart")) => {
-                    if key == "commands" {
+                    if matches!(key, "commands" | "apps" | "programs") {
                         if let Some(grid) = grid_strings(&value) {
                             let commands = grid
                                 .into_iter()
@@ -513,7 +513,7 @@ fn annotate_event_diagnostics(
 /// field for is reported instead of dropped.
 fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "border_width" => set_u32_range(
+        "border_width" | "border_w" => set_u32_range(
             &mut g.border_width,
             key,
             value,
@@ -521,6 +521,21 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
             crate::core::layout::MAX_CFG_BORDER as u32,
             diag,
         ),
+        "gaps" => {
+            let mut legacy = None;
+            set_u32_range(
+                &mut legacy,
+                key,
+                value,
+                0,
+                crate::core::layout::MAX_CFG_GAP as u32,
+                diag,
+            );
+            if let Some(v) = legacy {
+                g.gaps_inner = Some(v);
+                g.gaps_outer = Some(v);
+            }
+        }
         "gaps_inner" => set_u32_range(
             &mut g.gaps_inner,
             key,
@@ -539,7 +554,7 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         ),
         "smart_gaps" => set_bool(&mut g.smart_gaps, key, value, diag),
         "corner_radius" => set_u32(&mut g.corner_radius, key, value, diag),
-        "view_count" => set_usize_range(&mut g.view_count, key, value, 1, 9, diag),
+        "view_count" | "n_tags" => set_usize_range(&mut g.view_count, key, value, 1, 9, diag),
         "column_width" => set_f32_range(&mut g.column_width, key, value, 0.1, 1.0, diag),
         "accordion_boost" => {
             set_f32_range(&mut g.accordion_boost, key, value, 0.0, 0.9, diag);
@@ -550,11 +565,13 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         "overview_scale" => {
             set_f32_range(&mut g.overview_scale, key, value, 0.05, 1.0, diag);
         }
-        "auto_view_binds" => set_bool(&mut g.auto_view_binds, key, value, diag),
+        "auto_view_binds" | "auto_workspace_binds" => {
+            set_bool(&mut g.auto_view_binds, key, value, diag)
+        }
         "focus_mouse" => set_bool(&mut g.focus_mouse, key, value, diag),
         "warp_cursor" => set_bool(&mut g.warp_cursor, key, value, diag),
         "honor_initial_state" => set_bool(&mut g.honor_initial_state, key, value, diag),
-        "view_names" => {
+        "view_names" | "tag_names" => {
             if let Some(list) = value.as_str_list() {
                 let names: Vec<String> = list.iter().map(|s| s.as_ref().to_string()).collect();
                 if names.is_empty() || names.iter().any(|name| name.trim().is_empty()) {
@@ -575,9 +592,9 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
 /// Map one `[colors]` key onto the model.
 fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "normal" => set_u32(&mut c.normal, key, value, diag),
-        "focused" => set_u32(&mut c.focused, key, value, diag),
-        "urgent" => set_u32(&mut c.urgent, key, value, diag),
+        "normal" | "col_normal" => set_u32(&mut c.normal, key, value, diag),
+        "focused" | "col_focused" => set_u32(&mut c.focused, key, value, diag),
+        "urgent" | "col_urgent" => set_u32(&mut c.urgent, key, value, diag),
         _ => warn_unknown_key(diag, "[colors]", key),
     }
 }
@@ -616,11 +633,11 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
     match key {
         "class" => set_string(&mut row.class, key, value, diag),
         "instance" => set_string(&mut row.instance, key, value, diag),
-        "window_type" => set_string(&mut row.window_type, key, value, diag),
+        "window_type" | "type" => set_string(&mut row.window_type, key, value, diag),
         "title" => set_string(&mut row.title, key, value, diag),
         "float" => set_rule_bool(&mut row.float, key, value, diag),
         "sticky" => set_rule_bool(&mut row.sticky, key, value, diag),
-        "view" => set_usize(&mut row.view, key, value, diag),
+        "view" | "workspace" | "ws" => set_usize(&mut row.view, key, value, diag),
         "size" => {
             if let Some([w, h]) = positive_u32_pair(value) {
                 row.size = Some([w, h]);
@@ -654,7 +671,7 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
                 warn_bad(diag, key, "a number between 0.0 and 1.0");
             }
         }
-        "border_width" => set_u32_range(
+        "border_width" | "border_w" => set_u32_range(
             &mut row.border_width,
             key,
             value,
@@ -662,14 +679,14 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
             crate::core::layout::MAX_CFG_BORDER as u32,
             diag,
         ),
-        "ignore_initial_state" => {
+        "ignore_initial_state" | "no_initial_state" | "no_maximize" => {
             set_rule_bool(&mut row.ignore_initial_state, key, value, diag);
         }
         "honor_initial_state" => set_bool(&mut row.honor_initial_state, key, value, diag),
-        "deny_fullscreen" => {
+        "deny_fullscreen" | "no_fullscreen" => {
             set_rule_bool(&mut row.deny_fullscreen, key, value, diag);
         }
-        "true_fullscreen" => {
+        "true_fullscreen" | "exclusive_fullscreen" => {
             set_rule_bool(&mut row.true_fullscreen, key, value, diag);
         }
         _ => warn_unknown_key(diag, "[[rules]]", key),
