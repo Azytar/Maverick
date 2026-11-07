@@ -211,19 +211,24 @@ mod frame_alloc_tests {
         counter.finish().div_ceil(16)
     }
 
-    /// Stage 4 baseline: the steady-state reconcile path currently allocates
-    /// one fresh Desired window vector and one duplicate-coalescing map per pass.
+    /// Stage 4 baseline: a normal build allocates one fresh Desired window
+    /// vector and one duplicate-coalescing map per steady-state pass.
+    ///
+    /// The diagnostic window-trace feature deliberately adds formatting/output
+    /// work. It is measured separately rather than mistaken for production hot
+    /// path cost: the all-features CI build currently adds two allocations.
     ///
     /// This assertion is deliberately a baseline, not a desired end state.
     /// The next Stage 4 change must preserve all reconciliation semantics, then
-    /// reduce this number and update the contract with before/after evidence.
+    /// reduce the normal-build number with before/after evidence.
     #[test]
-    fn reconcile_allocation_baseline_is_two_per_frame() {
+    fn reconcile_allocation_baseline_is_explicit() {
+        let expected = if cfg!(feature = "window-trace") { 4 } else { 2 };
         for n in [1, 5, 10, 50] {
             let per_frame = reconcile_allocs_per_frame(n);
             assert_eq!(
-                per_frame, 2,
-                "{n} windows: expected the audited two steady-state scratch allocations, got {per_frame}"
+                per_frame, expected,
+                "{n} windows: expected {expected} audited steady-state allocations, got {per_frame}"
             );
         }
     }
