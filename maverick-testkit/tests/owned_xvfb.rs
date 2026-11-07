@@ -32,16 +32,18 @@ fn window_list(
         // The WM may not have published this property yet.
         return Ok(Vec::new());
     }
-    let values = reply.value32().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "invalid X11 window property")
-    })?;
+    let values = reply
+        .value32()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid X11 window property"))?;
     Ok(values.collect())
 }
 
 fn release_binary() -> PathBuf {
     std::env::var_os("MAVERICK_TEST_WM")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/release/maverick"))
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/release/maverick")
+        })
 }
 
 #[test]
@@ -137,7 +139,14 @@ fn managed_windows_follow_real_server_stacking() -> Result<(), Box<dyn Error>> {
         .into_iter()
         .filter(|window| windows.contains(window))
         .collect();
-    assert_eq!(server_order.len(), 2, "both managed clients must appear in QueryTree");
-    assert_eq!(server_order, published_order, "EWMH stacking must match the real X server");
+    assert_eq!(
+        server_order.len(),
+        2,
+        "both managed clients must appear in QueryTree"
+    );
+    assert_eq!(
+        server_order, published_order,
+        "EWMH stacking must match the real X server"
+    );
     Ok(())
 }

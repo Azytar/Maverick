@@ -146,8 +146,13 @@ fn isolated_command(root: &Path, display: Option<&str>, binary: &OsStr) -> Comma
         if key_text.starts_with("MAVERICK_")
             || matches!(
                 key_text.as_ref(),
-                "DISPLAY" | "XAUTHORITY" | "WAYLAND_DISPLAY" | "HOME"
-                    | "XDG_RUNTIME_DIR" | "XDG_CONFIG_HOME" | "XDG_STATE_HOME"
+                "DISPLAY"
+                    | "XAUTHORITY"
+                    | "WAYLAND_DISPLAY"
+                    | "HOME"
+                    | "XDG_RUNTIME_DIR"
+                    | "XDG_CONFIG_HOME"
+                    | "XDG_STATE_HOME"
                     | "XDG_CACHE_HOME"
             )
         {
@@ -199,9 +204,20 @@ mod tests {
     #[test]
     fn display_record_accepts_only_a_bounded_decimal_line() {
         assert_eq!(read_display_record(&b"93\n"[..]).unwrap(), ":93");
-        for bad in [&b"\n"[..], &b"a1\n"[..], &b"93x\n"[..], &b"12345678901234567\n"[..]] {
-            assert_eq!(read_display_record(bad).unwrap_err().kind(), ErrorKind::InvalidData);
+        for bad in [
+            &b"\n"[..],
+            &b"a1\n"[..],
+            &b"93x\n"[..],
+            &b"12345678901234567\n"[..],
+        ] {
+            assert_eq!(
+                read_display_record(bad).unwrap_err().kind(),
+                ErrorKind::InvalidData
+            );
         }
-        assert_eq!(read_display_record(&b"21"[..]).unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(
+            read_display_record(&b"21"[..]).unwrap_err().kind(),
+            ErrorKind::UnexpectedEof
+        );
     }
 }
