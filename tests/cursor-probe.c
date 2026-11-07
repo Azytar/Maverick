@@ -51,6 +51,16 @@ int main(void) {
         } else if (!strcmp(line, "destroy\n")) {
             XDestroyWindow(display, client);
             client = None;
+        } else if (!strcmp(line, "viewable\n")) {
+            XWindowAttributes attrs;
+            XSync(display, False);
+            if (client != None && XGetWindowAttributes(display, client, &attrs)
+                && attrs.map_state == IsViewable) {
+                puts("1 0 0 0");
+            } else {
+                puts("0 0 0 0");
+            }
+            continue;
         } else if (!strcmp(line, "enter\n")) {
             XWarpPointer(display, None, client, 0, 0, 0, 0, 10, 10);
             XSync(display, False);
