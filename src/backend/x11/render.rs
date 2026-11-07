@@ -1757,6 +1757,49 @@ mod tests {
     use crate::types::ViewId;
 
     #[test]
+    #[ignore = "manual CPU workload; run with --release --ignored --nocapture"]
+    fn float_stack_workload() {
+        use crate::core::framebench::CountAllocs;
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        for count in [2, 10, 50, 200] {
+            for transients in [false, true] {
+                let input: Vec<WindowId> = (1..=count).collect();
+                let mut clients = std::collections::HashMap::new();
+                for &win in &input {
+                    let mut client = Client::new(win, 0, ViewId::new(0));
+                    if transients && win % 2 == 0 {
+                        client.transient_parent = Some(win - 1);
+                    }
+                    clients.insert(win, client);
+                }
+                let mut shifted = input.clone();
+                shifted.rotate_left(1);
+                let focus = [&input[..], &shifted[..]];
+                let iterations = if count == 200 { 2_000 } else { 10_000 };
+                let mut samples = Vec::new();
+                let allocations = CountAllocs::start();
+                black_box(float_stack_order(input.clone(), &clients, focus[0]));
+                let allocations = allocations.finish();
+                for _ in 0..9 {
+                    let start = Instant::now();
+                    for round in 0..iterations {
+                        black_box(float_stack_order(
+                            black_box(input.clone()),
+                            black_box(&clients),
+                            black_box(focus[round % 2]),
+                        ));
+                    }
+                    samples.push(start.elapsed().as_nanos() / iterations as u128);
+                }
+                samples.sort_unstable();
+                println!("float_stack clients={count} transients={transients} iterations={iterations} allocations={allocations} median_ns={} min_ns={} max_ns={}", samples[4], samples[0], samples[8]);
+            }
+        }
+    }
+
+    #[test]
     fn floating_stack_keeps_all_members_when_transient_parents_form_cycles() {
         let mut clients = std::collections::HashMap::new();
         for (win, parent) in [(1, 2), (2, 1), (3, 3), (4, 99)] {
