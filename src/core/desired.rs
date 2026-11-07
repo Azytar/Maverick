@@ -1,25 +1,25 @@
 //! Desired vs. applied — the pure intent layer of the render pipeline.
 //!
-//! `DesiredWindow`/`DesiredState` are the explicit, per-monitor snapshot of
-//! where every managed window *should* be after `layout::arrange` and
-//! `present::present_into`. Pure data: `WindowId` + `Rect` + border. No X11
-//! handles and no `&State` references.
+//! `DesiredWindow`/`DesiredState` describe where every managed window
+//! *should* be after `layout::arrange` and `present::present_into`. The
+//! representation is a borrowed view over the reusable `Placements` buffer:
+//! no X11 handles, no `&State`, and no second per-frame heap copy.
 //!
 //! The reconciler owns the other half of the split: it diffs `DesiredState`
 //! against `AppliedState` (what X11 actually has) and emits only the
 //! `ConfigureWindow` deltas. The backend owns `AppliedState` and applies them.
 //!
-//! Invariants: `from_placements` is the only path that builds the explicit
-//! form, so the pipeline stays greppable.
+//! Invariants: `from_placements` is the only constructor, so the semantic
+//! boundary stays explicit and greppable without duplicating the underlying
+//! geometry.
 
 use crate::types::{Rect, WindowId};
 
-/// One window's pure desired geometry, produced by core layout + present.
+/// One window's pure desired geometry, projected from the placement buffer.
 ///
-/// Contains NO X11 handles, NO references to `State`, and NO `AppliedState` — it
-/// is the *intent* side of the `DesiredState` vs `AppliedState` split. The
-/// reconciler compares this against what X11 already has and only configures
-/// what changed.
+/// Contains NO X11 handles, NO references to `State`, and NO `AppliedState`.
+/// It is a cheap copied view of one placement tuple, not stored in a second
+/// collection.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DesiredWindow {
     pub window: WindowId,
@@ -27,31 +27,40 @@ pub struct DesiredWindow {
     pub border: u32,
 }
 
-/// The explicit, pure desired state for one monitor's arrange cycle.
+/// Borrowed desired state for one monitor's arrange cycle.
 ///
-/// This is the single desired representation in the pipeline:
-/// `State` → `layout::arrange` → `Placements` (internal scratch) →
-/// `present::present_into` → `DesiredState` (explicit) → Reconciler →
-/// `AppliedState` → X11. The split keeps intent (`DesiredState`, owned here)
-/// separate from reality (`AppliedState`, owned by the backend), so the
-/// reconciler is the only place that diffs and emits `ConfigureWindow`.
-#[derive(Debug, Default)]
-pub struct DesiredState {
-    pub windows: Vec<DesiredWindow>,
+/// `Placements` remains the single owned projection buffer:
+/// `State -> layout::arrange -> Placements -> present::present_into ->
+/// DesiredState<'_> -> Reconciler -> AppliedState -> X11`.
+///
+/// Keeping this semantic wrapper preserves the intent/applied boundary while
+/// avoiding the old per-reconcile `Vec<DesiredWindow>` allocation.
+#[derive(Debug)]
+pub struct DesiredState<'a> {
+    placements: &'a [(WindowId, Rect, u32)],
 }
 
-impl DesiredState {
-    /// Explicit conversion from the internal `Placements` tuple-vec.
-    /// This is the ONLY place the tuple-vec becomes the explicit Desired representation.
-    pub fn from_placements(placements: &[(WindowId, Rect, u32)]) -> DesiredState {
-        let windows = placements
+impl<'a> DesiredState<'a> {
+    /// Borrow the already-materialized placement buffer without copying it.
+    pub fn from_placements(placements: &'a [(WindowId, Rect, u32)]) -> Self {
+        Self { placements }
+    }
+
+    pub fn len(&self) -> usize {
+        self.placements.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.placements.is_empty()
+    }
+
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = DesiredWindow> + DoubleEndedIterator + '_ {
+        self.placements
             .iter()
-            .map(|&(w, r, b)| DesiredWindow {
-                window: w,
-                rect: r,
-                border: b,
+            .map(|&(window, rect, border)| DesiredWindow {
+                window,
+                rect,
+                border,
             })
-            .collect();
-        DesiredState { windows }
     }
 }
