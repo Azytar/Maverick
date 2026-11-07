@@ -1153,7 +1153,10 @@ mod tests {
         fn reconcile_writes_exactly_the_pending_configures(
             (rows, applied) in arb_rows_and_applied(),
         ) {
-            let mut applied = AppliedState { windows: applied };
+            let mut applied = AppliedState {
+                windows: applied,
+                ..Default::default()
+            };
             let state = state_for(&rows);
             let desired = desired_for(&rows);
 
@@ -1441,7 +1444,10 @@ mod tests {
         fn a_repeated_reconcile_emits_nothing(
             (rows, applied) in arb_rows_and_applied(),
         ) {
-            let mut applied = AppliedState { windows: applied };
+            let mut applied = AppliedState {
+                windows: applied,
+                ..Default::default()
+            };
             // Clean clients: nothing is mid-transition, so no flag can force a
             // re-poke of an unchanged geometry.
             let clean: Vec<Row> = rows.iter().map(|r| Row { dirty: false, ..r.clone() }).collect();
@@ -1465,7 +1471,10 @@ mod tests {
         fn only_a_dirty_client_is_re_poked(
             (rows, applied) in arb_rows_and_applied(),
         ) {
-            let mut applied = AppliedState { windows: applied };
+            let mut applied = AppliedState {
+                windows: applied,
+                ..Default::default()
+            };
             let state = state_for(&rows);
             let desired = desired_for(&rows);
 
@@ -1495,7 +1504,10 @@ mod tests {
         fn reconcile_never_touches_the_logical_state(
             (rows, applied) in arb_rows_and_applied(),
         ) {
-            let mut applied = AppliedState { windows: applied };
+            let mut applied = AppliedState {
+                windows: applied,
+                ..Default::default()
+            };
             let state = state_for(&rows);
             let desired = desired_for(&rows);
             let before = fingerprint(&state);
