@@ -540,10 +540,10 @@ mod tests {
             },
         );
         let desired = DesiredState::from_windows(vec![DesiredWindow {
-                window: win,
-                rect,
-                border,
-            }]);
+            window: win,
+            rect,
+            border,
+        }]);
         let effects = reconcile(&desired, &state, &mut applied);
         assert!(
             effects.is_empty(),
@@ -571,10 +571,10 @@ mod tests {
             },
         );
         let desired = DesiredState::from_windows(vec![DesiredWindow {
-                window: win,
-                rect,
-                border,
-            }]);
+            window: win,
+            rect,
+            border,
+        }]);
         let effects = reconcile(&desired, &state, &mut applied);
         assert_eq!(
             effects.len(),
@@ -617,10 +617,10 @@ mod tests {
             },
         );
         let desired = DesiredState::from_windows(vec![DesiredWindow {
-                window: win,
-                rect,
-                border,
-            }]);
+            window: win,
+            rect,
+            border,
+        }]);
         let e1 = reconcile(&desired, &state_dirty, &mut applied);
         assert_eq!(
             e1.len(),
@@ -665,22 +665,22 @@ mod tests {
             );
         }
         let desired = DesiredState::from_windows(vec![
-                DesiredWindow {
-                    window: a,
-                    rect: rect_a,
-                    border,
-                },
-                DesiredWindow {
-                    window: b,
-                    rect: rect_b,
-                    border,
-                },
-                DesiredWindow {
-                    window: c,
-                    rect: rect_c_new,
-                    border,
-                },
-            ]);
+            DesiredWindow {
+                window: a,
+                rect: rect_a,
+                border,
+            },
+            DesiredWindow {
+                window: b,
+                rect: rect_b,
+                border,
+            },
+            DesiredWindow {
+                window: c,
+                rect: rect_c_new,
+                border,
+            },
+        ]);
         let effects = reconcile(&desired, &state, &mut applied);
         assert_eq!(effects.len(), 1, "only the changed window (c) emits");
         match &effects[0] {
@@ -1332,22 +1332,22 @@ mod tests {
         // The same window in two places with different geometry — the shape a
         // producer bug would produce.
         let desired = DesiredState::from_windows(vec![
-                DesiredWindow {
-                    window: 1,
-                    rect: Rect::new(0, 0, 100, 100),
-                    border: 2,
-                },
-                DesiredWindow {
-                    window: 2,
-                    rect: Rect::new(200, 0, 100, 100),
-                    border: 2,
-                },
-                DesiredWindow {
-                    window: 1,
-                    rect: Rect::new(500, 500, 80, 80),
-                    border: 2,
-                },
-            ]);
+            DesiredWindow {
+                window: 1,
+                rect: Rect::new(0, 0, 100, 100),
+                border: 2,
+            },
+            DesiredWindow {
+                window: 2,
+                rect: Rect::new(200, 0, 100, 100),
+                border: 2,
+            },
+            DesiredWindow {
+                window: 1,
+                rect: Rect::new(500, 500, 80, 80),
+                border: 2,
+            },
+        ]);
 
         let mut applied = AppliedState::default();
         for round in 1..=64 {
