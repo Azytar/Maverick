@@ -74,8 +74,8 @@ mantenerlas separadas:
   de floats). Cada ventana gestionada se referencia desde exactamente una de las
   dos, en exactamente un monitor.
 - `view_create` añade una View, hasta 9 por monitor. `view_remove` se rechaza
-  mientras la View que nombra siga teniendo clientes: adónde irían es una
-  decisión de política, así que la eliminación se rechaza en lugar de adivinarse.
+  mientras la View que nombra siga teniendo clientes, y la última View no se
+  puede eliminar: un monitor activo siempre conserva una View activa.
 - `view_create` y `view_remove` están expuestos como acciones y por
   `maverickctl view`; no vienen enlazados por defecto.
 

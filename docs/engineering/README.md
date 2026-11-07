@@ -7,9 +7,10 @@ needed to continue staged work without reconstructing it from chat history.
 
 | Stage | Status | Notes |
 | --- | --- | --- |
-| 0 — audit | active | repository, CI, tests, architecture and language inventory inspected |
-| 1 — Rust infrastructure | active | minimal dependency-free `maverick-xtask` added for Cargo gates and release builds |
-| 2+ | not started | do not migrate test harnesses until the Stage 0 baseline is green |
+| 0 — audit | complete | repository, CI, tests, architecture and language inventory inspected; baseline restored |
+| 1 — Rust infrastructure | complete | dependency-free `maverick-xtask` owns Cargo/release/X11 orchestration; branch CI is green |
+| 2 — selective migration | active | keep measured Python/C oracles unless a Rust migration demonstrates a concrete benefit |
+| 3 — reliability | active | View reconciliation fixed-point property and minimal `RemoveView` contracts added |
 
 ## Stage 0 baseline
 
@@ -76,11 +77,13 @@ Cargo rather than creating a second build system.
 ```sh
 cargo run -p maverick-xtask --locked -- check
 cargo run -p maverick-xtask --locked -- release
+cargo run -p maverick-xtask --locked -- x11
 ```
 
 `check` runs format verification, workspace Clippy with warnings denied,
-all-target/all-feature tests, then the default-feature workspace tests. CI uses
-the same command graph.
+all-target/all-feature tests, then the default-feature workspace tests. `x11`
+executes the existing isolated Python/C X11 campaign through the same local/CI
+entry point without replacing its independent behavior oracles.
 
 The CI workflow accepts pushes to `engineering/**`, supports manual dispatch,
 uses read-only repository permissions and cancels superseded runs for the same
@@ -88,12 +91,12 @@ branch.
 
 ## Next work
 
-1. Restore a fully green Stage 0 baseline.
-2. Extend `xtask` only when a concrete suite needs a shared local/CI entry
-   point; do not grow it into a generic framework.
-3. Choose the first X11 Python migration by demonstrated benefit. Prefer a
-   harness where Rust can replace arbitrary sleeps with observable X11/process
-   conditions.
-4. Preserve C probes that provide an independent ABI/protocol oracle.
-5. Begin performance work only after correctness gates are stable and retain
-   before/after evidence for every claim.
+1. Keep Stage 3 focused on invariants that detect real state/effect regressions;
+   do not duplicate the existing independent Carousel model.
+2. Preserve Python/C harnesses whose measured role is process orchestration or
+   an independent ABI/protocol oracle.
+3. Begin Stage 4 with a deterministic allocation baseline for the
+   `Placements -> DesiredState -> reconcile` path before changing it.
+4. Compare any Stage 4 change against the existing Xvfb profile workload and
+   retain before/after evidence; no performance claim follows from allocation
+   counts alone.
