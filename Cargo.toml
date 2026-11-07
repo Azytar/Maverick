@@ -5,6 +5,7 @@ members = [
     "maverick-x11",
     "maverick-toml",
     "maverickctl",
+    "xtask",
 ]
 resolver = "2"
 
