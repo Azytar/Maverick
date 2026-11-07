@@ -211,26 +211,23 @@ mod frame_alloc_tests {
         counter.finish().div_ceil(16)
     }
 
-    /// Stage 4 production baseline: measure the normal build only.
+    /// Stage 4 allocation regression guard for the normal build.
     ///
-    /// window-trace deliberately formats and emits observability data from
-    /// reconcile, so its allocator traffic is diagnostic overhead rather than
-    /// production hot-path cost. The all-features CI pass therefore skips this
-    /// assertion; xtask's following default-feature pass executes it.
-    ///
-    /// This is a baseline, not a desired end state. The next Stage 4 change must
-    /// preserve reconciliation semantics, then reduce this number with
-    /// before/after evidence.
+    /// The measured pre-change baseline was two steady-state allocations per
+    /// reconcile: the copied Desired window Vec plus the duplicate-coalescing
+    /// HashMap. DesiredState now borrows Placements, so only the coalescing map
+    /// should remain. window-trace is excluded because diagnostic formatting
+    /// adds unrelated allocator traffic.
     #[test]
-    fn reconcile_allocation_baseline_is_two_per_frame() {
+    fn reconcile_allocates_once_per_frame_after_borrowing_desired() {
         if cfg!(feature = "window-trace") {
             return;
         }
         for n in [1, 5, 10, 50] {
             let per_frame = reconcile_allocs_per_frame(n);
             assert_eq!(
-                per_frame, 2,
-                "{n} windows: expected the audited two production allocations, got {per_frame}"
+                per_frame, 1,
+                "{n} windows: expected one production allocation after removing the Desired copy, got {per_frame}"
             );
         }
     }
