@@ -74,35 +74,160 @@ const TEST_DEFAULT_FEATURES: Step = Step {
 };
 
 const X11_STEPS: &[Step] = &[
-    Step { label: "stacking startup contracts", program: "python3", args: &["tests/stacking-startup.py"] },
-    Step { label: "Xvfb stacking regression", program: "python3", args: &["tests/xvfb-stacking.py"] },
-    Step { label: "shell harness isolation", program: "python3", args: &["tests/harness-isolation.py"] },
-    Step { label: "session teardown", program: "python3", args: &["tests/session-teardown.py"] },
-    Step { label: "session teardown (exec client)", program: "python3", args: &["tests/session-teardown.py", "--exec-client"] },
-    Step { label: "session teardown (stale group)", program: "python3", args: &["tests/session-teardown.py", "--stale-group"] },
-    Step { label: "live configuration reload", program: "python3", args: &["tests/xvfb-reload.py"] },
-    Step { label: "explicit layout restoration", program: "python3", args: &["tests/xvfb-restore.py"] },
-    Step { label: "floating focus", program: "python3", args: &["tests/xvfb-floats.py", "--case", "focus"] },
-    Step { label: "transient stacking", program: "python3", args: &["tests/xvfb-floats.py", "--case", "transients"] },
-    Step { label: "floating metadata", program: "python3", args: &["tests/xvfb-floats.py", "--case", "metadata"] },
-    Step { label: "vertical floating", program: "python3", args: &["tests/xvfb-floats.py", "--case", "vertical"] },
-    Step { label: "layout restart", program: "python3", args: &["tests/xvfb-restart.py"] },
-    Step { label: "layout restart (pointer focus)", program: "python3", args: &["tests/xvfb-restart.py", "--pointer-focus"] },
-    Step { label: "root cursor", program: "python3", args: &["tests/xvfb-cursor.py"] },
-    Step { label: "root cursor theme", program: "python3", args: &["tests/xvfb-cursor-theme.py"] },
-    Step { label: "input hint contracts", program: "python3", args: &["tests/input-hint-contracts.py"] },
-    Step { label: "input hint X11", program: "python3", args: &["tests/xvfb-input-hint.py", "--wm", "target/release/maverick", "--ctl", "target/release/maverickctl", "--sanitize"] },
-    Step { label: "input protocol", program: "python3", args: &["tests/xvfb-input.py", "--case", "protocol"] },
-    Step { label: "input ownership", program: "python3", args: &["tests/xvfb-input.py", "--case", "ownership"] },
-    Step { label: "input child", program: "python3", args: &["tests/xvfb-input.py", "--case", "child"] },
-    Step { label: "input capture", program: "python3", args: &["tests/xvfb-input.py", "--case", "capture"] },
-    Step { label: "input capture exclusive", program: "python3", args: &["tests/xvfb-input.py", "--case", "capture", "--exclusive"] },
-    Step { label: "C probe campaign", program: "python3", args: &["tests/c-probe-campaign.py", "--wm", "target/release/maverick", "--evidence", "/tmp/maverick-c-probes"] },
-    Step { label: "overview isolation", program: "python3", args: &["tests/overview-isolation.py"] },
-    Step { label: "overview geometry", program: "python3", args: &["tests/xvfb-overview.py"] },
-    Step { label: "overview compositor", program: "python3", args: &["tests/xvfb-overview.py", "--compositor"] },
-    Step { label: "overview without composite", program: "python3", args: &["tests/xvfb-overview.py", "--without-composite"] },
-];
+    Step {
+        label: "stacking startup contracts",
+        program: "python3",
+        args: &["tests/stacking-startup.py"],
+    },
+    Step {
+        label: "Xvfb stacking regression",
+        program: "python3",
+        args: &["tests/xvfb-stacking.py"],
+    },
+    Step {
+        label: "shell harness isolation",
+        program: "python3",
+        args: &["tests/harness-isolation.py"],
+    },
+    Step {
+        label: "session teardown",
+        program: "python3",
+        args: &["tests/session-teardown.py"],
+    },
+    Step {
+        label: "session teardown (exec client)",
+        program: "python3",
+        args: &["tests/session-teardown.py", "--exec-client"],
+    },
+    Step {
+        label: "session teardown (stale group)",
+        program: "python3",
+        args: &["tests/session-teardown.py", "--stale-group"],
+    },
+    Step {
+        label: "live configuration reload",
+        program: "python3",
+        args: &["tests/xvfb-reload.py"],
+    },
+    Step {
+        label: "explicit layout restoration",
+        program: "python3",
+        args: &["tests/xvfb-restore.py"],
+    },
+    Step {
+        label: "floating focus",
+        program: "python3",
+        args: &["tests/xvfb-floats.py", "--case", "focus"],
+    },
+    Step {
+        label: "transient stacking",
+        program: "python3",
+        args: &["tests/xvfb-floats.py", "--case", "transients"],
+    },
+    Step {
+        label: "floating metadata",
+        program: "python3",
+        args: &["tests/xvfb-floats.py", "--case", "metadata"],
+    },
+    Step {
+        label: "vertical floating",
+        program: "python3",
+        args: &["tests/xvfb-floats.py", "--case", "vertical"],
+    },
+    Step {
+        label: "layout restart",
+        program: "python3",
+        args: &["tests/xvfb-restart.py"],
+    },
+    Step {
+        label: "layout restart (pointer focus)",
+        program: "python3",
+        args: &["tests/xvfb-restart.py", "--pointer-focus"],
+    },
+    Step {
+        label: "root cursor",
+        program: "python3",
+        args: &["tests/xvfb-cursor.py"],
+    },
+    Step {
+        label: "root cursor theme",
+        program: "python3",
+        args: &["tests/xvfb-cursor-theme.py"],
+    },
+    Step {
+        label: "input hint contracts",
+        program: "python3",
+        args: &["tests/input-hint-contracts.py"],
+    },
+    Step {
+        label: "input hint X11",
+        program: "python3",
+        args: &[
+            "tests/xvfb-input-hint.py",
+            "--wm",
+            "target/release/maverick",
+            "--ctl",
+            "target/release/maverickctl",
+            "--sanitize",
+        ],
+    },
+    Step {
+        label: "input protocol",
+        program: "python3",
+        args: &["tests/xvfb-input.py", "--case", "protocol"],
+    },
+    Step {
+        label: "input ownership",
+        program: "python3",
+        args: &["tests/xvfb-input.py", "--case", "ownership"],
+    },
+    Step {
+        label: "input child",
+        program: "python3",
+        args: &["tests/xvfb-input.py", "--case", "child"],
+    },
+    Step {
+        label: "input capture",
+        program: "python3",
+        args: &["tests/xvfb-input.py", "--case", "capture"],
+    },
+    Step {
+        label: "input capture exclusive",
+        program: "python3",
+        args: &["tests/xvfb-input.py", "--case", "capture", "--exclusive"],
+    },
+    Step {
+        label: "C probe campaign",
+        program: "python3",
+        args: &[
+            "tests/c-probe-campaign.py",
+            "--wm",
+            "target/release/maverick",
+            "--evidence",
+            "/tmp/maverick-c-probes",
+        ],
+    },
+    Step {
+        label: "overview isolation",
+        program: "python3",
+        args: &["tests/overview-isolation.py"],
+    },
+    Step {
+        label: "overview geometry",
+        program: "python3",
+        args: &["tests/xvfb-overview.py"],
+    },
+    Step {
+        label: "overview compositor",
+        program: "python3",
+        args: &["tests/xvfb-overview.py", "--compositor"],
+    },
+    Step {
+        label: "overview without composite",
+        program: "python3",
+        args: &["tests/xvfb-overview.py", "--without-composite"],
+    },
+]
 
 const RELEASE: Step = Step {
     label: "release build",
