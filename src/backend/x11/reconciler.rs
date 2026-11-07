@@ -948,6 +948,29 @@ mod tests {
             .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
     }
 
+    #[test]
+    fn borrowed_snapshots_do_not_reuse_stale_duplicate_indices() {
+        let state = State::new();
+        let mut applied = AppliedState::default();
+        let first = Rect::new(10, 20, 100, 200);
+        let last = Rect::new(30, 40, 300, 400);
+        let duplicate = [(7, first, 1), (7, last, 2)];
+        let desired = DesiredState::from_placements(&duplicate);
+        assert_eq!(reconcile(&desired, &state, &mut applied).len(), 1);
+        assert_eq!(applied.windows[&7].rect, last);
+        assert!(reconcile(&desired, &state, &mut applied).is_empty());
+
+        // A different monitor/pass may be empty, then contain the same window
+        // at an earlier index. Scratch from the duplicate must not suppress it.
+        assert!(reconcile(&DesiredState::from_placements(&[]), &state, &mut applied).is_empty());
+        applied.forget(7);
+        let single = [(7, first, 1)];
+        let desired = DesiredState::from_placements(&single);
+        assert_eq!(reconcile(&desired, &state, &mut applied).len(), 1);
+        assert_eq!(applied.windows[&7].rect, first);
+        assert!(reconcile(&desired, &state, &mut applied).is_empty());
+    }
+
     /// One generated placement: what the layout wants for `win`, whether the
     /// client is flagged `geometry_dirty` (a pending fullscreen/maximize
     /// transition), and whether a client record exists for it at all.

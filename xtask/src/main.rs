@@ -40,6 +40,12 @@ const FMT: Step = Step {
     args: &["fmt", "--all", "--", "--check"],
 };
 
+const CHECK: Step = Step {
+    label: "workspace check",
+    program: "cargo",
+    args: &["check", "--workspace", "--all-targets", "--locked"],
+};
+
 const CLIPPY: Step = Step {
     label: "clippy",
     program: "cargo",
@@ -48,6 +54,20 @@ const CLIPPY: Step = Step {
         "--workspace",
         "--all-targets",
         "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+    ],
+};
+
+const CLIPPY_DEFAULT_FEATURES: Step = Step {
+    label: "clippy (default features)",
+    program: "cargo",
+    args: &[
+        "clippy",
+        "--workspace",
+        "--all-targets",
         "--locked",
         "--",
         "-D",
@@ -261,9 +281,16 @@ fn run() -> Result<(), String> {
     }
 
     match task {
-        Task::Check => run_steps(&[FMT, CLIPPY, TEST_ALL_FEATURES, TEST_DEFAULT_FEATURES]),
+        Task::Check => run_steps(&[
+            FMT,
+            CHECK,
+            CLIPPY,
+            CLIPPY_DEFAULT_FEATURES,
+            TEST_ALL_FEATURES,
+            TEST_DEFAULT_FEATURES,
+        ]),
         Task::Fmt => run_steps(&[FMT]),
-        Task::Clippy => run_steps(&[CLIPPY]),
+        Task::Clippy => run_steps(&[CLIPPY, CLIPPY_DEFAULT_FEATURES]),
         Task::Test => run_steps(&[TEST_ALL_FEATURES, TEST_DEFAULT_FEATURES]),
         Task::Release => run_steps(&[RELEASE]),
         Task::X11 => run_steps(X11_STEPS),
@@ -302,7 +329,7 @@ fn run_steps(steps: &[Step]) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "maverick-xtask\n\n         Usage:\n  cargo run -p maverick-xtask -- <task>\n\n         Tasks:\n           check    Run format, clippy and both workspace test configurations\n           fmt      Run cargo fmt --check\n           clippy   Run workspace clippy with warnings denied\n           test     Run all-features and default-features workspace tests\n           release  Build the release maverick and maverickctl binaries\n           x11      Run the existing isolated X11 regression campaign\n           help     Show this help"
+        "maverick-xtask\n\n         Usage:\n  cargo run -p maverick-xtask -- <task>\n\n         Tasks:\n           check    Run format, workspace check, clippy and both test configurations\n           fmt      Run cargo fmt --check\n           clippy   Run both feature configurations with warnings denied\n           test     Run all-features and default-features workspace tests\n           release  Build the release maverick and maverickctl binaries\n           x11      Run the existing isolated X11 regression campaign\n           help     Show this help"
     );
 }
 

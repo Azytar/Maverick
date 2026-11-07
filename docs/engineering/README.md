@@ -82,8 +82,9 @@ cargo run -p maverick-xtask --locked -- release
 cargo run -p maverick-xtask --locked -- x11
 ```
 
-`check` runs format verification, workspace Clippy with warnings denied,
-all-target/all-feature tests, then the default-feature workspace tests. `x11`
+`check` runs format verification, an explicit all-target workspace check,
+Clippy with warnings denied for both all-features and default features, then
+both workspace test configurations. `x11`
 executes the existing isolated Python/C X11 campaign through the same local/CI
 entry point without replacing its independent behavior oracles.
 
@@ -177,7 +178,47 @@ passed locally. Rust compilation and X11 integration are **not yet verified**:
 the integration environment has no `cargo`/Rust toolchain or X11 development
 headers, and the installer suite requires a non-root user that this environment
 cannot switch to. No performance numbers for this merged tree are claimed.
-The branch is local only; publishing requires Git authentication.
+This was the local verification state at consolidation. The branch was later
+published at `6831720`; see Stage 9 for the subsequent integration results.
+
+## Stage 9 integration validation
+
+Starting revision: `6831720f9b1160284c49191e79b9c8b34e0e3ec1`, clean
+`engineering/next`; local history contains 115 commits beyond the inspected
+`origin/main`. The merge boundaries, configuration aliases/diagnostics,
+borrowed DesiredState, reconciler scratch, View identity, event wait and CI
+were reviewed before editing production.
+
+The initial revision passed [CI run 42391563106](https://github.com/Azytar/Maverick/actions/runs/42391563106):
+Rust 1.85 all-target/all-feature check; strict all-feature Clippy; **1,004
+passing tests per feature configuration**, with two manual timing workloads
+ignored in each; release build; installer suite; and all 29 X11 campaign
+steps, including native C probes. Dependency policy also passed. These are
+GitHub runner results, not local or physical-hardware measurements.
+
+Local validation exposed a coverage gap: `desired_len` in the borrowed render
+path was used only by `window-trace` but declared unconditionally. Default
+Clippy with `-D warnings` failed even though all-feature Clippy passed. The
+binding now shares the trace feature guard. `xtask check` and `xtask clippy`
+now lint both feature configurations; `check` also performs the explicit
+workspace check, so CI inherits the same gates without a separate command list.
+No lint suppression, dependency or lockfile change was needed.
+
+Additional regressions exercise duplicate-coalescing scratch across borrowed,
+empty and shortened snapshots, and exact legacy aliases through live X11
+reload after canonical configuration. Existing per-field semantic fallback
+policy is preserved: syntactically invalid, missing or unreadable files leave
+the active configuration untouched; individually invalid fields in a parsed
+file use compiled defaults, as the reload test already specifies.
+
+Local Rust 1.99.1 checks and strict Clippy pass for both feature configurations;
+release builds and the new scratch regression pass. The benchmark-contract
+suite (7 tests), stacking-audit unit tests (26 tests), Bash syntax and Python
+compilation pass. This runtime denies Unix socket `bind()` with EPERM:
+workspace IPC tests fail and Xvfb cannot open a listener. The installer suite
+requires a non-root user. Those environment failures are not skipped or
+converted to passes; the updated branch must pass CI before Stage 10 starts.
+No physical-session, latency or performance result is claimed here.
 
 ## Next work
 

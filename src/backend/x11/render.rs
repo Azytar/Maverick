@@ -645,6 +645,7 @@ impl WindowManager {
         // Borrow the reusable placement buffer as semantic DesiredState. The
         // wrapper owns no production geometry and performs no per-frame copy.
         let desired = DesiredState::from_placements(&self.desired);
+        #[cfg(feature = "window-trace")]
         let desired_len = desired.len();
         let effects = reconcile(&desired, &self.engine.state, &mut self.applied);
         #[cfg(feature = "window-trace")]

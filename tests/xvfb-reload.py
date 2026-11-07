@@ -195,6 +195,24 @@ def main():
                 write_config()
                 reload()
                 assert_visible("valid reload recovers after malformed input")
+
+                # Exercise the merged compatibility path through the live WM,
+                # not just the parser: aliases must keep geometry, camera and
+                # View count identical to their canonical spellings.
+                values.update(gaps_inner=13, gaps_outer=13, border_width=3, view_count=6,
+                              column_width=0.6)
+                write_config()
+                reload()
+                assert_visible("canonical configuration before alias reload")
+                before_camera, before_geometry = camera(), geometry()
+                config.write_text('[general]\ngaps = 13\nborder_w = 3\nn_tags = 6\n'
+                                  'auto_workspace_binds = true\nfocus_mouse = false\n'
+                                  'warp_cursor = false\n[autostart]\napps = []\n')
+                reload()
+                assert camera() == before_camera and geometry() == before_geometry
+                tree = json.loads(ctl("query", "tree"))
+                assert len(tree["monitors"][0]["workspaces"]) == 6
+                print("PASS: legacy aliases preserve canonical live geometry and Views", flush=True)
                 ctl("quit", "--yes")
                 assert wm.wait(timeout=5) == 0
             except Exception:
