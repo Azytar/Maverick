@@ -6774,7 +6774,7 @@ mod unit_tests {
 
     /// Run the production geometry pipeline for monitor `mi` and return the
     /// explicit `DesiredState` (exactly what `reconcile` is later diffed against).
-    fn pipeline_desired(engine: &Engine, mi: usize) -> DesiredState {
+    fn pipeline_desired(engine: &Engine, mi: usize) -> DesiredState<'static> {
         use crate::core::layout::{arrange, Placements, RibbonScratch};
         use crate::core::present::present_into;
         let mut placements = Placements::new();
@@ -6786,7 +6786,7 @@ mod unit_tests {
             &mut RibbonScratch::default(),
         );
         present_into(&engine.state, &engine.state.monitors[mi], &mut placements);
-        DesiredState::from_placements(&placements)
+        DesiredState::from_owned_placements(placements)
     }
 
     #[test]
@@ -7567,7 +7567,7 @@ mod unit_tests {
         // The whole-desktop Desired: `pipeline_desired` (arrange + present_into +
         // DesiredState::from_placements) run for EVERY monitor and merged, so the
         // duplicate/stale checks below see across monitors, not just one.
-        let run_pipeline_all = |engine: &Engine| -> DesiredState {
+        let run_pipeline_all = |engine: &Engine| -> DesiredState<'static> {
             let mut all = DesiredState::default();
             for mi in 0..engine.state.monitors.len() {
                 let d = pipeline_desired(engine, mi);
@@ -9746,7 +9746,7 @@ mod unit_tests {
         let mut transient_chains = 0usize;
 
         // Whole-desktop Desired: `pipeline_desired` merged across every monitor.
-        let run_pipeline_all = |engine: &Engine| -> DesiredState {
+        let run_pipeline_all = |engine: &Engine| -> DesiredState<'static> {
             let mut all = DesiredState::default();
             for mi in 0..engine.state.monitors.len() {
                 let d = pipeline_desired(engine, mi);
