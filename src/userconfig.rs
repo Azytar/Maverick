@@ -968,22 +968,11 @@ fn warn_unknown_section_if_typo(diag: &mut Diagnostics, name: &str, array: bool)
 
 fn removed_key_replacement(section: &str, key: &str) -> Option<&'static str> {
     Some(match (section, key) {
-        ("[general]", "border_w") => "border_width",
-        ("[general]", "gaps") => "gaps_inner + gaps_outer",
+        // These old width/bias settings do not have a 1:1 semantic mapping to
+        // the current fractional column-width model, so silently translating
+        // them would be misleading. Exact aliases are handled by the table
+        // dispatchers above and never reach this function.
         ("[general]", "default_col_width" | "default_col_w" | "split_bias") => "column_width",
-        ("[colors]", "col_normal") => "normal",
-        ("[colors]", "col_focused") => "focused",
-        ("[colors]", "col_urgent") => "urgent",
-        ("[autostart]", "apps" | "programs") => "commands",
-        ("[general]", "n_tags") => "view_count",
-        ("[general]", "tag_names") => "view_names",
-        ("[general]", "auto_workspace_binds") => "auto_view_binds",
-        ("[[rules]]", "type") => "window_type",
-        ("[[rules]]", "workspace" | "ws") => "view",
-        ("[[rules]]", "border_w") => "border_width",
-        ("[[rules]]", "no_initial_state" | "no_maximize") => "ignore_initial_state",
-        ("[[rules]]", "no_fullscreen") => "deny_fullscreen",
-        ("[[rules]]", "exclusive_fullscreen") => "true_fullscreen",
         _ => return None,
     })
 }
