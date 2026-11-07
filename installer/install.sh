@@ -718,18 +718,22 @@ step_verify() {
 # ── main ─────────────────────────────────────────────────────────────────────
 finalize_components() {
     local dir="$PREFIX/share/maverick" digest="" current="" staged
-    if [[ -e "$INSTALL_MANIFEST" && ( -L "$INSTALL_MANIFEST" || ! -O "$INSTALL_MANIFEST" ) ]]; then
+    if [[ -L "$INSTALL_MANIFEST" || ( -e "$INSTALL_MANIFEST" && ( ! -O "$INSTALL_MANIFEST" || ! -f "$INSTALL_MANIFEST" ) ) ]]; then
         die "installer manifest is not an owned regular file: $INSTALL_MANIFEST"
     fi
-    if [[ "$INSTALL_PROFILE" == minimal && -e "$BIN_DIR/maverickctl" ]]; then
-        current="$(sha256sum -- "$BIN_DIR/maverickctl" 2>/dev/null | cut -d ' ' -f 1 || true)"
-        if [[ -n "$PREVIOUS_CTL_SHA" && "$current" == "$PREVIOUS_CTL_SHA" && -O "$BIN_DIR/maverickctl" && ! -L "$BIN_DIR/maverickctl" ]]; then
+    if [[ "$INSTALL_PROFILE" == minimal && ( -e "$BIN_DIR/maverickctl" || -L "$BIN_DIR/maverickctl" ) ]]; then
+        # Hash only an owned regular file. A foreign link must be preserved,
+        # and reading a FIFO/device here could block the whole installation.
+        if [[ -n "$PREVIOUS_CTL_SHA" && -f "$BIN_DIR/maverickctl" && -O "$BIN_DIR/maverickctl" && ! -L "$BIN_DIR/maverickctl" ]]; then
+            current="$(sha256sum < "$BIN_DIR/maverickctl" 2>/dev/null | cut -d ' ' -f 1 || true)"
+        fi
+        if [[ -n "$PREVIOUS_CTL_SHA" && "$current" == "$PREVIOUS_CTL_SHA" ]]; then
             rm -- "$BIN_DIR/maverickctl"
         else
             printf '%s\n' 'maverickctl is not an unchanged installer-owned file; left in place.' >&2
         fi
     elif [[ "$INSTALL_PROFILE" == control ]]; then
-        digest="$(sha256sum -- "$BIN_DIR/maverickctl" | cut -d ' ' -f 1)"
+        digest="$(sha256sum < "$BIN_DIR/maverickctl" | cut -d ' ' -f 1)"
     fi
     mkdir -p -- "$dir"
     staged="$(mktemp "$dir/.manifest.XXXXXX")"
@@ -778,7 +782,7 @@ main() {
     check_profile_transition
     manifest_dir="$(realpath -m -- "$PREFIX/share/maverick")"
     [[ "$manifest_dir" == "$PREFIX/"* ]] || die "installer manifest directory leaves the prefix"
-    if [[ -e "$INSTALL_MANIFEST" && ( -L "$INSTALL_MANIFEST" || ! -O "$INSTALL_MANIFEST" || ! -f "$INSTALL_MANIFEST" ) ]]; then
+    if [[ -L "$INSTALL_MANIFEST" || ( -e "$INSTALL_MANIFEST" && ( ! -O "$INSTALL_MANIFEST" || ! -f "$INSTALL_MANIFEST" ) ) ]]; then
         die "installer manifest is not an owned regular file: $INSTALL_MANIFEST"
     fi
     if [[ "$INSTALL_PROFILE" == control && "$NO_BUILD" != true ]]; then

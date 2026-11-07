@@ -23,9 +23,11 @@ circumvent those limits. CLI discovery must not delete records merely because
 a live server has an incompatible control protocol.
 
 The initial supported pairing is this client with Maverick's
-`engineering/optional-control` implementation of protocol 1. The Maverick
-installation pins an immutable client commit and runs its external X11/control
-campaign against that client. Legacy clients remain accepted by protocol-1
+`engineering/optional-control` implementation of protocol 1. Before completing the extraction, the Maverick
+installer must pin an immutable published client commit and the external
+X11/control campaign must run against that checkout. Remote publication and
+that pin remain pending; the prepared client is currently built separately
+from the development checkout. Legacy clients remain accepted by protocol-1
 servers; any future incompatible wire version must explicitly retire legacy
 commands or require a negotiated connection rather than silently changing
 responses that old clients can interpret.

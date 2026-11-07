@@ -6,13 +6,14 @@
 //! failure reported as a success.
 
 use maverick_protocol::identity::InstanceInfo;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 
 mod runtime_dir;
+mod wire;
 
 /// One runtime directory for the whole binary, set once.
 ///
@@ -93,11 +94,9 @@ fn serve_replying(
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
-            let mut reader = BufReader::new(&stream);
-            let mut request = String::new();
-            if reader.read_line(&mut request).is_err() {
+            let Ok(request) = wire::read_command(&mut stream) else {
                 continue;
-            }
+            };
             let request = request.trim_end().to_string();
             let _ = tx.send(request.clone());
             let reply = if request == "ping" {

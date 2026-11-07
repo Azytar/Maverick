@@ -8,13 +8,14 @@
 //! and not a reconstruction of it.
 
 use maverick_protocol::identity::InstanceInfo;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 
 mod runtime_dir;
+mod wire;
 
 /// This binary's private runtime directory, so the tool under test resolves a
 /// session this binary published rather than whatever is live on the machine.
@@ -105,11 +106,9 @@ fn serve_recording(sid: &str) -> Recording {
     let worker = std::thread::spawn(move || loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
-                let mut reader = BufReader::new(&stream);
-                let mut request = String::new();
-                if reader.read_line(&mut request).is_err() {
+                let Ok(request) = wire::read_command(&mut stream) else {
                     continue;
-                }
+                };
                 let request = request.trim_end().to_string();
                 let _ = tx.send(request.clone());
                 let reply = if request == "ping" {

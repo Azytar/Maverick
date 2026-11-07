@@ -587,7 +587,7 @@ def suite_interactive_build_progress():
         # would pass without covering anything.
         env = box.env(SHELL="/bin/bash", TERM="xterm-256color", NO_COLOR="",
                       MAVERICK_TEST_BUILD_DELAY="3")
-        command = ["bash", str(box.repo / "installer/install.sh"), "--yes",
+        command = ["bash", str(box.repo / "installer/install.sh"), "--yes", "--with-control",
                    "--no-anim", "--no-path", "--lang", "en",
                    "--prefix", str(box.prefix)]
         proc = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
@@ -760,6 +760,22 @@ def suite_foreign_or_modified_controller_survives():
                                  env=box.env(MAVERICK_STUB_PROFILE="minimal"))
             assert result.returncode == 0, (result.stdout, result.stderr)
             assert controller.read_bytes() == before
+            assert "left in place" in result.stderr
+    for kind in ("symlink", "fifo"):
+        with tempfile.TemporaryDirectory(prefix="maverick-special-") as d:
+            box = Sandbox(Path(d))
+            assert box.install("--prefix", str(box.prefix), "--no-build").returncode == 0
+            controller = box.prefix / "bin/maverickctl"
+            controller.unlink()
+            if kind == "symlink":
+                controller.symlink_to(box.home / "missing-personal-client")
+            else:
+                os.mkfifo(controller)
+            before = controller.lstat()
+            result = box.install("--prefix", str(box.prefix), "--minimal", "--no-build",
+                                 timeout=15, env=box.env(MAVERICK_STUB_PROFILE="minimal"))
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert controller.lstat().st_ino == before.st_ino
             assert "left in place" in result.stderr
     print("PASS: unowned and modified client files survive migration")
 

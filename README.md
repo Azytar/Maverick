@@ -14,11 +14,12 @@ Views are logical containers, not X11 windows: creating, selecting and dropping
 one is a state transition, and nothing about it requires a round trip to the
 server.
 
-Maverick ships two binaries. `maverick` is the window manager.
-`maverickctl` is a separate control client that never links the window manager
-and never touches X11; it talks to a running instance over that instance's Unix
-control socket. Installation is source-based: there are no release archives or
-prebuilt binaries.
+Maverick builds Minimal by default: one `maverick` binary, with X11 management
+and no remote-control server. The explicit `control-ipc` feature enables remote
+control. `maverickctl` is an independent client project that never links the WM
+or opens an X display. Installation is source-based; no prebuilt release binary
+is required. The client source remains co-located while its independent remote
+publication and immutable installation pin are pending.
 
 [Overview](#overview) · [What Maverick is not](#what-maverick-is-not) ·
 [Architecture](#architecture) · [Project structure](#project-structure) ·
@@ -311,7 +312,7 @@ The boundaries that matter:
 | `maverick-x11/` | Shared Xlib/XCB connection bootstrap; links `X11` and `X11-xcb` |
 | `maverick-sys/` | OS/FFI boundary, instance identity, control socket protocol server, minimal JSON |
 | `maverick-toml/` | Zero-dependency TOML-subset parser |
-| `maverickctl/` | Control client: CLI, control-socket IPC client, discovery, session lifecycle |
+| `maverickctl/` | Independent Cargo workspace with its own lockfile; control client: CLI, control-socket IPC client, discovery, session lifecycle |
 | `installer/` | The installer, its shell library, and its test suite |
 | `tests/` | Real-X11 probes, integration scripts, installer smoke test |
 
@@ -401,8 +402,9 @@ Relevant environment variables:
 
 ## Installation
 
-Installation is source-based. The installer builds both binaries from this
-workspace with `cargo build --release -p maverick -p maverickctl`.
+The installer defaults to Minimal for a fresh installation. `--with-control`
+builds the WM with `control-ipc` and builds the independent client separately.
+Existing control installations retain their mode unless explicitly migrated.
 
 ```bash
 git clone https://github.com/Azytar/Maverick.git
@@ -414,6 +416,9 @@ The default prefix is `$HOME/.local`, which needs no privileges. The installer
 refuses to run as root, never invokes `sudo`, and never enables a service.
 
 ```text
+--minimal              WM only, recommended for new installations
+--with-control         WM with optional remote control and client
+--controller-source DIR  prepared independent client checkout
 --system               install into /usr/local instead
 --prefix DIR           install into DIR
 --xsessions-dir DIR    also install the session file into DIR (the only write
@@ -435,7 +440,8 @@ What it installs, and where:
 | path | what |
 | --- | --- |
 | `<prefix>/bin/maverick` | the window manager |
-| `<prefix>/bin/maverickctl` | the control client |
+| `<prefix>/bin/maverickctl` | the optional control client (`--with-control`) |
+| `<prefix>/share/maverick/install.manifest` | installer ownership/profile record |
 | `<prefix>/share/xsessions/maverick.desktop` | the X11 session entry |
 
 Outside the prefix the installer writes only files belonging to the invoking
@@ -453,7 +459,8 @@ rather than escalated around, so a system-wide install needs write access to
 `/usr/local` arranged in advance.
 
 Each step fails loudly. The installer runs the binaries it just installed —
-`maverick --version`, `maverickctl --help`, `maverickctl session --help` — and a
+`maverick --version`, plus `maverickctl --help`
+and `maverickctl session --help` for control installations — and a
 partial, stale or broken set is reported as a failure rather than as a successful
 install. It is safe to run repeatedly: a second run converges, fixes
 umask-hostile permissions and does not duplicate the `PATH` block.
@@ -469,10 +476,12 @@ Verify an installation with:
 
 ```bash
 maverick --version
+maverick --build-profile
+# For control installations:
 maverickctl --version
 ```
 
-To uninstall, delete the two binaries and the session file from the prefix, and
+To uninstall, delete the installed binaries, session file and installer manifest from the prefix, and
 remove the block between the `# >>> maverick (install.sh) >>>` markers from any
 startup file it touched.
 
@@ -491,19 +500,20 @@ Alternatively, select the installed Maverick session in the display manager.
 
 ```bash
 maverick --check-config ~/.config/maverick/config.toml   # validate, start nothing
-maverick --config ~/.config/maverick/config.toml --name desktop
+maverick --config ~/.config/maverick/config.toml
 maverick --help
 ```
 
 | flag | effect |
 | --- | --- |
-| `--name <id>` | label the instance for control and identification |
-| `--session-id <id>` | publish the instance under a fixed session id (`[A-Za-z0-9_-]`), which is what `maverickctl session` uses; the default is random |
+| `--name <id>` | control builds only: label the instance for control and identification |
+| `--session-id <id>` | control builds only: publish the instance under a fixed session id (`[A-Za-z0-9_-]`), which is what `maverickctl session` uses; the default is random |
 | `--replace` | take over from a running window manager, adopting its windows |
 | `--debug` | log at debug level, equivalent to `MAVERICK_LOG=debug` |
 | `--log-level <level>` | `off`, `error`, `warn`, `info`, `debug` or `trace`; overrides `--debug` |
 | `--config <path>` | read the configuration from `<path>` instead of `$XDG_CONFIG_HOME/maverick/config.toml`; reused by reload and restart |
 | `--check-config [path]` | validate a configuration and exit: `0` clean, `1` on warnings or errors. Starts no window manager and opens no display |
+| `--build-profile` | print `minimal` or `control` without starting a WM |
 | `-v`, `--version` | print the version and exit |
 | `-h`, `--help` | show the built-in help |
 
@@ -740,7 +750,7 @@ autostart does not disable services activated independently by the session.
 
 ## maverickctl
 
-`maverickctl` is a separate control client. It never links the window manager and
+`maverickctl` requires a WM compiled with `control-ipc`. It is a separate control client and never links the window manager and
 never opens an X display; it speaks to a running instance over that instance's
 Unix control socket, which is peer-checked with `SO_PEERCRED` inside a private
 `0700` runtime directory.
@@ -799,6 +809,8 @@ query topic from a typo.
 `process`. `maverickctl --help` gives the complete command list.
 
 ## Sessions
+
+These optional orchestration commands require the control build and independent client.
 
 `maverickctl session` manages whole graphical sessions: a nested X server, a
 Maverick, the programs launched into it, a cookie, logs and a lifecycle.
@@ -883,7 +895,10 @@ has no animation subsystem.
 ## Building from source
 
 ```bash
-cargo build --release -p maverick -p maverickctl
+cargo build --release -p maverick --locked
+# Optional control build and independent client:
+cargo build --release -p maverick --features control-ipc --locked
+cargo build --release --manifest-path maverickctl/Cargo.toml --locked
 cargo check --workspace --all-targets
 cargo fmt --all -- --check      # read-only form; `cargo fmt --all` to apply
 ```

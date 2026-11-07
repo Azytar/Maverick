@@ -14,11 +14,11 @@ convierte esa decisión en peticiones a X11. Una View es un contenedor lógico, 
 una ventana X11: crearla, seleccionarla y eliminarla es una transición de
 estado, y nada de eso requiere un viaje de ida y vuelta al servidor.
 
-Maverick distribuye dos binarios. `maverick` es el gestor de ventanas.
-`maverickctl` es un cliente de control separado que nunca enlaza el gestor de
-ventanas ni toca X11; habla con una instancia en marcha a través del socket de
-control Unix de esa instancia. La instalación es desde código fuente: no hay
-archivos de release ni binarios precompilados.
+Maverick compila Minimal por defecto: el binario `maverick` conserva la gestión
+X11 y no incluye servidor de control remoto. `control-ipc` habilita el control
+opcional. `maverickctl` es un proyecto Cargo independiente, sin enlazar el gestor
+ni abrir una pantalla X11. Su código permanece junto al gestor mientras se
+completan la publicación independiente y la referencia remota inmutable.
 
 [Panorámica](#panorámica) · [Lo que Maverick no es](#lo-que-maverick-no-es) ·
 [Arquitectura](#arquitectura) · [Estructura del proyecto](#estructura-del-proyecto) ·
@@ -360,8 +360,17 @@ Variables de entorno relevantes:
 
 ## Instalación
 
-La instalación es desde código fuente. El instalador compila ambos binarios desde
-este workspace con `cargo build --release -p maverick -p maverickctl`.
+Las instalaciones nuevas recomiendan `--minimal`: solo gestor, configuración y
+sesión X11. `--with-control` añade el servidor y el cliente independiente;
+`--controller-source DIR` selecciona su checkout preparado. Las instalaciones
+con control conservan su modalidad salvo cambio explícito. `--no-build` verifica
+el perfil del artefacto. El instalador no elimina clientes ajenos o modificados,
+y exige cerrar el Maverick anterior antes de cambiar su instalación a Minimal.
+La descarga remota fijada del cliente queda pendiente de su publicación.
+
+La instalación es desde código fuente. El instalador compila el gestor según la
+modalidad elegida y, cuando se solicita control, compila el cliente desde su
+workspace independiente con su propio lockfile.
 
 ```bash
 git clone https://github.com/Azytar/Maverick.git
@@ -374,6 +383,9 @@ instalador se niega a ejecutarse como root, nunca invoca `sudo` y nunca habilita
 ningún servicio.
 
 ```text
+--minimal              solo gestor (por defecto en instalaciones nuevas)
+--with-control         gestor con control remoto y cliente
+--controller-source DIR  checkout independiente del cliente
 --system               instalar en /usr/local en lugar del prefijo por defecto
 --prefix DIR           instalar en DIR
 --xsessions-dir DIR    instalar además el fichero de sesión en DIR (la única
@@ -398,7 +410,8 @@ Lo que instala, y dónde:
 | ruta | qué |
 | --- | --- |
 | `<prefix>/bin/maverick` | el gestor de ventanas |
-| `<prefix>/bin/maverickctl` | el cliente de control |
+| `<prefix>/bin/maverickctl` | cliente opcional (`--with-control`) |
+| `<prefix>/share/maverick/install.manifest` | modalidad y propiedad de los binarios |
 | `<prefix>/share/xsessions/maverick.desktop` | la entrada de sesión X11 |
 
 Fuera del prefijo el instalador sólo escribe ficheros del usuario que lo invoca,
@@ -418,8 +431,8 @@ error de permisos en lugar de escalarse con `sudo`, así que una instalación en
 todo el sistema necesita acceso de escritura a `/usr/local` previsto de antemano.
 
 Cada paso falla de forma ruidosa. El instalador ejecuta los binarios que acaba de
-instalar — `maverick --version`, `maverickctl --help`,
-`maverickctl session --help` — y un conjunto parcial, obsoleto o roto se informa
+instalar — `maverick --version` y, con control,
+`maverickctl --help` y `maverickctl session --help` — y un conjunto parcial, obsoleto o roto se informa
 como fallo y no como instalación correcta. Es seguro ejecutarlo repetidamente:
 una segunda pasada converge, corrige permisos hostiles al umask y no duplica el
 bloque de `PATH`.
@@ -464,13 +477,14 @@ maverick --help
 
 | flag | efecto |
 | --- | --- |
-| `--name <id>` | etiquetar la instancia para control e identificación |
-| `--session-id <id>` | publicar la instancia con un id de sesión fijo (`[A-Za-z0-9_-]`), que es lo que usa `maverickctl session`; por defecto es aleatorio |
+| `--name <id>` | solo con control: etiquetar la instancia para control e identificación |
+| `--session-id <id>` | solo con control: publicar la instancia con un id de sesión fijo (`[A-Za-z0-9_-]`), que es lo que usa `maverickctl session`; por defecto es aleatorio |
 | `--replace` | tomar el relevo de un gestor de ventanas en marcha, adoptando sus ventanas |
 | `--debug` | log en nivel debug, equivalente a `MAVERICK_LOG=debug` |
 | `--log-level <nivel>` | `off`, `error`, `warn`, `info`, `debug` o `trace`; tiene precedencia sobre `--debug` |
 | `--config <ruta>` | leer la configuración de `<ruta>` en lugar de `$XDG_CONFIG_HOME/maverick/config.toml`; reutilizado por reload y restart |
 | `--check-config [ruta]` | validar una configuración y salir: `0` limpio, `1` con avisos o errores. No arranca ningún gestor de ventanas ni abre display |
+| `--build-profile` | imprimir `minimal` o `control` sin iniciar el gestor |
 | `-v`, `--version` | imprimir la versión y salir |
 | `-h`, `--help` | mostrar la ayuda incorporada |
 
@@ -651,6 +665,8 @@ El arranque de sesión y el reinicio no son un supervisor general de servicios.
 
 ## maverickctl
 
+Este cliente requiere Maverick compilado con `control-ipc`; Minimal no publica socket.
+
 `maverickctl` es un cliente de control separado. Nunca enlaza el gestor de
 ventanas ni abre un display X; habla con una instancia en marcha a través del
 socket de control Unix de esa instancia, verificado contra pares con `SO_PEERCRED`
@@ -711,6 +727,8 @@ de consulta de una errata.
 `process`. `maverickctl --help` ofrece la lista completa de comandos.
 
 ## Sesiones
+
+Estas herramientas opcionales requieren la modalidad con control y el cliente independiente.
 
 `maverickctl session` gestiona sesiones gráficas completas: un servidor X
 anidado, un Maverick, los programas lanzados en ella, una cookie, logs y un
@@ -790,7 +808,10 @@ Maverick dibuja a través de X11 y no tiene subsistema de animación.
 ## Compilar desde el código
 
 ```bash
-cargo build --release -p maverick -p maverickctl
+cargo build --release -p maverick --locked
+# Modalidad con control y cliente independiente:
+cargo build --release -p maverick --features control-ipc --locked
+cargo build --release --manifest-path maverickctl/Cargo.toml --locked
 cargo check --workspace --all-targets
 cargo fmt --all -- --check      # forma de solo lectura; `cargo fmt --all` aplica
 ```

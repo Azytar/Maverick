@@ -15,8 +15,11 @@
 //! replies a fixed refusal, one routes by the request line, one closes without
 //! replying at all — so only the ownership lives here.
 
+#[path = "../wire/mod.rs"]
+mod wire;
+
 use maverick_protocol::identity::InstanceInfo;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixListener;
@@ -123,11 +126,9 @@ impl Instance {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         served += 1;
-                        let mut reader = BufReader::new(&stream);
-                        let mut request = String::new();
-                        if reader.read_line(&mut request).is_err() {
+                        let Ok(request) = wire::read_command(&mut stream) else {
                             continue;
-                        }
+                        };
                         if let Some(reply) = reply(request.trim_end()) {
                             let _ = stream.write_all(reply.as_bytes());
                             let _ = stream.flush();

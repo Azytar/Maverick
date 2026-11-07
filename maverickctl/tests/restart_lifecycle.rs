@@ -15,7 +15,7 @@
 //! invalidate.
 
 use maverickctl::ctl::main_with_args;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod runtime_dir;
+mod wire;
 
 /// A private runtime directory, so no fixture here is visible to another test
 /// binary's fixtures and no live instance can be discovered.
@@ -94,15 +95,14 @@ impl Instance {
             while !flag.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut line = String::new();
                         let mode = *seen.lock().expect("behaviour lock");
-                        let reply = match BufReader::new(&stream).read_line(&mut line) {
+                        let reply = match wire::read_command(&mut stream) {
                             Err(_) => continue,
                             Ok(_) if mode == Behaviour::Departing => {
                                 "error restarting\n".to_string()
                             }
-                            Ok(_) if line.starts_with("ping") => format!("pong {name}\n"),
-                            Ok(_) if line.starts_with("query ") => {
+                            Ok(line) if line.starts_with("ping") => format!("pong {name}\n"),
+                            Ok(line) if line.starts_with("query ") => {
                                 if mode == Behaviour::Serving {
                                     "{\"monitors\":[{\"index\":0}]}\n".to_string()
                                 } else {
