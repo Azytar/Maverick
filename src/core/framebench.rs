@@ -221,9 +221,11 @@ mod frame_alloc_tests {
     /// This is a baseline, not a desired end state. The next Stage 4 change must
     /// preserve reconciliation semantics, then reduce this number with
     /// before/after evidence.
-    #[cfg(not(feature = "window-trace"))]
     #[test]
     fn reconcile_allocation_baseline_is_two_per_frame() {
+        if cfg!(feature = "window-trace") {
+            return;
+        }
         for n in [1, 5, 10, 50] {
             let per_frame = reconcile_allocs_per_frame(n);
             assert_eq!(
