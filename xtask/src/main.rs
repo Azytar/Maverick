@@ -8,6 +8,7 @@ enum Task {
     Clippy,
     Test,
     Release,
+    X11,
     Help,
 }
 
@@ -19,6 +20,7 @@ impl Task {
             Some("clippy") => Ok(Self::Clippy),
             Some("test") => Ok(Self::Test),
             Some("release") => Ok(Self::Release),
+            Some("x11") => Ok(Self::X11),
             Some("help" | "-h" | "--help") => Ok(Self::Help),
             Some(other) => Err(format!("unknown xtask '{other}'")),
         }
@@ -71,6 +73,37 @@ const TEST_DEFAULT_FEATURES: Step = Step {
     args: &["test", "--workspace", "--all-targets", "--locked"],
 };
 
+const X11_STEPS: &[Step] = &[
+    Step { label: "stacking startup contracts", program: "python3", args: &["tests/stacking-startup.py"] },
+    Step { label: "Xvfb stacking regression", program: "python3", args: &["tests/xvfb-stacking.py"] },
+    Step { label: "shell harness isolation", program: "python3", args: &["tests/harness-isolation.py"] },
+    Step { label: "session teardown", program: "python3", args: &["tests/session-teardown.py"] },
+    Step { label: "session teardown (exec client)", program: "python3", args: &["tests/session-teardown.py", "--exec-client"] },
+    Step { label: "session teardown (stale group)", program: "python3", args: &["tests/session-teardown.py", "--stale-group"] },
+    Step { label: "live configuration reload", program: "python3", args: &["tests/xvfb-reload.py"] },
+    Step { label: "explicit layout restoration", program: "python3", args: &["tests/xvfb-restore.py"] },
+    Step { label: "floating focus", program: "python3", args: &["tests/xvfb-floats.py", "--case", "focus"] },
+    Step { label: "transient stacking", program: "python3", args: &["tests/xvfb-floats.py", "--case", "transients"] },
+    Step { label: "floating metadata", program: "python3", args: &["tests/xvfb-floats.py", "--case", "metadata"] },
+    Step { label: "vertical floating", program: "python3", args: &["tests/xvfb-floats.py", "--case", "vertical"] },
+    Step { label: "layout restart", program: "python3", args: &["tests/xvfb-restart.py"] },
+    Step { label: "layout restart (pointer focus)", program: "python3", args: &["tests/xvfb-restart.py", "--pointer-focus"] },
+    Step { label: "root cursor", program: "python3", args: &["tests/xvfb-cursor.py"] },
+    Step { label: "root cursor theme", program: "python3", args: &["tests/xvfb-cursor-theme.py"] },
+    Step { label: "input hint contracts", program: "python3", args: &["tests/input-hint-contracts.py"] },
+    Step { label: "input hint X11", program: "python3", args: &["tests/xvfb-input-hint.py", "--wm", "target/release/maverick", "--ctl", "target/release/maverickctl", "--sanitize"] },
+    Step { label: "input protocol", program: "python3", args: &["tests/xvfb-input.py", "--case", "protocol"] },
+    Step { label: "input ownership", program: "python3", args: &["tests/xvfb-input.py", "--case", "ownership"] },
+    Step { label: "input child", program: "python3", args: &["tests/xvfb-input.py", "--case", "child"] },
+    Step { label: "input capture", program: "python3", args: &["tests/xvfb-input.py", "--case", "capture"] },
+    Step { label: "input capture exclusive", program: "python3", args: &["tests/xvfb-input.py", "--case", "capture", "--exclusive"] },
+    Step { label: "C probe campaign", program: "python3", args: &["tests/c-probe-campaign.py", "--wm", "target/release/maverick", "--evidence", "/tmp/maverick-c-probes"] },
+    Step { label: "overview isolation", program: "python3", args: &["tests/overview-isolation.py"] },
+    Step { label: "overview geometry", program: "python3", args: &["tests/xvfb-overview.py"] },
+    Step { label: "overview compositor", program: "python3", args: &["tests/xvfb-overview.py", "--compositor"] },
+    Step { label: "overview without composite", program: "python3", args: &["tests/xvfb-overview.py", "--without-composite"] },
+];
+
 const RELEASE: Step = Step {
     label: "release build",
     program: "cargo",
@@ -113,6 +146,7 @@ fn run() -> Result<(), String> {
         Task::Clippy => run_steps(&[CLIPPY]),
         Task::Test => run_steps(&[TEST_ALL_FEATURES, TEST_DEFAULT_FEATURES]),
         Task::Release => run_steps(&[RELEASE]),
+        Task::X11 => run_steps(X11_STEPS),
         Task::Help => {
             print_help();
             Ok(())
@@ -147,7 +181,7 @@ fn run_steps(steps: &[Step]) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "maverick-xtask\n\n         Usage:\n  cargo run -p maverick-xtask -- <task>\n\n         Tasks:\n           check    Run format, clippy and both workspace test configurations\n           fmt      Run cargo fmt --check\n           clippy   Run workspace clippy with warnings denied\n           test     Run all-features and default-features workspace tests\n           release  Build the release maverick and maverickctl binaries\n           help     Show this help"
+        "maverick-xtask\n\n         Usage:\n  cargo run -p maverick-xtask -- <task>\n\n         Tasks:\n           check    Run format, clippy and both workspace test configurations\n           fmt      Run cargo fmt --check\n           clippy   Run workspace clippy with warnings denied\n           test     Run all-features and default-features workspace tests\n           release  Build the release maverick and maverickctl binaries\n           x11      Run the existing isolated X11 regression campaign\n           help     Show this help"
     );
 }
 
@@ -168,6 +202,7 @@ mod tests {
             ("clippy", Task::Clippy),
             ("test", Task::Test),
             ("release", Task::Release),
+            ("x11", Task::X11),
             ("help", Task::Help),
             ("--help", Task::Help),
         ] {
