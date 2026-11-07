@@ -7,20 +7,31 @@ use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, KEY_PRESS_EVENT, KEY_RELE
 use x11rb::protocol::xtest::ConnectionExt as _;
 
 pub fn key(conn: &RustConnection, keysym: u32) -> Result<(), Box<dyn Error>> {
+    chord(conn, &[keysym])
+}
+
+fn chord(conn: &RustConnection, keysyms: &[u32]) -> Result<(), Box<dyn Error>> {
     let setup = conn.setup();
     let mapping = conn
         .get_keyboard_mapping(setup.min_keycode, setup.max_keycode - setup.min_keycode + 1)?
         .reply()?;
-    let index = mapping
-        .keysyms
-        .chunks(usize::from(mapping.keysyms_per_keycode))
-        .position(|symbols| symbols.first() == Some(&keysym))
-        .ok_or("missing Xvfb keysym")?;
-    let code = setup.min_keycode + u8::try_from(index)?;
-    conn.xtest_fake_input(KEY_PRESS_EVENT, code, 0, x11rb::NONE, 0, 0, 0)?
-        .check()?;
-    conn.xtest_fake_input(KEY_RELEASE_EVENT, code, 0, x11rb::NONE, 0, 0, 0)?
-        .check()?;
+    let mut codes = Vec::new();
+    for keysym in keysyms {
+        let index = mapping
+            .keysyms
+            .chunks(usize::from(mapping.keysyms_per_keycode))
+            .position(|symbols| symbols.first() == Some(keysym))
+            .ok_or("missing Xvfb keysym")?;
+        codes.push(setup.min_keycode + u8::try_from(index)?);
+    }
+    for &code in &codes {
+        conn.xtest_fake_input(KEY_PRESS_EVENT, code, 0, x11rb::NONE, 0, 0, 0)?
+            .check()?;
+    }
+    for &code in codes.iter().rev() {
+        conn.xtest_fake_input(KEY_RELEASE_EVENT, code, 0, x11rb::NONE, 0, 0, 0)?
+            .check()?;
+    }
     conn.flush()?;
     // Real keybindings have a 60ms duplicate-key debounce. Model a human key.
     thread::sleep(Duration::from_millis(80));
@@ -74,19 +85,15 @@ fn keyboard_views_and_carousel_publish_real_focus_and_desktop() -> Result<(), Bo
 #[test]
 #[ignore = "needs Xvfb and an already compiled release WM"]
 fn keyboard_collapse_and_vertical_focus_follow_real_geometry() -> Result<(), Box<dyn Error>> {
-    let (mut session, conn, root) = start_with_config(
-        "[general]\nfocus_mouse=false\nwarp_cursor=false\n[autostart]\ncommands=[]\n\
-         [[keybindings]]\nkey=\"F1\"\naction=\"collapse_column\"\n\
-         [[keybindings]]\nkey=\"F2\"\naction=\"focus:up\"\n\
-         [[keybindings]]\nkey=\"F3\"\naction=\"focus:down\"\n\
-         [[keybindings]]\nkey=\"F4\"\naction=\"move:up\"\n\
-         [[keybindings]]\nkey=\"F5\"\naction=\"move:down\"\n",
-    )?;
+    let (mut session, conn, root) = start_session()?;
+    const SUPER: u32 = 0xffeb;
+    const CTRL: u32 = 0xffe3;
+    const SHIFT: u32 = 0xffe1;
     let a = map_client(&conn, root, false)?;
     wait_managed(&mut session, &conn, root, &[a])?;
     let b = map_client(&conn, root, false)?;
     wait_managed(&mut session, &conn, root, &[a, b])?;
-    key(&conn, 0xffbe)?;
+    chord(&conn, &[SUPER, CTRL, u32::from(b'j')])?;
     wait_for(&mut session, "collapsed column geometry", || {
         let ga = conn.get_geometry(a)?.reply()?;
         let gb = conn.get_geometry(b)?.reply()?;
@@ -97,15 +104,15 @@ fn keyboard_collapse_and_vertical_focus_follow_real_geometry() -> Result<(), Box
             && gb.height < 600)
     })?;
     let active = atom(&conn, b"_NET_ACTIVE_WINDOW")?;
-    for (keysym, focused) in [(0xffbf, a), (0xffc0, b)] {
-        key(&conn, keysym)?;
+    for (keysym, focused) in [(u32::from(b'k'), a), (u32::from(b'j'), b)] {
+        chord(&conn, &[SUPER, keysym])?;
         wait_for(&mut session, "vertical keyboard focus", || {
             Ok(window_list(&conn, root, active)? == [focused]
                 && conn.get_input_focus()?.reply()?.focus == focused)
         })?;
     }
-    for (keysym, upper, lower) in [(0xffc1, b, a), (0xffc2, a, b)] {
-        key(&conn, keysym)?;
+    for (keysym, upper, lower) in [(u32::from(b'k'), b, a), (u32::from(b'j'), a, b)] {
+        chord(&conn, &[SUPER, SHIFT, keysym])?;
         wait_for(&mut session, "vertical keyboard movement", || {
             Ok(
                 conn.get_geometry(upper)?.reply()?.y < conn.get_geometry(lower)?.reply()?.y

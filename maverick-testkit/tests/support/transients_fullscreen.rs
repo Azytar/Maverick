@@ -117,6 +117,16 @@ fn fullscreen_restores_geometry_and_obeys_float_dock_layers() -> Result<(), Box<
             &[atom(&conn, b"_NET_WM_WINDOW_TYPE_DOCK")?],
         )?
         .check()?;
+        // Maverick tracks panel layers through their workarea reservation,
+        // matching the retained native stacking probe's real dock fixture.
+        conn.change_property32(
+            PropMode::REPLACE,
+            dock,
+            atom(&conn, b"_NET_WM_STRUT_PARTIAL")?,
+            AtomEnum::CARDINAL,
+            &[0, 0, 24, 0, 0, 0, 0, 0, 0, 799, 0, 0],
+        )?
+        .check()?;
         conn.map_window(dock)?.check()?;
         conn.flush()?;
         wait_managed(&mut session, &conn, root, &[owner, tile, float])?;
@@ -246,5 +256,49 @@ fn initial_ribbon_fullscreen_and_owned_popups_keep_their_layers() -> Result<(), 
                 == [owner, child, grandchild])
     })?;
     assert_stacking(&conn, root, &[owner, child, grandchild])?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "needs Xvfb and an already compiled release WM"]
+fn user_keyboard_focus_lets_a_float_peek_over_fullscreen() -> Result<(), Box<dyn Error>> {
+    let (mut session, conn, root) = start_with_config(
+        "[general]\nfocus_mouse=false\nwarp_cursor=false\n[autostart]\ncommands=[]\n\
+         [[keybindings]]\nkey=\"F1\"\naction=\"focus:next\"\n",
+    )?;
+    let owner = map_client(&conn, root, false)?;
+    let float = map_client(&conn, root, true)?;
+    wait_managed(&mut session, &conn, root, &[owner, float])?;
+    let active = atom(&conn, b"_NET_ACTIVE_WINDOW")?;
+    request_focus(&conn, root, active, owner)?;
+    wait_for(&mut session, "fullscreen owner's initial focus", || {
+        Ok(window_list(&conn, root, active)? == [owner])
+    })?;
+    set_state(&conn, root, owner, 1, b"_NET_WM_STATE_FULLSCREEN")?;
+    wait_for(&mut session, "fullscreen above unrelated float", || {
+        Ok(has_state(&conn, owner, b"_NET_WM_STATE_FULLSCREEN")?
+            && server_stack(&conn, root, &[owner, float])? == [float, owner])
+    })?;
+    for target in [float, owner, float, owner] {
+        super::keyboard::key(&conn, 0xffbe)?;
+        wait_for(
+            &mut session,
+            "explicit user focus and floating peek",
+            || {
+                let stack = window_list(&conn, root, atom(&conn, b"_NET_CLIENT_LIST_STACKING")?)?;
+                Ok(window_list(&conn, root, active)? == [target]
+                    && conn.get_input_focus()?.reply()?.focus == target
+                    && stack.last() == Some(&target)
+                    && server_stack(&conn, root, &[owner, float])?.last() == Some(&target))
+            },
+        )?;
+        assert_stacking(&conn, root, &[owner, float])?;
+        assert!(has_state(&conn, owner, b"_NET_WM_STATE_FULLSCREEN")?);
+        let g = geometry(&conn, owner)?;
+        assert_eq!(
+            (g.x, g.y, g.width, g.height, g.border_width),
+            (0, 0, 800, 600, 0)
+        );
+    }
     Ok(())
 }
