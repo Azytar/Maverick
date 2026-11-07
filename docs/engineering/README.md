@@ -410,7 +410,29 @@ python3 tests/xvfb-stacking-campaign.py --out /tmp/maverick-stage11.json --exter
 
 CI preserves the measurement JSON alongside existing native probe evidence.
 Local X11/IPC execution is blocked by this container's socket restrictions;
-post-correction live validation is performed in CI.
+[post-correction CI run 42399569526](https://github.com/Azytar/Maverick/actions/runs/42399569526)
+passed all four jobs and all 33 X11 steps. All 60 rows completed; ConfigureWindow
+counts stayed identical. QueryTree counts stayed identical except tiled cyclic
+focus, which conservatively changed from 0 to 12 per case; every repeated-focus
+case still made zero queries. External restacks/docks, rapid focus and sticky
+View transitions passed. No latency improvement is claimed.
+
+### Stability follow-up — signal wake delivery
+
+The baseline cursor shutdown timeout exposed a real pre-existing lost-wakeup
+contract: signal handlers only set flags, and a process-directed signal may run
+on the IPC thread rather than interrupt the WM's poll. Delivery just before
+poll also loses the interrupt. A process-isolated Rust regression reproduced
+both cases without X11: the flag was set but the WM wait timed out.
+
+Handlers now additionally write one permanent, nonblocking CLOEXEC eventfd.
+Only the WM wait consumes this descriptor; control-server waits cannot steal
+its notification. The handler allocates/locks nothing and preserves errno.
+Failure to create the descriptor is reported as unavailable signal handlers.
+Four subprocess scenarios cover quit/regrab before/during the wait, verify
+ordinary waits cannot consume the wake, and verify draining leaves no idle
+spin. This correctness fix adds no timer or dependency; the necessary write
+FFI remains confined to the existing system boundary.
 
 ## Next work
 

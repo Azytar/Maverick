@@ -837,7 +837,7 @@ impl WindowManager {
             } else {
                 &fds[..1]
             };
-            maverick_sys::wait_readable_fds(fds, timeout);
+            maverick_sys::wait_readable_fds_with_signals(fds, timeout);
             drop(wait_trace);
             // Drain for anything that arrived while we were blocked.
             while let Some((ev, sequence)) = self.conn.poll_for_event_with_sequence()? {
