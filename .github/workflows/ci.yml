@@ -41,6 +41,7 @@ jobs:
         run: |
           cargo check --workspace --all-targets --all-features --locked
           cargo check -p maverick --all-targets --no-default-features --locked
+          cargo check --manifest-path maverickctl/Cargo.toml --workspace --all-targets --all-features --locked
 
   # The WM and its runtime libraries live in the workspace. Lint + test them
   # together so the dev loop is covered.

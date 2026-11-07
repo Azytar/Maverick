@@ -4,7 +4,7 @@
 //! windows: CLI parsing ([`ctl`]), the control-socket client ([`client`]),
 //! instance discovery ([`discover`]) and session orchestration ([`session`]).
 //! It drives a running Maverick over `control.sock`; the only Maverick crate
-//! it links is [`maverick_sys`], for the shared protocol surface (socket
+//! it links is [`maverick_protocol`], for the shared protocol surface (socket
 //! paths, peer-credential authorization, line framing, JSON helpers).
 
 pub mod client;

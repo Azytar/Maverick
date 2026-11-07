@@ -7,7 +7,7 @@
 //! below records what actually arrived on the socket, so these assert the wire
 //! and not a reconstruction of it.
 
-use maverick_sys::identity::InstanceInfo;
+use maverick_protocol::identity::InstanceInfo;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
@@ -67,19 +67,19 @@ impl Drop for Recording {
         }
         // Only this session's own socket and record. `cleanup_meta` unlinks by
         // type, so it cannot follow a path that is not the fixture's.
-        maverick_sys::identity::cleanup_meta(&self.sid);
+        maverick_protocol::identity::cleanup_meta(&self.sid);
     }
 }
 
 fn serve_recording(sid: &str) -> Recording {
     let sid = sid.to_string();
-    let path = maverick_sys::identity::sock_path(&sid);
+    let path = maverick_protocol::identity::sock_path(&sid);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("create fixture session dir");
     }
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).expect("bind fixture socket");
-    maverick_sys::identity::write_meta(&InstanceInfo {
+    maverick_protocol::identity::write_meta(&InstanceInfo {
         name: sid.clone(),
         session_id: sid.clone(),
         pid: std::process::id(),
@@ -189,10 +189,10 @@ fn dispatched(args: &[&str]) -> String {
 fn a_dropped_recording_server_leaves_nothing_discoverable() {
     runtime_dir();
     let sid = "clileak";
-    let sock = maverick_sys::identity::sock_path(sid);
-    let meta = maverick_sys::identity::try_meta_path(sid).expect("a valid session id");
+    let sock = maverick_protocol::identity::sock_path(sid);
+    let meta = maverick_protocol::identity::try_meta_path(sid).expect("a valid session id");
     assert!(
-        maverick_sys::identity::read_meta(sid).is_none(),
+        maverick_protocol::identity::read_meta(sid).is_none(),
         "the fixture's namespace must start empty, or this proves nothing"
     );
 
@@ -203,7 +203,7 @@ fn a_dropped_recording_server_leaves_nothing_discoverable() {
             "the fixture must publish a socket to be leaked"
         );
         assert!(
-            maverick_sys::identity::read_meta(sid).is_some(),
+            maverick_protocol::identity::read_meta(sid).is_some(),
             "the fixture must publish a record to be leaked"
         );
         // It has to be reachable while alive, or the drop could "clean up" a
@@ -221,7 +221,7 @@ fn a_dropped_recording_server_leaves_nothing_discoverable() {
         "the identity record outlived its owner: {meta:?}"
     );
     assert!(
-        maverick_sys::identity::read_meta(sid).is_none(),
+        maverick_protocol::identity::read_meta(sid).is_none(),
         "the session is still resolvable after the fixture was dropped"
     );
 }
@@ -239,7 +239,7 @@ fn a_dropped_recording_server_spares_the_others() {
     let (mine, theirs) = ("clispare-mine", "clispare-theirs");
 
     let other = serve_recording(theirs);
-    let sock = maverick_sys::identity::sock_path(theirs);
+    let sock = maverick_protocol::identity::sock_path(theirs);
     assert!(sock.exists(), "the neighbour must be up to be spared");
 
     {
@@ -252,7 +252,7 @@ fn a_dropped_recording_server_spares_the_others() {
         "dropping one fixture removed a session it never created: {sock:?}"
     );
     assert!(
-        maverick_sys::identity::read_meta(theirs).is_some(),
+        maverick_protocol::identity::read_meta(theirs).is_some(),
         "dropping one fixture removed another session's record"
     );
     drop(other);
@@ -266,7 +266,7 @@ fn a_recording_server_can_be_created_and_dropped_repeatedly() {
     let sid = "clicycle";
     for round in 0..3 {
         let server = serve_recording(sid);
-        let sock = maverick_sys::identity::sock_path(sid);
+        let sock = maverick_protocol::identity::sock_path(sid);
         assert!(
             sock.exists(),
             "round {round}: the fixture must publish a socket"
@@ -281,7 +281,7 @@ fn a_recording_server_can_be_created_and_dropped_repeatedly() {
             "round {round}: the socket outlived its owner"
         );
         assert!(
-            maverick_sys::identity::read_meta(sid).is_none(),
+            maverick_protocol::identity::read_meta(sid).is_none(),
             "round {round}: the record outlived its owner"
         );
     }
@@ -774,7 +774,7 @@ fn a_stale_record_is_still_a_resolvable_target() {
     // `alive: true` is what the window manager wrote, and discovery overwrites
     // it — which is the point, so the fixture cannot pass by being declared
     // stale rather than being measured stale.
-    maverick_sys::identity::write_meta(&InstanceInfo {
+    maverick_protocol::identity::write_meta(&InstanceInfo {
         name: sid.to_string(),
         session_id: sid.to_string(),
         pid: std::process::id(),
@@ -791,11 +791,11 @@ fn a_stale_record_is_still_a_resolvable_target() {
     // Each precondition is checked, so a fixture that quietly became "no record
     // at all" or "still listening" cannot satisfy this.
     assert!(
-        maverick_sys::identity::read_meta(sid).is_some(),
+        maverick_protocol::identity::read_meta(sid).is_some(),
         "the record must exist: a missing target is a different case"
     );
     assert!(
-        !maverick_sys::identity::sock_path(sid).exists(),
+        !maverick_protocol::identity::sock_path(sid).exists(),
         "the socket must be gone: a listening peer is a different case"
     );
     let found = maverickctl::discover::find_by_name(sid).expect("a record is still a target");
@@ -833,5 +833,5 @@ fn a_stale_record_is_still_a_resolvable_target() {
     // this the one test in the binary that accumulates a file per run — and an
     // instance nothing owns, which is the thing the ownership work has been
     // removing. There is no socket to unlink; the record is all this published.
-    maverick_sys::identity::cleanup_meta(sid);
+    maverick_protocol::identity::cleanup_meta(sid);
 }

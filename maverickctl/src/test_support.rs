@@ -55,10 +55,10 @@ pub fn text() -> impl Strategy<Value = String> {
 
 /// The runtime root this test process publishes, created once.
 ///
-/// A twin of `maverick_sys`'s `prop_support::runtime_root`, for the same reason
+/// A twin of `maverick_protocol`'s `prop_support::runtime_root`, for the same reason
 /// the pair above is duplicated: `#[cfg(test)]` items cannot cross crates.
 ///
-/// `maverick_sys::identity::runtime_dir` resolves `$XDG_RUNTIME_DIR/maverick` and
+/// `maverick_protocol::identity::runtime_dir` resolves `$XDG_RUNTIME_DIR/maverick` and
 /// falls back to `/run/user/$UID/maverick` when that is unset, so a unit test
 /// that stands up a control server would publish a session directory and a
 /// socket into the user's own Maverick runtime. Nothing there belongs to the
@@ -81,16 +81,17 @@ pub fn runtime_root() -> &'static std::path::Path {
             .prefix("mc-")
             .tempdir_in("/tmp")
             .expect("test runtime root");
-        maverick_sys::identity::set_private_dir(dir.path()).expect("private test runtime root");
+        maverick_protocol::identity::set_private_dir(dir.path())
+            .expect("private test runtime root");
         std::env::set_var("XDG_RUNTIME_DIR", dir.path());
         // Verified rather than assumed: if the redirect did not take, every
         // caller below this line would publish into the user's own runtime
         // directory, so the failure has to surface here rather than as a stray
         // socket much later.
         assert!(
-            maverick_sys::identity::runtime_dir().starts_with(dir.path()),
+            maverick_protocol::identity::runtime_dir().starts_with(dir.path()),
             "the test runtime root is not in effect: unit tests would publish into {}",
-            maverick_sys::identity::runtime_dir().display()
+            maverick_protocol::identity::runtime_dir().display()
         );
         dir
     })
@@ -109,8 +110,8 @@ pub fn runtime_root() -> &'static std::path::Path {
 /// a directory that still holds a socket simply fails to be removed rather than
 /// being emptied.
 pub fn retire(name: &str) {
-    let dir =
-        maverick_sys::identity::try_session_dir(name).expect("a fixture owns a valid session id");
+    let dir = maverick_protocol::identity::try_session_dir(name)
+        .expect("a fixture owns a valid session id");
     let _ = std::fs::remove_dir(dir);
 }
 
@@ -123,12 +124,13 @@ pub fn retire(name: &str) {
 #[test]
 fn retiring_a_fixture_directory_is_scoped_by_ownership() {
     runtime_root();
-    maverick_sys::identity::ensure_runtime_dir().expect("runtime dir");
+    maverick_protocol::identity::ensure_runtime_dir().expect("runtime dir");
 
     let owned = format!("retire-owned-{}", std::process::id());
     let neighbour = format!("retire-neighbour-{}", std::process::id());
-    let owned_dir = maverick_sys::identity::try_session_dir(&owned).expect("owned dir");
-    let neighbour_dir = maverick_sys::identity::try_session_dir(&neighbour).expect("neighbour dir");
+    let owned_dir = maverick_protocol::identity::try_session_dir(&owned).expect("owned dir");
+    let neighbour_dir =
+        maverick_protocol::identity::try_session_dir(&neighbour).expect("neighbour dir");
     std::fs::create_dir_all(&owned_dir).expect("owned dir");
     std::fs::create_dir_all(&neighbour_dir).expect("neighbour dir");
     std::fs::write(neighbour_dir.join("keep"), b"x").expect("neighbour file");

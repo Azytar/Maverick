@@ -4,10 +4,10 @@ members = [
     "maverick-sys",
     "maverick-x11",
     "maverick-toml",
-    "maverickctl",
     "maverick-testkit",
     "xtask",
 ]
+exclude = ["maverickctl"]
 default-members = ["."]
 resolver = "2"
 

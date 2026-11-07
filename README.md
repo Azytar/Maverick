@@ -960,19 +960,36 @@ GPL-3.0. See [LICENSE](LICENSE).
 
 ### Optional control builds
 
-On the development branch, `cargo build --release -p maverick` builds Minimal:
-only the X11 WM, with no control listener, control thread or discovery record.
-Keyboard actions, TOML rules, autostart and X11 restart remain available.
-`Super+Control+R` reloads the current TOML without IPC; `Super+Shift+R` restarts.
+`cargo build --release -p maverick` builds Minimal: the X11 WM without a control
+listener, thread, discovery record or control API. Keyboard actions, TOML rules,
+autostart, signals and X11 restart remain available. `Super+Control+R` reloads
+the current TOML; `Super+Shift+R` restarts.
 
-To build the compatible managed variant, use
-`cargo build --release -p maverick --features control-ipc`. The existing
-installer explicitly selects this variant until the separate client and
-selective installation are verified. This change is not a new public release;
-existing installations are not rebuilt or migrated automatically.
+`cargo build --release -p maverick --features control-ipc` enables remote control.
+The independent client is prepared in `maverickctl/`, excluded from the WM
+workspace, with its own Cargo.lock, protocol crate, tests and CI configuration.
+It builds with `cargo build --release --manifest-path maverickctl/Cargo.toml` and
+has no dependency on the WM repository or X11 engine. Its source remains here
+until publication and an immutable remote client pin are available; extraction
+must not make a working installation depend on an unpublished commit.
 
-The Rust Xvfb campaign runs the same tests against both release variants.
-The isolated Minimal lint/test commands select only `-p maverick` to prevent
-workspace feature unification through the client from obscuring the dependency
-boundary. A separate compile-fail check verifies that the Minimal system crate
-exports no `ControlServer`, `ControlHub` or `InstanceInfo` API.
+The installer offers `--minimal` and `--with-control`. Fresh installations
+recommend Minimal and do not build or fetch the client. Existing control
+installations keep their mode unless explicitly migrated. Control builds use
+the prepared independent client checkout (`--controller-source DIR` can select
+another local checkout). The final remote download path remains pending client
+publication; no mutable remote branch or invented revision is used.
+
+`--no-build` verifies `maverick --build-profile` before replacing any binary.
+An explicit transition to Minimal refuses to replace an owned WM still running
+in the old mode. Client removal requires an installer manifest, matching hash,
+current ownership and a regular file; personal or modified client files remain.
+
+The Xvfb campaign runs the same 21 Rust tests against both release variants,
+then independent native/control clients. Separate Minimal checks prevent
+workspace feature unification from hiding the dependency boundary; a compile-fail
+check verifies that the Minimal system crate exports no ControlServer,
+ControlHub or InstanceInfo. These development changes do not publish a release
+or automatically rebuild/migrate existing installations.
+
+Arch and nested-display validation commands are in [tests/ARCH_VALIDATION.md](tests/ARCH_VALIDATION.md).

@@ -93,6 +93,74 @@ const TEST_DEFAULT_FEATURES: Step = Step {
     args: &["test", "--workspace", "--all-targets", "--locked"],
 };
 
+const CLIENT_CHECK: Step = Step {
+    label: "independent client check",
+    program: "cargo",
+    args: &[
+        "check",
+        "--manifest-path",
+        "maverickctl/Cargo.toml",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+    ],
+};
+const CLIENT_FMT: Step = Step {
+    label: "independent client format",
+    program: "cargo",
+    args: &[
+        "fmt",
+        "--manifest-path",
+        "maverickctl/Cargo.toml",
+        "--all",
+        "--",
+        "--check",
+    ],
+};
+const CLIENT_CLIPPY: Step = Step {
+    label: "independent client clippy",
+    program: "cargo",
+    args: &[
+        "clippy",
+        "--manifest-path",
+        "maverickctl/Cargo.toml",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+    ],
+};
+const CLIENT_TEST: Step = Step {
+    label: "independent client tests",
+    program: "cargo",
+    args: &[
+        "test",
+        "--manifest-path",
+        "maverickctl/Cargo.toml",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+    ],
+};
+const CLIENT_RELEASE: Step = Step {
+    label: "independent client release",
+    program: "cargo",
+    args: &[
+        "build",
+        "--release",
+        "--manifest-path",
+        "maverickctl/Cargo.toml",
+        "--target-dir",
+        "target",
+        "--locked",
+    ],
+};
+
 const MINIMAL_CLIPPY: Step = Step {
     label: "isolated Minimal clippy",
     program: "cargo",
@@ -366,8 +434,6 @@ const RELEASE: Step = Step {
         "--release",
         "-p",
         "maverick",
-        "-p",
-        "maverickctl",
         "--features",
         "maverick/control-ipc",
         "--locked",
@@ -410,11 +476,25 @@ fn run() -> Result<(), String> {
             MINIMAL_CLIPPY,
             MINIMAL_TEST,
             MINIMAL_API,
+            CLIENT_FMT,
+            CLIENT_CHECK,
+            CLIENT_CLIPPY,
+            CLIENT_TEST,
         ]),
-        Task::Fmt => run_steps(&[FMT]),
-        Task::Clippy => run_steps(&[CLIPPY, CLIPPY_DEFAULT_FEATURES, MINIMAL_CLIPPY]),
-        Task::Test => run_steps(&[TEST_ALL_FEATURES, TEST_DEFAULT_FEATURES, MINIMAL_TEST]),
-        Task::Release => run_steps(&[MINIMAL_RELEASE, RELEASE]),
+        Task::Fmt => run_steps(&[FMT, CLIENT_FMT]),
+        Task::Clippy => run_steps(&[
+            CLIPPY,
+            CLIPPY_DEFAULT_FEATURES,
+            MINIMAL_CLIPPY,
+            CLIENT_CLIPPY,
+        ]),
+        Task::Test => run_steps(&[
+            TEST_ALL_FEATURES,
+            TEST_DEFAULT_FEATURES,
+            MINIMAL_TEST,
+            CLIENT_TEST,
+        ]),
+        Task::Release => run_steps(&[MINIMAL_RELEASE, RELEASE, CLIENT_RELEASE]),
         Task::X11 => {
             // Each profile gets the same protocol regressions. The remaining
             // external-client campaign intentionally exercises remote control.

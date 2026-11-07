@@ -625,7 +625,7 @@ pub use identity::{self_info, InstanceInfo, DEFAULT_NAME};
 
 /// Shared pieces for the property tests that are compiled into the library
 /// because the functions they cover are private.
-#[cfg(test)]
+#[cfg(all(test, feature = "control-ipc"))]
 pub(crate) mod prop_support {
     use proptest::prelude::*;
     use proptest::string::string_regex;

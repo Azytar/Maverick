@@ -143,7 +143,7 @@ fn a_reachable_peer_that_answers_nothing_is_a_failed_command() {
         None
     });
     assert!(
-        maverick_sys::identity::read_meta(sid).is_some(),
+        maverick_protocol::identity::read_meta(sid).is_some(),
         "a peer that cannot be resolved would make this the other test"
     );
 
@@ -194,8 +194,8 @@ fn dropping_a_socket_only_fixture_leaves_the_other_answering() {
     let kept = Instance::serve("socketonly-kept", Published::SocketOnly, Some(64), |_| {
         Some("pong socketonly-kept\n".to_string())
     });
-    let dropped_sock = maverick_sys::identity::sock_path("socketonly-dropped");
-    let kept_sock = maverick_sys::identity::sock_path("socketonly-kept");
+    let dropped_sock = maverick_protocol::identity::sock_path("socketonly-dropped");
+    let kept_sock = maverick_protocol::identity::sock_path("socketonly-kept");
     assert!(
         dropped_sock.exists() && kept_sock.exists(),
         "both fixtures publish a socket"
@@ -231,9 +231,9 @@ fn the_socket_only_ownership_boundary_holds_in_either_direction() {
     });
     drop(answering);
 
-    assert!(!maverick_sys::identity::sock_path("either-answering").exists());
+    assert!(!maverick_protocol::identity::sock_path("either-answering").exists());
     assert!(
-        maverick_sys::identity::sock_path("either-silent").exists(),
+        maverick_protocol::identity::sock_path("either-silent").exists(),
         "the silent fixture's socket belongs to it, not to the one just retired"
     );
     // A silent peer proves it is alive by accepting the connection and writing

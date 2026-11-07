@@ -1,3 +1,20 @@
+[workspace]
+members = ["control"]
+default-members = ["."]
+resolver = "2"
+
+[workspace.package]
+version = "1.1.1"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Azytar <stardust_ech0@proton.me>"]
+license = "GPL-3.0"
+repository = "https://github.com/Azytar/maverickctl"
+
+[workspace.dependencies]
+proptest = "1"
+tempfile = "3"
+
 [package]
 name = "maverickctl"
 version.workspace = true
@@ -6,20 +23,21 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "maverickctl — external Unix control tool for the Maverick window manager: CLI parsing, control-socket IPC client, and session/discovery operations. It drives a running Maverick over the control socket and never links the window manager itself."
-categories = ["command-line-utilities"]
-keywords = ["linux", "unix", "window-manager", "ipc", "cli"]
+description = "Independent Unix control client and session manager for Maverick"
 
 [dependencies]
-maverick-sys = { workspace = true, features = ["control-ipc"] }
+maverick-protocol = { path = "control", version = "1.1.1" }
 libc = "0.2"
-rustix = { version = "1", default-features = false, features = [
-    "std",
-    "fs",
-    "process",
-    "rand",
-] }
+rustix = { version = "1", default-features = false, features = ["std", "fs", "process", "rand"] }
 
 [dev-dependencies]
+maverick-protocol = { path = "control", features = ["test-server"] }
 proptest.workspace = true
 tempfile.workspace = true
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

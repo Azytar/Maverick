@@ -45,7 +45,7 @@ use super::{
     current_gid, current_uid, read_checked, session_dir, wait_until, Session, SessionError,
     SessionName, SessionState, Spec, START_TIMEOUT, STOP_GRACE,
 };
-use maverick_sys::identity;
+use maverick_protocol::identity;
 
 /// A resolved, runnable Maverick binary.
 ///

@@ -34,7 +34,7 @@ const TREE: &str = r#"{"sel_mon":0,"monitors":[{"index":0,"active_ws":0,"focused
 
 /// Stand in for an instance, answering every verb over the real protocol.
 ///
-/// The two refusals are the ones `maverick_sys`'s `dispatch_line` actually
+/// The two refusals are the ones `maverick_protocol`'s `dispatch_line` actually
 /// writes: a full window-manager command queue for the queued action, and
 /// `error restarting` for a read once the instance has begun its handoff. A test
 /// chooses between them by asking for the receipt `ok` instead, so the two
@@ -248,7 +248,7 @@ fn a_refused_dispatch_fails_and_a_receipt_does_not() {
 fn a_dropped_refusal_fixture_leaves_nothing_discoverable() {
     runtime_dir();
     let sid = "refusaldrop";
-    let sock = maverick_sys::identity::sock_path(sid);
+    let sock = maverick_protocol::identity::sock_path(sid);
     assert!(
         maverickctl::discover::find_by_name(sid).is_none(),
         "the fixture's namespace must start empty, or this proves nothing"
@@ -287,7 +287,7 @@ fn a_dropped_refusal_fixture_spares_the_others() {
     runtime_dir();
     let (mine, theirs) = ("refusalspare-mine", "refusalspare-theirs");
     let other = serve(theirs, TREE, "ok");
-    let sock = maverick_sys::identity::sock_path(theirs);
+    let sock = maverick_protocol::identity::sock_path(theirs);
     {
         let _own = serve(mine, TREE, "ok");
     }

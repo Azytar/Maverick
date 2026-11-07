@@ -190,7 +190,7 @@ fn a_fixture_in_one_namespace_is_invisible_to_another() {
     std::fs::create_dir_all(&a).expect("scratch directory");
     std::fs::create_dir_all(&b).expect("scratch directory");
 
-    // The shape `maverick_sys::identity` publishes: what discovery looks for.
+    // The shape `maverick_protocol::identity` publishes: what discovery looks for.
     let ficha = a.join("maverick-identity.json");
     std::fs::write(&ficha, b"{\"name\":\"a\"}").expect("publish a fixture");
 

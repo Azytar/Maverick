@@ -471,6 +471,7 @@ fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -
     // the replacement takes to start, which can be shorter than one poll.
     let restarting = hub.is_restarting();
     match cmd {
+        "protocol" => format!("protocol {}\n", crate::protocol::PROTOCOL_VERSION),
         PING_CMD if restarting => "error restarting\n".to_string(),
         STATE_CMD if restarting => "error restarting\n".to_string(),
         PING_CMD => format!("pong {safe_name}\n"),

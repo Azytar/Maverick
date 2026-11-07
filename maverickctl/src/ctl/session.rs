@@ -30,7 +30,7 @@ use crate::session::{
     self, lifecycle, proc, Backend, Resolution, Session, SessionName, SessionState, SessionView,
     Spec,
 };
-use maverick_sys::json::Json;
+use maverick_protocol::json::Json;
 
 /// How many log lines `maverickctl logs` shows by default.
 const DEFAULT_LOG_LINES: usize = 40;
@@ -158,15 +158,18 @@ fn view_json(v: &SessionView) -> String {
     };
     let refresh = v.refresh_rate.map_or("null".to_string(), |r| r.to_string());
     let xauth = match live_record(&v.name) {
-        Some(s) => maverick_sys::json::json_quote(&s.xauth_path().display().to_string()),
+        Some(s) => maverick_protocol::json::json_quote(&s.xauth_path().display().to_string()),
         None => "null".to_string(),
     };
     let fields = [
-        field("name", maverick_sys::json::json_quote(&v.name)),
-        field("session_id", maverick_sys::json::json_quote(&v.sid)),
-        field("kind", maverick_sys::json::json_quote(v.kind)),
-        field("state", maverick_sys::json::json_quote(v.state.as_str())),
-        field("display", maverick_sys::json::json_quote(&v.display)),
+        field("name", maverick_protocol::json::json_quote(&v.name)),
+        field("session_id", maverick_protocol::json::json_quote(&v.sid)),
+        field("kind", maverick_protocol::json::json_quote(v.kind)),
+        field(
+            "state",
+            maverick_protocol::json::json_quote(v.state.as_str()),
+        ),
+        field("display", maverick_protocol::json::json_quote(&v.display)),
         field("resolution", resolution),
         field("refresh_rate", refresh),
         field("pid", v.pid.map_or("null".to_string(), |p| p.to_string())),
@@ -174,18 +177,18 @@ fn view_json(v: &SessionView) -> String {
             "x_pid",
             v.x_pid.map_or("null".to_string(), |p| p.to_string()),
         ),
-        field("binary", maverick_sys::json::json_quote(&v.binary)),
+        field("binary", maverick_protocol::json::json_quote(&v.binary)),
         field("debug", v.debug.to_string()),
         field(
             "backend",
             v.backend.map_or("null".to_string(), |b| {
-                maverick_sys::json::json_quote(b.label())
+                maverick_protocol::json::json_quote(b.label())
             }),
         ),
         field("xauth", xauth),
         field(
             "exit_reason",
-            maverick_sys::json::json_quote(&v.exit_reason),
+            maverick_protocol::json::json_quote(&v.exit_reason),
         ),
         field("created_at", v.created_at.to_string()),
         field("owner_uid", v.owner_uid.to_string()),
@@ -459,7 +462,7 @@ fn change(c: &Ctl, args: &[String], verb: &str) -> Result<(), String> {
         if views.is_empty() {
             println!(
                 "{{\"name\":{},\"removed\":true}}",
-                maverick_sys::json::json_quote(&name)
+                maverick_protocol::json::json_quote(&name)
             );
         } else {
             println!("{{\"session\":{}}}", views[0]);
@@ -546,7 +549,7 @@ pub fn exec(c: &Ctl, args: &[String]) -> Result<(), String> {
     if c.json {
         println!(
             "{{\"session\":{},\"pid\":{pid}}}",
-            maverick_sys::json::json_quote(&call.session)
+            maverick_protocol::json::json_quote(&call.session)
         );
     } else {
         println!("{pid}");
@@ -1010,7 +1013,7 @@ fn process_list(c: &Ctl, _args: &[String]) -> Result<bool, String> {
             .collect();
         println!(
             "{{\"session\":{},\"processes\":[{}]}}",
-            maverick_sys::json::json_quote(&name),
+            maverick_protocol::json::json_quote(&name),
             items.join(",")
         );
         return Ok(true);
@@ -1044,12 +1047,12 @@ fn process_json(p: &proc::ProcInfo, role: &str) -> String {
         p.pid,
         p.ppid,
         p.pgid,
-        maverick_sys::json::json_quote(&p.display_name()),
-        maverick_sys::json::json_quote(role),
-        maverick_sys::json::json_quote(&p.cmdline),
+        maverick_protocol::json::json_quote(&p.display_name()),
+        maverick_protocol::json::json_quote(role),
+        maverick_protocol::json::json_quote(&p.cmdline),
         p.cpu_percent(),
         p.rss_bytes,
-        maverick_sys::json::json_quote(&p.rss_human()),
+        maverick_protocol::json::json_quote(&p.rss_human()),
         p.elapsed_ms,
     )
 }
@@ -1282,13 +1285,15 @@ pub fn inspect(c: &Ctl, _args: &[String]) -> Result<(), String> {
     //
     // `required` is the difference: a refusal always fails, while a transport
     // error is only an error when the instance was already answering.
-    let query = |topic: &str, required: bool| -> Result<Option<maverick_sys::json::Json>, String> {
+    let query = |topic: &str,
+                 required: bool|
+     -> Result<Option<maverick_protocol::json::Json>, String> {
         match client::query(&view.sid, topic) {
             Ok(reply) => match super::refusal(&reply) {
                 Some(why) => Err(format!(
                     "the window manager refused the {topic} query: {why}"
                 )),
-                None => Ok(maverick_sys::json::parse(&reply)),
+                None => Ok(maverick_protocol::json::parse(&reply)),
             },
             Err(e) if required => Err(format!("cannot read the {topic} of '{}': {e}", view.name)),
             Err(_) => Ok(None),
@@ -1366,7 +1371,7 @@ fn merge_inspect(
     windows: &[super::WindowInfo],
     process_count: usize,
 ) -> String {
-    let base = maverick_sys::json::parse(view).expect("a view this function just built");
+    let base = maverick_protocol::json::parse(view).expect("a view this function just built");
     let mut fields = match base {
         Json::Obj(fields) => fields,
         _ => Vec::new(),
@@ -1736,7 +1741,7 @@ mod tests {
             "the key is always present: {doc}"
         );
         assert!(
-            maverick_sys::json::parse(&doc).is_some(),
+            maverick_protocol::json::parse(&doc).is_some(),
             "and it must be valid JSON"
         );
 
@@ -1782,7 +1787,7 @@ mod tests {
             created_at: 0,
             owner_uid: 1000,
         });
-        let v = maverick_sys::json::parse(&doc).expect("valid JSON");
+        let v = maverick_protocol::json::parse(&doc).expect("valid JSON");
         for key in [
             "name",
             "session_id",
@@ -1823,7 +1828,7 @@ mod tests {
             elapsed_ms: 10_000,
         };
         let doc = process_json(&p, "application");
-        let v = maverick_sys::json::parse(&doc).expect("valid JSON");
+        let v = maverick_protocol::json::parse(&doc).expect("valid JSON");
         assert_eq!(v.num_field("pid"), 18231);
         assert_eq!(v.str_field("name"), "alacritty");
         assert_eq!(v.str_field("role"), "application");

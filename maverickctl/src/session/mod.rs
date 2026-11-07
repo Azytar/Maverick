@@ -50,7 +50,7 @@
 //! A session belongs to the uid that created it, and the record says so. The
 //! directory is `0700`, the cookie is `0600`, the logs are `0600`, and the
 //! control socket is additionally peer-credential checked by the WM (see
-//! [`maverick_sys::control`]). Nothing here reads an environment variable as an
+//! [`maverick_protocol::control`]). Nothing here reads an environment variable as an
 //! authorization decision: `owner_uid` is recorded so a *foreign* record is
 //! refused, never so a caller can claim one.
 
@@ -64,8 +64,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use maverick_sys::identity;
-use maverick_sys::json::{json_quote, quote_array, scan_object};
+use maverick_protocol::identity;
+use maverick_protocol::json::{json_quote, quote_array, scan_object};
 
 pub use xserver::{Backend, Display, XServer};
 
@@ -544,7 +544,7 @@ impl Session {
     /// not usable.
     ///
     /// A `null` field reads as *absent*, not as the four characters `null`
-    /// (see [`maverick_sys::json::Field::text`]), so an optional the writer left empty
+    /// (see [`maverick_protocol::json::Field::text`]), so an optional the writer left empty
     /// stays empty on the way back in. That is what keeps `cwd: null` from
     /// becoming a session whose working directory is a file called "null".
     pub fn from_json(doc: &str) -> Option<Self> {

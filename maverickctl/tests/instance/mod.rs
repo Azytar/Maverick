@@ -15,7 +15,7 @@
 //! replies a fixed refusal, one routes by the request line, one closes without
 //! replying at all — so only the ownership lives here.
 
-use maverick_sys::identity::InstanceInfo;
+use maverick_protocol::identity::InstanceInfo;
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
@@ -67,7 +67,7 @@ impl Instance {
         };
 
         if published != Published::RecordOnly {
-            let path = maverick_sys::identity::sock_path(sid);
+            let path = maverick_protocol::identity::sock_path(sid);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).expect("create fixture session dir");
             }
@@ -93,7 +93,7 @@ impl Instance {
         }
 
         if published != Published::SocketOnly {
-            maverick_sys::identity::write_meta(&InstanceInfo {
+            maverick_protocol::identity::write_meta(&InstanceInfo {
                 name: sid.to_string(),
                 session_id: sid.to_string(),
                 pid: std::process::id(),
@@ -166,10 +166,10 @@ impl Drop for Instance {
             // Unlinks the record and the socket, each only if it still is the
             // type it was published as, under this session's directory alone.
             Published::Instance | Published::RecordOnly => {
-                maverick_sys::identity::cleanup_meta(&self.sid);
+                maverick_protocol::identity::cleanup_meta(&self.sid);
             }
             Published::SocketOnly => {
-                let sock = maverick_sys::identity::sock_path(&self.sid);
+                let sock = maverick_protocol::identity::sock_path(&self.sid);
                 if let Ok(meta) = std::fs::symlink_metadata(&sock) {
                     if meta.file_type().is_socket() {
                         let _ = std::fs::remove_file(&sock);

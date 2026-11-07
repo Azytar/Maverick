@@ -119,6 +119,12 @@ def differing(expected, got):
 # The contract suite names the installer by path, so it is listed here by the
 # name the smoke module exports; nothing else needs repointing.
 ORIGINAL_SUITES = [
+    smoke.suite_minimal_default_and_source_build,
+    smoke.suite_profile_mismatch_is_rejected,
+    smoke.suite_control_mode_is_preserved_and_owned_client_is_retired,
+    smoke.suite_foreign_or_modified_controller_survives,
+    smoke.suite_minimal_transition_refuses_a_running_owned_wm,
+    smoke.suite_manifest_cannot_escape_the_prefix,
     smoke.suite_local_install,
     smoke.suite_default_prefix_is_user_local,
     smoke.suite_path_setup,
@@ -266,13 +272,16 @@ def suite_build_command_names_the_release_set():
         assert result.returncode == 0, (result.stdout[-2000:], result.stderr[-2000:])
         builds = [line for line in box.calls.splitlines() if line.startswith("cargo build")]
         assert builds, f"no cargo build was recorded:\n{box.calls}"
-        for line in builds:
-            assert "-p maverick" in line, f"build does not name maverick: {line}"
-            assert "-p maverickctl" in line, f"build does not name maverickctl: {line}"
-            assert "--release" in line, f"build is not a release build: {line}"
-            assert "--features maverick/control-ipc" in line, f"build names features: {line}"
-            assert "--no-default-features" not in line, \
-                f"build disables a default feature that does not exist: {line}"
+        wm = [line for line in builds if "--manifest-path" not in line]
+        client = [line for line in builds if "--manifest-path" in line]
+        assert wm and client, builds
+        for line in wm:
+            assert "-p maverick " in line and "--release" in line, line
+            assert "--features control-ipc" in line, line
+            assert "-p maverickctl" not in line, line
+        for line in client:
+            assert "-p maverickctl" in line and "--release" in line and "--locked" in line, line
+            assert "--target-dir" in line and "maverickctl/Cargo.toml" in line, line
     print("PASS: the build command names maverick and maverickctl, and explicit control-ipc")
 
 

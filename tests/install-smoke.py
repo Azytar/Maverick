@@ -47,6 +47,7 @@ def startup_files(box):
 STUB_OK = """#!/bin/sh
 case "$1" in
   --version) echo "maverick 0.0.0-test"; exit 0 ;;
+  --build-profile) echo "${MAVERICK_STUB_PROFILE:-control}"; exit 0 ;;
   session)   [ "${2:-}" = "--help" ] && echo "maverickctl sessions - test stub"; exit 0 ;;
   --help)    echo "usage: test stub"; exit 0 ;;
 esac
@@ -59,6 +60,7 @@ exit 0
 STUB_NO_SESSIONS = """#!/bin/sh
 case "$1" in
   --version) echo "maverick 0.0.0-test"; exit 0 ;;
+  --build-profile) echo "${MAVERICK_STUB_PROFILE:-control}"; exit 0 ;;
   session)   echo "maverickctl: unknown command 'session'" >&2; exit 1 ;;
   --help)    echo "usage: test stub"; exit 0 ;;
 esac
@@ -131,6 +133,8 @@ class Sandbox:
                      self.repo / "target/release", self.target / "release"):
             path.mkdir(parents=True)
         shutil.copytree(INSTALLER_DIR, self.repo / "installer")
+        (self.repo / "maverickctl").mkdir()
+        (self.repo / "maverickctl/Cargo.toml").write_text('[package]\nname="maverickctl"\nversion="1.1.1"\n')
         (self.repo / "config/config.toml").write_text("[general]\nview_count = 4\n")
         self.stubs = base / "stubs"
         self.stubs.mkdir()
@@ -156,9 +160,11 @@ class Sandbox:
         env.update({k: str(v) for k, v in extra.items()})
         return env
 
-    def install(self, *args, env=None, timeout=60):
+    def install(self, *args, env=None, timeout=60, profile="control"):
         command = ["bash", str(self.repo / "installer/install.sh"), "--yes", "--no-anim", "--lang", "en"]
         command += list(args)
+        if profile is not None and not any(a in ("--minimal", "--with-control") for a in args):
+            command += ["--with-control" if profile == "control" else "--minimal"]
         result = subprocess.run(command, env=env or self.env(), capture_output=True,
                                 text=True, timeout=timeout)
         self.calls = self.log.read_text() if self.log.exists() else ""
@@ -181,6 +187,8 @@ def interactive_install(box, keys, args=()):
     env = box.env(SHELL="/bin/bash", TERM="xterm-256color")
     command = ["bash", str(box.repo / "installer/install.sh"), "--no-build", "--lang", "en"]
     command += list(args)
+    if not any(a in ("--minimal", "--with-control") for a in args):
+        command += ["--with-control"]
     proc = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
                             env=env, close_fds=True)
     os.close(slave)
@@ -692,9 +700,115 @@ def suite_cli_contract():
     print("PASS: CLI argument contract")
 
 
+
+def suite_minimal_default_and_source_build():
+    for build in (False, True):
+        with tempfile.TemporaryDirectory(prefix="maverick-minimal-") as d:
+            box = Sandbox(Path(d))
+            executable(box.tools / "git", '#!/bin/sh\necho unexpected-network >&2\nexit 99\n')
+            args = [] if build else ["--no-build"]
+            result = box.install("--prefix", str(box.prefix), *args,
+                                 profile=None, env=box.env(MAVERICK_STUB_PROFILE="minimal"))
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert (box.prefix / "bin/maverick").is_file()
+            assert not (box.prefix / "bin/maverickctl").exists()
+            assert (box.prefix / "share/xsessions/maverick.desktop").is_file()
+            assert "--manifest-path" not in box.calls and "-p maverickctl" not in box.calls
+            assert "--features control-ipc" not in box.calls
+    print("PASS: new Minimal installs neither build nor fetch the independent client")
+
+
+def suite_profile_mismatch_is_rejected():
+    with tempfile.TemporaryDirectory(prefix="maverick-profile-") as d:
+        box = Sandbox(Path(d))
+        result = box.install("--prefix", str(box.prefix), "--minimal", "--no-build")
+        assert result.returncode != 0 and "artifact profile" in result.stderr
+        assert not (box.prefix / "bin/maverick").exists()
+    print("PASS: --no-build cannot install a control binary as Minimal")
+
+
+def suite_control_mode_is_preserved_and_owned_client_is_retired():
+    with tempfile.TemporaryDirectory(prefix="maverick-migration-") as d:
+        box = Sandbox(Path(d))
+        first = box.install("--prefix", str(box.prefix), "--no-build")
+        check_success(box, first)
+        # No explicit mode: upgrading a control installation preserves it.
+        again = box.install("--prefix", str(box.prefix), "--no-build", profile=None)
+        assert again.returncode == 0 and (box.prefix / "bin/maverickctl").exists()
+        config = box.home / ".config/maverick/config.toml"
+        config.write_text("# personal configuration\n")
+        migrated = box.install("--prefix", str(box.prefix), "--minimal", "--no-build", "--no-config",
+                               env=box.env(MAVERICK_STUB_PROFILE="minimal"))
+        assert migrated.returncode == 0, (migrated.stdout, migrated.stderr)
+        assert not (box.prefix / "bin/maverickctl").exists()
+        assert config.read_text() == "# personal configuration\n"
+    print("PASS: control upgrades preserve mode; explicit Minimal retires only the owned client")
+
+
+def suite_foreign_or_modified_controller_survives():
+    for modified in (False, True):
+        with tempfile.TemporaryDirectory(prefix="maverick-foreign-") as d:
+            box = Sandbox(Path(d))
+            if modified:
+                assert box.install("--prefix", str(box.prefix), "--no-build").returncode == 0
+            else:
+                (box.prefix / "bin").mkdir(parents=True)
+            controller = box.prefix / "bin/maverickctl"
+            executable(controller, "#!/bin/sh\n# personal controller\nexit 0\n")
+            before = controller.read_bytes()
+            result = box.install("--prefix", str(box.prefix), "--minimal", "--no-build",
+                                 env=box.env(MAVERICK_STUB_PROFILE="minimal"))
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert controller.read_bytes() == before
+            assert "left in place" in result.stderr
+    print("PASS: unowned and modified client files survive migration")
+
+
+def suite_minimal_transition_refuses_a_running_owned_wm():
+    with tempfile.TemporaryDirectory(prefix="maverick-running-") as d:
+        box = Sandbox(Path(d))
+        (box.prefix / "bin").mkdir(parents=True)
+        binary = box.prefix / "bin/maverick"
+        source = '#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\nint main(int n,char **v){if(n>1){puts(strcmp(v[1],"--build-profile")==0?"control":"maverick test");return 0;}sleep(60);return 0;}\n'
+        subprocess.run(["cc", "-x", "c", "-o", str(binary), "-"], input=source, text=True, check=True)
+        old = binary.read_bytes()
+        process = subprocess.Popen([str(binary)])
+        try:
+            result = box.install("--prefix", str(box.prefix), "--minimal", "--no-build",
+                                 env=box.env(MAVERICK_STUB_PROFILE="minimal"))
+            assert result.returncode != 0 and "close the running Maverick" in result.stderr
+            assert binary.read_bytes() == old
+            assert process.poll() is None
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+    print("PASS: a profile switch cannot leave the old owned control process running")
+
+
+def suite_manifest_cannot_escape_the_prefix():
+    with tempfile.TemporaryDirectory(prefix="maverick-manifest-") as d:
+        box = Sandbox(Path(d))
+        outside = box.base / "outside"
+        outside.mkdir()
+        (box.prefix / "share").mkdir(parents=True)
+        (box.prefix / "share/maverick").symlink_to(outside, target_is_directory=True)
+        result = box.install("--prefix", str(box.prefix), "--minimal", "--no-build",
+                             env=box.env(MAVERICK_STUB_PROFILE="minimal"))
+        assert result.returncode != 0 and "manifest directory leaves" in result.stderr
+        assert list(outside.iterdir()) == []
+        assert not (box.prefix / "bin/maverick").exists()
+    print("PASS: manifest writes cannot follow a link outside the selected prefix")
+
+
 def main():
     assert os.getuid() != 0, "Run this test as a normal user"
     suites = [
+        suite_minimal_default_and_source_build,
+        suite_profile_mismatch_is_rejected,
+        suite_control_mode_is_preserved_and_owned_client_is_retired,
+        suite_foreign_or_modified_controller_survives,
+        suite_minimal_transition_refuses_a_running_owned_wm,
+        suite_manifest_cannot_escape_the_prefix,
         suite_local_install,
         suite_default_prefix_is_user_local,
         suite_path_setup,

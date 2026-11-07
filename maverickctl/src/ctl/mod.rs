@@ -17,7 +17,7 @@
 //! [`resolve_target`] resolves the target `session_id` in this order (first
 //! match wins):
 //!
-//! 1. `--session <sid>` — explicit session id, validated via [`maverick_sys::identity::read_meta`].
+//! 1. `--session <sid>` — explicit session id, validated via [`maverick_protocol::identity::read_meta`].
 //! 2. `--name <label>` — human label or sid, via [`crate::discover::find_by_name`].
 //! 3. `$MAVERICK_INSTANCE` — session id the WM exported to its children.
 //! 4. Caller context — `DISPLAY` + controlling TTY (`/proc/self/stat` field 7);
@@ -52,7 +52,7 @@
 use std::process::ExitCode;
 
 use crate::{client, discover};
-use maverick_sys::identity::{current_display, current_tty_nr, InstanceInfo};
+use maverick_protocol::identity::{current_display, current_tty_nr, InstanceInfo};
 
 pub mod session;
 pub mod windows;
@@ -726,7 +726,7 @@ fn parse_opts_default(args: &[String]) -> Opts {
 /// key (`session_id`), not the human label.
 fn resolve_target(tool: &str, name: &Option<String>, session: &Option<String>) -> Option<String> {
     if let Some(s) = session {
-        return if maverick_sys::identity::read_meta(s).is_some() {
+        return if maverick_protocol::identity::read_meta(s).is_some() {
             Some(s.clone())
         } else {
             eprintln!("{tool}: no instance with session id '{s}'");
@@ -753,7 +753,7 @@ fn resolve_target(tool: &str, name: &Option<String>, session: &Option<String>) -
     // `$MAVERICK_INSTANCE` holds the session id the WM exported to its children
     // (the common case when a tool is launched from a Maverick keybind).
     if let Ok(env) = std::env::var("MAVERICK_INSTANCE") {
-        if !env.is_empty() && maverick_sys::identity::read_meta(&env).is_some() {
+        if !env.is_empty() && maverick_protocol::identity::read_meta(&env).is_some() {
             return Some(env);
         }
     }
@@ -1187,7 +1187,7 @@ fn cmd_forward(tool: &str, line: &str) -> ExitCode {
     // protocol is line-based and whitespace-separated, and rejoining is what
     // makes `query  tree` and `query tree` the same request.
     let payload = o.positional.join(" ");
-    use maverick_sys::identity::{DISPATCH_CMD, IDENTIFY_CMD, PING_CMD, QUERY_CMD};
+    use maverick_protocol::identity::{DISPATCH_CMD, IDENTIFY_CMD, PING_CMD, QUERY_CMD};
     // Require a whitespace delimiter after `query`/`dispatch`, mirroring the
     // server (`control::dispatch_line`): `queryfoo` must fall through to
     // dispatch, not be parsed as topic `foo`.

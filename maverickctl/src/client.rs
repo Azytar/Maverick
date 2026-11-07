@@ -1,11 +1,11 @@
 //! Control-socket client: how `maverickctl` (and only it) talks to a running instance.
 //!
 //! The window manager never calls anything in this module: it owns the server
-//! half (`maverick_sys::control`) and only ever reads its own socket. Every
+//! half (`maverick_protocol::control`) and only ever reads its own socket. Every
 //! function here opens a fresh `UnixStream` to another process's
 //! `control.sock`, so this code lives in the tool crate rather than in the
 //! shared IPC surface. Moved verbatim from `maverick-sys::control`; the only
-//! edits are the `maverick_sys::` paths below.
+//! edits are the `maverick_protocol::` paths below.
 
 #[cfg(test)]
 use std::io::BufRead;
@@ -13,11 +13,11 @@ use std::io::{self, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use maverick_sys::control::MAX_CMD_LEN;
-use maverick_sys::identity::{
+use maverick_protocol::identity::{
     self, DISPATCH_CMD, IDENTIFY_CMD, PING_CMD, QUERY_CMD, QUIT_CMD, RELOAD_CMD, RESTART_CMD,
     STATE_CMD, SUBSCRIBE_CMD,
 };
+use maverick_protocol::protocol::MAX_CMD_LEN;
 
 /// Connect to a running instance's control socket and send one command,
 /// returning the first reply line. Used by discovery/ctl tools.
@@ -41,9 +41,14 @@ pub fn send_command(name: &str, cmd: &str) -> std::io::Result<String> {
     let mut stream = UnixStream::connect(&path)?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+    let mut reader = BufReader::new(stream.try_clone()?);
+    // Discovery must still report a live legacy instance; commands that act
+    // on it require an explicit versioned contract before sending their data.
+    if !matches!(cmd, PING_CMD | IDENTIFY_CMD) {
+        negotiate(&mut stream, &mut reader)?;
+    }
     stream.write_all(format!("{cmd}\n").as_bytes())?;
-    let mut reader = BufReader::new(stream);
-    let reply = maverick_sys::protocol::read_frame(&mut reader)?.unwrap_or_default();
+    let reply = maverick_protocol::protocol::read_frame(&mut reader)?.unwrap_or_default();
     // The protocol owes exactly one line per request: every arm of
     // `dispatch_line` returns one, and the server writes it before closing. The
     // shortest real reply is `ok`, so a zero-byte read means the peer went away
@@ -57,6 +62,21 @@ pub fn send_command(name: &str, cmd: &str) -> std::io::Result<String> {
         ));
     }
     Ok(reply)
+}
+
+fn negotiate(stream: &mut UnixStream, reader: &mut impl std::io::BufRead) -> io::Result<()> {
+    stream.write_all(b"protocol\n")?;
+    let response = maverick_protocol::protocol::read_frame(reader)?.unwrap_or_default();
+    require_protocol(&response)
+}
+
+fn require_protocol(response: &str) -> io::Result<()> {
+    let expected = format!("protocol {}", maverick_protocol::protocol::PROTOCOL_VERSION);
+    if response == expected {
+        return Ok(());
+    }
+    Err(io::Error::new(io::ErrorKind::Unsupported,
+        format!("control protocol mismatch: received {response:?}; client requires {expected:?} (use a compatible control-ipc WM)")))
 }
 
 /// Probe a running instance: connect, `ping`, and confirm it answers.
@@ -132,12 +152,14 @@ where
 {
     let path = identity::try_sock_path(name)?;
     let mut stream = UnixStream::connect(&path)?;
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+    let mut reader = BufReader::new(stream.try_clone()?);
+    negotiate(&mut stream, &mut reader)?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.write_all(format!("{SUBSCRIBE_CMD}\n").as_bytes())?;
-    let mut reader = BufReader::new(stream);
     let mut acked = false;
-    while let Some(line) = maverick_sys::protocol::read_frame(&mut reader)? {
+    while let Some(line) = maverick_protocol::protocol::read_frame(&mut reader)? {
         let trimmed = line.trim_end_matches(['\n', '\r']);
         // Skip the initial "ok subscribe" acknowledgement. A server-side
         // rejection (e.g. subscriber cap) arrives here instead: surface it
@@ -156,15 +178,21 @@ where
             break;
         }
     }
+    if !acked {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "missing subscribe acknowledgement",
+        ));
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maverick_sys::control::{identity_json, ControlServer, MAX_SUBSCRIBERS};
-    use maverick_sys::hub::{ControlCommand, ControlHub};
-    use maverick_sys::identity::{self, InstanceInfo};
+    use maverick_protocol::control::{identity_json, ControlServer, MAX_SUBSCRIBERS};
+    use maverick_protocol::hub::{ControlCommand, ControlHub};
+    use maverick_protocol::identity::{self, InstanceInfo};
 
     #[test]
     fn subscribe_receives_events() {
@@ -385,5 +413,24 @@ mod tests {
         peer.join().expect("the peer thread returns");
         let _ = std::fs::remove_file(&path);
         crate::test_support::retire(name);
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    #[test]
+    fn incompatible_and_legacy_servers_are_rejected_before_control_commands() {
+        assert!(super::require_protocol("protocol 1").is_ok());
+        for response in [
+            "protocol 0",
+            "protocol 2",
+            "protocol 1 extra",
+            "",
+            "error unknown-command: protocol",
+        ] {
+            let error = super::require_protocol(response).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+            assert!(error.to_string().contains("requires"));
+        }
     }
 }

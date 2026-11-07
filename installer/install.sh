@@ -55,19 +55,29 @@ NO_BUILD=false
 PATH_CHOICE=""
 NO_ANIM="${MAVERICK_NO_ANIM:-0}"
 KEEP_LOG=false
+INSTALL_PROFILE=""
+CONTROLLER_SOURCE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --prefix|--lang|--xsessions-dir)
+        --prefix|--lang|--xsessions-dir|--controller-source)
             [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || {
                 echo "$1 requires a value" >&2; exit 2;
             }
             case "$1" in
                 --prefix)         PREFIX="$2" ;;
+                --controller-source) CONTROLLER_SOURCE="$(realpath -m -- "$2")" ;;
                 --lang)           LANG_CHOICE="$2" ;;
                 --xsessions-dir)  XSESSIONS_DIR="$2" ;;
             esac
             shift 2 ;;
+        --minimal|--with-control)
+            requested=minimal
+            [[ "$1" != --with-control ]] || requested=control
+            [[ -z "$INSTALL_PROFILE" || "$INSTALL_PROFILE" == "$requested" ]] || {
+                echo '--minimal and --with-control are mutually exclusive' >&2; exit 2;
+            }
+            INSTALL_PROFILE="$requested"; shift ;;
         --system)    SYSTEM_INSTALL=true; shift ;;
         --yes|-y)    YES=true; shift ;;
         --no-config) NO_CONFIG=true; shift ;;
@@ -86,26 +96,25 @@ while [[ $# -gt 0 ]]; do
             cat <<'HELP'
 Usage: ./installer/install.sh [options]
 
-Installs maverick and maverickctl into a prefix. The default prefix is
-$HOME/.local and needs no privileges. Outside the prefix the installer writes
-only your own files — the config under ~/.config and, when the bin directory
-is missing from PATH, a marked block in a shell startup file (see --no-path).
-It never invokes sudo.
+Installs Maverick into a prefix (default: $HOME/.local), without sudo.
+New installations default to Minimal: the WM, its initial configuration and
+X11 session entry. Existing control installations keep their mode unless you
+explicitly select --minimal. Personal configuration is never removed.
 
-Inside the prefix, exactly three files:
-  <prefix>/bin/maverick                  the X11 tiling window manager
-  <prefix>/bin/maverickctl               the separate control client
-  <prefix>/share/xsessions/maverick.desktop   the X11 session entry
+--with-control enables the WM control listener and installs maverickctl.
+The independent client checkout is currently prepared beside the WM at
+maverickctl/; --controller-source selects another prepared local checkout.
+Remote client publication is required before a pinned remote source can
+replace this temporary local source. Minimal never builds or fetches it.
 
-Both binaries are built from this workspace with
-`cargo build --release -p maverick -p maverickctl --features maverick/control-ipc`. There is no second control
-binary, no installer crate, no desktop-environment component, no compositor,
-wallpaper, animation or rendering component, and no showcase or demo asset to
-install: the installer offers no switch for any of them, and
---with-compositor / --no-default-features are rejected with status 2 because
-there is nothing to select.
+Existing artifacts passed to --no-build must report the selected profile;
+a stale control binary cannot silently be installed as Minimal.
 
 Options:
+  --minimal        WM only; recommended for new installations
+  --with-control   WM with remote control and the independent client
+  --controller-source DIR
+                   Prepared independent client source (control mode only)
   --system         Install into /usr/local (requires write access to it)
   --prefix DIR     Install prefix (default: $HOME/.local)
   --xsessions-dir DIR
@@ -206,7 +215,39 @@ BIN_DIR="$PREFIX/bin"
 # inconsistent with each other, and when the list shrank they made the final
 # verification reject an installation it had just performed correctly.
 # A literal next to a list is a second source of truth waiting to be wrong.
-RUNTIME_BINS=(maverick maverickctl)
+RUNTIME_BINS=(maverick)
+# Resolve the mode before deriving the artifact set. A legacy install that
+# cannot report its profile is kept in control mode until explicitly migrated.
+INSTALLED_PROFILE=""
+if [[ -x "$BIN_DIR/maverick" ]]; then
+    INSTALLED_PROFILE="$("$BIN_DIR/maverick" --build-profile 2>/dev/null || true)"
+fi
+if [[ -z "$INSTALL_PROFILE" ]]; then
+    if [[ "$INSTALLED_PROFILE" == minimal ]]; then
+        INSTALL_PROFILE=minimal
+    elif [[ -x "$BIN_DIR/maverick" ]]; then
+        INSTALL_PROFILE=control
+    else
+        INSTALL_PROFILE=minimal
+    fi
+    PROFILE_EXPLICIT=false
+else
+    PROFILE_EXPLICIT=true
+fi
+if [[ "$INSTALL_PROFILE" == control ]]; then RUNTIME_BINS+=(maverickctl); fi
+CONTROLLER_SOURCE="${CONTROLLER_SOURCE:-$APP_DIR/../maverickctl}"
+WM_CARGO_ARGS=(-p maverick --no-default-features)
+if [[ "$INSTALL_PROFILE" == control ]]; then WM_CARGO_ARGS+=(--features control-ipc); fi
+INSTALL_MANIFEST="$PREFIX/share/maverick/install.manifest"
+PREVIOUS_CTL_SHA=""
+if [[ -f "$INSTALL_MANIFEST" && ! -L "$INSTALL_MANIFEST" && -O "$INSTALL_MANIFEST" && "$(head -n 1 -- "$INSTALL_MANIFEST")" == maverick-installer-v1 ]]; then
+    while IFS= read -r record; do
+        if [[ "$record" == controller_sha256=* ]]; then
+            value="${record#controller_sha256=}"
+            if [[ "$value" =~ ^[0-9a-f]{64}$ ]]; then PREVIOUS_CTL_SHA="$value"; fi
+        fi
+    done < "$INSTALL_MANIFEST"
+fi
 RUNTIME_BIN_COUNT="${#RUNTIME_BINS[@]}"
 
 # The session file lives inside the prefix and nowhere else. Display managers
@@ -315,6 +356,12 @@ step_deps() {
     _step_end 0 "$DEPS_DETAIL"
 }
 
+build_controller() {
+    [[ "$INSTALL_PROFILE" == control ]] || return 0
+    cargo build --release -p maverickctl --manifest-path "$CONTROLLER_SOURCE/Cargo.toml" \
+        --target-dir "$CARGO_TARGET_DIR" --locked
+}
+
 step_build() {
     # ── step 1 · build ───────────────────────────────────────────────────────────
     FINAL_LOG_PATH=""
@@ -330,8 +377,7 @@ step_build() {
         # two binaries the installer installs. A fixed estimate is only the last
         # resort when `cargo tree` cannot answer, because an estimate that can
         # only grow leaves the bar pinned below 100% for the whole build.
-        estimated_crates="$(cargo tree --edges normal,build --prefix none \
-            -p maverick -p maverickctl --features maverick/control-ipc 2>/dev/null | sort -u | grep -c . || true)"
+        estimated_crates="$(cargo tree --edges normal,build --prefix none "${WM_CARGO_ARGS[@]}" 2>/dev/null | sort -u | grep -c . || true)"
         if [[ -z "$estimated_crates" || "$estimated_crates" -lt 1 ]]; then
             estimated_crates=12
         fi
@@ -339,11 +385,12 @@ step_build() {
 
         (
             if RUSTFLAGS="-C target-cpu=native" cargo build --release \
-                   -p maverick -p maverickctl --features maverick/control-ipc >"$BUILD_LOG" 2>&1; then
+                   "${WM_CARGO_ARGS[@]}" --locked >"$BUILD_LOG" 2>&1 && build_controller >>"$BUILD_LOG" 2>&1; then
                 exit 0
             fi
             cargo build --release \
-                -p maverick -p maverickctl --features maverick/control-ipc >>"$BUILD_LOG" 2>&1
+                "${WM_CARGO_ARGS[@]}" --locked >>"$BUILD_LOG" 2>&1
+            build_controller >>"$BUILD_LOG" 2>&1
         ) &
         BUILD_PID=$!
 
@@ -467,6 +514,9 @@ step_install() {
             die "$(t err_missing_exe): $CARGO_TARGET_DIR/release/$bin $(t err_missing_exe_hint)"
     done
     "$CARGO_TARGET_DIR/release/maverick" --version >/dev/null 2>&1 || die "$(t verify_fail)"
+    actual_profile="$("$CARGO_TARGET_DIR/release/maverick" --build-profile)" || die "$(t verify_fail)"
+    [[ "$actual_profile" == "$INSTALL_PROFILE" ]] || die "artifact profile is $actual_profile; requested $INSTALL_PROFILE (rebuild the selected mode)"
+
     mkdir -p -- "$BIN_DIR" || die "$(t no_write): $BIN_DIR"
 
     # Stage the whole set before replacing anything. Committing one binary at a
@@ -646,10 +696,13 @@ step_verify() {
     VERIFY_CHECKS=0
     verify_installed "$BIN_DIR/maverick --version" \
         "$BIN_DIR/maverick" --version
+    if [[ "$INSTALL_PROFILE" == control ]];
+    then
     verify_installed "$BIN_DIR/maverickctl --help" \
         "$BIN_DIR/maverickctl" --help
     verify_installed "$BIN_DIR/maverickctl session --help" \
         "$BIN_DIR/maverickctl" session --help
+    fi
     for bin in "${RUNTIME_BINS[@]}"; do
         [[ -x "$BIN_DIR/$bin" ]] || die "$(t verify_fail): $BIN_DIR/$bin"
     done
@@ -663,6 +716,41 @@ step_verify() {
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
+finalize_components() {
+    local dir="$PREFIX/share/maverick" digest="" current="" staged
+    if [[ -e "$INSTALL_MANIFEST" && ( -L "$INSTALL_MANIFEST" || ! -O "$INSTALL_MANIFEST" ) ]]; then
+        die "installer manifest is not an owned regular file: $INSTALL_MANIFEST"
+    fi
+    if [[ "$INSTALL_PROFILE" == minimal && -e "$BIN_DIR/maverickctl" ]]; then
+        current="$(sha256sum -- "$BIN_DIR/maverickctl" 2>/dev/null | cut -d ' ' -f 1 || true)"
+        if [[ -n "$PREVIOUS_CTL_SHA" && "$current" == "$PREVIOUS_CTL_SHA" && -O "$BIN_DIR/maverickctl" && ! -L "$BIN_DIR/maverickctl" ]]; then
+            rm -- "$BIN_DIR/maverickctl"
+        else
+            printf '%s\n' 'maverickctl is not an unchanged installer-owned file; left in place.' >&2
+        fi
+    elif [[ "$INSTALL_PROFILE" == control ]]; then
+        digest="$(sha256sum -- "$BIN_DIR/maverickctl" | cut -d ' ' -f 1)"
+    fi
+    mkdir -p -- "$dir"
+    staged="$(mktemp "$dir/.manifest.XXXXXX")"
+    printf 'maverick-installer-v1\nprofile=%s\ncontroller_sha256=%s\n' "$INSTALL_PROFILE" "$digest" > "$staged"
+    chmod 0644 "$staged"
+    mv -fT -- "$staged" "$INSTALL_MANIFEST"
+}
+
+check_profile_transition() {
+    local process exe
+    [[ "$INSTALL_PROFILE" == minimal && -x "$BIN_DIR/maverick" && "$INSTALLED_PROFILE" != minimal ]] || return 0
+    for process in /proc/[0-9]*; do
+        [[ -O "$process" ]] || continue
+        exe="$(readlink "$process/exe" 2>/dev/null || true)"
+        exe="${exe% (deleted)}"
+        if [[ "$exe" == "$BIN_DIR/maverick" ]]; then
+            die "close the running Maverick before switching its installation to Minimal"
+        fi
+    done
+}
+
 main() {
     check_unsupported_os
 
@@ -674,6 +762,28 @@ main() {
     _now_ms
     T_START=$NOW_MS
     banner
+    if [[ "$PROFILE_EXPLICIT" == false && "$HAS_TTY" -eq 1 && "$YES" != true ]]; then
+        profile_default=no
+        profile_hint="$(t install_rust_hint)"
+        if [[ "$INSTALL_PROFILE" == control ]]; then profile_default=yes; profile_hint="$(t confirm_hint)"; fi
+        if prompt "$(t profile_q)" "$profile_hint" "$profile_default"; then
+            INSTALL_PROFILE=control; RUNTIME_BINS=(maverick maverickctl)
+            WM_CARGO_ARGS=(-p maverick --no-default-features --features control-ipc)
+        else
+            INSTALL_PROFILE=minimal; RUNTIME_BINS=(maverick)
+            WM_CARGO_ARGS=(-p maverick --no-default-features)
+        fi
+        RUNTIME_BIN_COUNT="${#RUNTIME_BINS[@]}"
+    fi
+    check_profile_transition
+    manifest_dir="$(realpath -m -- "$PREFIX/share/maverick")"
+    [[ "$manifest_dir" == "$PREFIX/"* ]] || die "installer manifest directory leaves the prefix"
+    if [[ -e "$INSTALL_MANIFEST" && ( -L "$INSTALL_MANIFEST" || ! -O "$INSTALL_MANIFEST" || ! -f "$INSTALL_MANIFEST" ) ]]; then
+        die "installer manifest is not an owned regular file: $INSTALL_MANIFEST"
+    fi
+    if [[ "$INSTALL_PROFILE" == control && "$NO_BUILD" != true ]]; then
+        [[ -f "$CONTROLLER_SOURCE/Cargo.toml" ]] || die "independent controller source is missing: $CONTROLLER_SOURCE"
+    fi
     confirm_install
 
     # ── config pre-check ─────────────────────────────────────────────────────────
@@ -730,6 +840,7 @@ main() {
     step_session
     step_config
     step_verify
+    finalize_components
 
     # ── cerrar el bloque ─────────────────────────────────────────────────────────
     printf '\n'

@@ -18,7 +18,7 @@
 //! rather than resolved to a guess.
 
 use crate::client;
-use maverick_sys::json::Json;
+use maverick_protocol::json::Json;
 
 use super::session::{available_sessions, split_session_and_rest, truncate};
 use super::{print_usage, session_target, Ctl};
@@ -296,7 +296,7 @@ fn tree_of(name: &str, sid: &str) -> Result<Vec<WindowInfo>, String> {
     if let Some(why) = super::refusal(&tree) {
         return Err(format!("cannot read the window tree of '{name}': {why}"));
     }
-    let tree = maverick_sys::json::parse(&tree)
+    let tree = maverick_protocol::json::parse(&tree)
         .ok_or_else(|| format!("the window tree of '{name}' was not valid JSON"))?;
     Ok(flatten_windows(&tree))
 }
@@ -375,7 +375,7 @@ fn window_list(c: &Ctl, args: &[String]) -> Result<bool, String> {
         let items: Vec<String> = windows.iter().map(window_json).collect();
         println!(
             "{{\"session\":{},\"windows\":[{}]}}",
-            maverick_sys::json::json_quote(&sid),
+            maverick_protocol::json::json_quote(&sid),
             items.join(",")
         );
         return Ok(true);
@@ -411,9 +411,9 @@ fn window_json(w: &WindowInfo) -> String {
         w.id,
         w.id,
         w.pid.map_or_else(|| "null".to_string(), num),
-        maverick_sys::json::json_quote(&w.class),
-        maverick_sys::json::json_quote(&w.instance),
-        maverick_sys::json::json_quote(&w.title),
+        maverick_protocol::json::json_quote(&w.class),
+        maverick_protocol::json::json_quote(&w.instance),
+        maverick_protocol::json::json_quote(&w.title),
         w.monitor,
         w.workspace,
         w.column,
@@ -470,7 +470,7 @@ fn window_inspect(c: &Ctl, args: &[String]) -> Result<(), String> {
                     "the window manager refused the inspect query: {why}"
                 ));
             }
-            None => maverick_sys::json::parse(&reply),
+            None => maverick_protocol::json::parse(&reply),
         },
         // Not running: the window list above still answered, so this half is
         // legitimately absent rather than refused.
@@ -478,7 +478,7 @@ fn window_inspect(c: &Ctl, args: &[String]) -> Result<(), String> {
     };
     if c.json {
         let doc = window_json(w);
-        let mut fields = match maverick_sys::json::parse(&doc) {
+        let mut fields = match maverick_protocol::json::parse(&doc) {
             Some(Json::Obj(f)) => f,
             _ => Vec::new(),
         };
@@ -598,9 +598,9 @@ fn act(c: &Ctl, args: &[String], verb: &str, op: WindowOp) -> Result<(), String>
     if c.json {
         println!(
             "{{\"session\":{},\"window\":{},\"action\":{}}}",
-            maverick_sys::json::json_quote(&name),
+            maverick_protocol::json::json_quote(&name),
             id,
-            maverick_sys::json::json_quote(&op.action(id))
+            maverick_protocol::json::json_quote(&op.action(id))
         );
     } else {
         println!("{id:#x}: {verb}");
@@ -790,8 +790,8 @@ fn report(c: &Ctl, session_name: &str, action: &str) {
     if c.json {
         println!(
             "{{\"session\":{},\"action\":{}}}",
-            maverick_sys::json::json_quote(session_name),
-            maverick_sys::json::json_quote(action)
+            maverick_protocol::json::json_quote(session_name),
+            maverick_protocol::json::json_quote(action)
         );
     } else {
         println!("{action}");
@@ -896,7 +896,7 @@ mod tests {
     /// change this fixture with it.
     #[test]
     fn flattening_reads_the_hierarchy_including_floats() {
-        let tree = maverick_sys::json::parse(
+        let tree = maverick_protocol::json::parse(
             r#"{"sel_mon":0,"monitors":[{"index":0,"active_ws":0,"focused":2,
                  "workspaces":[{"index":0,"layout":"column","columns":[
                     {"width":640.0,"focused":0,"windows":[
@@ -940,7 +940,7 @@ mod tests {
     /// document that disagrees with itself reports the window's own answer.
     #[test]
     fn a_windows_own_placement_beats_the_walk_position() {
-        let tree = maverick_sys::json::parse(
+        let tree = maverick_protocol::json::parse(
             r#"{"sel_mon":0,"monitors":[{"index":0,"active_ws":0,"focused":0,
                  "workspaces":[{"index":0,"columns":[{"width":1.0,"focused":0,"windows":[
                     {"id":1,"pid":7,"class":"a","instance":"a","title":"t","monitor":1,"workspace":3,"geom":[0,0,10,10]}]}],"floats":[]}]}]}"#,
@@ -956,7 +956,8 @@ mod tests {
     #[test]
     fn flattening_a_missing_tree_yields_nothing() {
         for doc in ["{}", r#"{"monitors":[]}"#, "not json"] {
-            let tree = maverick_sys::json::parse(doc).unwrap_or(maverick_sys::json::Json::Null);
+            let tree =
+                maverick_protocol::json::parse(doc).unwrap_or(maverick_protocol::json::Json::Null);
             assert!(flatten_windows(&tree).is_empty(), "{doc}");
         }
     }

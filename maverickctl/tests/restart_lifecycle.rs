@@ -63,14 +63,14 @@ struct Instance {
 
 impl Instance {
     fn start(sid: &str, behaviour: Behaviour) -> Self {
-        let path = maverick_sys::identity::sock_path(sid);
+        let path = maverick_protocol::identity::sock_path(sid);
         std::fs::create_dir_all(path.parent().expect("session dir")).expect("create dir");
         let _ = std::fs::remove_file(&path);
         // Discovery resolves by ficha, so a socket alone is not an instance the
         // tool can target — and a test that could not resolve its target would
         // pass for a reason unrelated to the wait under test. `start_time` is
         // left at 0, which liveness reads as "do not check".
-        maverick_sys::identity::write_meta(&maverick_sys::identity::InstanceInfo {
+        maverick_protocol::identity::write_meta(&maverick_protocol::identity::InstanceInfo {
             name: sid.to_string(),
             session_id: sid.to_string(),
             pid: std::process::id(),
@@ -165,7 +165,7 @@ impl Drop for Instance {
         // each still selectable by name — `find_by_name` matches a stale record
         // as readily as a live one, and the tool then fails at the connect with
         // an error about a session nothing is serving.
-        maverick_sys::identity::cleanup_meta(&self.sid);
+        maverick_protocol::identity::cleanup_meta(&self.sid);
     }
 }
 
@@ -297,11 +297,11 @@ fn a_handoff_leaves_the_session_addressable() {
     let mut first = Instance::start(sid, Behaviour::Serving);
     first.handoff_out();
     assert!(
-        !maverick_sys::identity::sock_path(sid).exists(),
+        !maverick_protocol::identity::sock_path(sid).exists(),
         "socket must go"
     );
     assert!(
-        maverick_sys::identity::read_meta(sid).is_some(),
+        maverick_protocol::identity::read_meta(sid).is_some(),
         "record must survive the handoff: across an exec the session stays addressable"
     );
     assert!(
@@ -324,11 +324,11 @@ fn dropping_the_last_owner_unpublishes_the_session() {
     let sid = "withdrawn";
     drop(Instance::start(sid, Behaviour::Serving));
     assert!(
-        !maverick_sys::identity::sock_path(sid).exists(),
+        !maverick_protocol::identity::sock_path(sid).exists(),
         "socket must go"
     );
     assert!(
-        maverick_sys::identity::read_meta(sid).is_none(),
+        maverick_protocol::identity::read_meta(sid).is_none(),
         "record must not outlive its owner"
     );
     assert!(
@@ -345,14 +345,14 @@ fn retiring_one_instance_leaves_another_serving() {
     let retired = Instance::start("retired", Behaviour::Serving);
     let kept = Instance::start("kept", Behaviour::Serving);
     drop(retired);
-    assert!(maverick_sys::identity::read_meta("retired").is_none());
-    assert!(maverick_sys::identity::read_meta("kept").is_some());
-    assert!(maverick_sys::identity::sock_path("kept").exists());
+    assert!(maverick_protocol::identity::read_meta("retired").is_none());
+    assert!(maverick_protocol::identity::read_meta("kept").is_some());
+    assert!(maverick_protocol::identity::sock_path("kept").exists());
     assert!(
         maverickctl::client::ping("kept").is_ok(),
         "the surviving fixture is still answering"
     );
     assert!(maverickctl::discover::find_by_name("kept").is_some());
     drop(kept);
-    assert!(maverick_sys::identity::read_meta("kept").is_none());
+    assert!(maverick_protocol::identity::read_meta("kept").is_none());
 }

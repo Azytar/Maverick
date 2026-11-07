@@ -63,6 +63,7 @@ fn main() {
     let mut replace = false;
     let mut show_help = false;
     let mut show_version = false;
+    let mut show_profile = false;
     let mut config_path: Option<String> = None;
     // `--check-config` with an optional path argument. `Some(Some(p))` means the
     // flag was given with an explicit path; `Some(None)` means the flag was
@@ -75,6 +76,7 @@ fn main() {
     while let Some(a) = args.next() {
         match a.as_str() {
             "-v" | "--version" => show_version = true,
+            "--build-profile" => show_profile = true,
             "-h" | "--help" => show_help = true,
             "--replace" | "-r" => replace = true,
             "--config" => {
@@ -200,6 +202,17 @@ fn main() {
         }
     }
 
+    if show_profile {
+        println!(
+            "{}",
+            if cfg!(feature = "control-ipc") {
+                "control"
+            } else {
+                "minimal"
+            }
+        );
+        process::exit(0);
+    }
     if show_version {
         println!("maverick {}", env!("CARGO_PKG_VERSION"));
         process::exit(0);
@@ -223,6 +236,7 @@ fn main() {
         println!("                        $XDG_CONFIG_HOME/maverick/config.toml");
         println!("  --check-config [path] Validate the config TOML and exit (0 = clean,");
         println!("                        1 = warnings/errors). Starts no WM.");
+        println!("  --build-profile     Print minimal or control and exit");
         println!("  -v, --version        Print version and exit");
         println!("  -h, --help           Show this help");
         println!();

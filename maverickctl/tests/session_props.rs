@@ -4,9 +4,9 @@
 //! if the uid it compares against is the kernel's rather than whatever the
 //! record says. These tests live with the session code: they pin the record
 //! layer (`maverickctl::session`) against the identity layer
-//! (`maverick_sys::identity`) it must agree with.
+//! (`maverick_protocol::identity`) it must agree with.
 
-use maverick_sys::identity::{current_gid, current_uid};
+use maverick_protocol::identity::{current_gid, current_uid};
 use maverickctl::session::{read, read_checked, session_dir, spec_path, SessionError, SessionName};
 
 /// The session layer must not answer the uid question separately from

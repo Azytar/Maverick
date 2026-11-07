@@ -5,7 +5,7 @@
 //! is a different defect from an option forwarded by mistake, and so is a
 //! failure reported as a success.
 
-use maverick_sys::identity::InstanceInfo;
+use maverick_protocol::identity::InstanceInfo;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
@@ -65,13 +65,13 @@ fn serve_replying(
 ) -> Receiver<String> {
     let sid = sid.to_string();
     runtime_dir();
-    let path = maverick_sys::identity::sock_path(&sid);
+    let path = maverick_protocol::identity::sock_path(&sid);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("create fixture session dir");
     }
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).expect("bind fixture socket");
-    maverick_sys::identity::write_meta(&InstanceInfo {
+    maverick_protocol::identity::write_meta(&InstanceInfo {
         name: sid.clone(),
         session_id: sid.clone(),
         pid: std::process::id(),
@@ -554,7 +554,7 @@ fn the_documented_process_orders_reach_the_session_they_name() {
     let r = run(&["--json", "process", "list", sid]);
     assert_eq!(r.code, 0, "`--json process list {sid}` must succeed: {r:?}");
     assert!(
-        maverick_sys::json::parse(r.stdout.trim()).is_some(),
+        maverick_protocol::json::parse(r.stdout.trim()).is_some(),
         "`--json process list {sid}` must print one JSON document: {r:?}"
     );
 

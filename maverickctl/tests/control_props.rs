@@ -9,9 +9,9 @@
 
 mod common;
 
-use maverick_sys::control::{identity_json, MAX_CMD_LEN};
-use maverick_sys::identity::{is_valid_sid, InstanceInfo, PING_CMD};
-use maverick_sys::json::json_quote;
+use maverick_protocol::control::{identity_json, MAX_CMD_LEN};
+use maverick_protocol::identity::{is_valid_sid, InstanceInfo, PING_CMD};
+use maverick_protocol::json::json_quote;
 use maverickctl::client::{dispatch, query, send_command};
 use proptest::prelude::*;
 use std::io::ErrorKind;

@@ -10,8 +10,8 @@ cargo run -p maverick-xtask --locked -- x11
 ```
 
 `check` runs default-feature and all-feature Rust tests. `x11` explicitly runs
-ignored `maverick-testkit` tests against the release WM, with two test threads,
-then the retained external-client campaign. A missing dependency or release
+ignored `maverick-testkit` tests against both Minimal and control release WMs, with two test threads,
+then the retained external-client campaign against control. There are 21 Rust X11 tests per profile. A missing dependency or release
 binary is an error. Ordinary `cargo test` does not execute ignored X11 tests.
 
 ## Rust testkit contracts
