@@ -81,6 +81,9 @@ pub struct AppliedWindow {
 #[derive(Debug, Default)]
 pub struct AppliedState {
     pub windows: std::collections::HashMap<WindowId, AppliedWindow>,
+    // Reused only while coalescing one desired snapshot. This is scratch, not
+    // model state: every reconcile clears and rebuilds it from Desired.
+    last_index_scratch: std::collections::HashMap<WindowId, usize>,
 }
 
 /// The geometry X11 will actually hold for a requested `(rect, border)`.
@@ -204,15 +207,15 @@ pub fn reconcile(
     // is ordered back-to-front, so the *last* entry for a window is the one
     // nearest the top of the stack, and last-write-wins is both the cheapest
     // deterministic policy and the one that matches the stacking order.
-    let mut last_index: std::collections::HashMap<WindowId, usize> =
-        std::collections::HashMap::with_capacity(desired.len());
+    applied.last_index_scratch.clear();
+    applied.last_index_scratch.reserve(desired.len());
     for (i, dw) in desired.iter().enumerate() {
-        last_index.insert(dw.window, i);
+        applied.last_index_scratch.insert(dw.window, i);
     }
 
     let mut out = Vec::new();
     for (i, dw) in desired.iter().enumerate() {
-        if last_index[&dw.window] != i {
+        if applied.last_index_scratch.get(&dw.window).copied() != Some(i) {
             continue;
         }
         let dirty = state
