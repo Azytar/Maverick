@@ -1524,6 +1524,7 @@ impl WindowManager {
             from: Some(from),
             to: Some(to),
         });
+        #[cfg(feature = "control-ipc")]
         self.publish_state();
         #[cfg(debug_assertions)]
         self.engine.state.assert_invariants();

@@ -163,7 +163,12 @@ impl WindowManager {
             Effect::Spawn(cmd) => self.spawn(&cmd),
             Effect::Quit => self.begin_shutdown(),
             Effect::Restart => self.restart(),
-            Effect::PublishIpcState => self.publish_state(),
+            Effect::Reload => self.reload_config()?,
+            #[cfg(any(feature = "control-ipc", test))]
+            Effect::PublishIpcState => {
+                #[cfg(feature = "control-ipc")]
+                self.publish_state();
+            }
         }
         Ok(())
     }
@@ -192,6 +197,7 @@ impl WindowManager {
         // polling for it — so a client could otherwise see this process still
         // serving before the exec and after it never return at all, and have no
         // way to tell a completed restart from an instance that never left.
+        #[cfg(feature = "control-ipc")]
         if let Some(hub) = &self.hub {
             hub.begin_restart();
         }
@@ -219,7 +225,10 @@ impl WindowManager {
             // `launch_args` excludes argv[0] (the program name), which
             // `Command::new(exe)` already supplies, so the new argv matches the
             // original launch exactly.
+            #[cfg(feature = "control-ipc")]
             let args = restart_args(&self.launch_args, &self.session_id);
+            #[cfg(not(feature = "control-ipc"))]
+            let args = self.launch_args.clone();
             let err = std::process::Command::new(exe)
                 .args(&args)
                 .env(super::restart::HANDOFF_ENV, std::process::id().to_string())
@@ -299,11 +308,13 @@ impl WindowManager {
     }
 
     /// Hand over the control socket server (kept so `cleanup` can tear it down).
+    #[cfg(feature = "control-ipc")]
     pub fn set_control(&mut self, server: maverick_sys::ControlServer) {
         self.control = Some(server);
     }
 
     /// Record the session id (used for the identity ficha teardown).
+    #[cfg(feature = "control-ipc")]
     pub fn set_session_id(&mut self, sid: String) {
         self.session_id = sid;
     }
@@ -311,6 +322,7 @@ impl WindowManager {
     /// Attach the control hub bridging the socket thread and the WM loop, and
     /// subscribe the `HubEventSink` to the typed `EventBus` so domain events
     /// render onto the `subscribe` wire protocol.
+    #[cfg(feature = "control-ipc")]
     pub fn set_hub(&mut self, hub: maverick_sys::ControlHub) {
         self.engine
             .subscribe(Box::new(super::hubevents::HubEventSink::new(hub.clone())));
@@ -319,6 +331,7 @@ impl WindowManager {
 
     /// Drain any control commands the socket thread queued and act on them:
     /// dispatch actions through the Engine, or quit/restart/reload the WM.
+    #[cfg(feature = "control-ipc")]
     pub(super) fn drain_control(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let cmds = match &self.hub {
             Some(h) => h.drain_commands(),
@@ -393,7 +406,7 @@ impl WindowManager {
         crate::userconfig::dump_diagnostics(&path, &diag);
         if source != crate::userconfig::ConfigSource::UserFile {
             log::warn!(
-                "reload: '{}' is missing, unreadable or not valid TOML; keeping current config (run `maverickctl restart` to fall back to compiled defaults)",
+                "reload: '{}' is missing, unreadable or not valid TOML; keeping current config (restart Maverick to fall back to compiled defaults)",
                 path.display()
             );
             return Ok(());
@@ -491,6 +504,7 @@ impl WindowManager {
     /// Granular `focus`/`workspace` lines for `subscribe` clients do not come
     /// from here: they are produced by the typed `EventBus` via `HubEventSink`,
     /// so a single source of truth describes every transition.
+    #[cfg(feature = "control-ipc")]
     pub(super) fn publish_state(&mut self) {
         let hub = match &self.hub {
             Some(h) => h.clone(),
@@ -513,6 +527,7 @@ impl WindowManager {
 /// restart (`MAVERICK_INSTANCE`, exported to every child at startup) then names
 /// paths that no longer exist. Re-passing the current id keeps the socket path
 /// stable across restarts.
+#[cfg(feature = "control-ipc")]
 fn restart_args(launch_args: &[String], session_id: &str) -> Vec<String> {
     let mut args = launch_args.to_vec();
     if !args.iter().any(|a| a == "--session-id") {
@@ -522,7 +537,7 @@ fn restart_args(launch_args: &[String], session_id: &str) -> Vec<String> {
     args
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "control-ipc"))]
 mod tests {
     use super::restart_args;
 

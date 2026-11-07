@@ -7,6 +7,8 @@
 //! grows the WM's memory, and a subscriber list that overshoots its cap parks
 //! every remaining handler thread on a stream nobody feeds.
 
+#![cfg(feature = "control-ipc")]
+
 use maverick_sys::hub::{ControlCommand, ControlHub, CMD_CAP, SUB_CAP};
 use proptest::prelude::*;
 use std::sync::{Arc, Barrier};

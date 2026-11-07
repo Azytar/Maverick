@@ -10,6 +10,11 @@ description = "Maverick's OS/control boundary: libc FFI (signals, poll, uid/gid)
 categories = ["os::unix-apis"]
 keywords = ["linux", "unix", "window-manager", "ipc", "ffi"]
 
+[features]
+default = []
+json = []
+control-ipc = ["json", "rustix/net", "rustix/rand"]
+
 [dependencies]
 # rustix has no `sigaction` (`src/not_implemented.rs`), so signal disposition
 # needs `libc`; everything else here goes through rustix.
@@ -17,9 +22,7 @@ libc = "0.2"
 rustix = { version = "1", default-features = false, features = [
     "std",
     "event",
-    "net",
     "process",
-    "rand",
 ] }
 
 [dev-dependencies]

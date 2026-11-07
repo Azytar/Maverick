@@ -53,6 +53,7 @@ pub mod desired;
 pub mod effect;
 pub mod engine;
 pub mod event;
+#[cfg(any(feature = "control-ipc", test))]
 pub mod ipc;
 pub mod layout;
 pub mod present;
@@ -84,4 +85,5 @@ pub use commands::Command;
 pub use effect::Effect;
 pub use engine::Engine;
 pub use event::{CommandReport, Event, EventHandler};
+#[cfg(any(feature = "control-ipc", test))]
 pub use ipc::state_json;

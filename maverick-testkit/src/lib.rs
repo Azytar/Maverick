@@ -149,13 +149,26 @@ impl XvfbSession {
         }
         let mut command = isolated_command(&self.root, Some(&self.display), binary.as_os_str());
         command.arg("--config").arg(&self.config);
-        command.arg("--session-id").arg("rust-testkit");
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(File::create(self.root.join("maverick.log"))?));
         self.wm = Some(OwnedChild(command.spawn()?));
         Ok(())
+    }
+
+    /// Inspect only resources of this fixture's WM, before its cleanup.
+    pub fn control_resources(&self) -> io::Result<(bool, usize)> {
+        let runtime = self.root.join("runtime/maverick");
+        let tasks = match &self.wm {
+            Some(wm) => fs::read_dir(format!("/proc/{}/task", wm.0.id()))?.count(),
+            None => return Err(io::Error::other("no owned WM")),
+        };
+        Ok((runtime.exists(), tasks))
+    }
+
+    pub fn write_config(&self, contents: &str) -> io::Result<()> {
+        fs::write(&self.config, contents)
     }
 
     /// The log belongs to this sandbox; useful as an exec/restart barrier.

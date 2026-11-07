@@ -38,7 +38,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libx11-dev libx11-xcb-dev libxcb1-dev
       - name: Check complete workspace on declared MSRV
-        run: cargo check --workspace --all-targets --all-features --locked
+        run: |
+          cargo check --workspace --all-targets --all-features --locked
+          cargo check -p maverick --all-targets --no-default-features --locked
 
   # The WM and its runtime libraries live in the workspace. Lint + test them
   # together so the dev loop is covered.
@@ -111,8 +113,8 @@ jobs:
         # that profile: it is the one `installer/install.sh` produces and
         # installs. A debug build is not the artifact that ships, and the gate
         # must not pass against it instead.
-        # There is no `default` feature and no compositor to leave out, so this
-        # is one command with no feature flags — not "the only build there is".
+        # Build Minimal in target/minimal and explicit control-ipc in target,
+        # so the client-independent suite can verify both compiled variants.
         run: cargo run -p maverick-xtask --locked -- release
       - name: X11 regression campaign
         # Explicitly includes ignored Rust Xvfb tests. Python/C retain external

@@ -51,7 +51,9 @@ fn main() {
 
     // Parse args in any order. Unknown arguments abort before any state is
     // created, so a typo cannot leave a half-initialised session behind.
+    #[cfg(feature = "control-ipc")]
     let mut instance_name = maverick_sys::DEFAULT_NAME.to_string();
+    #[cfg(feature = "control-ipc")]
     let mut session_id: Option<String> = None;
     // Logging flags, applied after `log::init` (which reads the environment)
     // and before anything is created, so a debug session's very first line is
@@ -93,6 +95,7 @@ fn main() {
                 };
                 check_config = Some(path);
             }
+            #[cfg(feature = "control-ipc")]
             "--name" => {
                 if let Some(n) = args.next() {
                     instance_name = n
@@ -101,6 +104,7 @@ fn main() {
                     break;
                 }
             }
+            #[cfg(feature = "control-ipc")]
             "--session-id" => {
                 // An explicit id makes this instance's runtime directory, its
                 // control socket and its identity ficha live at a name the user
@@ -114,6 +118,11 @@ fn main() {
                     bad_arg = Some("--session-id requires a value".into());
                     break;
                 }
+            }
+            #[cfg(not(feature = "control-ipc"))]
+            "--name" | "--session-id" => {
+                bad_arg = Some(format!("{a} requires a Maverick build with control-ipc"));
+                break;
             }
             "--debug" => debug = true,
             "--log-level" => {
@@ -196,12 +205,17 @@ fn main() {
         process::exit(0);
     }
     if show_help {
-        println!("Usage: maverick [--name <id>] [--session-id <id>] [--replace] [--debug] [--log-level <level>] [--config <path>] [--check-config [path]] [-v] [-h]");
-        println!("  --name <id>          Instance name for control/identification");
-        println!("  --session-id <id>    Publish this instance under a fixed session id");
-        println!("                        ([A-Za-z0-9_-]), so its runtime directory and");
-        println!("                        control socket are named after it. Used by");
-        println!("                        `maverickctl session`; the default is random.");
+        #[cfg(not(feature = "control-ipc"))]
+        println!("Usage: maverick [--replace] [--debug] [--log-level <level>] [--config <path>] [--check-config [path]] [-v] [-h]");
+        #[cfg(feature = "control-ipc")]
+        {
+            println!("Usage: maverick [--name <id>] [--session-id <id>] [--replace] [--debug] [--log-level <level>] [--config <path>] [--check-config [path]] [-v] [-h]");
+            println!("  --name <id>          Instance name for control/identification");
+            println!("  --session-id <id>    Publish this instance under a fixed session id");
+            println!("                        ([A-Za-z0-9_-]), so its runtime directory and");
+            println!("                        control socket are named after it. Used by");
+            println!("                        `maverickctl session`; the default is random.");
+        }
         println!("  --replace            Replace an already-running WM (adopts your windows)");
         println!("  --debug              Log at debug level (same as MAVERICK_LOG=debug)");
         println!("  --log-level <level>  off|error|warn|info|debug|trace (overrides --debug)");
@@ -218,6 +232,7 @@ fn main() {
         process::exit(0);
     }
 
+    #[cfg(feature = "control-ipc")]
     log::info!("instance name: {}", instance_name);
 
     // Build this instance's identity. The `session_id` is the filesystem key
@@ -230,6 +245,7 @@ fn main() {
     // A rejected id aborts here, before anything is created: an instance that
     // fell back to a random id would write its ficha and bind its socket
     // somewhere no `maverickctl` command would ever look.
+    #[cfg(feature = "control-ipc")]
     let info = match &session_id {
         Some(sid) => match maverick_sys::identity::self_info_with_sid(&instance_name, sid) {
             Ok(info) => info,
@@ -240,11 +256,13 @@ fn main() {
         },
         None => maverick_sys::self_info(&instance_name),
     };
+    #[cfg(feature = "control-ipc")]
     let sid = info.session_id.clone();
 
     // Export the session id so child processes (notably `maverickctl`) target
     // *this* instance by default, even when several Mavericks run on different
     // TTYs/DISPLAYs.
+    #[cfg(feature = "control-ipc")]
     std::env::set_var("MAVERICK_INSTANCE", &sid);
 
     maverick_sys::detach_from_terminal();
@@ -266,20 +284,25 @@ fn main() {
     // Advertise this instance so an external tool can discover or close it,
     // even when several Mavericks run on different TTYs/DISPLAYs. Neither of
     // these is fatal: a WM without a control socket still manages windows.
-    if let Err(e) = maverick_sys::identity::write_meta(&info) {
-        log::warn!("failed to write instance ficha: {e}");
-    }
-    let identity_json = maverick_sys::control::identity_json(&info);
-    // The hub bridges the control-socket thread and the WM event loop: it
-    // queues dispatched commands, caches the state snapshot, and fans out
-    // events to `subscribe` clients.
-    let hub = maverick_sys::ControlHub::new();
-    let control = match maverick_sys::ControlServer::spawn(&sid, identity_json, hub.clone()) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            log::warn!("failed to start control socket: {e}");
-            None
+    #[cfg(feature = "control-ipc")]
+    let (hub, control) = {
+        if let Err(e) = maverick_sys::identity::write_meta(&info) {
+            log::warn!("failed to write instance ficha: {e}");
         }
+        let identity_json = maverick_sys::control::identity_json(&info);
+        // The hub bridges the control-socket thread and the WM event loop: it
+        // queues dispatched commands, caches the state snapshot, and fans out
+        // events to `subscribe` clients.
+        let hub = maverick_sys::ControlHub::new();
+        let control = match maverick_sys::ControlServer::spawn(&sid, identity_json, hub.clone()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log::warn!("failed to start control socket: {e}");
+                None
+            }
+        };
+
+        (hub, control)
     };
 
     let cfg = config::load_config(config_path.as_deref().map(std::path::Path::new));
@@ -301,10 +324,13 @@ fn main() {
         Ok(mut manager) => {
             // Hand over the control socket + session id so cleanup() can tear
             // them down and remove the identity record on exit.
-            manager.set_session_id(sid.clone());
-            manager.set_hub(hub);
-            if let Some(server) = control {
-                manager.set_control(server);
+            #[cfg(feature = "control-ipc")]
+            {
+                manager.set_session_id(sid.clone());
+                manager.set_hub(hub);
+                if let Some(server) = control {
+                    manager.set_control(server);
+                }
             }
 
             // Autostart runs only after the WM owns the X connection: a bar or
@@ -369,6 +395,7 @@ fn main() {
             eprintln!("maverick: failed to initialise: {e}");
             // Remove the identity record written before init, so a failed
             // start does not linger in the instance list.
+            #[cfg(feature = "control-ipc")]
             maverick_sys::identity::cleanup_meta(&sid);
             process::exit(1);
         }

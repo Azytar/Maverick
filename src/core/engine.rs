@@ -20,9 +20,9 @@ use crate::config::Cfg;
 use crate::core::commands::{
     CollapseColumn, Command, CreateView, FocusDirection, FocusMonitor, FocusWindow, GrowColumn,
     KillWindow, MoveToWorkspace, MoveWindow, MoveWindowToMonitor, NewColumn, NextView,
-    OverviewEnter, OverviewNav, PageSnap, PreviousView, Quit, RemoveView, Restart, RestoreLayout,
-    ReturnToOriginView, SetLayout, Spawn, ToggleFloat, ToggleFullscreen, ToggleMaximize,
-    ToggleOverview, ViewWorkspace, ViewportZoom,
+    OverviewEnter, OverviewNav, PageSnap, PreviousView, Quit, Reload, RemoveView, Restart,
+    RestoreLayout, ReturnToOriginView, SetLayout, Spawn, ToggleFloat, ToggleFullscreen,
+    ToggleMaximize, ToggleOverview, ViewWorkspace, ViewportZoom,
 };
 use crate::core::effect::Effect;
 use crate::core::event::{Event, EventBus, EventHandler};
@@ -123,6 +123,7 @@ impl Engine {
         // Ensure sync IPC subscribers get a fresh snapshot of the state this
         // command's effects just produced. Appended last, and only for a command
         // that actually produced something — see the contract above.
+        #[cfg(any(feature = "control-ipc", test))]
         if !effects.is_empty() && !effects.iter().any(|e| matches!(e, Effect::PublishIpcState)) {
             effects.push(Effect::PublishIpcState);
         }
@@ -149,16 +150,13 @@ impl Engine {
         commands: impl IntoIterator<Item = Box<dyn Command>>,
     ) -> Vec<Effect> {
         let mut all = Vec::new();
-        let mut dirty = false;
         let mut events = Vec::new();
         for mut cmd in commands {
             let report = cmd.execute(&mut self.state, &mut self.cfg);
             if let Some(event) = report.event {
-                dirty = true;
                 events.push(event);
             }
             if !report.effects.is_empty() {
-                dirty = true;
                 all.extend(report.effects);
             }
         }
@@ -184,13 +182,15 @@ impl Engine {
                 // means: a transaction that fired no event and emitted no effects
                 // of its own is still dirty, and its publish is what carries that
                 // focus to observers.
-                dirty = true;
             }
         }
         // A transaction that changed nothing publishes nothing; otherwise the
         // single publish is appended last, so it carries the state of every
         // effect above.
-        if dirty && !all.iter().any(|e| matches!(e, Effect::PublishIpcState)) {
+        #[cfg(any(feature = "control-ipc", test))]
+        if (!all.is_empty() || !events.is_empty())
+            && !all.iter().any(|e| matches!(e, Effect::PublishIpcState))
+        {
             all.push(Effect::PublishIpcState);
         }
         #[cfg(debug_assertions)]
@@ -272,6 +272,7 @@ impl Engine {
             Action::Spawn(cmd) => self.execute(Spawn(cmd)),
             Action::Quit => self.execute(Quit),
             Action::Restart => self.execute(Restart),
+            Action::Reload => self.execute(Reload),
             Action::ToggleFloat => self.execute(ToggleFloat(None)),
             Action::RestoreLayout => self.execute(RestoreLayout(None)),
             Action::ToggleFullscreen => {

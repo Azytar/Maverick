@@ -1684,7 +1684,7 @@ impl Command for CreateView {
             return CommandReport::new(Vec::new());
         }
         mon.create_view();
-        CommandReport::new(vec![Effect::RefreshDesktops, Effect::PublishIpcState])
+        CommandReport::new(vec![Effect::RefreshDesktops])
     }
 }
 
@@ -2282,6 +2282,15 @@ pub struct Restart;
 impl Command for Restart {
     fn execute(&mut self, _state: &mut State, _cfg: &mut Cfg) -> CommandReport {
         CommandReport::with_event(vec![Effect::Restart], Event::SessionRestart)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Reload;
+
+impl Command for Reload {
+    fn execute(&mut self, _state: &mut State, _cfg: &mut Cfg) -> CommandReport {
+        CommandReport::new(vec![Effect::Reload])
     }
 }
 

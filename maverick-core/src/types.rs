@@ -1712,6 +1712,8 @@ pub enum Action {
     MoveMon(Dir),
     /// Restart the WM (re-exec).
     Restart,
+    /// Reload the current configuration without restarting clients.
+    Reload,
     /// Quit the WM cleanly: the event loop stops and the normal teardown runs —
     /// clients are asked to close under one global budget, then `cleanup()`
     /// releases the X11/IPC resources before the process exits 0. Bound to

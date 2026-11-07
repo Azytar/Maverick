@@ -802,6 +802,7 @@ impl WindowManager {
                 }
                 if changed {
                     self.write_net_wm_state(e.window);
+                    #[cfg(feature = "control-ipc")]
                     self.publish_state();
                 }
             }

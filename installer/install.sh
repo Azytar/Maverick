@@ -98,7 +98,7 @@ Inside the prefix, exactly three files:
   <prefix>/share/xsessions/maverick.desktop   the X11 session entry
 
 Both binaries are built from this workspace with
-`cargo build --release -p maverick -p maverickctl`. There is no second control
+`cargo build --release -p maverick -p maverickctl --features maverick/control-ipc`. There is no second control
 binary, no installer crate, no desktop-environment component, no compositor,
 wallpaper, animation or rendering component, and no showcase or demo asset to
 install: the installer offers no switch for any of them, and
@@ -331,7 +331,7 @@ step_build() {
         # resort when `cargo tree` cannot answer, because an estimate that can
         # only grow leaves the bar pinned below 100% for the whole build.
         estimated_crates="$(cargo tree --edges normal,build --prefix none \
-            -p maverick -p maverickctl 2>/dev/null | sort -u | grep -c . || true)"
+            -p maverick -p maverickctl --features maverick/control-ipc 2>/dev/null | sort -u | grep -c . || true)"
         if [[ -z "$estimated_crates" || "$estimated_crates" -lt 1 ]]; then
             estimated_crates=12
         fi
@@ -339,11 +339,11 @@ step_build() {
 
         (
             if RUSTFLAGS="-C target-cpu=native" cargo build --release \
-                   -p maverick -p maverickctl >"$BUILD_LOG" 2>&1; then
+                   -p maverick -p maverickctl --features maverick/control-ipc >"$BUILD_LOG" 2>&1; then
                 exit 0
             fi
             cargo build --release \
-                -p maverick -p maverickctl >>"$BUILD_LOG" 2>&1
+                -p maverick -p maverickctl --features maverick/control-ipc >>"$BUILD_LOG" 2>&1
         ) &
         BUILD_PID=$!
 

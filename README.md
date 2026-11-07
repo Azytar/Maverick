@@ -957,3 +957,22 @@ previous session.
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE).
+
+### Optional control builds
+
+On the development branch, `cargo build --release -p maverick` builds Minimal:
+only the X11 WM, with no control listener, control thread or discovery record.
+Keyboard actions, TOML rules, autostart and X11 restart remain available.
+`Super+Control+R` reloads the current TOML without IPC; `Super+Shift+R` restarts.
+
+To build the compatible managed variant, use
+`cargo build --release -p maverick --features control-ipc`. The existing
+installer explicitly selects this variant until the separate client and
+selective installation are verified. This change is not a new public release;
+existing installations are not rebuilt or migrated automatically.
+
+The Rust Xvfb campaign runs the same tests against both release variants.
+The isolated Minimal lint/test commands select only `-p maverick` to prevent
+workspace feature unification through the client from obscuring the dependency
+boundary. A separate compile-fail check verifies that the Minimal system crate
+exports no `ControlServer`, `ControlHub` or `InstanceInfo` API.

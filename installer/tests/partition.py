@@ -270,10 +270,10 @@ def suite_build_command_names_the_release_set():
             assert "-p maverick" in line, f"build does not name maverick: {line}"
             assert "-p maverickctl" in line, f"build does not name maverickctl: {line}"
             assert "--release" in line, f"build is not a release build: {line}"
-            assert "--features" not in line, f"build names features: {line}"
+            assert "--features maverick/control-ipc" in line, f"build names features: {line}"
             assert "--no-default-features" not in line, \
                 f"build disables a default feature that does not exist: {line}"
-    print("PASS: the build command names maverick and maverickctl, and no features")
+    print("PASS: the build command names maverick and maverickctl, and explicit control-ipc")
 
 
 def suite_golden_output():

@@ -11,7 +11,7 @@ categories = ["command-line-utilities"]
 keywords = ["linux", "unix", "window-manager", "ipc", "cli"]
 
 [dependencies]
-maverick-sys.workspace = true
+maverick-sys = { workspace = true, features = ["control-ipc"] }
 libc = "0.2"
 rustix = { version = "1", default-features = false, features = [
     "std",

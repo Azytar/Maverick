@@ -170,3 +170,25 @@ fn withdrawn_client_can_remap_without_stale_state() -> Result<(), Box<dyn Error>
     assert_stacking(&conn, root, &[window])?;
     Ok(())
 }
+
+#[test]
+#[ignore = "needs Xvfb and an already compiled release WM"]
+fn profile_creates_only_the_expected_control_resources() -> Result<(), Box<dyn Error>> {
+    let (mut session, conn, root) = start_session()?;
+    let window = map_client(&conn, root, false)?;
+    wait_managed(&mut session, &conn, root, &[window])?;
+    match std::env::var("MAVERICK_TEST_PROFILE").as_deref() {
+        Ok("minimal") => {
+            let (runtime, tasks) = session.control_resources()?;
+            assert!(!runtime, "Minimal created control identity/runtime files");
+            assert_eq!(tasks, 1, "Minimal started background threads");
+        }
+        Ok("control") => {
+            let (runtime, tasks) = session.control_resources()?;
+            assert!(runtime, "control build failed to publish its session");
+            assert!(tasks >= 2, "control listener did not start");
+        }
+        _ => return Err("set MAVERICK_TEST_PROFILE=minimal or control (xtask x11 sets it)".into()),
+    }
+    Ok(())
+}

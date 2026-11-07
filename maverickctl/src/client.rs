@@ -7,11 +7,13 @@
 //! shared IPC surface. Moved verbatim from `maverick-sys::control`; the only
 //! edits are the `maverick_sys::` paths below.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(test)]
+use std::io::BufRead;
+use std::io::{self, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use maverick_sys::control::{MAX_CMD_LEN, MAX_LINE_LEN};
+use maverick_sys::control::MAX_CMD_LEN;
 use maverick_sys::identity::{
     self, DISPATCH_CMD, IDENTIFY_CMD, PING_CMD, QUERY_CMD, QUIT_CMD, RELOAD_CMD, RESTART_CMD,
     STATE_CMD, SUBSCRIBE_CMD,
@@ -40,18 +42,8 @@ pub fn send_command(name: &str, cmd: &str) -> std::io::Result<String> {
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
     stream.write_all(format!("{cmd}\n").as_bytes())?;
-    let reader = BufReader::new(stream);
-    let mut reply = String::new();
-    // Bound the reply as well: a compromised server must not OOM the client.
-    let mut limited = reader.take((MAX_LINE_LEN + 16) as u64);
-    limited.read_line(&mut reply)?;
-    if reply.len() > MAX_LINE_LEN + 16 {
-        return Err(std::io::Error::new(
-            io::ErrorKind::InvalidData,
-            "reply too long",
-        ));
-    }
-    let reply = reply.trim_end_matches(['\n', '\r']).to_string();
+    let mut reader = BufReader::new(stream);
+    let reply = maverick_sys::protocol::read_frame(&mut reader)?.unwrap_or_default();
     // The protocol owes exactly one line per request: every arm of
     // `dispatch_line` returns one, and the server writes it before closing. The
     // shortest real reply is `ok`, so a zero-byte read means the peer went away
@@ -143,13 +135,9 @@ where
     stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
     stream.write_all(format!("{SUBSCRIBE_CMD}\n").as_bytes())?;
-    let reader = BufReader::new(stream);
+    let mut reader = BufReader::new(stream);
     let mut acked = false;
-    for line in reader.lines() {
-        let line = line?;
-        if line.len() > MAX_LINE_LEN {
-            continue;
-        }
+    while let Some(line) = maverick_sys::protocol::read_frame(&mut reader)? {
         let trimmed = line.trim_end_matches(['\n', '\r']);
         // Skip the initial "ok subscribe" acknowledgement. A server-side
         // rejection (e.g. subscriber cap) arrives here instead: surface it

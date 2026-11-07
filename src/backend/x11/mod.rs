@@ -77,13 +77,16 @@ use crate::core::layout::{
     arrange, fixed_size_hints, ideal_scroll, parse_wm_normal_hints, snap_float_to_hints,
     Placements, RibbonScratch,
 };
-use crate::core::{parse_action, state_json, Effect, Engine};
+#[cfg(feature = "control-ipc")]
+use crate::core::{parse_action, state_json};
+use crate::core::{Effect, Engine};
 use crate::log;
 use crate::types::*;
 
 mod actions;
 mod events;
 mod ewmh;
+#[cfg(feature = "control-ipc")]
 mod hubevents;
 mod input;
 mod manage;
@@ -250,8 +253,10 @@ pub struct WindowManager {
     /// Rate-limit tracker for key repeat suppression (mods, keysym → last dispatch).
     last_key_times: std::collections::BTreeMap<(u16, u32), std::time::Instant>,
     /// Control socket server (identity + remote quit). None if it failed to start.
+    #[cfg(feature = "control-ipc")]
     control: Option<maverick_sys::ControlServer>,
     /// Session id (random, per-session) used as the control-socket/ficha key.
+    #[cfg(feature = "control-ipc")]
     session_id: String,
     /// Config file path that was loaded at boot (the --config override when
     /// given, otherwise the resolved XDG path, or `None` when the compiled
@@ -271,9 +276,11 @@ pub struct WindowManager {
     shutdown_deadline: Option<std::time::Instant>,
     /// Bridge to the control-socket thread: drains dispatched commands, publishes
     /// state snapshots, and emits events for `subscribe` clients.
+    #[cfg(feature = "control-ipc")]
     hub: Option<maverick_sys::ControlHub>,
     /// Last state snapshot published to the hub — avoids re-publishing identical
     /// JSON on every loop iteration.
+    #[cfg(feature = "control-ipc")]
     last_state_json: String,
     /// External dock windows we currently reserve space for, mapped to the
     /// monitor index whose `reserved_regions` hold their reservation. Used to
@@ -679,7 +686,8 @@ impl WindowManager {
         // asked for: a clean exit that found no connection is still a lost
         // connection, and `x_teardown=full` must never be written for a teardown
         // that released nothing.
-        let local = teardown::run_local(
+        #[cfg(feature = "control-ipc")]
+        let local = teardown::run_local_control(
             &self.session_id,
             &mut self.control,
             if ran_x {
@@ -688,6 +696,12 @@ impl WindowManager {
                 TraceEnd::XConnectionLost
             },
         );
+        #[cfg(not(feature = "control-ipc"))]
+        let local = teardown::run_local(if ran_x {
+            TraceEnd::CleanExit
+        } else {
+            TraceEnd::XConnectionLost
+        });
         if let Some(error) = &local.trace.error {
             log::warn!("trace dump {}: {error}", local.trace.path.display());
         } else if local.trace.written {
@@ -832,14 +846,19 @@ impl WindowManager {
 
         if timeout != Some(std::time::Duration::ZERO) {
             let wait_trace = trace::Span::new("wait");
+            #[cfg(feature = "control-ipc")]
             let mut fds = [fd; 2];
+            #[cfg(feature = "control-ipc")]
             let fds = if let Some(hub) = &self.hub {
                 fds[1] = hub.wake_fd();
                 &fds[..]
             } else {
                 &fds[..1]
             };
+            #[cfg(feature = "control-ipc")]
             maverick_sys::wait_readable_fds_with_signals(fds, timeout);
+            #[cfg(not(feature = "control-ipc"))]
+            maverick_sys::wait_readable_fds_with_signals(&[fd], timeout);
             drop(wait_trace);
             // Drain for anything that arrived while we were blocked.
             while let Some((ev, sequence)) = self.conn.poll_for_event_with_sequence()? {
@@ -858,10 +877,13 @@ impl WindowManager {
         }
 
         // Execute any commands from the control socket, then publish state.
-        let control_trace = trace::Span::new("control");
-        self.drain_control()?;
-        self.publish_state();
-        drop(control_trace);
+        #[cfg(feature = "control-ipc")]
+        {
+            let control_trace = trace::Span::new("control");
+            self.drain_control()?;
+            self.publish_state();
+            drop(control_trace);
+        }
 
         // Whatever the post-wait drain owed. The earlier call already settled
         // everything that came before the wait; this one exists so that work is
@@ -1106,12 +1128,16 @@ impl WindowManager {
             desired: Placements::with_capacity(32),
             ribbon_scratch: RibbonScratch::default(),
             last_key_times: std::collections::BTreeMap::new(),
+            #[cfg(feature = "control-ipc")]
             control: None,
+            #[cfg(feature = "control-ipc")]
             session_id: String::new(),
             config_path,
             launch_args,
             shutdown_deadline: None,
+            #[cfg(feature = "control-ipc")]
             hub: None,
+            #[cfg(feature = "control-ipc")]
             last_state_json: String::new(),
             docks: std::collections::HashMap::new(),
             pointer_guard_until: None,

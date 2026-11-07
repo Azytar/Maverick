@@ -7,6 +7,8 @@
 //! by it, so an id that is not a single safe path component is a traversal and
 //! a cross-session collision waiting to happen.
 
+#![cfg(feature = "control-ipc")]
+
 use maverick_sys::identity::{
     current_gid, current_uid, is_valid_sid, meta_path, new_session_id, session_dir, sock_path,
     try_meta_path, try_session_dir, try_sock_path, MAX_SID_LEN,

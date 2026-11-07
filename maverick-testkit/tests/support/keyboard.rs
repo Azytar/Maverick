@@ -218,3 +218,23 @@ fn keyboard_restart_restores_live_clients_focus_and_geometry() -> Result<(), Box
     }
     Ok(())
 }
+
+#[test]
+#[ignore = "needs Xvfb and an already compiled release WM"]
+fn keyboard_reload_changes_geometry_without_restarting_clients() -> Result<(), Box<dyn Error>> {
+    let config = |border| {
+        format!("[general]\nfocus_mouse=false\nwarp_cursor=false\nborder_width={border}\n[autostart]\ncommands=[]\n[[keybindings]]\nkey=\"F1\"\naction=\"reload\"\n")
+    };
+    let (mut session, conn, root) = start_with_config(&config(0))?;
+    let window = map_client(&conn, root, false)?;
+    wait_managed(&mut session, &conn, root, &[window])?;
+    for border in [3, 1, 0] {
+        session.write_config(&config(border))?;
+        key(&conn, 0xffbe)?;
+        wait_for(&mut session, "keyboard configuration reload", || {
+            Ok(conn.get_geometry(window)?.reply()?.border_width == border)
+        })?;
+        assert_eq!(conn.get_input_focus()?.reply()?.focus, window);
+    }
+    Ok(())
+}

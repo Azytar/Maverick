@@ -93,6 +93,60 @@ const TEST_DEFAULT_FEATURES: Step = Step {
     args: &["test", "--workspace", "--all-targets", "--locked"],
 };
 
+const MINIMAL_CLIPPY: Step = Step {
+    label: "isolated Minimal clippy",
+    program: "cargo",
+    args: &[
+        "clippy",
+        "-p",
+        "maverick",
+        "--all-targets",
+        "--no-default-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+    ],
+};
+const MINIMAL_TEST: Step = Step {
+    label: "isolated Minimal tests",
+    program: "cargo",
+    args: &[
+        "test",
+        "-p",
+        "maverick",
+        "--all-targets",
+        "--no-default-features",
+        "--locked",
+    ],
+};
+const MINIMAL_API: Step = Step {
+    label: "Minimal control API exclusion",
+    program: "cargo",
+    args: &[
+        "test",
+        "-p",
+        "maverick-sys",
+        "--doc",
+        "--no-default-features",
+        "--locked",
+    ],
+};
+const MINIMAL_RELEASE: Step = Step {
+    label: "Minimal release build",
+    program: "cargo",
+    args: &[
+        "build",
+        "--release",
+        "-p",
+        "maverick",
+        "--no-default-features",
+        "--target-dir",
+        "target/minimal",
+        "--locked",
+    ],
+};
+
 const X11_STEPS: &[Step] = &[
     Step {
         label: "Rust Xvfb protocol and lifecycle regressions",
@@ -314,6 +368,8 @@ const RELEASE: Step = Step {
         "maverick",
         "-p",
         "maverickctl",
+        "--features",
+        "maverick/control-ipc",
         "--locked",
     ],
 };
@@ -351,13 +407,31 @@ fn run() -> Result<(), String> {
             CLIPPY_DEFAULT_FEATURES,
             TEST_ALL_FEATURES,
             TEST_DEFAULT_FEATURES,
+            MINIMAL_CLIPPY,
+            MINIMAL_TEST,
+            MINIMAL_API,
         ]),
         Task::Fmt => run_steps(&[FMT]),
-        Task::Clippy => run_steps(&[CLIPPY, CLIPPY_DEFAULT_FEATURES]),
-        Task::Test => run_steps(&[TEST_ALL_FEATURES, TEST_DEFAULT_FEATURES]),
-        Task::Release => run_steps(&[RELEASE]),
+        Task::Clippy => run_steps(&[CLIPPY, CLIPPY_DEFAULT_FEATURES, MINIMAL_CLIPPY]),
+        Task::Test => run_steps(&[TEST_ALL_FEATURES, TEST_DEFAULT_FEATURES, MINIMAL_TEST]),
+        Task::Release => run_steps(&[MINIMAL_RELEASE, RELEASE]),
         Task::X11 => {
-            run_steps(X11_STEPS)?;
+            // Each profile gets the same protocol regressions. The remaining
+            // external-client campaign intentionally exercises remote control.
+            for (profile, binary) in [
+                ("minimal", "target/minimal/release/maverick"),
+                ("control", "target/release/maverick"),
+            ] {
+                let binary = std::fs::canonicalize(binary)
+                    .map_err(|e| format!("missing {profile} release: {e}"))?;
+                eprintln!("[xtask] X11 profile {profile}: {}", binary.display());
+                env::set_var("MAVERICK_TEST_WM", binary);
+                env::set_var("MAVERICK_TEST_PROFILE", profile);
+                run_steps(&X11_STEPS[..1])?;
+            }
+            env::remove_var("MAVERICK_TEST_PROFILE");
+            env::remove_var("MAVERICK_TEST_WM");
+            run_steps(&X11_STEPS[1..])?;
             run_steps(FOCUS_X11_STEPS)
         }
         Task::Help => {
