@@ -32,9 +32,11 @@ def wait_for(predicate, message):
 def wait_for_stable_value(producer, predicate, message):
     deadline = time.monotonic() + 5
     previous = None
+    last = None
     consecutive = 0
     while time.monotonic() < deadline:
         value = producer()
+        last = value
         if predicate(value):
             consecutive = consecutive + 1 if value == previous else 1
             previous = value
@@ -44,7 +46,7 @@ def wait_for_stable_value(producer, predicate, message):
             previous = None
             consecutive = 0
         time.sleep(0.05)
-    raise AssertionError(message)
+    raise AssertionError(f"{message}; last observed sample={last}")
 
 
 def main():
@@ -80,6 +82,21 @@ def main():
 
                 blank = command("blank")
                 assert blank[2] == 0, "the inherited cursor is not transparent"
+
+                # Prove the Xvfb/XFixes oracle itself can observe a client's
+                # explicit cursor before Maverick exists. If this fails, a
+                # later ownership failure says nothing about the WM.
+                command("client")
+                oracle_client = wait_for_stable_value(
+                    lambda: command("enter"),
+                    lambda sample: sample[2] > 0 and sample != blank,
+                    "Xvfb did not expose the probe client's explicit cursor",
+                )
+                command("destroy")
+                wait_for(lambda: command("sample") == blank,
+                         "destroying the oracle client did not restore the inherited cursor")
+                print(f"PASS: Xvfb exposes an explicit client cursor without a WM {oracle_client}")
+
                 wm = subprocess.Popen([args.wm, "--config", str(config)], env=env,
                                       stdout=log, stderr=log)
                 processes.append(wm)
