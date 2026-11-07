@@ -189,7 +189,7 @@ pub enum GeometryEffect {
 /// flag and mutates ONLY `applied` (the last-X11-geometry record). It must never modify
 /// `State` logical geometry, decide layout, or read X11 events.
 pub fn reconcile(
-    desired: &DesiredState,
+    desired: &DesiredState<'_>,
     state: &State,
     applied: &mut AppliedState,
 ) -> Vec<GeometryEffect> {
@@ -205,13 +205,13 @@ pub fn reconcile(
     // nearest the top of the stack, and last-write-wins is both the cheapest
     // deterministic policy and the one that matches the stacking order.
     let mut last_index: std::collections::HashMap<WindowId, usize> =
-        std::collections::HashMap::with_capacity(desired.windows.len());
-    for (i, dw) in desired.windows.iter().enumerate() {
+        std::collections::HashMap::with_capacity(desired.len());
+    for (i, dw) in desired.iter().enumerate() {
         last_index.insert(dw.window, i);
     }
 
     let mut out = Vec::new();
-    for (i, dw) in desired.windows.iter().enumerate() {
+    for (i, dw) in desired.iter().enumerate() {
         if last_index[&dw.window] != i {
             continue;
         }
@@ -230,7 +230,7 @@ pub fn reconcile(
     #[cfg(feature = "window-trace")]
     wtrace!(
         "reconcile desired={} effects={} applied_total={}",
-        desired.windows.len(),
+        desired.len(),
         out.len(),
         applied.windows.len()
     );
@@ -539,13 +539,11 @@ mod tests {
                 seen: true,
             },
         );
-        let desired = DesiredState {
-            windows: vec![DesiredWindow {
+        let desired = DesiredState::from_windows(vec![DesiredWindow {
                 window: win,
                 rect,
                 border,
-            }],
-        };
+            }]);
         let effects = reconcile(&desired, &state, &mut applied);
         assert!(
             effects.is_empty(),
@@ -572,13 +570,11 @@ mod tests {
                 seen: true,
             },
         );
-        let desired = DesiredState {
-            windows: vec![DesiredWindow {
+        let desired = DesiredState::from_windows(vec![DesiredWindow {
                 window: win,
                 rect,
                 border,
-            }],
-        };
+            }]);
         let effects = reconcile(&desired, &state, &mut applied);
         assert_eq!(
             effects.len(),
@@ -620,13 +616,11 @@ mod tests {
                 seen: true,
             },
         );
-        let desired = DesiredState {
-            windows: vec![DesiredWindow {
+        let desired = DesiredState::from_windows(vec![DesiredWindow {
                 window: win,
                 rect,
                 border,
-            }],
-        };
+            }]);
         let e1 = reconcile(&desired, &state_dirty, &mut applied);
         assert_eq!(
             e1.len(),
@@ -670,8 +664,7 @@ mod tests {
                 },
             );
         }
-        let desired = DesiredState {
-            windows: vec![
+        let desired = DesiredState::from_windows(vec![
                 DesiredWindow {
                     window: a,
                     rect: rect_a,
@@ -687,8 +680,7 @@ mod tests {
                     rect: rect_c_new,
                     border,
                 },
-            ],
-        };
+            ]);
         let effects = reconcile(&desired, &state, &mut applied);
         assert_eq!(effects.len(), 1, "only the changed window (c) emits");
         match &effects[0] {
@@ -1077,17 +1069,16 @@ mod tests {
     }
 
     /// The desired snapshot for a set of rows.
-    fn desired_for(rows: &[Row]) -> DesiredState {
-        DesiredState {
-            windows: rows
-                .iter()
+    fn desired_for(rows: &[Row]) -> DesiredState<'static> {
+        DesiredState::from_windows(
+            rows.iter()
                 .map(|r| DesiredWindow {
                     window: r.win,
                     rect: r.rect,
                     border: r.border,
                 })
                 .collect(),
-        }
+        )
     }
 
     /// Every field of `State`, in a form that does not depend on hash-map
@@ -1340,8 +1331,7 @@ mod tests {
         }
         // The same window in two places with different geometry — the shape a
         // producer bug would produce.
-        let desired = DesiredState {
-            windows: vec![
+        let desired = DesiredState::from_windows(vec![
                 DesiredWindow {
                     window: 1,
                     rect: Rect::new(0, 0, 100, 100),
@@ -1357,8 +1347,7 @@ mod tests {
                     rect: Rect::new(500, 500, 80, 80),
                     border: 2,
                 },
-            ],
-        };
+            ]);
 
         let mut applied = AppliedState::default();
         for round in 1..=64 {
