@@ -100,8 +100,16 @@ def main():
                 assert command("sample") == arrow
                 print("PASS: the root cursor remains visible without opening an application")
                 command("client")
+
+                def client_sample():
+                    entered = command("enter")
+                    sampled = command("sample")
+                    if entered[2] <= 0:
+                        return [0, 0, 0, 0]
+                    return sampled
+
                 client = wait_for_stable_value(
-                    lambda: command("enter"),
+                    client_sample,
                     lambda sample: sample[2] > 0 and sample != arrow,
                     "the client's own cursor was replaced",
                 )
