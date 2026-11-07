@@ -109,6 +109,10 @@ def main():
                 assert command("sample") == arrow
                 print("PASS: the root cursor remains visible without opening an application")
                 command("client")
+                wait_for(
+                    lambda: command("viewable")[0] == 1,
+                    "the client did not become viewable",
+                )
 
                 def client_sample():
                     entered = command("enter")
