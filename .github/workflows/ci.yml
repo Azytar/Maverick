@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, 'engineering/**']
   pull_request:
 
 env:
@@ -36,6 +36,8 @@ jobs:
         # No `--locked`: cargo fmt resolves no dependency graph, and rejects
         # the flag outright, so it cannot detect a stale lock.
         run: cargo fmt --all -- --check
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Test
