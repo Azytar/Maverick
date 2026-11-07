@@ -2510,3 +2510,71 @@ impl Command for OverviewEnter {
         )
     }
 }
+
+
+#[cfg(test)]
+mod view_removal_tests {
+    use super::*;
+    use crate::types::Monitor;
+
+    fn state_with_views(count: usize) -> (State, Cfg) {
+        let mut state = State::new();
+        state
+            .monitors
+            .push(Monitor::new(Rect::new(0, 0, 1280, 720), count));
+        (state, Cfg::default())
+    }
+
+    #[test]
+    fn removing_a_view_before_the_active_one_only_updates_ewmh_position() {
+        let (mut state, mut cfg) = state_with_views(3);
+        let active = state.monitors[0].workspaces[1].id;
+        assert!(state.monitors[0].goto_view(active));
+
+        let report = RemoveView(0).execute(&mut state, &mut cfg);
+
+        assert_eq!(state.monitors[0].workspaces.len(), 2);
+        assert_eq!(state.monitors[0].carousel.current(), Some(active));
+        assert_eq!(state.monitors[0].active_index(), 0);
+        assert!(report.event.is_none());
+        assert_eq!(report.effects.len(), 2, "{:?}", report.effects);
+        assert!(matches!(report.effects[0], Effect::RefreshDesktops));
+        assert!(matches!(report.effects[1], Effect::SetCurrentDesktop(0)));
+        assert!(
+            !report
+                .effects
+                .iter()
+                .any(|e| matches!(e, Effect::ArrangeMonitor(_) | Effect::FocusWindow(_))),
+            "removing another View must not re-arrange or re-focus the active one"
+        );
+    }
+
+    #[test]
+    fn removing_a_view_after_the_active_one_only_refreshes_desktop_metadata() {
+        let (mut state, mut cfg) = state_with_views(3);
+        let active = state.monitors[0].workspaces[0].id;
+
+        let report = RemoveView(2).execute(&mut state, &mut cfg);
+
+        assert_eq!(state.monitors[0].workspaces.len(), 2);
+        assert_eq!(state.monitors[0].carousel.current(), Some(active));
+        assert_eq!(state.monitors[0].active_index(), 0);
+        assert!(report.event.is_none());
+        assert_eq!(report.effects.len(), 1, "{:?}", report.effects);
+        assert!(matches!(report.effects[0], Effect::RefreshDesktops));
+    }
+
+    #[test]
+    fn removing_the_last_view_is_a_noop() {
+        let (mut state, mut cfg) = state_with_views(1);
+        let only = state.monitors[0].workspaces[0].id;
+
+        let report = RemoveView(0).execute(&mut state, &mut cfg);
+
+        assert!(report.effects.is_empty(), "{:?}", report.effects);
+        assert!(report.event.is_none());
+        assert_eq!(state.monitors[0].workspaces.len(), 1);
+        assert_eq!(state.monitors[0].carousel.current(), Some(only));
+        assert_eq!(state.monitors[0].carousel.origin(), Some(only));
+    }
+}
