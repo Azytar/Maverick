@@ -47,7 +47,7 @@ def cpu_ticks(pid):
 
 class Session:
     def __init__(self, directory, helper, shim, wm, ctl, mode, count, instrumented):
-        self.directory, self.ctl_path = directory, ctl
+        self.directory, self.ctl_path, self.mode = directory, ctl, mode
         directory.mkdir(mode=0o700)
         self.processes = []
         self.log = (directory / "session.log").open("w+")
@@ -61,7 +61,8 @@ class Session:
         config = directory / "config.toml"
         config.write_text('[general]\nfocus_mouse = false\nwarp_cursor = false\n'
                           '[autostart]\ncommands = []\n[[rules]]\nclass = "stage11"\n'
-                          f'float = {str(mode != "tiled").lower()}\ntrue_fullscreen = true\n')
+                          f'float = {str(mode != "tiled").lower()}\ntrue_fullscreen = true\n'
+                          + ('sticky = true\n' if mode == 'sticky' else ''))
         try:
             server = self.spawn(["Xvfb", "-displayfd", "1", "-screen", "0", "1280x800x24", "-nolisten", "tcp"],
                                 stdout=subprocess.PIPE, stderr=self.log, text=True)
@@ -99,12 +100,18 @@ class Session:
     def command(self, text):
         self.probe.stdin.write(text + "\n")
         self.probe.stdin.flush()
-        return json.loads(line(self.probe.stdout))
+        value = line(self.probe.stdout)
+        return {"ok": True} if value == "ok" else json.loads(value)
 
     def settle(self, count):
         def snapshot():
             value = self.command("stack")
-            return value if value["equal"] and len(value["managed"]) == count else None
+            if not value["equal"] or len(value["managed"]) != count:
+                return None
+            if self.mode == "transient":
+                for parent, child in zip(self.windows[::2], self.windows[1::2]):
+                    assert value["real"].index(parent) < value["real"].index(child)
+            return value
         return wait_for(snapshot, "published stacking differs from independent QueryTree")
 
     def focus(self, target):
@@ -190,6 +197,23 @@ def external_cases(session):
     updated = session.settle(count)
     assert updated["real"] == changed["real"]
     print("PASS: external restack updates published stacking without another WM action", flush=True)
+    # Burst commands are deliberately not settled individually.
+    for index in range(40):
+        session.ctl("msg", f"focus_window {session.windows[index % count]}")
+    session.ctl("query", "tree")
+    session.focus(target)
+    state = session.settle(count)
+    assert state["focus"] == target and state["active"] == target
+    session.command("dock")
+    dock = session.command("dockid")
+    state = session.settle(count)
+    assert dock in state["published"]
+    session.command(f"external {dock} 1 0")
+    wait_for(lambda: session.command("stack")["real"][0] == dock, "external dock lower did not reach X11")
+    assert session.settle(count)["real"][0] == dock
+    session.command("remove")
+    session.settle(count)
+    print("PASS: rapid focus and external dock restacking preserve server equivalence", flush=True)
     session.command(f"destroy-id {target}")
     session.settle(count - 1)
     print("PASS: destruction removes the client from the real and published stack", flush=True)
@@ -240,6 +264,16 @@ def main():
             session = Session(directory / "external", helper, shim, args.wm, args.ctl, "float", 2, False)
             try:
                 external_cases(session)
+            finally:
+                session.close()
+            session = Session(directory / "sticky", helper, shim, args.wm, args.ctl, "sticky", 2, False)
+            try:
+                for view in (2, 1, 2, 1):
+                    session.ctl("msg", f"view {view}")
+                    session.ctl("query", "tree")
+                    state = session.settle(2)
+                    assert set(state["real"]) == set(session.windows)
+                print("PASS: sticky clients preserve stacking across View changes", flush=True)
             finally:
                 session.close()
 

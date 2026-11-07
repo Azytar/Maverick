@@ -295,10 +295,9 @@ impl WindowManager {
         // A `SendEvent`-generated ConfigureNotify. `apply_geom` fabricates one
         // of these for every client (ICCCM requires it), and because the WM
         // selects `STRUCTURE_NOTIFY` on each managed window the server hands it
-        // straight back to us. Its `above_sibling` is a hard-coded `None`, which
-        // in a `ConfigureNotify` means "no sibling above this window" (it would
-        // read as "raise to the top" if replayed, and the geometry is redundant
-        // anyway — we are the ones who set it), so the whole event is dropped.
+        // straight back to us. Its `above_sibling` is a hard-coded `None` (the
+        // bottom of the stack in a real ConfigureNotify), not a server stacking
+        // observation. Its geometry is redundant too, so drop the whole event.
         if e.response_type & 0x80 != 0 {
             return Ok(());
         }

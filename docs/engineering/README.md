@@ -340,6 +340,78 @@ so CI verifies them together with the existing native protocol clients. Local
 strict Clippy in both feature modes, MSRV 1.85 and release builds pass. This
 container still forbids X11/IPC sockets; final live validation runs in CI.
 
+## Stage 11 — authoritative stacking observations
+
+The production-unchanged baseline is `e0b7126`, measured in
+[CI run 42398768369, attempt 2](https://github.com/Azytar/Maverick/actions/runs/42398768369/attempts/2).
+The first attempt stopped at the cursor test's signal shutdown timeout. The
+second completed all 60 measurement rows, then reproduced an external restack
+leaving `_NET_CLIENT_LIST_STACKING` stale indefinitely on an idle server.
+
+Explicit focus queues `SetInputFocus`, updates focus recency and arranges the
+monitor. `stack_overlay` computes the policy order, raises each entry only when
+that order differs, and sets `stacking_dirty`. At settled event-loop boundaries,
+`flush_client_list` coalesces invalidations; `QueryTree.reply()` waits for the
+actual root children, filters managed clients/docks, then publishes the property
+with a checked write. The query also waits behind earlier requests on this
+connection. Request submissions alone are not completion measurements.
+
+Twelve cyclic floating focus actions produced this baseline on the CI Xvfb
+runner (not Axiom's laptop):
+
+| Clients | ConfigureWindow | QueryTree / successful query replies | Median instrumented query wait |
+| --- | ---: | ---: | ---: |
+| 2 | 24 | 12 / 12 | 88.9 us |
+| 10 | 120 | 12 / 12 | 262.9 us |
+| 50 | 600 | 12 / 12 | 1177.3 us |
+
+Each row also made 12 checked property writes; their waits are recorded
+separately. Repeated focus made zero queries in all 15 client/mode combinations.
+Tiled cyclic focus made zero baseline queries; transient cases made 0/6/6.
+Fullscreen and maximize each made 12. Query waits include preceding raises,
+observer activity, scheduling and shim overhead; they are neither isolated
+QueryTree server time nor evidence of physical latency. Uninstrumented rows
+separately record native active-window + X focus acknowledgement (including IPC
+CLI startup/observer queries), whole-campaign wall time and 10 ms CPU ticks.
+Pure server execution time is unavailable. The logs retain all 60 rows.
+
+Alternatives evaluated:
+
+- **A, retain QueryTree:** chosen. Per-monitor policy order cannot establish the
+  global effective order across external clients, reparenting and failed async
+  requests. The measurements do not justify replacing the server oracle.
+- **B, derive all order from events:** rejected. Partial notifications, synthetic
+  events, unmanaged siblings and resynchronization add unnecessary state.
+- **C, coalesce invalidations:** retain existing settled boundaries and cover
+  older notification echoes with the QueryTree sequence watermark. New real
+  structure observations invalidate publication, including external changes.
+- **D, order cache:** rejected for this stage; a permanently stale second source
+  of truth is worse than a query. No full stacking model is introduced.
+
+The correction handles real root Configure/Map/Reparent/Circulate observations
+for tracked clients/docks. Only sequences strictly older than the last snapshot
+are covered; equality can describe another client's subsequent restack. x11rb's
+extended sequence avoids 16-bit wrapping comparisons. Synthetic ICCCM
+ConfigureNotify messages and child-targeted duplicate copies are excluded.
+New geometry notifications can conservatively require a query even when the
+relative stack did not change; correctness takes precedence over the counter.
+No timer or periodic work is added.
+
+The independent Xlib probe compares the published order with its own QueryTree,
+checks real focus, tests redirected and override-redirect external attempts,
+transients, rapid focus, docks, sticky View transitions and destruction. Unit
+tests cover notification filtering and sequence equality/wrap boundaries.
+Reproduce the complete campaign with:
+
+```sh
+cargo run -p maverick-xtask --locked -- x11
+python3 tests/xvfb-stacking-campaign.py --out /tmp/maverick-stage11.json --external
+```
+
+CI preserves the measurement JSON alongside existing native probe evidence.
+Local X11/IPC execution is blocked by this container's socket restrictions;
+post-correction live validation is performed in CI.
+
 ## Next work
 
 1. Keep Stage 3 focused on invariants that detect real state/effect regressions;
