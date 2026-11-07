@@ -5,7 +5,6 @@ use std::time::Duration;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, KEY_PRESS_EVENT, KEY_RELEASE_EVENT};
 use x11rb::protocol::xtest::ConnectionExt as _;
-use x11rb::rust_connection::RustConnection;
 
 pub fn key(conn: &RustConnection, keysym: u32) -> Result<(), Box<dyn Error>> {
     let setup = conn.setup();
@@ -79,7 +78,9 @@ fn keyboard_collapse_and_vertical_focus_follow_real_geometry() -> Result<(), Box
         "[general]\nfocus_mouse=false\nwarp_cursor=false\n[autostart]\ncommands=[]\n\
          [[keybindings]]\nkey=\"F1\"\naction=\"collapse_column\"\n\
          [[keybindings]]\nkey=\"F2\"\naction=\"focus:up\"\n\
-         [[keybindings]]\nkey=\"F3\"\naction=\"focus:down\"\n",
+         [[keybindings]]\nkey=\"F3\"\naction=\"focus:down\"\n\
+         [[keybindings]]\nkey=\"F4\"\naction=\"move:up\"\n\
+         [[keybindings]]\nkey=\"F5\"\naction=\"move:down\"\n",
     )?;
     let a = map_client(&conn, root, false)?;
     wait_managed(&mut session, &conn, root, &[a])?;
@@ -101,6 +102,16 @@ fn keyboard_collapse_and_vertical_focus_follow_real_geometry() -> Result<(), Box
         wait_for(&mut session, "vertical keyboard focus", || {
             Ok(window_list(&conn, root, active)? == [focused]
                 && conn.get_input_focus()?.reply()?.focus == focused)
+        })?;
+    }
+    for (keysym, upper, lower) in [(0xffc1, b, a), (0xffc2, a, b)] {
+        key(&conn, keysym)?;
+        wait_for(&mut session, "vertical keyboard movement", || {
+            Ok(
+                conn.get_geometry(upper)?.reply()?.y < conn.get_geometry(lower)?.reply()?.y
+                    && window_list(&conn, root, active)? == [b]
+                    && conn.get_input_focus()?.reply()?.focus == b,
+            )
         })?;
     }
     Ok(())

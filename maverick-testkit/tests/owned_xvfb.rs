@@ -6,6 +6,8 @@ mod failures;
 #[path = "support/keyboard.rs"]
 mod keyboard;
 
+#[path = "support/input_hints.rs"]
+mod input_hints;
 mod support;
 #[path = "support/transients_fullscreen.rs"]
 mod transients_fullscreen;

@@ -2,7 +2,6 @@ use super::support::*;
 use std::error::Error;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, PropMode};
-use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 #[test]
@@ -72,9 +71,7 @@ fn disconnected_client_is_removed_without_affecting_other_connections() -> Resul
 {
     let (mut session, conn, root) = start_session()?;
     let survivor = map_client(&conn, root, false)?;
-    let (stream, _) =
-        x11rb::rust_connection::DefaultStream::from_unix_stream(session.connect_stream()?)?;
-    let other = RustConnection::connect_to_stream(stream, 0)?;
+    let other = connect(&session)?;
     let window = map_client(&other, root, true)?;
     wait_managed(&mut session, &conn, root, &[survivor, window])?;
     drop(other);
@@ -102,5 +99,27 @@ fn fixture_reports_owned_wm_and_server_failure() -> Result<(), Box<dyn Error>> {
     session.stop_server()?;
     let error = wait_for(&mut session, "deliberately stopped server", || Ok(false)).unwrap_err();
     assert!(error.to_string().contains("Xvfb exited"), "{error}");
+    Ok(())
+}
+
+#[test]
+#[ignore = "needs Xvfb and an already compiled release WM"]
+fn dropping_one_fixture_removes_only_its_server_and_private_files() -> Result<(), Box<dyn Error>> {
+    let (first, first_conn, _) = start_session()?;
+    let (mut second, second_conn, root) = start_session()?;
+    assert_ne!(first.display(), second.display());
+    let directory = first.wm_log_path().parent().unwrap().to_path_buf();
+    drop(first);
+    assert!(!directory.exists(), "fixture temporary files survived Drop");
+    assert!(
+        match first_conn.get_input_focus() {
+            Ok(cookie) => cookie.reply().is_err(),
+            Err(_) => true,
+        },
+        "owned Xvfb survived Drop"
+    );
+    let window = map_client(&second_conn, root, false)?;
+    wait_managed(&mut second, &second_conn, root, &[window])?;
+    assert_stacking(&second_conn, root, &[window])?;
     Ok(())
 }

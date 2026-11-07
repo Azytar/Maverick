@@ -10,7 +10,41 @@ use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageEvent, ConnectionExt, CreateWindowAux, EventMask, PropMode,
     Window, WindowClass,
 };
-use x11rb::rust_connection::RustConnection;
+use x11rb::rust_connection::{DefaultStream, PollMode, Stream};
+use x11rb::utils::RawFdContainer;
+
+/// The watchdog must drop with this X11 connection, never with the session:
+/// keeping its duplicate socket alive would prevent server-side client death.
+pub struct DeadlineStream {
+    inner: DefaultStream,
+    _deadline: maverick_testkit::ConnectionDeadline,
+}
+
+impl Stream for DeadlineStream {
+    fn poll(&self, mode: PollMode) -> io::Result<()> {
+        self.inner.poll(mode)
+    }
+    fn read(&self, bytes: &mut [u8], fds: &mut Vec<RawFdContainer>) -> io::Result<usize> {
+        self.inner.read(bytes, fds)
+    }
+    fn write(&self, bytes: &[u8], fds: &mut Vec<RawFdContainer>) -> io::Result<usize> {
+        self.inner.write(bytes, fds)
+    }
+}
+
+pub type RustConnection = x11rb::rust_connection::RustConnection<DeadlineStream>;
+
+pub fn connect(session: &XvfbSession) -> Result<RustConnection, Box<dyn Error>> {
+    let (stream, deadline) = session.connect_stream()?;
+    let (inner, _) = DefaultStream::from_unix_stream(stream)?;
+    Ok(RustConnection::connect_to_stream(
+        DeadlineStream {
+            inner,
+            _deadline: deadline,
+        },
+        0,
+    )?)
+}
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
@@ -30,6 +64,13 @@ pub fn window_list(
     if reply.format == 0 {
         // The WM may not have published this property yet.
         return Ok(Vec::new());
+    }
+    if reply.type_ != u32::from(AtomEnum::WINDOW) || reply.format != 32 || reply.bytes_after != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid or truncated EWMH window list",
+        )
+        .into());
     }
     let values = reply
         .value32()
@@ -97,9 +138,7 @@ pub fn start_with_config(
     let mut session = XvfbSession::with_config(config)?;
     session.launch_wm(&binary)?;
 
-    let stream = session.connect_stream()?;
-    let (stream, _) = x11rb::rust_connection::DefaultStream::from_unix_stream(stream)?;
-    let conn = RustConnection::connect_to_stream(stream, 0)?;
+    let conn = connect(&session)?;
     let screen = 0;
     let root = conn.setup().roots[screen].root;
     let supporting_wm = atom(&conn, b"_NET_SUPPORTING_WM_CHECK")?;

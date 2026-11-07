@@ -2,7 +2,6 @@ use super::support::*;
 use std::error::Error;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, GetGeometryReply, PropMode, Window};
-use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 fn transient(
@@ -122,6 +121,12 @@ fn fullscreen_restores_geometry_and_obeys_float_dock_layers() -> Result<(), Box<
         conn.flush()?;
         wait_managed(&mut session, &conn, root, &[owner, tile, float])?;
         let windows = [owner, tile, float, dock];
+        wait_for(&mut session, "dock stacking publication", || {
+            Ok(
+                window_list(&conn, root, atom(&conn, b"_NET_CLIENT_LIST_STACKING")?)?
+                    .contains(&dock),
+            )
+        })?;
         for target in [owner, float, tile, owner] {
             request_focus(&conn, root, active, target)?;
             wait_for(&mut session, "fullscreen layer with float and dock", || {

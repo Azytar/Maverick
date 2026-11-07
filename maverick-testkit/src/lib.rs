@@ -42,7 +42,6 @@ pub struct XvfbSession {
     display: String,
     config: PathBuf,
     root: PathBuf,
-    deadlines: Vec<ConnectionDeadline>,
 }
 
 impl XvfbSession {
@@ -120,7 +119,6 @@ impl XvfbSession {
             display,
             config,
             root,
-            deadlines: Vec::new(),
         })
     }
 
@@ -131,17 +129,14 @@ impl XvfbSession {
 
     /// Connect only to this server. A total connection deadline also unblocks
     /// synchronous X11 replies if the server stops responding mid-request.
-    pub fn connect_stream(&mut self) -> io::Result<UnixStream> {
+    pub fn connect_stream(&self) -> io::Result<(UnixStream, ConnectionDeadline)> {
         let number = self
             .display
             .strip_prefix(':')
             .ok_or_else(|| io::Error::other("invalid private display"))?;
         let stream = UnixStream::connect(format!("/tmp/.X11-unix/X{number}"))?;
-        self.deadlines.push(ConnectionDeadline::new(
-            stream.try_clone()?,
-            Duration::from_secs(60),
-        ));
-        Ok(stream)
+        let deadline = ConnectionDeadline::new(stream.try_clone()?, Duration::from_secs(60));
+        Ok((stream, deadline))
     }
 
     /// Start the requested WM binary without passing control-plane variables.
@@ -213,7 +208,7 @@ impl XvfbSession {
 
 /// A cancellable watchdog owns a duplicate of a test socket, never a PID.
 /// Shutdown wakes blocked readers; dropping the fixture cancels and joins it.
-struct ConnectionDeadline {
+pub struct ConnectionDeadline {
     cancel: Option<mpsc::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
 }
