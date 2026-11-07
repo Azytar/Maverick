@@ -1146,7 +1146,7 @@ impl WindowManager {
         if let Some(w) = valid_win {
             // One scoped lookup: ends the immutable borrow of `clients` before
             // the mutations below re-borrow the map.
-            let (mon_i, geom, urgent, wants_input) = {
+            let (mon_i, geom, wants_input, take_focus) = {
                 let c = match self.engine.state.clients.get(&w) {
                     Some(c) => c,
                     None => return self.focus(None),
@@ -1174,12 +1174,7 @@ impl WindowManager {
                 if !wants_input && !take_focus {
                     return Ok(());
                 }
-                (
-                    c.monitor,
-                    c.geom,
-                    c.flags.has(WinFlags::URGENT),
-                    wants_input,
-                )
+                (c.monitor, c.geom, wants_input, take_focus)
             };
 
             // Guard against stale client.monitor after hotplug
@@ -1219,7 +1214,9 @@ impl WindowManager {
                 // back off it.
                 self.root_focus_pending = Some(w);
             }
-            if self.has_protocol(w, self.atoms.wm_take_focus)? {
+            // No event dispatch occurs since eligibility was checked above;
+            // reuse the protocol lookup rather than querying the cache twice.
+            if take_focus {
                 self.offer_take_focus(w)?;
             }
             // Commit the logical focus to `State` *before* reconciling against
@@ -1257,14 +1254,12 @@ impl WindowManager {
             // server sends the `FocusOut` that hands repair to the event path —
             // probing here would re-ask for the answer every time we change
             // focus, on the thread that has to keep draining input.
-            let col = if urgent {
-                self.engine.cfg.col_urgent
-            } else {
-                self.engine.cfg.col_focused
-            };
-            let _ = self
-                .conn
-                .change_window_attributes(w, &ChangeWindowAttributesAux::new().border_pixel(col));
+            // This focus consumes urgency below. Paint the focused color now,
+            // rather than leaving an urgent border after the flag/atom is gone.
+            let _ = self.conn.change_window_attributes(
+                w,
+                &ChangeWindowAttributesAux::new().border_pixel(self.engine.cfg.col_focused),
+            );
 
             let was_urgent = if let Some(c) = self.engine.state.clients.get_mut(&w) {
                 // Consume the urgency flag so its border color and the

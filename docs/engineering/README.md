@@ -277,6 +277,69 @@ with `PROPTEST_CASES=1024`, and both arrange/reconcile allocation guards.
 The publication gate remains the same complete CI campaign, including native C
 X11 clients; environment-dependent local failures remain documented above.
 
+## Stage 10 continuation: focus requests and urgent appearance
+
+Starting revision: `6fb8849`. The focus path was inspected before changing
+production. `has_protocol` already caches `WM_PROTOCOLS`: its two reads inside
+one `focus()` were duplicate cache lookups, not two server round trips.
+The earlier saturation harness references scratch-only tools that are absent
+from this checkout, so it was not presented as a runnable measurement.
+
+The existing isolated float campaign now accepts `--request-output` and
+`--focus-pattern cycle|repeat`. A test-only C preload counts x11rb's RAW XCB
+submissions through both 64-bit submission APIs; nested forwarding is counted
+once. Capture is scoped to the WM, and never enabled on clients or production
+sessions. An independent Xlib client verifies real input focus and
+`_NET_ACTIVE_WINDOW` after each action. Instrumented runs omit timing metrics:
+these are queued request counts, not server completion, flush counts or latency.
+
+The production-unchanged baseline (`122f331`) was measured in
+[CI run 42395522831](https://github.com/Azytar/Maverick/actions/runs/42395522831).
+Two clients and 20 actions per case produced:
+
+| RAW XCB operation | Alternating focus | Repeated focus |
+| --- | ---: | ---: |
+| SetInputFocus | 20 | 20 |
+| GetInputFocus | 0 | 0 |
+| ChangeWindowAttributes | 40 | 20 |
+| ConfigureWindow | 40 | 0 |
+| QueryTree | 20 | 0 |
+| ChangeProperty | 41 | 21 |
+| GetProperty | 1 | 1 |
+
+The measured interval includes a workload-completion urgency sentinel. Its
+metadata work is included above. Reproduce the cycle and repeat cases with:
+
+```sh
+python3 tests/xvfb-floats.py --case profile --clients 2 --actions 20 --idle-seconds 0.05 --request-output /tmp/focus-cycle.jsonl
+python3 tests/xvfb-floats.py --case profile --clients 2 --actions 20 --idle-seconds 0.05 --focus-pattern repeat --request-output /tmp/focus-repeat.jsonl
+python3 tests/xvfb-floats.py --case urgency
+```
+
+The native urgency regression failed on that baseline: focus and the active
+window agreed and the attention atom cleared, but the border retained the
+urgent color. `focus()` now paints `col_focused` when it consumes urgency.
+The protocol eligibility result is also reused within that call. No event is
+dispatched between the reads, and later property notifications still invalidate
+the existing cache. Explicit focus requests, server timestamps, child-focus
+handling and Globally Active offers remain intact; no timing improvement or
+request reduction is claimed from this correction.
+
+The same CI run separately exposed a Proptest-1.11 float-sampler panic before
+Maverick's presentation assertion ran. A standalone reproducer needs only a
+PassThrough RNG with eight `0xff` bytes followed by zeroes and the range
+`0.05f32..=1.0`. Root property fixtures now sample integer encodings for affected
+positive float ranges, preserving every representable value and both endpoints
+while changing the sampling distribution. The independent core test uses the
+same encoding technique. No property/assertion is removed and no dependency is
+changed. A regression runs the exact panic-triggering RNG stream; presentation
+properties also passed 10,000 cases each locally with a sufficient reject budget.
+
+The standard `xtask x11` campaign includes both request profiles and urgency,
+so CI verifies them together with the existing native protocol clients. Local
+strict Clippy in both feature modes, MSRV 1.85 and release builds pass. This
+container still forbids X11/IPC sockets; final live validation runs in CI.
+
 ## Next work
 
 1. Keep Stage 3 focused on invariants that detect real state/effect regressions;
@@ -285,6 +348,6 @@ X11 clients; environment-dependent local failures remain documented above.
    an independent ABI/protocol oracle.
 3. Extend measurements only when a new profile identifies another real cost;
    preserve the established zero-allocation and reconciliation contracts.
-4. Compare any Stage 4 change against the existing Xvfb profile workload and
-   retain before/after evidence; no performance claim follows from allocation
-   counts alone.
+4. Investigate the measured QueryTree per alternating floating focus before
+   introducing any stacking cache; external restacks and transient ordering
+   must remain observable. Preserve uninstrumented controls for timing claims.
