@@ -227,7 +227,7 @@ const X11_STEPS: &[Step] = &[
         program: "python3",
         args: &["tests/xvfb-overview.py", "--without-composite"],
     },
-]
+];
 
 const RELEASE: Step = Step {
     label: "release build",
