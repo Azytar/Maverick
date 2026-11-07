@@ -282,7 +282,8 @@ def main():
                         raw = Path(wm_env["MAVERICK_XCB_PROFILE_PATH"]).read_text()
                         records = [json.loads(row) for row in raw.splitlines()]
                         assert records and all(row["sequence"] > 0 for row in records), "request observer failed"
-                        measured = [row for row in records if request_start <= row["ns"] <= request_end]
+                        measured = [row for row in records if request_start <= row["ns"] <= request_end
+                                    and row.get("kind", "submit") == "submit"]
                         counts = Counter(row["opcode"] for row in measured)
                         assert counts[42] >= args.actions, "request observer missed direct focus submissions"
                         profile["raw_xcb_submissions"] = dict(sorted(counts.items()))

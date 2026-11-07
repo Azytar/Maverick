@@ -251,6 +251,16 @@ const X11_STEPS: &[Step] = &[
 
 const FOCUS_X11_STEPS: &[Step] = &[
     Step {
+        label: "stacking measurement and external equivalence",
+        program: "python3",
+        args: &[
+            "tests/xvfb-stacking-campaign.py",
+            "--out",
+            "/tmp/maverick-stage11.json",
+            "--external",
+        ],
+    },
+    Step {
         label: "focus request profile (cycle)",
         program: "python3",
         args: &[
