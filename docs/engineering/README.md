@@ -11,7 +11,8 @@ needed to continue staged work without reconstructing it from chat history.
 | 1 — Rust infrastructure | complete | dependency-free `maverick-xtask` owns Cargo/release/X11 orchestration; branch CI is green |
 | 2 — selective migration | active | keep measured Python/C oracles unless a Rust migration demonstrates a concrete benefit |
 | 3 — reliability | active | View reconciliation fixed-point property and minimal `RemoveView` contracts added |
-| 4 — performance | active | desired/reconcile allocation baseline measured; first production copy removed |
+| 4 — performance | active | steady-state reconcile reduced from two allocations to zero with full X11 equivalence |
+| 7 — security | active | dependency advisories/sources gate and explicit MSRV enforcement added |
 
 ## Stage 0 baseline
 
@@ -129,6 +130,33 @@ equivalence. It still does **not** establish a wall-clock or presentation
 latency improvement; non-empty reconciliations may legitimately grow the
 returned effects vector because emitting real X11 work is not the no-op case
 measured here.
+
+## Stage 7 dependency and MSRV result
+
+The first dependency-policy run exposed a real consistency defect before it
+found a vulnerability: Maverick declared Rust 1.82, but the locked development
+graph contained `wit-bindgen 0.57.1` through
+`proptest -> rand -> getrandom -> wasip2`. Cargo 1.82 cannot parse that
+Edition-2024 package, so the declared MSRV was no longer a property of the
+checked-in lockfile.
+
+Maverick is an application and no repository documentation promised Rust 1.82
+as an external compatibility contract. The workspace MSRV is therefore now
+**Rust 1.85**, the first stable release with Edition 2024 support. CI runs a
+separate Rust-1.85 workspace check over all targets/features so this value
+cannot silently drift again.
+
+`cargo-deny` runs through the official action pinned to an immutable commit.
+The initial policy intentionally covers only two high-confidence classes:
+
+- RustSec advisories, with no ignored advisory IDs;
+- dependency sources, denying unknown registries and Git dependencies while
+  allowing crates.io and local/path workspace crates.
+
+The current lockfile contains no Git dependencies and the dependency-policy
+workflow passes on Rust 1.85. License and duplicate/bans policy is deliberately
+deferred until an explicit license/version inventory is reviewed; Stage 7 does
+not create broad exception lists merely to make a stricter template pass.
 
 ## Next work
 
