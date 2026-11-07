@@ -110,6 +110,26 @@ establish a wall-clock, input-latency or presentation improvement. The next
 performance check must use the existing Xvfb profile workload and then, only if
 the effect survives there, controlled physical-hardware measurements.
 
+## Stage 4 second vertical result
+
+The remaining steady-state reconciliation allocation came from the defensive
+last-write-wins map used to coalesce duplicate window placements. That map is
+scratch only: it is rebuilt from Desired every pass and is not a second source
+of window-manager state.
+
+`AppliedState` now retains that map's capacity between reconciliations. Each
+pass clears and rebuilds the scratch contents, preserving the duplicate policy
+without allocating after warm-up. The allocation regression now requires
+**zero heap allocations per steady-state reconcile** for 1, 5, 10 and 50
+windows.
+
+The branch passes the full Rust gates, installer suite and isolated X11
+campaign. This establishes the steady-state allocation invariant and functional
+equivalence. It still does **not** establish a wall-clock or presentation
+latency improvement; non-empty reconciliations may legitimately grow the
+returned effects vector because emitting real X11 work is not the no-op case
+measured here.
+
 ## Next work
 
 1. Keep Stage 3 focused on invariants that detect real state/effect regressions;
