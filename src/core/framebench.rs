@@ -234,6 +234,72 @@ mod frame_alloc_tests {
         }
     }
 
+    /// Measure real reconciliation, including duplicate handling and changed
+    /// geometry. No X11 server or timing threshold is part of this workload.
+    #[cfg(not(feature = "window-trace"))]
+    #[test]
+    #[ignore = "manual timing workload; run with --release --ignored --nocapture"]
+    fn reconcile_workload() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 20_000;
+        for (n, duplicates, changing) in [
+            (1, false, false),
+            (5, false, false),
+            (10, false, false),
+            (50, false, false),
+            (200, false, false),
+            (50, true, false),
+            (50, false, true),
+        ] {
+            let state = ribbon(n);
+            let mut first: Placements = (1..=n)
+                .map(|win| (win, Rect::new(win as i32, 20, 400, 900), 2))
+                .collect();
+            if duplicates {
+                first.push((1, Rect::new(30, 40, 300, 400), 3));
+            }
+            let second: Placements = first
+                .iter()
+                .map(|&(win, rect, border)| {
+                    (win, Rect::new(rect.x + 1, rect.y, rect.w, rect.h), border)
+                })
+                .collect();
+            let snapshots = [
+                DesiredState::from_placements(&first),
+                DesiredState::from_placements(&second),
+            ];
+            let mut applied = AppliedState::default();
+            assert_eq!(
+                reconcile(&snapshots[0], &state, &mut applied).len(),
+                n as usize
+            );
+            let mut samples = Vec::new();
+            for _ in 0..9 {
+                let mut effects = 0;
+                let start = Instant::now();
+                for round in 0..ITERATIONS {
+                    let snapshot = if changing { 1 - round % 2 } else { 0 };
+                    effects += black_box(reconcile(
+                        black_box(&snapshots[snapshot]),
+                        black_box(&state),
+                        black_box(&mut applied),
+                    ))
+                    .len();
+                }
+                let elapsed = start.elapsed().as_nanos() / ITERATIONS as u128;
+                assert_eq!(effects, if changing { ITERATIONS * n as usize } else { 0 });
+                samples.push(elapsed);
+            }
+            samples.sort_unstable();
+            println!(
+                "reconcile windows={n} duplicates={duplicates} changing={changing} iterations={ITERATIONS} median_ns={} min_ns={} max_ns={}",
+                samples[4], samples[0], samples[8]
+            );
+        }
+    }
+
     /// The headline projection invariant: an arrange must not touch the heap.
     ///
     /// This is the whole justification for the projection buffers being
