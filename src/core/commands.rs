@@ -2511,7 +2511,6 @@ impl Command for OverviewEnter {
     }
 }
 
-
 #[cfg(test)]
 mod view_removal_tests {
     use super::*;
