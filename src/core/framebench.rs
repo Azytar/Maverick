@@ -115,7 +115,9 @@ mod self_tests {
 
 mod frame_alloc_tests {
     use super::CountAllocs;
+    use crate::backend::x11::reconciler::{reconcile, AppliedState};
     use crate::config::Cfg;
+    use crate::core::desired::DesiredState;
     use crate::core::layout::{arrange, Placements, RibbonScratch};
     use crate::core::present::present_into;
     use crate::types::{Client, Column, Focus, Monitor, Rect, State, ViewId, WindowId};
@@ -170,6 +172,60 @@ mod frame_alloc_tests {
         // Report per frame, rounding up, so "1" really means "at least one
         // allocation every frame" and 0 means none at all.
         total.div_ceil(16)
+    }
+
+    /// Allocations performed by steady-state desired-to-applied reconciliation.
+    ///
+    /// The layout/presentation buffers are already warm here, and AppliedState
+    /// has seen the geometry once, so no X11 configure effects are expected.
+    /// This isolates scratch allocations in DesiredState::from_placements and
+    /// reconcile rather than first-frame growth or a real geometry change.
+    fn reconcile_allocs_per_frame(n_windows: u32) -> u64 {
+        let state = ribbon(n_windows);
+        let cfg = Cfg::default();
+        let mut placements: Placements = Placements::new();
+        let mut scratch = RibbonScratch::default();
+
+        for _ in 0..8 {
+            arrange(&state, 0, &cfg, &mut placements, &mut scratch);
+            present_into(&state, &state.monitors[0], &mut placements);
+        }
+
+        let mut applied = AppliedState::default();
+        let desired = DesiredState::from_placements(&placements);
+        let first = reconcile(&desired, &state, &mut applied);
+        assert!(
+            !first.is_empty(),
+            "the warm-up reconcile must establish the applied geometry"
+        );
+
+        let counter = CountAllocs::start();
+        for _ in 0..16 {
+            let desired = DesiredState::from_placements(&placements);
+            let effects = reconcile(&desired, &state, &mut applied);
+            assert!(
+                effects.is_empty(),
+                "steady-state reconciliation unexpectedly emitted geometry"
+            );
+        }
+        counter.finish().div_ceil(16)
+    }
+
+    /// Stage 4 baseline: the steady-state reconcile path currently allocates
+    /// one fresh Desired window vector and one duplicate-coalescing map per pass.
+    ///
+    /// This assertion is deliberately a baseline, not a desired end state.
+    /// The next Stage 4 change must preserve all reconciliation semantics, then
+    /// reduce this number and update the contract with before/after evidence.
+    #[test]
+    fn reconcile_allocation_baseline_is_two_per_frame() {
+        for n in [1, 5, 10, 50] {
+            let per_frame = reconcile_allocs_per_frame(n);
+            assert_eq!(
+                per_frame, 2,
+                "{n} windows: expected the audited two steady-state scratch allocations, got {per_frame}"
+            );
+        }
     }
 
     /// The headline projection invariant: an arrange must not touch the heap.
