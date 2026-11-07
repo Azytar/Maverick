@@ -31,7 +31,35 @@ int main(int argc, char **argv) {
     printf("%lu\n", win); fflush(stdout);
     char cmd[256];
     while (fgets(cmd, sizeof(cmd), stdin)) {
-        if (!strncmp(cmd, "dockid", 6)) {
+        if (!strcmp(cmd, "focus-state\n")) {
+            Window focused;
+            int revert, format;
+            Atom type;
+            unsigned long count, remaining, active = None;
+            unsigned char *data = NULL;
+            XGetInputFocus(d, &focused, &revert);
+            if (XGetWindowProperty(d, root, XInternAtom(d, "_NET_ACTIVE_WINDOW", False),
+                                   0, 1, False, XA_WINDOW, &type, &format, &count,
+                                   &remaining, &data) != Success || type != XA_WINDOW ||
+                format != 32 || count != 1 || remaining || !data) return 2;
+            active = *(unsigned long *)data;
+            XFree(data);
+            XWindowAttributes attr;
+            if (!XGetWindowAttributes(d, win, &attr)) return 2;
+            unsigned long pixel = 0;
+            int y = attr.y + attr.border_width + attr.height / 2;
+            if (focused == win && active == win && attr.map_state == IsViewable &&
+                attr.border_width > 0 && attr.x >= 0 && attr.x < DisplayWidth(d, DefaultScreen(d)) &&
+                y >= 0 && y < DisplayHeight(d, DefaultScreen(d))) {
+                XImage *image = XGetImage(d, root, attr.x, y, 1, 1, AllPlanes, ZPixmap);
+                if (!image) return 2;
+                pixel = XGetPixel(image, 0, 0);
+                XDestroyImage(image);
+            }
+            printf("%lu %lu %lu\n", focused, active, pixel);
+            fflush(stdout);
+            continue;
+        } else if (!strncmp(cmd, "dockid", 6)) {
             printf("%lu\n", dock); fflush(stdout);
             continue;
         } else if (!strncmp(cmd, "dock", 4)) {

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check floating-window layers and focus on a private Xvfb display."""
 import argparse
+from collections import Counter
 import json
 import math
 import os
@@ -51,16 +52,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wm", default=str(ROOT / "target/release/maverick"))
     parser.add_argument("--ctl", default=str(ROOT / "target/release/maverickctl"))
-    parser.add_argument("--case", choices=("layers", "focus", "vertical", "transients", "metadata", "profile"), default="focus")
+    parser.add_argument("--case", choices=("layers", "focus", "vertical", "transients", "metadata", "profile", "urgency"), default="focus")
     parser.add_argument("--clients", type=int, default=10, help="profile: total clients, including two floats")
     parser.add_argument("--actions", type=int, default=100, help="profile: successive focus requests")
     parser.add_argument("--idle-seconds", type=float, default=2, help="profile: idle sampling interval")
     parser.add_argument("--trace-output", type=Path, help="profile: enable and save the existing WM trace")
+    parser.add_argument("--request-output", type=Path, help="profile: save test-only raw XCB submission records")
+    parser.add_argument("--focus-pattern", choices=("cycle", "repeat"), default="cycle")
     args = parser.parse_args()
     if not 2 <= args.clients <= 200 or not 1 <= args.actions <= 10000 or not 0 < args.idle_seconds <= 30:
         parser.error("expected 2..200 clients, 1..10000 actions and 0..30 idle seconds")
     if args.trace_output and args.case != "profile":
         parser.error("--trace-output requires --case profile")
+    if args.request_output and (args.case != "profile" or args.trace_output):
+        parser.error("--request-output requires profile without --trace-output")
     processes = []
     with tempfile.TemporaryDirectory(prefix="mfloat-", dir="/tmp") as directory:
         directory = Path(directory)
@@ -73,11 +78,20 @@ def main():
             env["MAVERICK_TRACE"] = "1"
             env["MAVERICK_TRACE_PATH"] = str(directory / "wm.trace")
         config = directory / "config.toml"
-        config.write_text("[general]\nfocus_mouse = false\nwarp_cursor = false\n"
+        appearance = ("border_width = 3\n[colors]\nnormal = 0x222222\n"
+                      "focused = 0x00ff00\nurgent = 0xff0000\n") if args.case == "urgency" else ""
+        config.write_text("[general]\nfocus_mouse = false\nwarp_cursor = false\n" + appearance +
                           "[autostart]\ncommands = []\n")
         helper = directory / "probe"
         subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(ROOT / "tests/stacking-probe.c"),
                         "-o", str(helper), "-lX11"], check=True)
+        wm_env = dict(env)
+        if args.request_output:
+            shim = directory / "requests.so"
+            subprocess.run(["cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-shared", "-fPIC",
+                            str(ROOT / "tests/xcb-request-profile.c"), "-o", str(shim), "-ldl"], check=True)
+            wm_env["LD_PRELOAD"] = str(shim)
+            wm_env["MAVERICK_XCB_PROFILE_PATH"] = str(directory / "requests.jsonl")
         with (directory / "wm.log").open("w+") as log:
             try:
                 server = subprocess.Popen(["Xvfb", "-displayfd", "1", "-screen", "0", "800x600x24",
@@ -85,8 +99,9 @@ def main():
                                           stderr=log, text=True, env=env)
                 processes.append(server)
                 env["DISPLAY"] = ":" + line(server.stdout)
+                wm_env["DISPLAY"] = env["DISPLAY"]
                 wm = subprocess.Popen([args.wm, "--config", str(config), "--session-id", "floats"],
-                                      env=env, stdout=log, stderr=log)
+                                      env=wm_env, stdout=log, stderr=log)
                 processes.append(wm)
 
                 def ctl(*words, check=True):
@@ -179,6 +194,18 @@ def main():
                 focus(b)
                 wait_for(lambda: above(a, b), "focusing a tile covered an existing float")
                 print("PASS: a new or focused tile stays below an existing float", flush=True)
+                if args.case == "urgency":
+                    command(a, "state 1 _NET_WM_STATE_DEMANDS_ATTENTION")
+                    wait_for(lambda: "_NET_WM_STATE_DEMANDS_ATTENTION" in subprocess.check_output(
+                        ["xprop", "-id", str(a), "_NET_WM_STATE"], env=env, text=True, timeout=3),
+                        "urgency was not established")
+                    focus(a)
+                    wait_for(lambda: "_NET_WM_STATE_DEMANDS_ATTENTION" not in subprocess.check_output(
+                        ["xprop", "-id", str(a), "_NET_WM_STATE"], env=env, text=True, timeout=3),
+                        "focus did not consume urgency")
+                    wait_for(lambda: list(map(int, command(a, "focus-state").split())) == [a, a, 0x00ff00],
+                             "focused urgent client did not acquire the focused border color")
+                    print("PASS: urgent focus clears attention and paints the focused border", flush=True)
                 if args.case != "layers":
                     ctl("msg", f"float_window {b}")
                     if args.case == "profile":
@@ -191,18 +218,26 @@ def main():
                         after_idle_cpu, _ = process_sample(wm.pid)
                         busy_cpu, _ = process_sample(wm.pid)
                         busy_start = time.monotonic()
+                        request_start = time.monotonic_ns()
                         latencies = []
                         for index in range(args.actions):
                             started = time.monotonic()
-                            ctl("msg", f"focus_window {targets[index % len(targets)]}")
+                            target = targets[index % len(targets)] if args.focus_pattern == "cycle" else targets[-1]
+                            ctl("msg", f"focus_window {target}")
                             latencies.append((time.monotonic() - started) * 1000)
+                            if args.request_output:
+                                wait_for(lambda: list(map(int, command(target, "focus-state").split()))[:2] == [target, target],
+                                         "real input focus and active window disagree")
                         command(a, "state 1 _NET_WM_STATE_DEMANDS_ATTENTION")
                         wait_for(lambda: "_NET_WM_STATE_DEMANDS_ATTENTION" in subprocess.check_output(
                             ["xprop", "-id", str(a), "_NET_WM_STATE"], env=env, text=True, timeout=3),
                             "workload completion sentinel was not processed")
+                        request_end = time.monotonic_ns()
                         busy_wall = time.monotonic() - busy_start
                         after_busy_cpu, rss = process_sample(wm.pid)
                         profile = {"clients": args.clients, "floats": 2, "actions": args.actions,
+                                   "focus_pattern": args.focus_pattern,
+                                   "request_instrumented": bool(args.request_output),
                                    "trace_enabled": bool(args.trace_output),
                                    "idle_wall_seconds": round(idle_wall, 3),
                                    "idle_wm_cpu_ms": round((after_idle_cpu - idle_cpu) * 1000, 3),
@@ -231,7 +266,7 @@ def main():
                             wait_for(lambda: above(c, dock), "published stack put a dock above fullscreen")
                             print("PASS: published stack matches X11 for float focus, fullscreen and docks", flush=True)
                         print("PASS: fullscreen and focused floating peek retain their layers", flush=True)
-                    else:
+                    elif args.case == "transients":
                         child = launch(a)
                         grandchild = launch(child)
                         focus(a)
@@ -243,6 +278,22 @@ def main():
                 ctl("quit", "--yes", check=False)
                 assert wm.wait(timeout=5) == 0
                 if args.case == "profile":
+                    if args.request_output:
+                        raw = Path(wm_env["MAVERICK_XCB_PROFILE_PATH"]).read_text()
+                        records = [json.loads(row) for row in raw.splitlines()]
+                        assert records and all(row["sequence"] > 0 for row in records), "request observer failed"
+                        measured = [row for row in records if request_start <= row["ns"] <= request_end]
+                        counts = Counter(row["opcode"] for row in measured)
+                        assert counts[42] >= args.actions, "request observer missed direct focus submissions"
+                        profile["raw_xcb_submissions"] = dict(sorted(counts.items()))
+                        profile["request_window_monotonic_ns"] = [request_start, request_end]
+                        profile["request_measurement_scope"] = "WM RAW submissions including completion sentinel; not flushes or server latency"
+                        args.request_output.write_text(raw)
+                        # The interceptor and native checks perturb timing. Keep
+                        # those runs out of the uninstrumented latency series.
+                        for key in list(profile):
+                            if key.startswith(("ipc_cli_", "workload_", "idle_")):
+                                del profile[key]
                     if args.trace_output:
                         trace = Path(env["MAVERICK_TRACE_PATH"]).read_text()
                         args.trace_output.write_text(trace)

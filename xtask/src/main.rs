@@ -249,6 +249,50 @@ const X11_STEPS: &[Step] = &[
     },
 ];
 
+const FOCUS_X11_STEPS: &[Step] = &[
+    Step {
+        label: "focus request profile (cycle)",
+        program: "python3",
+        args: &[
+            "tests/xvfb-floats.py",
+            "--case",
+            "profile",
+            "--clients",
+            "2",
+            "--actions",
+            "20",
+            "--idle-seconds",
+            "0.05",
+            "--request-output",
+            "/tmp/maverick-focus-cycle.jsonl",
+        ],
+    },
+    Step {
+        label: "focus request profile (repeat)",
+        program: "python3",
+        args: &[
+            "tests/xvfb-floats.py",
+            "--case",
+            "profile",
+            "--clients",
+            "2",
+            "--actions",
+            "20",
+            "--idle-seconds",
+            "0.05",
+            "--focus-pattern",
+            "repeat",
+            "--request-output",
+            "/tmp/maverick-focus-repeat.jsonl",
+        ],
+    },
+    Step {
+        label: "urgent focus appearance",
+        program: "python3",
+        args: &["tests/xvfb-floats.py", "--case", "urgency"],
+    },
+];
+
 const RELEASE: Step = Step {
     label: "release build",
     program: "cargo",
@@ -293,7 +337,10 @@ fn run() -> Result<(), String> {
         Task::Clippy => run_steps(&[CLIPPY, CLIPPY_DEFAULT_FEATURES]),
         Task::Test => run_steps(&[TEST_ALL_FEATURES, TEST_DEFAULT_FEATURES]),
         Task::Release => run_steps(&[RELEASE]),
-        Task::X11 => run_steps(X11_STEPS),
+        Task::X11 => {
+            run_steps(X11_STEPS)?;
+            run_steps(FOCUS_X11_STEPS)
+        }
         Task::Help => {
             print_help();
             Ok(())
