@@ -213,21 +213,23 @@ mod frame_alloc_tests {
 
     /// Stage 4 allocation regression guard for the normal build.
     ///
-    /// The measured pre-change baseline was two steady-state allocations per
-    /// reconcile: the copied Desired window Vec plus the duplicate-coalescing
-    /// HashMap. DesiredState now borrows Placements, so only the coalescing map
-    /// should remain. window-trace is excluded because diagnostic formatting
-    /// adds unrelated allocator traffic.
+    /// Stage 4 steady-state allocation invariant.
+    ///
+    /// The original path allocated twice per reconcile: a copied Desired Vec and
+    /// a fresh duplicate-coalescing HashMap. Desired now borrows Placements and
+    /// AppliedState reuses the coalescing map as scratch, so a no-op reconcile
+    /// must not touch the heap after warm-up. window-trace is excluded because
+    /// diagnostic formatting adds unrelated allocator traffic.
     #[test]
-    fn reconcile_allocates_once_per_frame_after_borrowing_desired() {
+    fn steady_state_reconcile_allocates_nothing() {
         if cfg!(feature = "window-trace") {
             return;
         }
         for n in [1, 5, 10, 50] {
             let per_frame = reconcile_allocs_per_frame(n);
             assert_eq!(
-                per_frame, 1,
-                "{n} windows: expected one production allocation after removing the Desired copy, got {per_frame}"
+                per_frame, 0,
+                "{n} windows: {per_frame} allocation(s) per steady-state reconcile"
             );
         }
     }
