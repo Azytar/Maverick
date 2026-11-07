@@ -127,6 +127,25 @@ fn map_client(
     Ok(window)
 }
 
+fn request_focus(
+    conn: &RustConnection,
+    root: Window,
+    active: Atom,
+    target: Window,
+) -> Result<(), Box<dyn Error>> {
+    // EWMH pager request: no control socket or CLI is involved.
+    let event = ClientMessageEvent::new(32, target, active, [2, 0, 0, 0, 0]);
+    conn.send_event(
+        false,
+        root,
+        EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+        event,
+    )?
+    .check()?;
+    conn.flush()?;
+    Ok(())
+}
+
 fn assert_stacking(
     conn: &RustConnection,
     root: Window,
@@ -201,15 +220,7 @@ fn focus_requests_raise_real_floating_clients() -> Result<(), Box<dyn Error>> {
     })?;
 
     for target in [windows[0], windows[1], windows[0]] {
-        let event = ClientMessageEvent::new(32, target, active, [2, 0, 0, 0, 0]);
-        conn.send_event(
-            false,
-            root,
-            EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
-            event,
-        )?
-        .check()?;
-        conn.flush()?;
+        request_focus(&conn, root, active, target)?;
 
         wait_for(&mut session, "EWMH focus and floating stack", || {
             let focused = window_list(&conn, root, active)?;
@@ -226,5 +237,90 @@ fn focus_requests_raise_real_floating_clients() -> Result<(), Box<dyn Error>> {
             Some(&target)
         );
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "needs Xvfb and an already compiled release WM"]
+fn destroying_focused_client_restores_focus_and_cleans_ewmh() -> Result<(), Box<dyn Error>> {
+    let (mut session, conn, root) = start_session()?;
+    let active = atom(&conn, b"_NET_ACTIVE_WINDOW")?;
+    let client_list = atom(&conn, b"_NET_CLIENT_LIST")?;
+    let stacking = atom(&conn, b"_NET_CLIENT_LIST_STACKING")?;
+    let survivor = map_client(&conn, root, false)?;
+    let doomed = map_client(&conn, root, true)?;
+
+    wait_for(&mut session, "both managed clients", || {
+        let clients = window_list(&conn, root, client_list)?;
+        Ok(clients.contains(&survivor) && clients.contains(&doomed))
+    })?;
+    request_focus(&conn, root, active, doomed)?;
+    wait_for(&mut session, "focused floating client", || {
+        Ok(window_list(&conn, root, active)? == [doomed])
+    })?;
+
+    conn.destroy_window(doomed)?.check()?;
+    conn.flush()?;
+    wait_for(&mut session, "destroyed client removal and focus fallback", || {
+        let clients = window_list(&conn, root, client_list)?;
+        let order = window_list(&conn, root, stacking)?;
+        Ok(clients == [survivor]
+            && order == [survivor]
+            && window_list(&conn, root, active)? == [survivor])
+    })?;
+    assert_stacking(&conn, root, &[survivor])?;
+
+    conn.destroy_window(survivor)?.check()?;
+    conn.flush()?;
+    wait_for(&mut session, "last client teardown", || {
+        Ok(window_list(&conn, root, client_list)?.is_empty()
+            && window_list(&conn, root, stacking)?.is_empty()
+            && window_list(&conn, root, active)? == [x11rb::NONE])
+    })?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "needs Xvfb and an already compiled release WM"]
+fn withdrawn_client_can_remap_without_stale_state() -> Result<(), Box<dyn Error>> {
+    let (mut session, conn, root) = start_session()?;
+    let active = atom(&conn, b"_NET_ACTIVE_WINDOW")?;
+    let client_list = atom(&conn, b"_NET_CLIENT_LIST")?;
+    let stacking = atom(&conn, b"_NET_CLIENT_LIST_STACKING")?;
+    let window = map_client(&conn, root, true)?;
+
+    wait_for(&mut session, "mapped floating client", || {
+        Ok(window_list(&conn, root, client_list)? == [window])
+    })?;
+    request_focus(&conn, root, active, window)?;
+    wait_for(&mut session, "initial client focus", || {
+        Ok(window_list(&conn, root, active)? == [window])
+    })?;
+
+    // UnmapNotify leaves the XID alive, but must remove every WM reference.
+    conn.unmap_window(window)?.check()?;
+    conn.flush()?;
+    wait_for(&mut session, "withdrawn client removal", || {
+        Ok(window_list(&conn, root, client_list)?.is_empty()
+            && window_list(&conn, root, stacking)?.is_empty()
+            && window_list(&conn, root, active)? == [x11rb::NONE])
+    })?;
+    assert!(
+        conn.query_tree(root)?.reply()?.children.contains(&window),
+        "unmapping must not destroy the client XID"
+    );
+
+    // Mapping the same XID must be treated as a fresh managed window.
+    conn.map_window(window)?.check()?;
+    conn.flush()?;
+    wait_for(&mut session, "remapped client registration", || {
+        Ok(window_list(&conn, root, client_list)? == [window]
+            && window_list(&conn, root, stacking)? == [window])
+    })?;
+    request_focus(&conn, root, active, window)?;
+    wait_for(&mut session, "remapped client focus", || {
+        Ok(window_list(&conn, root, active)? == [window])
+    })?;
+    assert_stacking(&conn, root, &[window])?;
     Ok(())
 }
