@@ -11,6 +11,7 @@ needed to continue staged work without reconstructing it from chat history.
 | 1 — Rust infrastructure | complete | dependency-free `maverick-xtask` owns Cargo/release/X11 orchestration; branch CI is green |
 | 2 — selective migration | active | keep measured Python/C oracles unless a Rust migration demonstrates a concrete benefit |
 | 3 — reliability | active | View reconciliation fixed-point property and minimal `RemoveView` contracts added |
+| 4 — performance | active | desired/reconcile allocation baseline measured; first production copy removed |
 
 ## Stage 0 baseline
 
@@ -88,6 +89,26 @@ entry point without replacing its independent behavior oracles.
 The CI workflow accepts pushes to `engineering/**`, supports manual dispatch,
 uses read-only repository permissions and cancels superseded runs for the same
 branch.
+
+## Stage 4 first vertical result
+
+The first measured target was the steady-state
+`Placements -> DesiredState -> reconcile` path. The pre-change allocation
+guard measured **two heap allocations per reconcile** after warm-up: one for the
+copied desired-window vector and one for duplicate-coalescing state inside the
+reconciler.
+
+Production now borrows the already-owned `Placements` buffer through
+`DesiredState`; tests retain an explicit owned fixture representation instead
+of forcing ownership back into the live path. The deterministic regression guard
+requires **one allocation per steady-state reconcile** for 1, 5, 10 and 50
+windows. The remaining allocation belongs to reconciliation scratch state.
+
+The branch passed the full Rust gates, installer suite and isolated X11 campaign.
+This establishes correctness and the allocation reduction. It does **not**
+establish a wall-clock, input-latency or presentation improvement. The next
+performance check must use the existing Xvfb profile workload and then, only if
+the effect survives there, controlled physical-hardware measurements.
 
 ## Next work
 
