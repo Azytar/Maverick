@@ -375,6 +375,10 @@ separately record native active-window + X focus acknowledgement (including IPC
 CLI startup/observer queries), whole-campaign wall time and 10 ms CPU ticks.
 Pure server execution time is unavailable. The logs retain all 60 rows.
 
+Protocol references: [X11 core](https://xorg.freedesktop.org/archive/X11R7.7/doc/xproto/x11protocol.html),
+[ICCCM](https://xorg.freedesktop.org/releases/X11R7.6/doc/xorg-docs/specs/ICCCM/icccm.html),
+and [EWMH client lists](https://specifications.freedesktop.org/wm/1.5/ar01s03.html).
+
 Alternatives evaluated:
 
 - **A, retain QueryTree:** chosen. Per-monitor policy order cannot establish the
@@ -409,6 +413,8 @@ python3 tests/xvfb-stacking-campaign.py --out /tmp/maverick-stage11.json --exter
 ```
 
 CI preserves the measurement JSON alongside existing native probe evidence.
+The JSON identifies CPU/kernel/revision/binary hash and accepts the explicitly
+operator-reported `--power-source battery|mains` (default `unknown`).
 Local X11/IPC execution is blocked by this container's socket restrictions;
 [post-correction CI run 42399569526](https://github.com/Azytar/Maverick/actions/runs/42399569526)
 passed all four jobs and all 33 X11 steps. All 60 rows completed; ConfigureWindow
@@ -436,7 +442,7 @@ FFI remains confined to the existing system boundary.
 
 ## Stage 12 — floating stack ranks and scratch reuse
 
-The unchanged production helper was measured first in `78f17fd`. The comparison
+The unchanged production helper was measured first in `5b1bda2`. The comparison
 workload retains that algorithm as a test-only oracle, alternates two focus
 recency snapshots, and measures nine interleaved batches per variant. Fixtures
 have 2/10/50/200 floating clients, with or without parent/child pairs. Medians
@@ -486,6 +492,15 @@ tests hit the container's AF_UNIX EPERM restriction; the installer additionally
 requires an unprivileged UID unavailable here. Neither test is weakened. Clean
 release, strict Clippy in both feature modes and MSRV checks pass locally;
 complete live validation uses CI.
+
+The Stage 12 [X11 job in run 42401107997](https://github.com/Azytar/Maverick/actions/runs/42401107997)
+passed all 33 steps and 60 measurement rows. Every RAW request count exactly
+matched the post-Stage-11 campaign. That run's Rust job caught the test-only
+legacy oracle preceding production code: the architectural scanner truncates
+at the first test section. The oracle now lives inside the existing final test
+module; all ten source constraints and the 10,000-case differential test pass
+locally. The guard is retained unchanged. Final validation requires both the
+complete Rust and X11 jobs on the published head.
 
 ## Next work
 

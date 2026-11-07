@@ -229,6 +229,8 @@ def main():
                         default=["float", "tiled", "transient", "fullscreen", "maximize"])
     parser.add_argument("--external", action="store_true")
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--power-source", choices=["unknown", "battery", "mains"], default="unknown",
+                        help="operator-reported power source; never inferred from timings")
     args = parser.parse_args()
     if not all(2 <= n <= 200 for n in args.clients) or not 1 <= args.actions <= 1000:
         parser.error("expected 2..200 clients and 1..1000 actions")
@@ -255,8 +257,12 @@ def main():
                         raise
                     finally:
                         session.close()
+        cpu_model = next((row.split(":", 1)[1].strip() for row in Path("/proc/cpuinfo").read_text().splitlines()
+                          if row.startswith("model name")), platform.machine())
         evidence = dict(schema=1, complete=True, revision=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                         wm_sha256=hashlib.sha256(Path(args.wm).read_bytes()).hexdigest(), kernel=platform.release(),
+                        cpu_model=cpu_model, power_source=args.power_source,
+                        external_checks_passed=False if args.external else None,
                         rows=rows, scope="RAW x11rb submissions; ABI reply/check waits are diagnostic, not server execution time. Uninstrumented focus acknowledgement includes IPC CLI and observer queries; CPU ticks are quantized.")
         if args.out:
             args.out.write_text(json.dumps(evidence, indent=2) + "\n")
@@ -276,6 +282,9 @@ def main():
                 print("PASS: sticky clients preserve stacking across View changes", flush=True)
             finally:
                 session.close()
+            evidence["external_checks_passed"] = True
+            if args.out:
+                args.out.write_text(json.dumps(evidence, indent=2) + "\n")
 
 
 if __name__ == "__main__":

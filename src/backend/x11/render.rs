@@ -442,39 +442,6 @@ pub(super) fn transient_chain_reaches(
     false
 }
 
-#[cfg(test)]
-fn legacy_float_stack_order(
-    mut pending: Vec<WindowId>,
-    clients: &std::collections::HashMap<WindowId, Client>,
-    focus_stack: &[WindowId],
-) -> Vec<WindowId> {
-    pending.sort_by_key(|win| {
-        (
-            focus_stack
-                .iter()
-                .position(|w| w == win)
-                .map_or(0, |i| i + 1),
-            *win,
-        )
-    });
-    let mut order = Vec::with_capacity(pending.len());
-    while !pending.is_empty() {
-        let next = pending
-            .iter()
-            .position(|win| {
-                clients
-                    .get(win)
-                    .and_then(|client| client.transient_parent)
-                    .is_none_or(|parent| !pending.contains(&parent))
-            })
-            // A client-controlled cycle has no valid parent-first order.
-            // Remove one member to keep the pass finite and deterministic.
-            .unwrap_or(0);
-        order.push(pending.remove(next));
-    }
-    order
-}
-
 /// Append peers by focus recency, keeping transients above their parents.
 /// Scratch ranks are rebuilt on every pass; they are never model state.
 fn append_float_stack_order(
@@ -1786,6 +1753,38 @@ impl WindowManager {
 mod tests {
     use super::*;
     use crate::types::ViewId;
+
+    fn legacy_float_stack_order(
+        mut pending: Vec<WindowId>,
+        clients: &std::collections::HashMap<WindowId, Client>,
+        focus_stack: &[WindowId],
+    ) -> Vec<WindowId> {
+        pending.sort_by_key(|win| {
+            (
+                focus_stack
+                    .iter()
+                    .position(|w| w == win)
+                    .map_or(0, |i| i + 1),
+                *win,
+            )
+        });
+        let mut order = Vec::with_capacity(pending.len());
+        while !pending.is_empty() {
+            let next = pending
+                .iter()
+                .position(|win| {
+                    clients
+                        .get(win)
+                        .and_then(|client| client.transient_parent)
+                        .is_none_or(|parent| !pending.contains(&parent))
+                })
+                // A client-controlled cycle has no valid parent-first order.
+                // Remove one member to keep the pass finite and deterministic.
+                .unwrap_or(0);
+            order.push(pending.remove(next));
+        }
+        order
+    }
 
     fn buffered_float_order(
         pending: &mut Vec<WindowId>,
