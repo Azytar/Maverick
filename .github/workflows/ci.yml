@@ -41,24 +41,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libx11-dev libx11-xcb-dev libxcb1-dev
-      - name: Format
-        # Documented in README.md ("Building from source") and
-        # docs/architecture.md ("Checking these claims") but never run here.
-        # No `--locked`: cargo fmt resolves no dependency graph, and rejects
-        # the flag outright, so it cannot detect a stale lock.
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Test
-        # `--all-targets` matches the `cargo check --workspace --all-targets`
-        # gate in docs/architecture.md: a target Clippy compiles is a target
-        # whose tests should run.
-        run: cargo test --workspace --all-targets --all-features --locked
-      - name: Test (default features)
-        # The only features left are the two diagnostic trace builds, so this
-        # is what catches a trace-only build breaking. It is the configuration
-        # the release binary ships.
-        run: cargo test --workspace --all-targets --locked
+      - name: Rust gates
+        # Keep local development and CI on the same command graph. The xtask is
+        # intentionally dependency-free and only delegates to Cargo; it does
+        # not hide or replace Cargo's own diagnostics.
+        run: cargo run -p maverick-xtask --locked -- check
 
   # The installer is plain bash — check its syntax so it cannot silently bitrot.
   # `installer/tests/partition.py` runs every smoke suite from
@@ -105,7 +92,7 @@ jobs:
         # must not pass against it instead.
         # There is no `default` feature and no compositor to leave out, so this
         # is one command with no feature flags — not "the only build there is".
-        run: cargo build --release -p maverick -p maverickctl --locked
+        run: cargo run -p maverick-xtask --locked -- release
       - name: Stacking startup contracts
         run: python3 tests/stacking-startup.py
       - name: Xvfb stacking regression
