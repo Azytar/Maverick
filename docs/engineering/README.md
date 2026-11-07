@@ -158,6 +158,27 @@ workflow passes on Rust 1.85. License and duplicate/bans policy is deliberately
 deferred until an explicit license/version inventory is reviewed; Stage 7 does
 not create broad exception lists merely to make a stricter template pass.
 
+## Stage 8 local consolidation
+
+`engineering/next` joins the Stage 7 Rust infrastructure, allocation and
+dependency work with `config/toml-hardening` (parser validation, bounded typo
+suggestions, and runtime work reduction). Both original histories are kept by
+merge commits. Three divergent fixes were carried forward separately: two X11
+cursor visibility probe changes and a `ViewId` exhaustion guard.
+
+The configuration merge deliberately keeps exact-semantic legacy key aliases
+from the repaired Stage 7 baseline while retaining stricter TOML validation.
+The hardening branch's removed-alias test was narrowed to non-equivalent old
+settings; both the reload contract and new line-number diagnostics remain.
+
+Static workflow validation, Bash syntax checking, Python compilation, the
+benchmark-contract suite (7 tests), and stacking-audit unit tests (14 tests)
+passed locally. Rust compilation and X11 integration are **not yet verified**:
+the integration environment has no `cargo`/Rust toolchain or X11 development
+headers, and the installer suite requires a non-root user that this environment
+cannot switch to. No performance numbers for this merged tree are claimed.
+The branch is local only; publishing requires Git authentication.
+
 ## Next work
 
 1. Keep Stage 3 focused on invariants that detect real state/effect regressions;
