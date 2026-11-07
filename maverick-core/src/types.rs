@@ -543,12 +543,12 @@ impl Carousel {
     /// caller pushes the View and then calls [`Self::attach`] so the pointers are
     /// repaired in one place.
     pub fn mint(&mut self) -> ViewId {
+        let next = self
+            .next_id
+            .checked_add(1)
+            .expect("ViewId space exhausted before a duplicate could be minted");
         let id = ViewId(self.next_id);
-        // `saturating_add` rather than `+`: a wrapped id would repeat an earlier
-        // one and silently re-point stale `Client::workspace` values. Saturating
-        // keeps them distinct instead, and 4 billion Views on one monitor is not
-        // reachable in practice.
-        self.next_id = self.next_id.saturating_add(1);
+        self.next_id = next;
         id
     }
 
@@ -2756,6 +2756,19 @@ impl State {
 impl Default for State {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod carousel_identity_tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "ViewId space exhausted")]
+    fn mint_never_reuses_the_last_identifier() {
+        let mut carousel = Carousel::new();
+        carousel.next_id = u32::MAX;
+        let _ = carousel.mint();
     }
 }
 
