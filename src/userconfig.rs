@@ -1496,6 +1496,7 @@ pub fn action_from_str(input: &str) -> Option<Action> {
 mod tests {
     use super::*;
     use crate::types::Dir;
+    use proptest::prelude::*;
 
     /// Parse TOML text straight into the user model, panicking on a syntax
     /// error: these tests only ever feed well-formed input.
@@ -2000,6 +2001,45 @@ gaps = 20
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert_eq!(cfg.gaps_inner, 20);
         assert_eq!(cfg.gaps_outer, 20);
+    }
+
+    proptest! {
+        #[test]
+        fn exact_legacy_general_aliases_match_canonical_runtime_values(
+            gap in 0u32..=crate::core::layout::MAX_CFG_GAP as u32,
+            views in 1usize..=9,
+            auto_binds in any::<bool>(),
+        ) {
+            let mut legacy_diag = Diagnostics::default();
+            let legacy = parse_user(
+                &format!(
+                    "[general]\ngaps = {gap}\nn_tags = {views}\nauto_workspace_binds = {auto_binds}\n"
+                ),
+                &mut legacy_diag,
+            )
+            .expect("generated legacy config is valid TOML");
+            let legacy = merge_config(compiled_config(), legacy, &mut legacy_diag);
+
+            let mut canonical_diag = Diagnostics::default();
+            let canonical = parse_user(
+                &format!(
+                    "[general]\ngaps_inner = {gap}\ngaps_outer = {gap}\nview_count = {views}\nauto_view_binds = {auto_binds}\n"
+                ),
+                &mut canonical_diag,
+            )
+            .expect("generated canonical config is valid TOML");
+            let canonical = merge_config(compiled_config(), canonical, &mut canonical_diag);
+
+            prop_assert!(legacy_diag.is_clean(), "legacy diagnostics: {legacy_diag:?}");
+            prop_assert!(
+                canonical_diag.is_clean(),
+                "canonical diagnostics: {canonical_diag:?}"
+            );
+            prop_assert_eq!(legacy.gaps_inner, canonical.gaps_inner);
+            prop_assert_eq!(legacy.gaps_outer, canonical.gaps_outer);
+            prop_assert_eq!(legacy.n_tags, canonical.n_tags);
+            prop_assert_eq!(legacy.keybinds, canonical.keybinds);
+        }
     }
 
     #[test]
