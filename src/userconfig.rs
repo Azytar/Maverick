@@ -23,13 +23,11 @@
 //! only the keys it actually sets, and everything else keeps the compiled
 //! value. The order-sensitive cases are:
 //!
-//! * `[general].theme` is applied before `[colors]`, so an explicit color
-//!   always beats the palette the theme selected.
 //! * `[[keybindings]]`, `[[rules]]` and `[autostart].commands` *replace* the
 //!   compiled lists wholesale. A file with no `[[keybindings]]`/`[[rules]]`
 //!   keeps the compiled keymap/rules; a file that declares one of them drops
 //!   the compiled list entirely (there is no "append" or "clear" form).
-//! * Generated workspace binds are appended last within the keybind list, and
+//! * Generated View binds are appended last within the keybind list, and
 //!   only into unclaimed slots (see `append_numeric_keybindings`).
 //!
 //! # Failure policy
@@ -47,10 +45,9 @@
 //! What is reported is scoped to what Maverick can name. A key inside a table
 //! it knows (`[general]`, `[colors]`, `[autostart]`, `[[keybindings]]`,
 //! `[[rules]]`) with no field behind it is a warning: the file still loads, but
-//! the user is told which setting did not take. A *table* it has never heard of
-//! is skipped without a word, because that is the shape a config written for a
-//! newer Maverick takes, and refusing to load it (or nagging about it) would
-//! break forward compatibility for no benefit.
+//! the user is told which setting did not take. An unrelated *table* it has never
+//! heard of stays silent for forward compatibility; a name close to a known
+//! table is reported as a likely typo instead of disappearing.
 
 use std::path::{Path, PathBuf};
 
@@ -69,9 +66,8 @@ use crate::types::Action;
 /// * `errors`   — a value that could not be applied at all: unknown keysym,
 ///   unknown action, binding conflict, workspace out of range, unknown
 ///   `window_type`, numeric value out of range, rule with no criteria.
-/// * `warnings` — a value that was accepted-but-degraded: deprecated alias,
-///   wrong-typed field, unknown key in a known table, empty entry discarded,
-///   unknown theme.
+/// * `warnings` — a value that was accepted-but-degraded: wrong-typed field,
+///   unknown key in a known table or empty entry discarded.
 ///
 /// A warning still makes `--check-config` exit non-zero (`is_clean` requires
 /// both lists empty), so "the file loads" is never mistaken for "the file is
@@ -92,12 +88,14 @@ impl Diagnostics {
 
 /// Emit every diagnostic via `log::warn`; the runtime path keeps going
 /// regardless, so a broken config costs a warning, never a session.
-pub fn dump_diagnostics(diag: &Diagnostics) {
+pub fn dump_diagnostics(path: &Path, diag: &Diagnostics) {
     for w in &diag.warnings {
-        log::warn!("config: {w}");
+        log::warn!("config warning: {}: {w}", path.display());
     }
     for e in &diag.errors {
-        log::warn!("config: {e}");
+        // Config faults are non-fatal at runtime, so they stay on the warning
+        // log channel; keep the semantic severity explicit in the message.
+        log::warn!("config error: {}: {e}", path.display());
     }
 }
 #[derive(Debug, Default)]
@@ -111,29 +109,17 @@ struct UserConfig {
 
 #[derive(Debug, Default)]
 struct GeneralCfg {
+    /// Header location for diagnostics involving more than one setting.
+    line: usize,
     border_width: Option<u32>,
-    /// Legacy alias: sets both `gaps_inner` and `gaps_outer` at once.
-    gaps: Option<u32>,
     gaps_inner: Option<u32>,
     gaps_outer: Option<u32>,
     smart_gaps: Option<bool>,
     corner_radius: Option<u32>,
-    /// Named color-scheme preset (see `config::theme_palette`). Applied
-    /// before `[colors]`, so an explicit `[colors]` entry always wins over
-    /// whatever the theme sets.
-    theme: Option<String>,
-    n_tags: Option<usize>,
-    /// New-style column width: fraction (0.1–1.0) of the workarea given to a
-    /// freshly created column. Replaces the old `default_col_width` (px) and
-    /// `split_bias` (fraction) keys, which are kept as deprecated aliases.
+    view_count: Option<usize>,
+    /// Width of a freshly created column as a fraction (0.1–1.0) of the
+    /// workarea.
     column_width: Option<f32>,
-    /// Legacy alias: pixel column width, converted to `column_width` against a
-    /// fixed 1920px workarea (no monitor is known at parse time); emits a
-    /// deprecation warning.
-    default_col_width: Option<u32>,
-    /// Legacy alias: fraction of the workarea for a new column. Maps directly
-    /// onto `column_width`; emits a deprecation warning.
-    split_bias: Option<f32>,
     /// Accordion focus-expansion factor (0.0–0.9), see `Cfg::accordion_boost`.
     accordion_boost: Option<f32>,
     /// Overview zoom-out floor (0.05–1.0): the smallest scale Overview may use,
@@ -142,12 +128,12 @@ struct GeneralCfg {
     /// Overview entry scale (0.05–1.0): the scale the mode is entered at, see
     /// `Cfg::overview_scale`.
     overview_scale: Option<f32>,
-    /// Auto-generate `Super+1..n` / `Super+Shift+1..n` workspace binds.
-    /// Defaults to `true`; when `false` no workspace binds are added.
-    auto_workspace_binds: Option<bool>,
+    /// Auto-generate `Super+1..n` / `Super+Shift+1..n` View binds.
+    /// Defaults to `true`; when `false` no View binds are added.
+    auto_view_binds: Option<bool>,
     focus_mouse: Option<bool>,
     warp_cursor: Option<bool>,
-    tag_names: Option<Vec<String>>,
+    view_names: Option<Vec<String>>,
     /// Global policy for the client's map-time `_NET_WM_STATE`. `false` (the
     /// default) normalizes away a window's initial maximized/fullscreen request
     /// so it opens as a normal tile; `true` honours it. See `Cfg::honor_initial_state`.
@@ -163,26 +149,26 @@ struct ColorsCfg {
 
 #[derive(Debug, Default)]
 struct KeybindEntry {
+    line: usize,
     key: String,
     action: String,
 }
 
 #[derive(Debug, Default)]
 struct RuleEntry {
+    line: usize,
     class: Option<String>,
     instance: Option<String>,
     window_type: Option<String>,
     title: Option<String>,
     float: bool,
     sticky: bool,
-    workspace: Option<usize>,
+    view: Option<usize>,
     /// `[width, height]` in pixels for forced floating size.
     size: Option<[u32; 2]>,
     /// `[x, y]` relative to the monitor workarea origin, for forced position.
     position: Option<[i32; 2]>,
-    /// 0.0-1.0, not validated here: `manage::apply_rules` clamps it when the
-    /// `_NET_WM_WINDOW_OPACITY` property is written, so a typo degrades the
-    /// window instead of discarding the whole rule.
+    /// 0.0-1.0, validated while reading the TOML row.
     opacity: Option<f32>,
     border_width: Option<u32>,
     /// Forces the window's map-time `_NET_WM_STATE` to be normalized away.
@@ -237,22 +223,25 @@ pub fn load_config(path: Option<&Path>) -> Cfg {
         return cfg;
     };
     let (cfg, diag) = load_from_path(&path);
-    dump_diagnostics(&diag);
+    dump_diagnostics(&path, &diag);
     cfg
 }
 
 /// The complete fail-safe default: the compiled baseline plus the auto-generated
-/// numeric workspace keybindings (`Super+1..n` → view, `Super+Shift+1..n` → move).
+/// numeric View keybindings (`Super+1..n` → view, `Super+Shift+1..n` → move).
 ///
 /// Every fallback path in the loader (no path, missing file, unreadable file,
 /// broken TOML) returns this, so a WM that never reads a config file still
-/// starts with a reachable workspace keymap. A file that *does* parse is never
+/// starts with a reachable View keymap. A file that *does* parse is never
 /// merged onto it: `merge_config` takes [`compiled_config`] as its baseline and
-/// adds the generated binds itself, so they reflect the file's `n_tags` and
-/// `auto_workspace_binds`. The compiled baseline therefore stays free of
-/// workspace binds — they are generated, never configured.
+/// adds the generated binds itself, so they reflect the file's `view_count` and
+/// `auto_view_binds`. The compiled baseline therefore stays free of
+/// View binds — they are generated, never configured.
 fn default_config() -> Cfg {
-    let mut cfg = compiled_config();
+    with_numeric_view_binds(compiled_config())
+}
+
+fn with_numeric_view_binds(mut cfg: Cfg) -> Cfg {
     append_numeric_keybindings(&mut cfg.keybinds, cfg.n_tags);
     cfg
 }
@@ -286,7 +275,7 @@ pub enum ConfigSource {
 /// it is for.
 pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics) {
     log::config_trace("defaults_start", format_args!("path={}", path.display()));
-    let fallback = default_config();
+    let baseline = compiled_config();
     log::config_trace("defaults_end", format_args!(""));
     let mut diag = Diagnostics::default();
 
@@ -299,15 +288,19 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
     let source = match read_result {
         Ok(source) => source,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let fallback = with_numeric_view_binds(baseline);
             log::config_snapshot("normalized_missing_file", &fallback);
             return (ConfigSource::CompiledBaseline, fallback, diag);
         }
         Err(e) => {
             diag.errors.push(format!(
-                "cannot read '{}': {e}; using compiled defaults",
-                path.display()
+                "cannot read configuration: {e}; using compiled defaults"
             ));
-            return (ConfigSource::CompiledBaseline, fallback, diag);
+            return (
+                ConfigSource::CompiledBaseline,
+                with_numeric_view_binds(baseline),
+                diag,
+            );
         }
     };
 
@@ -339,23 +332,24 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
         Ok(user) => user,
         Err(e) => {
             diag.errors.push(format!(
-                "invalid TOML in '{}' (line {}, {}); using compiled defaults",
-                path.display(),
-                e.line,
-                e.kind
+                "line {}: invalid TOML ({}); using compiled defaults",
+                e.line, e.kind
             ));
-            return (ConfigSource::CompiledBaseline, fallback, diag);
+            return (
+                ConfigSource::CompiledBaseline,
+                with_numeric_view_binds(baseline),
+                diag,
+            );
         }
     };
 
     log::config_trace("validation_start", format_args!("phase=semantic_merge"));
-    // The merge baseline is the compiled keymap, NOT the fail-safe `fallback`
-    // above: `merge_config` generates the workspace binds itself, for the
-    // `n_tags` the file ended up with and only when `auto_workspace_binds`
-    // allows it. Starting from `fallback` would pre-seed a bind for every digit
+    // Keep the baseline free of generated View binds: merge_config adds them for the
+    // `view_count` the file ended up with and only when `auto_view_binds`
+    // allows it. Pre-generating them would seed a bind for every digit
     // of the compiled tag count, which no flag could then take away — the
     // generated binds are indistinguishable from the user's own once merged in.
-    let cfg = merge_config(compiled_config(), user, &mut diag);
+    let cfg = merge_config(baseline, user, &mut diag);
     log::config_trace(
         "validation_end",
         format_args!(
@@ -376,7 +370,7 @@ pub fn load_from_path_classified(path: &Path) -> (ConfigSource, Cfg, Diagnostics
 /// The reload path must NOT use this view. A reload *replaces* the
 /// configuration that is already live, and a compiled baseline returned for a
 /// missing, unreadable or unparseable file is not that configuration — adopting
-/// it would silently swap the user's keybinds, rules, theme and tag count for
+/// it would silently swap the user's keybinds, rules and tag count for
 /// the compiled ones. `reload_config` therefore calls
 /// [`load_from_path_classified`] and keeps the configuration it is already
 /// running when the source is [`ConfigSource::CompiledBaseline`].
@@ -393,14 +387,34 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
     let mut user = UserConfig::default();
     let mut cur: Option<Cur<'_>> = None;
 
-    for event in parse(source) {
+    let mut parser = parse(source);
+    while let Some(event) = parser.next() {
+        let line = parser.event_line();
+        let warning_start = diag.warnings.len();
+        let error_start = diag.errors.len();
         let event = event?;
         match event {
-            Event::Section(name) => cur = Some(Cur::Plain(name)),
+            Event::Section(name) => {
+                warn_unknown_section_if_typo(diag, name, false);
+                if name == "general" {
+                    user.general.get_or_insert_with(|| GeneralCfg {
+                        line,
+                        ..GeneralCfg::default()
+                    });
+                }
+                cur = Some(Cur::Plain(name));
+            }
             Event::ArraySection(name) => {
+                warn_unknown_section_if_typo(diag, name, true);
                 match name {
-                    "keybindings" => user.keybindings.push(KeybindEntry::default()),
-                    "rules" => user.rules.push(RuleEntry::default()),
+                    "keybindings" => user.keybindings.push(KeybindEntry {
+                        line,
+                        ..KeybindEntry::default()
+                    }),
+                    "rules" => user.rules.push(RuleEntry {
+                        line,
+                        ..RuleEntry::default()
+                    }),
                     _ => {}
                 }
                 cur = Some(Cur::Row(name));
@@ -415,10 +429,27 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                     apply_color_key(c, key, &value, diag);
                 }
                 Some(Cur::Plain("autostart")) => {
-                    if matches!(key, "commands" | "apps" | "programs") {
-                        user.autostart.get_or_insert_with(AutostartCfg::default);
+                    if key == "commands" {
                         if let Some(grid) = grid_strings(&value) {
-                            user.autostart.as_mut().unwrap().commands = grid;
+                            let commands = grid
+                                .into_iter()
+                                .enumerate()
+                                .filter_map(|(index, command)| {
+                                    if command
+                                        .first()
+                                        .is_some_and(|bin| !bin.trim().is_empty())
+                                    {
+                                        Some(command)
+                                    } else {
+                                        diag.warnings.push(format!(
+                                            "[autostart].commands entry #{} has no executable; ignoring it",
+                                            index + 1
+                                        ));
+                                        None
+                                    }
+                                })
+                                .collect();
+                            user.autostart = Some(AutostartCfg { commands });
                         } else {
                             diag.warnings.push(format!(
                                 "[autostart].{key} must be a list of string lists; ignoring it"
@@ -458,41 +489,83 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                 _ => {}
             },
         }
+        annotate_event_diagnostics(diag, warning_start, error_start, line);
     }
     Ok(user)
 }
 
-/// Map one `[general]` key onto the model. Deprecated spellings (`border_w`,
-/// `default_col_w`, …) resolve to their canonical field here, a
-/// wrong-typed value is skipped with a warning rather than rejecting the file,
-/// and a key this table has no field for is reported instead of dropped.
+fn annotate_event_diagnostics(
+    diag: &mut Diagnostics,
+    warning_start: usize,
+    error_start: usize,
+    line: usize,
+) {
+    for message in &mut diag.warnings[warning_start..] {
+        *message = format!("line {line}: {message}");
+    }
+    for message in &mut diag.errors[error_start..] {
+        *message = format!("line {line}: {message}");
+    }
+}
+
+/// Map one `[general]` key onto the model. A wrong-typed value is skipped
+/// with a warning rather than rejecting the file, and a key this table has no
+/// field for is reported instead of dropped.
 fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "border_width" | "border_w" => set_u32(&mut g.border_width, key, value, diag),
-        "gaps" => set_u32(&mut g.gaps, key, value, diag),
-        "gaps_inner" => set_u32(&mut g.gaps_inner, key, value, diag),
-        "gaps_outer" => set_u32(&mut g.gaps_outer, key, value, diag),
+        "border_width" => set_u32_range(
+            &mut g.border_width,
+            key,
+            value,
+            0,
+            crate::core::layout::MAX_CFG_BORDER as u32,
+            diag,
+        ),
+        "gaps_inner" => set_u32_range(
+            &mut g.gaps_inner,
+            key,
+            value,
+            0,
+            crate::core::layout::MAX_CFG_GAP as u32,
+            diag,
+        ),
+        "gaps_outer" => set_u32_range(
+            &mut g.gaps_outer,
+            key,
+            value,
+            0,
+            crate::core::layout::MAX_CFG_GAP as u32,
+            diag,
+        ),
         "smart_gaps" => set_bool(&mut g.smart_gaps, key, value, diag),
         "corner_radius" => set_u32(&mut g.corner_radius, key, value, diag),
-        "theme" => set_string(&mut g.theme, key, value, diag),
-        "n_tags" => set_usize(&mut g.n_tags, key, value, diag),
-        "column_width" => set_f32(&mut g.column_width, key, value, diag),
-        "default_col_width" | "default_col_w" => {
-            set_u32(&mut g.default_col_width, key, value, diag)
+        "view_count" => set_usize_range(&mut g.view_count, key, value, 1, 9, diag),
+        "column_width" => set_f32_range(&mut g.column_width, key, value, 0.1, 1.0, diag),
+        "accordion_boost" => {
+            set_f32_range(&mut g.accordion_boost, key, value, 0.0, 0.9, diag);
         }
-        "split_bias" => set_f32(&mut g.split_bias, key, value, diag),
-        "accordion_boost" => set_f32(&mut g.accordion_boost, key, value, diag),
-        "overview_zoom_min" => set_f32(&mut g.overview_zoom_min, key, value, diag),
-        "overview_scale" => set_f32(&mut g.overview_scale, key, value, diag),
-        "auto_workspace_binds" => set_bool(&mut g.auto_workspace_binds, key, value, diag),
+        "overview_zoom_min" => {
+            set_f32_range(&mut g.overview_zoom_min, key, value, 0.05, 1.0, diag);
+        }
+        "overview_scale" => {
+            set_f32_range(&mut g.overview_scale, key, value, 0.05, 1.0, diag);
+        }
+        "auto_view_binds" => set_bool(&mut g.auto_view_binds, key, value, diag),
         "focus_mouse" => set_bool(&mut g.focus_mouse, key, value, diag),
         "warp_cursor" => set_bool(&mut g.warp_cursor, key, value, diag),
         "honor_initial_state" => set_bool(&mut g.honor_initial_state, key, value, diag),
-        "tag_names" => {
+        "view_names" => {
             if let Some(list) = value.as_str_list() {
-                g.tag_names = Some(list.iter().map(|s| s.as_ref().to_string()).collect());
+                let names: Vec<String> = list.iter().map(|s| s.as_ref().to_string()).collect();
+                if names.is_empty() || names.iter().any(|name| name.trim().is_empty()) {
+                    diag.warnings.push(
+                        "view_names must contain at least one non-blank name; ignoring it".into(),
+                    );
+                } else {
+                    g.view_names = Some(names);
+                }
             } else {
-                warn_bad(diag, key);
+                warn_bad(diag, key, "a list of strings");
             }
         }
         _ => warn_unknown_key(diag, "[general]", key),
@@ -502,9 +575,9 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
 /// Map one `[colors]` key onto the model.
 fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "normal" | "col_normal" => set_u32(&mut c.normal, key, value, diag),
-        "focused" | "col_focused" => set_u32(&mut c.focused, key, value, diag),
-        "urgent" | "col_urgent" => set_u32(&mut c.urgent, key, value, diag),
+        "normal" => set_u32(&mut c.normal, key, value, diag),
+        "focused" => set_u32(&mut c.focused, key, value, diag),
+        "urgent" => set_u32(&mut c.urgent, key, value, diag),
         _ => warn_unknown_key(diag, "[colors]", key),
     }
 }
@@ -512,8 +585,18 @@ fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>, diag: &mut D
 /// Map one `[[keybindings]]` key onto the current row.
 fn apply_keybind_key(row: &mut KeybindEntry, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "key" => row.key = value.as_str().map_or_else(String::new, str::to_string),
-        "action" => row.action = value.as_str().map_or_else(String::new, str::to_string),
+        "key" | "action" => {
+            if let Some(text) = value.as_str() {
+                let slot = if key == "key" {
+                    &mut row.key
+                } else {
+                    &mut row.action
+                };
+                *slot = text.to_string();
+            } else {
+                warn_bad(diag, key, "a string");
+            }
+        }
         _ => warn_unknown_key(diag, "[[keybindings]]", key),
     }
 }
@@ -527,41 +610,66 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
         if let Some(v) = value.as_bool() {
             *slot = v;
         } else {
-            warn_bad(diag, key);
+            warn_bad(diag, key, "a boolean");
         }
     }
     match key {
         "class" => set_string(&mut row.class, key, value, diag),
         "instance" => set_string(&mut row.instance, key, value, diag),
-        "window_type" | "type" => set_string(&mut row.window_type, key, value, diag),
+        "window_type" => set_string(&mut row.window_type, key, value, diag),
         "title" => set_string(&mut row.title, key, value, diag),
         "float" => set_rule_bool(&mut row.float, key, value, diag),
         "sticky" => set_rule_bool(&mut row.sticky, key, value, diag),
-        "workspace" | "ws" => set_usize(&mut row.workspace, key, value, diag),
+        "view" => set_usize(&mut row.view, key, value, diag),
         "size" => {
-            if let Some([w, h]) = int_pair(value) {
-                row.size = Some([w as u32, h as u32]);
+            if let Some([w, h]) = positive_u32_pair(value) {
+                row.size = Some([w, h]);
             } else {
-                warn_bad(diag, key);
+                diag.errors.push(
+                    "rule.size must be [width, height] with both values between 1 and 4294967295; ignoring it"
+                        .into(),
+                );
             }
         }
         "position" => {
-            if let Some([x, y]) = int_pair(value) {
-                row.position = Some([x as i32, y as i32]);
+            if let Some([x, y]) = i32_pair(value) {
+                row.position = Some([x, y]);
             } else {
-                warn_bad(diag, key);
+                diag.errors.push(
+                    "rule.position must be [x, y] with both values inside the signed 32-bit range; ignoring it"
+                        .into(),
+                );
             }
         }
-        "opacity" => set_f32(&mut row.opacity, key, value, diag),
-        "border_width" | "border_w" => set_u32(&mut row.border_width, key, value, diag),
-        "ignore_initial_state" | "no_initial_state" | "no_maximize" => {
+        "opacity" => {
+            if let Some(v) = number_f64(value) {
+                if v.is_finite() && (0.0..=1.0).contains(&v) {
+                    row.opacity = Some(v as f32);
+                } else {
+                    diag.errors.push(format!(
+                        "rule.opacity must be between 0.0 and 1.0; ignoring {v}"
+                    ));
+                }
+            } else {
+                warn_bad(diag, key, "a number between 0.0 and 1.0");
+            }
+        }
+        "border_width" => set_u32_range(
+            &mut row.border_width,
+            key,
+            value,
+            0,
+            crate::core::layout::MAX_CFG_BORDER as u32,
+            diag,
+        ),
+        "ignore_initial_state" => {
             set_rule_bool(&mut row.ignore_initial_state, key, value, diag);
         }
         "honor_initial_state" => set_bool(&mut row.honor_initial_state, key, value, diag),
-        "deny_fullscreen" | "no_fullscreen" => {
+        "deny_fullscreen" => {
             set_rule_bool(&mut row.deny_fullscreen, key, value, diag);
         }
-        "true_fullscreen" | "exclusive_fullscreen" => {
+        "true_fullscreen" => {
             set_rule_bool(&mut row.true_fullscreen, key, value, diag);
         }
         _ => warn_unknown_key(diag, "[[rules]]", key),
@@ -574,7 +682,23 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
 /// Parse a two-element integer array, e.g. `size`/`position`.
 fn int_pair(value: &Value<'_>) -> Option<[i64; 2]> {
     let list = value.as_int_list()?;
-    Some([*list.first()?, *list.get(1)?])
+    (list.len() == 2).then(|| [list[0], list[1]])
+}
+
+fn positive_u32_pair(value: &Value<'_>) -> Option<[u32; 2]> {
+    let [a, b] = int_pair(value)?;
+    let a = u32::try_from(a).ok()?;
+    let b = u32::try_from(b).ok()?;
+    (a > 0 && b > 0).then_some([a, b])
+}
+
+fn i32_pair(value: &Value<'_>) -> Option<[i32; 2]> {
+    let [a, b] = int_pair(value)?;
+    Some([i32::try_from(a).ok()?, i32::try_from(b).ok()?])
+}
+
+fn number_f64(value: &Value<'_>) -> Option<f64> {
+    value.as_f64().or_else(|| value.as_i64().map(|v| v as f64))
 }
 
 fn grid_strings(value: &Value<'_>) -> Option<Vec<Vec<String>>> {
@@ -598,7 +722,7 @@ fn set_u32(slot: &mut Option<u32>, key: &str, value: &Value<'_>, diag: &mut Diag
     if let Some(v) = value.as_u32() {
         *slot = Some(v);
     } else {
-        warn_bad(diag, key);
+        warn_bad(diag, key, "an unsigned 32-bit integer");
     }
 }
 
@@ -606,7 +730,7 @@ fn set_bool(slot: &mut Option<bool>, key: &str, value: &Value<'_>, diag: &mut Di
     if let Some(v) = value.as_bool() {
         *slot = Some(v);
     } else {
-        warn_bad(diag, key);
+        warn_bad(diag, key, "a boolean");
     }
 }
 
@@ -614,21 +738,71 @@ fn set_string(slot: &mut Option<String>, key: &str, value: &Value<'_>, diag: &mu
     if let Some(v) = value.as_str() {
         *slot = Some(v.to_string());
     } else {
-        warn_bad(diag, key);
+        warn_bad(diag, key, "a string");
     }
 }
 
-/// Assign `key`'s float value into `slot`. Accepts a decimal float *or* an
-/// integer literal (e.g. `column_width = 1`) and coerces it to `f32` — the
-/// strict TOML-subset parser keeps the two types separate, but config should
-/// not force a trailing `.0` on integer-valued fractions.
-fn set_f32(slot: &mut Option<f32>, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
-    if let Some(v) = value.as_f64() {
-        *slot = Some(v as f32);
-    } else if let Some(i) = value.as_i64() {
-        *slot = Some(i as f32);
+fn set_u32_range(
+    slot: &mut Option<u32>,
+    key: &str,
+    value: &Value<'_>,
+    min: u32,
+    max: u32,
+    diag: &mut Diagnostics,
+) {
+    let Some(v) = value.as_u32() else {
+        warn_bad(diag, key, "an unsigned 32-bit integer");
+        return;
+    };
+    if (min..=max).contains(&v) {
+        *slot = Some(v);
     } else {
-        warn_bad(diag, key);
+        diag.errors.push(format!(
+            "{key} must be between {min} and {max}; ignoring {v}"
+        ));
+    }
+}
+
+fn set_f32_range(
+    slot: &mut Option<f32>,
+    key: &str,
+    value: &Value<'_>,
+    min: f64,
+    max: f64,
+    diag: &mut Diagnostics,
+) {
+    let Some(v) = number_f64(value) else {
+        warn_bad(diag, key, "a number");
+        return;
+    };
+    if v.is_finite() && (min..=max).contains(&v) {
+        // Check the source precision before rounding to the runtime type.
+        *slot = Some(v as f32);
+    } else {
+        diag.errors.push(format!(
+            "{key} must be between {min} and {max}; ignoring {v}"
+        ));
+    }
+}
+
+fn set_usize_range(
+    slot: &mut Option<usize>,
+    key: &str,
+    value: &Value<'_>,
+    min: usize,
+    max: usize,
+    diag: &mut Diagnostics,
+) {
+    let Some(v) = value.as_u32().map(|v| v as usize) else {
+        warn_bad(diag, key, "an unsigned 32-bit integer");
+        return;
+    };
+    if (min..=max).contains(&v) {
+        *slot = Some(v);
+    } else {
+        diag.errors.push(format!(
+            "{key} must be between {min} and {max}; ignoring {v}"
+        ));
     }
 }
 
@@ -636,28 +810,179 @@ fn set_usize(slot: &mut Option<usize>, key: &str, value: &Value<'_>, diag: &mut 
     if let Some(v) = value.as_u32() {
         *slot = Some(v as usize);
     } else {
-        warn_bad(diag, key);
+        warn_bad(diag, key, "an unsigned 32-bit integer");
     }
 }
 
-fn warn_bad(diag: &mut Diagnostics, key: &str) {
+fn warn_bad(diag: &mut Diagnostics, key: &str, expected: &str) {
     diag.warnings.push(format!(
-        "value for '{key}' has an unexpected type; ignoring it"
+        "value for '{key}' has an unexpected type; expected {expected}; ignoring it"
     ));
 }
 
+const GENERAL_KEYS: &[&str] = &[
+    "border_width",
+    "gaps_inner",
+    "gaps_outer",
+    "smart_gaps",
+    "corner_radius",
+    "view_count",
+    "column_width",
+    "accordion_boost",
+    "overview_zoom_min",
+    "overview_scale",
+    "auto_view_binds",
+    "focus_mouse",
+    "warp_cursor",
+    "honor_initial_state",
+    "view_names",
+];
+
+const COLOR_KEYS: &[&str] = &["normal", "focused", "urgent"];
+
+const AUTOSTART_KEYS: &[&str] = &["commands"];
+const KEYBIND_KEYS: &[&str] = &["key", "action"];
+const RULE_KEYS: &[&str] = &[
+    "class",
+    "instance",
+    "window_type",
+    "title",
+    "float",
+    "sticky",
+    "view",
+    "size",
+    "position",
+    "opacity",
+    "border_width",
+    "ignore_initial_state",
+    "honor_initial_state",
+    "deny_fullscreen",
+    "true_fullscreen",
+];
+
+fn edit_distance(a: &str, b: &str, row: &mut [usize]) -> usize {
+    for (index, cell) in row.iter_mut().enumerate() {
+        *cell = index;
+    }
+    for (i, a_byte) in a.bytes().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, b_byte) in b.bytes().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1)
+                .min(row[j] + 1)
+                .min(diagonal + usize::from(a_byte != b_byte));
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}
+
+fn nearest_name<'a>(name: &str, candidates: &'a [&str]) -> Option<&'a str> {
+    // No accepted suggestion can be more than two edits away. Length alone
+    // rules out unrelated long keys without scanning them for every candidate.
+    let width = candidates
+        .iter()
+        .filter(|candidate| name.len().abs_diff(candidate.len()) <= 2)
+        .map(|candidate| candidate.len())
+        .max()?;
+    let mut row = vec![0; width + 1];
+    let mut best: Option<(&str, usize)> = None;
+    for candidate in candidates {
+        if name.len().abs_diff(candidate.len()) > 2 {
+            continue;
+        }
+        let distance = edit_distance(name, candidate, &mut row[..=candidate.len()]);
+        if best.is_none_or(|(_, best_distance)| distance < best_distance) {
+            best = Some((candidate, distance));
+        }
+    }
+    let (candidate, distance) = best?;
+    let threshold = if name.len().max(candidate.len()) <= 6 {
+        1
+    } else {
+        2
+    };
+    (distance <= threshold).then_some(candidate)
+}
+
+fn known_keys(section: &str) -> &'static [&'static str] {
+    match section {
+        "[general]" => GENERAL_KEYS,
+        "[colors]" => COLOR_KEYS,
+        "[autostart]" => AUTOSTART_KEYS,
+        "[[keybindings]]" => KEYBIND_KEYS,
+        "[[rules]]" => RULE_KEYS,
+        _ => &[],
+    }
+}
+
+/// Unknown tables stay silent for forward compatibility, except when their name
+/// is close enough to a table Maverick already owns that it is almost certainly
+/// a typo. That keeps a future `[compositor]` harmless while making `[genreal]`
+/// actionable.
+fn warn_unknown_section_if_typo(diag: &mut Diagnostics, name: &str, array: bool) {
+    const PLAIN: &[&str] = &["general", "colors", "autostart"];
+    const ROWS: &[&str] = &["keybindings", "rules"];
+    let candidates = if array { ROWS } else { PLAIN };
+    if candidates.contains(&name) {
+        return;
+    }
+    let other_kind = if array { PLAIN } else { ROWS };
+    if other_kind.contains(&name) {
+        let (open, close, expected_open, expected_close) = if array {
+            ("[[", "]]", "[", "]")
+        } else {
+            ("[", "]", "[[", "]]")
+        };
+        diag.warnings.push(format!(
+            "unknown table '{open}{name}{close}'; use '{expected_open}{name}{expected_close}' instead"
+        ));
+        return;
+    }
+    if let Some(suggestion) = nearest_name(name, candidates) {
+        let open = if array { "[[" } else { "[" };
+        let close = if array { "]]" } else { "]" };
+        diag.warnings.push(format!(
+            "unknown table '{open}{name}{close}'; did you mean '{open}{suggestion}{close}'?"
+        ));
+    }
+}
+
+fn removed_key_replacement(section: &str, key: &str) -> Option<&'static str> {
+    Some(match (section, key) {
+        ("[general]", "border_w") => "border_width",
+        ("[general]", "gaps") => "gaps_inner + gaps_outer",
+        ("[general]", "default_col_width" | "default_col_w" | "split_bias") => "column_width",
+        ("[colors]", "col_normal") => "normal",
+        ("[colors]", "col_focused") => "focused",
+        ("[colors]", "col_urgent") => "urgent",
+        ("[autostart]", "apps" | "programs") => "commands",
+        ("[general]", "n_tags") => "view_count",
+        ("[general]", "tag_names") => "view_names",
+        ("[general]", "auto_workspace_binds") => "auto_view_binds",
+        ("[[rules]]", "type") => "window_type",
+        ("[[rules]]", "workspace" | "ws") => "view",
+        ("[[rules]]", "border_w") => "border_width",
+        ("[[rules]]", "no_initial_state" | "no_maximize") => "ignore_initial_state",
+        ("[[rules]]", "no_fullscreen") => "deny_fullscreen",
+        ("[[rules]]", "exclusive_fullscreen") => "true_fullscreen",
+        _ => return None,
+    })
+}
+
 /// Report a key that a known table has no field for. The value is accepted and
-/// the rest of the file still merges, so this is a warning rather than an error:
-/// what the user gets is a configuration that works minus the one setting they
-/// believe they made, which is exactly the case a silent drop hides best.
-/// Naming the table and the key is what makes it fixable — `honour_initial_state`
-/// and `[general].honor_initial_state` are one keystroke apart.
-///
-/// Unknown *tables* are not reported: see `parse_user`, where forward
-/// compatibility with a config written for a newer Maverick takes precedence.
+/// the rest of the file still merges, so this is a warning rather than an error.
+/// Close spellings name the canonical key explicitly; unrelated unknown keys are
+/// still reported without guessing.
 fn warn_unknown_key(diag: &mut Diagnostics, section: &str, key: &str) {
-    diag.warnings
-        .push(format!("unknown key '{section}.{key}'; ignoring it"));
+    let mut message = format!("unknown key '{section}.{key}'; ignoring it");
+    if let Some(replacement) = removed_key_replacement(section, key) {
+        message.push_str(&format!("; this spelling was removed, use '{replacement}'"));
+    } else if let Some(suggestion) = nearest_name(key, known_keys(section)) {
+        message.push_str(&format!("; did you mean '{section}.{suggestion}'?"));
+    }
+    diag.warnings.push(message);
 }
 
 /// Fold [`UserConfig`] into the baseline [`Cfg`], recording per-entry
@@ -667,7 +992,7 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
     let auto_ws = user
         .general
         .as_ref()
-        .is_none_or(|g| g.auto_workspace_binds.unwrap_or(true));
+        .is_none_or(|g| g.auto_view_binds.unwrap_or(true));
 
     if let Some(general) = user.general {
         apply_general(&mut cfg, general, diag);
@@ -678,7 +1003,7 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
 
     if !user.keybindings.is_empty() {
         // Any user keybinding discards the compiled keymap entirely; the
-        // generated workspace binds are re-added into the free slots.
+        // generated View binds are re-added into the free slots.
         cfg.keybinds = parse_keybindings(&user.keybindings, cfg.n_tags, auto_ws, diag);
     } else if auto_ws {
         // No user keybindings: keep the compiled binds and still synthesize the
@@ -690,31 +1015,15 @@ fn merge_config(mut cfg: Cfg, user: UserConfig, diag: &mut Diagnostics) -> Cfg {
         cfg.rules = parse_rules(user.rules, cfg.n_tags, diag);
     }
     if let Some(autostart) = user.autostart {
-        cfg.autostart = autostart
-            .commands
-            .into_iter()
-            .filter(|cmd| {
-                if cmd.first().is_some_and(|bin| !bin.trim().is_empty()) {
-                    true
-                } else {
-                    diag.warnings
-                        .push("discarded empty autostart command".into());
-                    false
-                }
-            })
-            .collect();
+        cfg.autostart = autostart.commands;
     }
-    normalize_tag_names(&mut cfg);
+    normalize_view_names(&mut cfg);
     cfg
 }
 
 fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     if let Some(v) = general.border_width {
         cfg.border_w = v;
-    }
-    if let Some(v) = general.gaps {
-        cfg.gaps_inner = v;
-        cfg.gaps_outer = v;
     }
     if let Some(v) = general.gaps_inner {
         cfg.gaps_inner = v;
@@ -728,97 +1037,20 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     if let Some(v) = general.corner_radius {
         cfg.corner_radius = v;
     }
-    if let Some(name) = &general.theme {
-        match crate::config::theme_palette(name) {
-            Some((normal, focused, urgent)) => {
-                cfg.col_normal = normal;
-                cfg.col_focused = focused;
-                cfg.col_urgent = urgent;
-            }
-            None => {
-                diag.warnings.push(format!(
-                    "general.theme '{name}' is not a known preset; ignoring it"
-                ));
-            }
-        }
-    }
-    if let Some(v) = general.n_tags {
-        if (1..=9).contains(&v) {
-            cfg.n_tags = v;
-        } else {
-            diag.errors.push(format!(
-                "general.n_tags must be between 1 and 9; ignoring {v}"
-            ));
-        }
+    if let Some(v) = general.view_count {
+        cfg.n_tags = v;
     }
     if let Some(v) = general.column_width {
-        if (0.1..=1.0).contains(&v) {
-            cfg.column_width = v;
-        } else {
-            diag.errors.push(format!(
-                "general.column_width must be between 0.1 and 1.0; ignoring {v}"
-            ));
-        }
-    }
-    // Legacy `default_col_width` / `default_col_w` (pixels) → fraction. The
-    // conversion needs a workarea width that does not exist at parse time, so
-    // it assumes 1920px and then clamps into the valid fraction range.
-    if let Some(px) = general.default_col_width {
-        if px > 0 {
-            cfg.column_width = (px as f32 / 1920.0).clamp(0.1, 1.0);
-            diag.warnings.push(
-                "general.default_col_width is deprecated; use [general].column_width \
-                 (fraction 0.1–1.0)"
-                    .into(),
-            );
-        } else {
-            diag.errors
-                .push("general.default_col_width must be greater than zero".into());
-        }
-    }
-    // Legacy `split_bias` (fraction) → column_width. A 0.0 `split_bias` is
-    // accepted here and clamped up to the 0.1 minimum, which is why this key
-    // validates over 0.0–1.0 but never stores 0.0.
-    if let Some(v) = general.split_bias {
-        if (0.0..=1.0).contains(&v) {
-            cfg.column_width = v.clamp(0.1, 1.0);
-            diag.warnings.push(
-                "general.split_bias is deprecated; use [general].column_width \
-                 (fraction 0.1–1.0)"
-                    .into(),
-            );
-        } else {
-            diag.errors.push(format!(
-                "general.split_bias must be between 0.0 and 1.0; ignoring {v}"
-            ));
-        }
+        cfg.column_width = v;
     }
     if let Some(v) = general.accordion_boost {
-        if (0.0..=0.9).contains(&v) {
-            cfg.accordion_boost = v;
-        } else {
-            diag.errors.push(format!(
-                "general.accordion_boost must be between 0.0 and 0.9; ignoring {v}"
-            ));
-        }
+        cfg.accordion_boost = v;
     }
     if let Some(v) = general.overview_zoom_min {
-        if (0.05..=1.0).contains(&v) {
-            cfg.overview_zoom_min = v;
-        } else {
-            diag.errors.push(format!(
-                "general.overview_zoom_min must be between 0.05 and 1.0; ignoring {v}"
-            ));
-        }
+        cfg.overview_zoom_min = v;
     }
     if let Some(v) = general.overview_scale {
-        if (0.05..=1.0).contains(&v) {
-            cfg.overview_scale = v;
-        } else {
-            diag.errors.push(format!(
-                "general.overview_scale must be between 0.05 and 1.0; ignoring {v}"
-            ));
-        }
+        cfg.overview_scale = v;
     }
     // The pair invariant `ALPHA_MIN <= floor <= target <= 1.0` (see
     // `layout::sanitized_overview_scales`, the runtime backstop for a `Cfg`
@@ -828,9 +1060,9 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     // instead of pretending the combination is valid.
     if cfg.overview_zoom_min > cfg.overview_scale {
         diag.errors.push(format!(
-            "general.overview_zoom_min ({}) must not exceed general.overview_scale ({}); \
+            "line {}: general.overview_zoom_min ({}) must not exceed general.overview_scale ({}); \
              using {} as the floor",
-            cfg.overview_zoom_min, cfg.overview_scale, cfg.overview_scale
+            general.line, cfg.overview_zoom_min, cfg.overview_scale, cfg.overview_scale
         ));
         cfg.overview_zoom_min = cfg.overview_scale;
     }
@@ -840,13 +1072,17 @@ fn apply_general(cfg: &mut Cfg, general: GeneralCfg, diag: &mut Diagnostics) {
     if let Some(v) = general.warp_cursor {
         cfg.warp_cursor = v;
     }
-    if let Some(names) = general.tag_names {
-        if names.is_empty() || names.iter().any(String::is_empty) {
-            diag.warnings
-                .push("general.tag_names must contain non-empty names; ignoring it".into());
-        } else {
-            cfg.tag_names = names;
+    if let Some(names) = general.view_names {
+        if names.len() > cfg.n_tags {
+            diag.warnings.push(format!(
+                "line {}: view_names has {} entries but view_count is {}; ignoring {} trailing name(s)",
+                general.line,
+                names.len(),
+                cfg.n_tags,
+                names.len() - cfg.n_tags
+            ));
         }
+        cfg.tag_names = names;
     }
     if let Some(v) = general.honor_initial_state {
         cfg.honor_initial_state = v;
@@ -865,17 +1101,17 @@ fn apply_colors(cfg: &mut Cfg, colors: ColorsCfg, _diag: &mut Diagnostics) {
     }
 }
 
-/// Force `tag_names` to be exactly `n_tags` long: surplus names are dropped and
-/// missing ones are auto-numbered, so the bar/IPC can index it by workspace
-/// without a range check.
-fn normalize_tag_names(cfg: &mut Cfg) {
+/// Force the runtime View-name vector to be exactly `view_count` long: surplus
+/// names are dropped and missing ones are auto-numbered, so bar/IPC consumers
+/// can index it without a range check.
+fn normalize_view_names(cfg: &mut Cfg) {
     cfg.tag_names.truncate(cfg.n_tags);
     while cfg.tag_names.len() < cfg.n_tags {
         cfg.tag_names.push((cfg.tag_names.len() + 1).to_string());
     }
 }
 
-fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -> Vec<Rule> {
+fn parse_rules(entries: Vec<RuleEntry>, view_count: usize, diag: &mut Diagnostics) -> Vec<Rule> {
     entries
         .into_iter()
         .enumerate()
@@ -886,31 +1122,38 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
                 && entry.title.as_deref().is_none_or(str::is_empty)
             {
                 diag.errors.push(format!(
-                    "discarded rule #{}: class, instance, window_type and title are all empty",
+                    "line {}: discarded rule #{}: class, instance, window_type and title are all empty",
+                    entry.line,
                     index + 1
                 ));
                 return None;
             }
-            if let Some(wt) = entry.window_type.as_deref() {
+            let window_type = if let Some(wt) = entry.window_type {
                 // The EWMH atom names only; a typo would otherwise become a
                 // criterion that silently never matches.
                 const KNOWN_TYPES: [&str; 8] = [
                     "normal", "desktop", "dock", "toolbar", "menu", "utility", "splash", "dialog",
                 ];
-                if !KNOWN_TYPES.contains(&wt.to_ascii_lowercase().as_str()) {
+                let normalized = wt.to_ascii_lowercase();
+                if !KNOWN_TYPES.contains(&normalized.as_str()) {
                     diag.errors.push(format!(
-                        "discarded rule #{}: unknown window_type '{wt}'",
+                        "line {}: discarded rule #{}: unknown window_type '{wt}'",
+                        entry.line,
                         index + 1
                     ));
                     return None;
                 }
-            }
-            // `workspace` is 1-based in the file, 0-based in `Rule::ws`; a
-            // reload that shrinks `n_tags` re-clamps it at manage time.
-            let ws = match entry.workspace {
-                Some(ws) if ws == 0 || ws > n_tags => {
+                Some(normalized)
+            } else {
+                None
+            };
+            // `view` is 1-based in the file, 0-based in `Rule::ws`; a reload
+            // that shrinks `view_count` re-clamps it at manage time.
+            let ws = match entry.view {
+                Some(ws) if ws == 0 || ws > view_count => {
                     diag.errors.push(format!(
-                        "discarded rule #{}: workspace {ws} is outside 1..={n_tags}",
+                        "line {}: discarded rule #{}: view {ws} is outside 1..={view_count}",
+                        entry.line,
                         index + 1
                     ));
                     return None;
@@ -921,10 +1164,7 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
             Some(Rule {
                 class: entry.class.filter(|s| !s.is_empty()),
                 instance: entry.instance.filter(|s| !s.is_empty()),
-                window_type: entry
-                    .window_type
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_ascii_lowercase()),
+                window_type,
                 title: entry.title.filter(|s| !s.is_empty()),
                 float: entry.float,
                 sticky: entry.sticky,
@@ -944,17 +1184,17 @@ fn parse_rules(entries: Vec<RuleEntry>, n_tags: usize, diag: &mut Diagnostics) -
 
 /// Parse `[[keybindings]]` rows into the `(mods, keysym, action)` list.
 ///
-/// Workspace binds (Super+1..n view, Super+Shift+1..n move) are auto-generated
-/// whenever `[general].auto_workspace_binds` is true (the default) — in the
+/// View binds (Super+1..n view, Super+Shift+1..n move) are auto-generated
+/// whenever `[general].auto_view_binds` is true (the default) — in the
 /// *free* slots only, so they never clobber a combination the user already
 /// claimed. Duplicate `(mods, keysym)` pairs within the user's own list resolve
 /// first-wins, and the loser is reported via `diag`. A bind whose action targets
-/// a workspace beyond `n_tags` is dropped: `n_tags` is known here, so there is
+/// a View beyond `view_count` is dropped: `view_count` is known here, so there is
 /// no reason to keep a shortcut that can only ever be a no-op.
 fn parse_keybindings(
     entries: &[KeybindEntry],
-    n_tags: usize,
-    auto_workspace_binds: bool,
+    view_count: usize,
+    auto_view_binds: bool,
     diag: &mut Diagnostics,
 ) -> Vec<(u16, u32, Action)> {
     let mut parsed: Vec<(u16, u32, Action)> = Vec::new();
@@ -962,68 +1202,59 @@ fn parse_keybindings(
     for entry in entries {
         let Some((mods, keysym)) = keybind_from_str(&entry.key) else {
             diag.errors.push(format!(
-                "discarded keybinding '{}': invalid key combination",
-                entry.key
+                "line {}: discarded keybinding '{}': invalid key combination",
+                entry.line, entry.key
             ));
             continue;
         };
         let Some(action) = action_from_str(&entry.action) else {
             diag.errors.push(format!(
-                "discarded keybinding '{}': invalid action '{}'",
-                entry.key, entry.action
+                "line {}: discarded keybinding '{}': invalid action '{}'",
+                entry.line, entry.key, entry.action
             ));
             continue;
         };
-        if !action_workspace_is_valid(&action, n_tags) {
+        if !action_view_is_valid(&action, view_count) {
             diag.errors.push(format!(
-                "discarded keybinding '{}': action workspace is outside 1..={n_tags}",
-                entry.key
+                "line {}: discarded keybinding '{}': action workspace is outside 1..={view_count}",
+                entry.line, entry.key
             ));
             continue;
         }
         // First-wins on duplicate combinations; later entries are dropped.
-        if parsed.iter().any(|(m, k, _)| *m == mods && *k == keysym) {
+        if let Some((_, _, action)) = parsed.iter().find(|(m, k, _)| *m == mods && *k == keysym) {
             diag.errors.push(format!(
-                "keybinding '{}' (mods={mods:#x}, keysym={keysym:#x}) duplicates an earlier \
+                "line {}: keybinding '{}' (mods={mods:#x}, keysym={keysym:#x}) duplicates an earlier \
                  bind and was ignored; keeping {}",
+                entry.line,
                 entry.key,
-                action_name_of(&parsed, mods, keysym)
+                crate::core::action::name(action)
             ));
             continue;
         }
         parsed.push((mods, keysym, action));
     }
 
-    if auto_workspace_binds {
-        append_numeric_keybindings(&mut parsed, n_tags);
+    if auto_view_binds {
+        append_numeric_keybindings(&mut parsed, view_count);
     }
     parsed
 }
 
-/// Human-readable name of the action already bound to `(mods, keysym)`, for the
-/// conflict diagnostic.
-fn action_name_of(list: &[(u16, u32, Action)], mods: u16, keysym: u32) -> String {
-    list.iter()
-        .find(|(m, k, _)| *m == mods && *k == keysym)
-        .map_or_else(String::new, |(_, _, a)| {
-            crate::core::action::name(a).to_string()
-        })
-}
-
-fn action_workspace_is_valid(action: &Action, n_tags: usize) -> bool {
+fn action_view_is_valid(action: &Action, view_count: usize) -> bool {
     match action {
-        Action::View(ws) | Action::MoveToWs(ws) | Action::ViewRemove(ws) => *ws < n_tags,
+        Action::View(ws) | Action::MoveToWs(ws) | Action::ViewRemove(ws) => *ws < view_count,
         _ => true,
     }
 }
 
-/// Add `Super+1..n` / `Super+Shift+1..n` for `n_tags`, capped at 9 because the
+/// Add `Super+1..n` / `Super+Shift+1..n` for `view_count`, capped at 9 because the
 /// digit row has no tenth key. Only unclaimed combinations are filled, so a
 /// user bind on e.g. `Super+1` wins and the generated `View(0)` is skipped.
-fn append_numeric_keybindings(keybinds: &mut Vec<(u16, u32, Action)>, n_tags: usize) {
+fn append_numeric_keybindings(keybinds: &mut Vec<(u16, u32, Action)>, view_count: usize) {
     let sup = u16::from(ModMask::M4);
     let shift_sup = sup | u16::from(ModMask::SHIFT);
-    for ws in 0..n_tags.min(9) {
+    for ws in 0..view_count.min(9) {
         let keysym = b'1' as u32 + ws as u32;
         let view = (sup, keysym);
         let move_to = (shift_sup, keysym);
@@ -1220,15 +1451,15 @@ pub fn mods_name(mask: u16) -> String {
 /// modifier (`Super+Super+a`) is rejected rather than folded, so a typo cannot
 /// silently change which chord is grabbed.
 fn keybind_from_str(input: &str) -> Option<(u16, u32)> {
-    let parts: Vec<_> = input
-        .split('+')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .collect();
-    let (key, modifiers) = parts.split_last()?;
+    let mut parts = input.rsplit('+').map(str::trim);
+    let key = parts.next()?;
     let keysym = keysym_from_name(key)?;
+    // X11 reserves zero for NoSymbol; it cannot name a key to grab.
+    if keysym == 0 {
+        return None;
+    }
     let mut mask = 0;
-    for modifier in modifiers {
+    for modifier in parts {
         let bit = match modifier.to_ascii_lowercase().as_str() {
             "super" | "mod" | "mod4" => u16::from(ModMask::M4),
             "shift" => u16::from(ModMask::SHIFT),

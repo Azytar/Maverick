@@ -300,18 +300,18 @@ impl Overview {
             matrix33: 65536,
         };
         for &(win, tile, _) in placements {
-            if !self.images.contains_key(&win) {
-                match Image::new(self.conn.clone(), win, &self.formats) {
-                    Ok(image) => {
-                        self.images.insert(win, image);
-                    }
-                    Err(error) => {
-                        log::debug!("Overview image {win:#x}: {error}");
-                        continue;
+            let image = match self.images.entry(win) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    match Image::new(self.conn.clone(), win, &self.formats) {
+                        Ok(image) => entry.insert(image),
+                        Err(error) => {
+                            log::debug!("Overview image {win:#x}: {error}");
+                            continue;
+                        }
                     }
                 }
-            }
-            let image = &self.images[&win];
+            };
             render::set_picture_transform(&self.conn, image.picture, transform)?;
             // Clip before converting coordinates to the signed 16-bit wire space.
             // Offscreen columns can have arbitrary world positions.
@@ -409,9 +409,9 @@ impl WindowManager {
         {
             self.overviews.remove(&mi);
         }
-        if !self.overviews.contains_key(&mi) {
+        if let std::collections::btree_map::Entry::Vacant(entry) = self.overviews.entry(mi) {
             let overview = Overview::new(self.conn.clone(), self.screen_num, view, workarea)?;
-            self.overviews.insert(mi, overview);
+            entry.insert(overview);
         }
         if self.engine.state.monitors[mi]
             .ws()

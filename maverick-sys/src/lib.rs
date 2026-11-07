@@ -459,17 +459,14 @@ pub fn wait_readable_fds(
     if fds.is_empty() {
         return true;
     }
-    let borrowed: Vec<std::os::unix::io::BorrowedFd<'_>> = fds
+    let mut pfds: Vec<rustix::event::PollFd<'_>> = fds
         .iter()
         .copied()
         // SAFETY: every descriptor here is one the caller is already holding
         // open and passes in solely to be waited on, and the borrow does not
         // outlive this call.
         .map(|fd| unsafe { std::os::unix::io::BorrowedFd::borrow_raw(fd) })
-        .collect();
-    let mut pfds: Vec<rustix::event::PollFd<'_>> = borrowed
-        .iter()
-        .map(|fd| rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN))
+        .map(|fd| rustix::event::PollFd::from_borrowed_fd(fd, rustix::event::PollFlags::IN))
         .collect();
     let ts = timeout.map(|v| {
         // `tv_nsec` is a remainder, not a total: `poll(2)` reads the pair as

@@ -816,11 +816,14 @@ impl WindowManager {
 
         if timeout != Some(std::time::Duration::ZERO) {
             let wait_trace = trace::Span::new("wait");
-            let mut fds = vec![fd];
-            if let Some(hub) = &self.hub {
-                fds.push(hub.wake_fd());
-            }
-            maverick_sys::wait_readable_fds(&fds, timeout);
+            let mut fds = [fd; 2];
+            let fds = if let Some(hub) = &self.hub {
+                fds[1] = hub.wake_fd();
+                &fds[..]
+            } else {
+                &fds[..1]
+            };
+            maverick_sys::wait_readable_fds(fds, timeout);
             drop(wait_trace);
             // Drain for anything that arrived while we were blocked.
             while let Some(ev) = self.conn.poll_for_event()? {

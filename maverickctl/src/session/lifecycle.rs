@@ -512,7 +512,7 @@ fn spawn_xserver(session: &Session, display: Display) -> Result<xserver::XServer
     };
     // A missing backend is the one start failure a user can actually fix, so
     // it is reported by name rather than as a spawn error.
-    if !find_on_path(spec.backend.binary()).is_some() {
+    if find_on_path(spec.backend.binary()).is_none() {
         return Err(SessionError::MissingBackend {
             binary: spec.backend.binary().to_string(),
             reason: "not found on $PATH".to_string(),

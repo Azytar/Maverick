@@ -139,7 +139,7 @@ impl<'a> Value<'a> {
         }
     }
 
-    /// A flat string array, e.g. `tag_names = ["web", "code"]`.
+    /// A flat string array, e.g. `view_names = ["web", "code"]`.
     #[must_use]
     pub fn as_str_list(&self) -> Option<&[Cow<'a, str>]> {
         match self {
@@ -168,6 +168,7 @@ pub fn parse(src: &str) -> Parser<'_> {
         src,
         pos: 0,
         line: 1,
+        event_line: 1,
         done: false,
         seen: Vec::new(),
     }
@@ -180,6 +181,8 @@ pub struct Parser<'a> {
     pos: usize,
     /// 1-based current line (bumped whenever a `\n` is consumed).
     line: usize,
+    /// 1-based start line of the last item returned by next().
+    event_line: usize,
     done: bool,
     /// Keys observed in the *current* table — for duplicate-key detection.
     seen: Vec<&'a str>,
@@ -204,6 +207,7 @@ impl<'a> Iterator for Parser<'a> {
             self.done = true;
             return None;
         }
+        self.event_line = self.line;
         if self.byte(self.pos) == b'[' {
             match self.parse_header() {
                 Ok(h) => {
@@ -224,7 +228,7 @@ impl<'a> Iterator for Parser<'a> {
                     if self.seen.contains(&key) {
                         self.done = true;
                         return Some(Err(ParseError {
-                            line: self.line,
+                            line: self.event_line,
                             kind: "duplicate-key",
                         }));
                     }
@@ -241,6 +245,15 @@ impl<'a> Iterator for Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// Start line of the most recent item yielded by this parser.
+    ///
+    /// This stays as parser metadata rather than inflating every Event variant,
+    /// so zero-copy consumers keep the same event representation.
+    #[must_use]
+    pub fn event_line(&self) -> usize {
+        self.event_line
+    }
+
     fn bytes(&self) -> &[u8] {
         self.src.as_bytes()
     }
@@ -408,6 +421,10 @@ impl<'a> Parser<'a> {
             self.bytes().get(digits..digits + 2),
             Some(b"0x") | Some(b"0X")
         ) {
+            // Hex literals are unsigned; never consume and then lose a sign.
+            if digits != start {
+                return Err(self.err("value"));
+            }
             self.pos += 2;
             let hex_start = self.pos;
             while self.byte(self.pos).is_ascii_hexdigit() {
@@ -482,7 +499,7 @@ impl<'a> Parser<'a> {
                     }
                     self.pos += 1;
                 }
-                0 => return Err(self.err("string")),
+                0 | b'\n' | b'\r' => return Err(self.err("string")),
                 _ => self.pos += 1,
             }
         }
@@ -556,7 +573,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// A single integer array element: decimal or hex, optional sign.
+    /// A single integer array element: signed decimal or unsigned hex.
     /// Bounded like [`Self::parse_number`].
     fn parse_int_elem(&mut self) -> Result<i64, ParseError> {
         let start = self.pos;
@@ -568,6 +585,9 @@ impl<'a> Parser<'a> {
             self.bytes().get(digits..digits + 2),
             Some(b"0x") | Some(b"0X")
         ) {
+            if digits != start {
+                return Err(self.err("array"));
+            }
             self.pos += 2;
             let hex_start = self.pos;
             while self.byte(self.pos).is_ascii_hexdigit() {
@@ -622,6 +642,9 @@ impl<'a> Parser<'a> {
                 let mut total = 0usize;
                 loop {
                     if grid.len() >= MAX_ARRAY_ELEMS {
+                        return Err(self.err("array"));
+                    }
+                    if self.byte(self.pos) != b'[' {
                         return Err(self.err("array"));
                     }
                     self.pos += 1;

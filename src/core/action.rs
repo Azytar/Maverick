@@ -234,7 +234,7 @@ pub fn parse(input: &str) -> Option<Action> {
     }
     if let Some(rest) = input.strip_prefix("shrink-col") {
         let n = rest.trim().parse::<i32>().ok()?;
-        return Some(Action::GrowCol(-n));
+        return n.checked_neg().map(Action::GrowCol);
     }
 
     // Colon/space separated: `verb:arg` or `verb arg`.
