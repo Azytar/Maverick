@@ -1916,21 +1916,10 @@ commands = [["example", "--flag"]]
     }
 
     #[test]
-    fn theme_preset_fills_colors_but_explicit_colors_win() {
-        let user = parse_string(
-            r#"
-[general]
-theme = "nord"
-"#,
-        );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        let (normal, focused, urgent) = crate::config::theme_palette("nord").unwrap();
-        assert_eq!(cfg.col_normal, normal);
-        assert_eq!(cfg.col_focused, focused);
-        assert_eq!(cfg.col_urgent, urgent);
-
-        // [colors] applied after [general], so it overrides the theme.
-        let user = parse_string(
+    fn removed_theme_key_is_reported_and_explicit_colors_still_apply() {
+        let baseline = compiled_config();
+        let mut diag = Diagnostics::default();
+        let user = parse_user(
             r#"
 [general]
 theme = "nord"
@@ -1938,24 +1927,21 @@ theme = "nord"
 [colors]
 focused = 0x00ff00
 "#,
-        );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        assert_eq!(cfg.col_focused, 0x00ff00);
-        assert_eq!(cfg.col_normal, normal); // untouched field still from the theme
-    }
+            &mut diag,
+        )
+        .expect("valid TOML");
+        let cfg = merge_config(compiled_config(), user, &mut diag);
 
-    #[test]
-    fn unknown_theme_name_is_ignored() {
-        let baseline = compiled_config();
-        let user = parse_string(
-            r#"
-[general]
-theme = "not-a-real-theme"
-"#,
-        );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert_eq!(cfg.col_normal, baseline.col_normal);
-        assert_eq!(cfg.col_focused, baseline.col_focused);
+        assert_eq!(cfg.col_focused, 0x00ff00);
+        assert_eq!(cfg.col_urgent, baseline.col_urgent);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(
+            diag.warnings[0].contains("[general].theme"),
+            "removed theme key must be named explicitly: {:?}",
+            diag.warnings
+        );
+        assert!(diag.errors.is_empty(), "{diag:?}");
     }
 
     /// A floor above the target is contradictory: the parser diagnoses it and
