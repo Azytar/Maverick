@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use maverick_testkit::XvfbSession;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ClientMessageEvent, ConnectionExt, CreateWindowAux, EventMask, PropMode, Window,
-    WindowClass,
+    Atom, AtomEnum, ClientMessageEvent, ConnectionExt, CreateWindowAux, EventMask, PropMode,
+    Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
@@ -221,7 +221,10 @@ fn focus_requests_raise_real_floating_clients() -> Result<(), Box<dyn Error>> {
                 && order.len() == windows.len()
                 && order.last() == Some(&target))
         })?;
-        assert_eq!(assert_stacking(&conn, root, &windows)?.last(), Some(&target));
+        assert_eq!(
+            assert_stacking(&conn, root, &windows)?.last(),
+            Some(&target)
+        );
     }
     Ok(())
 }
