@@ -29,6 +29,24 @@ def wait_for(predicate, message):
     raise AssertionError(message)
 
 
+def wait_for_stable_value(producer, predicate, message):
+    deadline = time.monotonic() + 5
+    previous = None
+    consecutive = 0
+    while time.monotonic() < deadline:
+        value = producer()
+        if predicate(value):
+            consecutive = consecutive + 1 if value == previous else 1
+            previous = value
+            if consecutive >= 2:
+                return value
+        else:
+            previous = None
+            consecutive = 0
+        time.sleep(0.05)
+    raise AssertionError(message)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wm", default=str(ROOT / "target/release/maverick"))
@@ -82,9 +100,12 @@ def main():
                 assert command("sample") == arrow
                 print("PASS: the root cursor remains visible without opening an application")
                 command("client")
-                wait_for(lambda: command("enter")[2] > 0 and command("sample") != arrow,
-                         "the client's own cursor was replaced")
-                assert command("sample")[2] > 0
+                client = wait_for_stable_value(
+                    lambda: command("enter"),
+                    lambda sample: sample[2] > 0 and sample != arrow,
+                    "the client's own cursor was replaced",
+                )
+                assert client[2] > 0 and client != arrow
                 print("PASS: applications retain their own cursor")
                 command("destroy")
                 wait_for(lambda: command("sample") == arrow, "the empty desktop lost its arrow")
