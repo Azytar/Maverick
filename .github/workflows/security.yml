@@ -42,6 +42,6 @@ jobs:
       - name: Check RustSec advisories and dependency sources
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
         with:
-          rust-version: '1.82.0'
+          rust-version: '1.85.0'
           command: check
           command-arguments: advisories sources
