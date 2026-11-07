@@ -52,7 +52,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wm", default=str(ROOT / "target/release/maverick"))
     parser.add_argument("--ctl", default=str(ROOT / "target/release/maverickctl"))
-    parser.add_argument("--case", choices=("layers", "focus", "vertical", "transients", "metadata", "profile", "urgency"), default="focus")
+    parser.add_argument("--case", choices=("layers", "focus", "metadata", "profile", "urgency"), default="focus")
     parser.add_argument("--clients", type=int, default=10, help="profile: total clients, including two floats")
     parser.add_argument("--actions", type=int, default=100, help="profile: successive focus requests")
     parser.add_argument("--idle-seconds", type=float, default=2, help="profile: idle sampling interval")
@@ -120,11 +120,8 @@ def main():
                 wait_for(ready, "WM did not claim the private display")
                 probes = {}
 
-                def launch(parent=None):
-                    words = [str(helper)]
-                    if parent is not None:
-                        words += ["--transient-for", str(parent)]
-                    probe = subprocess.Popen(words, env=env, stdin=subprocess.PIPE,
+                def launch():
+                    probe = subprocess.Popen([str(helper)], env=env, stdin=subprocess.PIPE,
                                              stdout=subprocess.PIPE, stderr=log, text=True)
                     processes.append(probe)
                     win = int(line(probe.stdout))
@@ -158,36 +155,6 @@ def main():
                         "focus did not reach the requested window")
 
                 a = launch()
-                if args.case == "vertical":
-                    b = launch()
-                    focus(b)
-                    ctl("msg", "collapse_column")
-
-                    def rows():
-                        return [window["id"] for window in tree()["monitors"][0]
-                                ["workspaces"][0]["columns"][0]["windows"]]
-
-                    def key(chord):
-                        subprocess.run(["xdotool", "key", "--clearmodifiers", chord],
-                                       env=env, check=True, timeout=5)
-
-                    def focused(win):
-                        return f"0x{win:x}" in subprocess.check_output(
-                            ["xprop", "-root", "_NET_ACTIVE_WINDOW"], env=env, text=True, timeout=3)
-
-                    wait_for(lambda: rows() == [a, b], "columns were not merged")
-                    key("super+k")
-                    wait_for(lambda: focused(a), "Super+K did not navigate from the collapsed row")
-                    key("super+j")
-                    wait_for(lambda: focused(b), "Super+J did not navigate to the next row")
-                    key("super+shift+k")
-                    wait_for(lambda: rows() == [b, a] and focused(b), "Super+Shift+K did not move the focused row up")
-                    key("super+shift+j")
-                    wait_for(lambda: rows() == [a, b] and focused(b), "Super+Shift+J did not move the focused row down")
-                    print("PASS: default vertical focus and movement shortcuts work after merging columns", flush=True)
-                    ctl("quit", "--yes", check=False)
-                    assert wm.wait(timeout=5) == 0
-                    return
                 ctl("msg", f"float_window {a}")
                 b = launch()
                 wait_for(lambda: above(a, b), "new tile covered an existing float")
@@ -266,15 +233,6 @@ def main():
                             wait_for(lambda: above(c, dock), "published stack put a dock above fullscreen")
                             print("PASS: published stack matches X11 for float focus, fullscreen and docks", flush=True)
                         print("PASS: fullscreen and focused floating peek retain their layers", flush=True)
-                    elif args.case == "transients":
-                        child = launch(a)
-                        grandchild = launch(child)
-                        focus(a)
-                        wait_for(lambda: above(grandchild, child) and above(child, a) and above(a, b),
-                                 "focusing a float buried it or one of its transient descendants")
-                        focus(b)
-                        wait_for(lambda: above(b, grandchild), "unrelated focused float stayed buried")
-                        print("PASS: transient descendants stay above their raised parent", flush=True)
                 ctl("quit", "--yes", check=False)
                 assert wm.wait(timeout=5) == 0
                 if args.case == "profile":

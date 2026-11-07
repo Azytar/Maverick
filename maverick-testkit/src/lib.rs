@@ -158,11 +158,6 @@ impl XvfbSession {
         Ok(())
     }
 
-    /// Replace only this session's config (e.g. before a keyboard reload).
-    pub fn write_config(&self, contents: &str) -> io::Result<()> {
-        fs::write(&self.config, contents)
-    }
-
     /// The log belongs to this sandbox; useful as an exec/restart barrier.
     pub fn wm_log_path(&self) -> PathBuf {
         self.root.join("maverick.log")
@@ -207,7 +202,7 @@ impl XvfbSession {
 }
 
 /// A cancellable watchdog owns a duplicate of a test socket, never a PID.
-/// Shutdown wakes blocked readers; dropping the fixture cancels and joins it.
+/// Shutdown wakes blocked readers; dropping the connection cancels and joins it.
 pub struct ConnectionDeadline {
     cancel: Option<mpsc::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,

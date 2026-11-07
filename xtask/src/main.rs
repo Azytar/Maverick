@@ -151,24 +151,9 @@ const X11_STEPS: &[Step] = &[
         args: &["tests/xvfb-restore.py"],
     },
     Step {
-        label: "floating focus",
-        program: "python3",
-        args: &["tests/xvfb-floats.py", "--case", "focus"],
-    },
-    Step {
-        label: "transient stacking",
-        program: "python3",
-        args: &["tests/xvfb-floats.py", "--case", "transients"],
-    },
-    Step {
         label: "floating metadata",
         program: "python3",
         args: &["tests/xvfb-floats.py", "--case", "metadata"],
-    },
-    Step {
-        label: "vertical floating",
-        program: "python3",
-        args: &["tests/xvfb-floats.py", "--case", "vertical"],
     },
     Step {
         label: "layout restart",

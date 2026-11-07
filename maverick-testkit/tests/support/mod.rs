@@ -100,15 +100,17 @@ pub fn wait_for(
             )
             .into());
         }
-        if condition()? {
-            return Ok(());
-        }
         if let Some(status) = session.wm_exit_status()? {
             return Err(format!(
                 "Maverick exited during {description}: {status}\n{}",
                 session.diagnostics()
             )
             .into());
+        }
+        if condition().map_err(|error| -> Box<dyn Error> {
+            format!("{description}: {error}\n{}", session.diagnostics()).into()
+        })? {
+            return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(format!(

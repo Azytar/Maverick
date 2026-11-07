@@ -162,14 +162,17 @@ stacking probe, requiring `libx11-dev` and `xdotool`.
 It also checks invalid EWMH state actions, attention transitions, repeated
 maximize requests and workarea metadata after live View and dock changes.
 
-`python3 tests/xvfb-floats.py --case focus` checks real X11 stacking when tiles
-map, floats take focus and fullscreen changes its presented owner.
-`--case transients` checks parent/dialog/sub-dialog ordering and focus on an
-unrelated float. Both use their own Xvfb and the stacking probe (`libx11-dev`).
-`--case metadata` compares the published stack with real X11 order, including
-fullscreen covering a dock created afterwards.
-`--case vertical` uses `xdotool` to exercise the default focus and row movement
-shortcuts after merging columns, including the stale row cursor from collapse.
+`python3 tests/xvfb-floats.py --case metadata` checks real X11 stacking when
+tiles map, floats take focus and fullscreen changes its presented owner. It
+also compares the published stack with X11 order, including a dock created
+after fullscreen. It uses its own Xvfb and the stacking probe (`libx11-dev`).
+The optional `--case focus` runs the subset without the dock check.
+
+Transient hierarchies and the default vertical navigation/movement shortcuts
+now run in `maverick-testkit` through `cargo run -p maverick-xtask --locked -- x11`.
+The Rust clients use X11 and XTEST directly, including the real default key
+bindings, without control IPC. See [the regression inventory](tests/README.md)
+for coverage, deadlines, retained external oracles and the equivalence run.
 
 `--case profile` is an optional CPU/RSS and control round-trip workload, with
 `--clients`, `--actions`, `--idle-seconds` and optional `--trace-output`.
