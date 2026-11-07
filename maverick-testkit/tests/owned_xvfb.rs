@@ -261,13 +261,17 @@ fn destroying_focused_client_restores_focus_and_cleans_ewmh() -> Result<(), Box<
 
     conn.destroy_window(doomed)?.check()?;
     conn.flush()?;
-    wait_for(&mut session, "destroyed client removal and focus fallback", || {
-        let clients = window_list(&conn, root, client_list)?;
-        let order = window_list(&conn, root, stacking)?;
-        Ok(clients == [survivor]
-            && order == [survivor]
-            && window_list(&conn, root, active)? == [survivor])
-    })?;
+    wait_for(
+        &mut session,
+        "destroyed client removal and focus fallback",
+        || {
+            let clients = window_list(&conn, root, client_list)?;
+            let order = window_list(&conn, root, stacking)?;
+            Ok(clients == [survivor]
+                && order == [survivor]
+                && window_list(&conn, root, active)? == [survivor])
+        },
+    )?;
     assert_stacking(&conn, root, &[survivor])?;
 
     conn.destroy_window(survivor)?.check()?;
