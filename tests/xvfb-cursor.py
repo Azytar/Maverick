@@ -29,6 +29,18 @@ def wait_for(predicate, message):
     raise AssertionError(message)
 
 
+def wait_for_value(producer, predicate, message):
+    deadline = time.monotonic() + 5
+    last = None
+    while time.monotonic() < deadline:
+        value = producer()
+        last = value
+        if predicate(value):
+            return value
+        time.sleep(0.05)
+    raise AssertionError(f"{message}; last observed sample={last}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wm", default=str(ROOT / "target/release/maverick"))
@@ -62,6 +74,21 @@ def main():
 
                 blank = command("blank")
                 assert blank[2] == 0, "the inherited cursor is not transparent"
+
+                # Prove the Xvfb/XFixes oracle itself can observe a client's
+                # explicit cursor before Maverick exists. If this fails, a
+                # later ownership failure says nothing about the WM.
+                command("client")
+                oracle_client = wait_for_value(
+                    lambda: command("enter"),
+                    lambda sample: sample[2] > 0 and sample != blank,
+                    "Xvfb did not expose the probe client's explicit cursor",
+                )
+                command("destroy")
+                wait_for(lambda: command("sample") == blank,
+                         "destroying the oracle client did not restore the inherited cursor")
+                print(f"PASS: Xvfb exposes an explicit client cursor without a WM {oracle_client}")
+
                 wm = subprocess.Popen([args.wm, "--config", str(config)], env=env,
                                       stdout=log, stderr=log)
                 processes.append(wm)
@@ -82,9 +109,20 @@ def main():
                 assert command("sample") == arrow
                 print("PASS: the root cursor remains visible without opening an application")
                 command("client")
-                wait_for(lambda: command("enter")[2] > 0 and command("sample") != arrow,
-                         "the client's own cursor was replaced")
-                assert command("sample")[2] > 0
+
+                def client_sample():
+                    entered = command("enter")
+                    sampled = command("sample")
+                    if entered[2] <= 0:
+                        return [0, 0, 0, 0]
+                    return sampled
+
+                client = wait_for_value(
+                    client_sample,
+                    lambda sample: sample[2] > 0 and sample != arrow,
+                    "the client's own cursor was replaced",
+                )
+                assert client[2] > 0 and client != arrow
                 print("PASS: applications retain their own cursor")
                 command("destroy")
                 wait_for(lambda: command("sample") == arrow, "the empty desktop lost its arrow")

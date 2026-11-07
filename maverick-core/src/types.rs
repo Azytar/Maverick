@@ -1701,7 +1701,8 @@ pub enum Action {
     ViewReturn,
     /// Append a new empty View on the selected monitor.
     ViewCreate,
-    /// Drop View `n` from the selected monitor. Refused while it holds clients.
+    /// Drop View `n` from the selected monitor. Refused while it holds clients
+    /// or when it is the monitor's final remaining View.
     ViewRemove(usize),
     /// Move focused window to workspace `n`.
     MoveToWs(usize),

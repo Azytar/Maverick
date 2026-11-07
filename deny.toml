@@ -1,0 +1,16 @@
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities and unsound advisories are errors by cargo-deny 0.20.x.
+# Yanked crates are surfaced but do not fail existing builds by policy.
+yanked = "warn"
+ignore = []
+
+[sources]
+# Production dependencies must be local workspace/path crates or crates.io.
+# A Git dependency requires an explicit engineering decision and allow-list edit.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

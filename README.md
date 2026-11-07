@@ -71,8 +71,8 @@ them apart:
   managed window is referenced from exactly one of the two, on exactly one
   monitor.
 - `view_create` adds a View, up to 9 per monitor. `view_remove` is refused
-  while the View it names still holds clients: where they would go is a policy
-  decision, so the removal is refused rather than guessed.
+  while the View it names still holds clients, and the final View cannot be
+  removed: a live monitor always retains one active View.
 
 ### Carousel navigation
 

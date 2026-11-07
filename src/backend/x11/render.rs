@@ -642,19 +642,23 @@ impl WindowManager {
             &self.engine.state.monitors[mon_idx],
             &mut self.desired,
         );
-        // Collect into a local so the immutable borrow of `desired`
-        // ends before `apply_geom` mutates `self`.
+        // Borrow the reusable placement buffer as semantic DesiredState. The
+        // wrapper owns no production geometry and performs no per-frame copy.
         let desired = DesiredState::from_placements(&self.desired);
+        let desired_len = desired.len();
         let effects = reconcile(&desired, &self.engine.state, &mut self.applied);
         #[cfg(feature = "window-trace")]
         let effect_count = effects.len();
         // Observability only: mirror the per-window *desired* rect. Never read
         // back for layout, focus or overlay decisions.
-        for dw in &desired.windows {
+        for dw in desired.iter() {
             if let Some(c) = self.engine.state.clients.get_mut(&dw.window) {
                 c.last_desired = Some(dw.rect);
             }
         }
+        // End the immutable borrow of self.desired before the X11 sink takes
+        // &mut self for each owned effect.
+        drop(desired);
         for e in effects {
             let GeometryEffect::Configure { win, rect, border } = e;
             self.emit_geometry(win, rect, border, true)?;
@@ -663,7 +667,7 @@ impl WindowManager {
         wtrace!(
             "arrange mon={} desired={} effects={} x11_focus={:?} sel_mon={}",
             mon_idx,
-            desired.windows.len(),
+            desired_len,
             effect_count,
             self.engine.state.x11_input_focus,
             self.engine.state.sel_mon

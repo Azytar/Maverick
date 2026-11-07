@@ -429,7 +429,7 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                     apply_color_key(c, key, &value, diag);
                 }
                 Some(Cur::Plain("autostart")) => {
-                    if key == "commands" {
+                    if matches!(key, "commands" | "apps" | "programs") {
                         if let Some(grid) = grid_strings(&value) {
                             let commands = grid
                                 .into_iter()
@@ -513,7 +513,7 @@ fn annotate_event_diagnostics(
 /// field for is reported instead of dropped.
 fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "border_width" => set_u32_range(
+        "border_width" | "border_w" => set_u32_range(
             &mut g.border_width,
             key,
             value,
@@ -521,6 +521,21 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
             crate::core::layout::MAX_CFG_BORDER as u32,
             diag,
         ),
+        "gaps" => {
+            let mut legacy = None;
+            set_u32_range(
+                &mut legacy,
+                key,
+                value,
+                0,
+                crate::core::layout::MAX_CFG_GAP as u32,
+                diag,
+            );
+            if let Some(v) = legacy {
+                g.gaps_inner = Some(v);
+                g.gaps_outer = Some(v);
+            }
+        }
         "gaps_inner" => set_u32_range(
             &mut g.gaps_inner,
             key,
@@ -539,7 +554,7 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         ),
         "smart_gaps" => set_bool(&mut g.smart_gaps, key, value, diag),
         "corner_radius" => set_u32(&mut g.corner_radius, key, value, diag),
-        "view_count" => set_usize_range(&mut g.view_count, key, value, 1, 9, diag),
+        "view_count" | "n_tags" => set_usize_range(&mut g.view_count, key, value, 1, 9, diag),
         "column_width" => set_f32_range(&mut g.column_width, key, value, 0.1, 1.0, diag),
         "accordion_boost" => {
             set_f32_range(&mut g.accordion_boost, key, value, 0.0, 0.9, diag);
@@ -550,11 +565,13 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         "overview_scale" => {
             set_f32_range(&mut g.overview_scale, key, value, 0.05, 1.0, diag);
         }
-        "auto_view_binds" => set_bool(&mut g.auto_view_binds, key, value, diag),
+        "auto_view_binds" | "auto_workspace_binds" => {
+            set_bool(&mut g.auto_view_binds, key, value, diag)
+        }
         "focus_mouse" => set_bool(&mut g.focus_mouse, key, value, diag),
         "warp_cursor" => set_bool(&mut g.warp_cursor, key, value, diag),
         "honor_initial_state" => set_bool(&mut g.honor_initial_state, key, value, diag),
-        "view_names" => {
+        "view_names" | "tag_names" => {
             if let Some(list) = value.as_str_list() {
                 let names: Vec<String> = list.iter().map(|s| s.as_ref().to_string()).collect();
                 if names.is_empty() || names.iter().any(|name| name.trim().is_empty()) {
@@ -575,9 +592,9 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
 /// Map one `[colors]` key onto the model.
 fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "normal" => set_u32(&mut c.normal, key, value, diag),
-        "focused" => set_u32(&mut c.focused, key, value, diag),
-        "urgent" => set_u32(&mut c.urgent, key, value, diag),
+        "normal" | "col_normal" => set_u32(&mut c.normal, key, value, diag),
+        "focused" | "col_focused" => set_u32(&mut c.focused, key, value, diag),
+        "urgent" | "col_urgent" => set_u32(&mut c.urgent, key, value, diag),
         _ => warn_unknown_key(diag, "[colors]", key),
     }
 }
@@ -616,11 +633,11 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
     match key {
         "class" => set_string(&mut row.class, key, value, diag),
         "instance" => set_string(&mut row.instance, key, value, diag),
-        "window_type" => set_string(&mut row.window_type, key, value, diag),
+        "window_type" | "type" => set_string(&mut row.window_type, key, value, diag),
         "title" => set_string(&mut row.title, key, value, diag),
         "float" => set_rule_bool(&mut row.float, key, value, diag),
         "sticky" => set_rule_bool(&mut row.sticky, key, value, diag),
-        "view" => set_usize(&mut row.view, key, value, diag),
+        "view" | "workspace" | "ws" => set_usize(&mut row.view, key, value, diag),
         "size" => {
             if let Some([w, h]) = positive_u32_pair(value) {
                 row.size = Some([w, h]);
@@ -654,7 +671,7 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
                 warn_bad(diag, key, "a number between 0.0 and 1.0");
             }
         }
-        "border_width" => set_u32_range(
+        "border_width" | "border_w" => set_u32_range(
             &mut row.border_width,
             key,
             value,
@@ -662,14 +679,14 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
             crate::core::layout::MAX_CFG_BORDER as u32,
             diag,
         ),
-        "ignore_initial_state" => {
+        "ignore_initial_state" | "no_initial_state" | "no_maximize" => {
             set_rule_bool(&mut row.ignore_initial_state, key, value, diag);
         }
         "honor_initial_state" => set_bool(&mut row.honor_initial_state, key, value, diag),
-        "deny_fullscreen" => {
+        "deny_fullscreen" | "no_fullscreen" => {
             set_rule_bool(&mut row.deny_fullscreen, key, value, diag);
         }
-        "true_fullscreen" => {
+        "true_fullscreen" | "exclusive_fullscreen" => {
             set_rule_bool(&mut row.true_fullscreen, key, value, diag);
         }
         _ => warn_unknown_key(diag, "[[rules]]", key),
@@ -951,22 +968,11 @@ fn warn_unknown_section_if_typo(diag: &mut Diagnostics, name: &str, array: bool)
 
 fn removed_key_replacement(section: &str, key: &str) -> Option<&'static str> {
     Some(match (section, key) {
-        ("[general]", "border_w") => "border_width",
-        ("[general]", "gaps") => "gaps_inner + gaps_outer",
+        // These old width/bias settings do not have a 1:1 semantic mapping to
+        // the current fractional column-width model, so silently translating
+        // them would be misleading. Exact aliases are handled by the table
+        // dispatchers above and never reach this function.
         ("[general]", "default_col_width" | "default_col_w" | "split_bias") => "column_width",
-        ("[colors]", "col_normal") => "normal",
-        ("[colors]", "col_focused") => "focused",
-        ("[colors]", "col_urgent") => "urgent",
-        ("[autostart]", "apps" | "programs") => "commands",
-        ("[general]", "n_tags") => "view_count",
-        ("[general]", "tag_names") => "view_names",
-        ("[general]", "auto_workspace_binds") => "auto_view_binds",
-        ("[[rules]]", "type") => "window_type",
-        ("[[rules]]", "workspace" | "ws") => "view",
-        ("[[rules]]", "border_w") => "border_width",
-        ("[[rules]]", "no_initial_state" | "no_maximize") => "ignore_initial_state",
-        ("[[rules]]", "no_fullscreen") => "deny_fullscreen",
-        ("[[rules]]", "exclusive_fullscreen") => "true_fullscreen",
         _ => return None,
     })
 }
@@ -1490,6 +1496,7 @@ pub fn action_from_str(input: &str) -> Option<Action> {
 mod tests {
     use super::*;
     use crate::types::Dir;
+    use proptest::prelude::*;
 
     /// Parse TOML text straight into the user model, panicking on a syntax
     /// error: these tests only ever feed well-formed input.
@@ -1916,21 +1923,10 @@ commands = [["example", "--flag"]]
     }
 
     #[test]
-    fn theme_preset_fills_colors_but_explicit_colors_win() {
-        let user = parse_string(
-            r#"
-[general]
-theme = "nord"
-"#,
-        );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        let (normal, focused, urgent) = crate::config::theme_palette("nord").unwrap();
-        assert_eq!(cfg.col_normal, normal);
-        assert_eq!(cfg.col_focused, focused);
-        assert_eq!(cfg.col_urgent, urgent);
-
-        // [colors] applied after [general], so it overrides the theme.
-        let user = parse_string(
+    fn removed_theme_key_is_reported_and_explicit_colors_still_apply() {
+        let baseline = compiled_config();
+        let mut diag = Diagnostics::default();
+        let user = parse_user(
             r#"
 [general]
 theme = "nord"
@@ -1938,24 +1934,21 @@ theme = "nord"
 [colors]
 focused = 0x00ff00
 "#,
-        );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        assert_eq!(cfg.col_focused, 0x00ff00);
-        assert_eq!(cfg.col_normal, normal); // untouched field still from the theme
-    }
+            &mut diag,
+        )
+        .expect("valid TOML");
+        let cfg = merge_config(compiled_config(), user, &mut diag);
 
-    #[test]
-    fn unknown_theme_name_is_ignored() {
-        let baseline = compiled_config();
-        let user = parse_string(
-            r#"
-[general]
-theme = "not-a-real-theme"
-"#,
-        );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert_eq!(cfg.col_normal, baseline.col_normal);
-        assert_eq!(cfg.col_focused, baseline.col_focused);
+        assert_eq!(cfg.col_focused, 0x00ff00);
+        assert_eq!(cfg.col_urgent, baseline.col_urgent);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(
+            diag.warnings[0].contains("[general].theme"),
+            "removed theme key must be named explicitly: {:?}",
+            diag.warnings
+        );
+        assert!(diag.errors.is_empty(), "{diag:?}");
     }
 
     /// A floor above the target is contradictory: the parser diagnoses it and
@@ -2008,6 +2001,45 @@ gaps = 20
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert_eq!(cfg.gaps_inner, 20);
         assert_eq!(cfg.gaps_outer, 20);
+    }
+
+    proptest! {
+        #[test]
+        fn exact_legacy_general_aliases_match_canonical_runtime_values(
+            gap in 0u32..=crate::core::layout::MAX_CFG_GAP as u32,
+            views in 1usize..=9,
+            auto_binds in any::<bool>(),
+        ) {
+            let mut legacy_diag = Diagnostics::default();
+            let legacy = parse_user(
+                &format!(
+                    "[general]\ngaps = {gap}\nn_tags = {views}\nauto_workspace_binds = {auto_binds}\n"
+                ),
+                &mut legacy_diag,
+            )
+            .expect("generated legacy config is valid TOML");
+            let legacy = merge_config(compiled_config(), legacy, &mut legacy_diag);
+
+            let mut canonical_diag = Diagnostics::default();
+            let canonical = parse_user(
+                &format!(
+                    "[general]\ngaps_inner = {gap}\ngaps_outer = {gap}\nview_count = {views}\nauto_view_binds = {auto_binds}\n"
+                ),
+                &mut canonical_diag,
+            )
+            .expect("generated canonical config is valid TOML");
+            let canonical = merge_config(compiled_config(), canonical, &mut canonical_diag);
+
+            prop_assert!(legacy_diag.is_clean(), "legacy diagnostics: {legacy_diag:?}");
+            prop_assert!(
+                canonical_diag.is_clean(),
+                "canonical diagnostics: {canonical_diag:?}"
+            );
+            prop_assert_eq!(legacy.gaps_inner, canonical.gaps_inner);
+            prop_assert_eq!(legacy.gaps_outer, canonical.gaps_outer);
+            prop_assert_eq!(legacy.n_tags, canonical.n_tags);
+            prop_assert_eq!(legacy.keybinds, canonical.keybinds);
+        }
     }
 
     #[test]

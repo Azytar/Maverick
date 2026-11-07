@@ -108,9 +108,9 @@ def main():
                     wait_for(lambda: log_path.read_text().count("[INFO]  reload:") >= reloads,
                              "reload did not complete")
 
-                def assert_visible(label):
-                    outer = min(values["gaps_outer"], 300)
-                    border = values["border_width"]
+                def assert_visible(label, *, expected_outer=None, expected_border=None):
+                    outer = min(values["gaps_outer"], 300) if expected_outer is None else expected_outer
+                    border = values["border_width"] if expected_border is None else expected_border
 
                     def visible():
                         x, y, w, h, bw = geometry()
@@ -130,12 +130,27 @@ def main():
                     print("PASS:", label, actual, "camera=", camera(), flush=True)
 
                 assert_visible("initial layout")
-                for inner, outer in ((200, 40), (500, 100), (0, 0), (40, 16),
-                                     (4294967295, 4294967295), (4, 8)):
+                for inner, outer in ((200, 40), (500, 100), (0, 0), (40, 16)):
                     values.update(gaps_inner=inner, gaps_outer=outer)
                     write_config()
                     reload()
                     assert_visible(f"reload gaps {inner}/{outer}")
+
+                # Out-of-range values are rejected individually. The parsed file is
+                # still adopted, but those fields fall back to the compiled defaults
+                # (4/8) rather than becoming enormous geometry or preserving the
+                # previous live values.
+                values.update(gaps_inner=4294967295, gaps_outer=4294967295)
+                write_config()
+                reload()
+                wait_for(lambda: log_path.read_text().count("must be between 0 and 1000000") >= 2,
+                         "out-of-range gaps were not diagnosed")
+                assert_visible("reload rejects out-of-range gaps", expected_outer=8)
+
+                values.update(gaps_inner=4, gaps_outer=8)
+                write_config()
+                reload()
+                assert_visible("reload gaps 4/8")
 
                 rng = random.Random(20261018)
                 for case in range(16):
