@@ -33,6 +33,27 @@
 
 use super::*;
 
+/// Real root-substructure observations that can change a tracked window's
+/// position in QueryTree. Membership changes are also handled by manage/unmanage.
+pub(super) fn stacking_observation(event: &Event, root: Window) -> Option<Window> {
+    let (response_type, parent, window) = match event {
+        Event::ConfigureNotify(e) => (e.response_type, e.event, e.window),
+        Event::CirculateNotify(e) => (e.response_type, e.event, e.window),
+        Event::MapNotify(e) => (e.response_type, e.event, e.window),
+        Event::ReparentNotify(e) => (e.response_type, e.event, e.window),
+        _ => return None,
+    };
+    (response_type & 0x80 == 0 && parent == root).then_some(window)
+}
+
+pub(super) fn stacking_snapshot_stale(snapshot: Option<u64>, event_sequence: u64) -> bool {
+    // An event older than QueryTree is already covered by that reply. Equality
+    // is NOT covered: another client can restack after QueryTree while that
+    // request is still the last one this connection has processed. Use x11rb's
+    // extended sequence, never the event's wrapping 16-bit wire field.
+    snapshot.is_none_or(|sequence| event_sequence >= sequence)
+}
+
 fn desktop_count(monitors: &[Monitor]) -> usize {
     monitors
         .iter()
@@ -190,10 +211,10 @@ impl WindowManager {
     }
 
     /// Publish the server's stack after pending raises, including tracked docks.
-    pub(super) fn update_client_list_stacking(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let out: Vec<_> = self
-            .conn
-            .query_tree(self.root)?
+    pub(super) fn update_client_list_stacking(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let query = self.conn.query_tree(self.root)?;
+        let sequence = query.sequence_number();
+        let out: Vec<_> = query
             .reply()?
             .children
             .into_iter()
@@ -210,6 +231,7 @@ impl WindowManager {
                 &out,
             )?
             .check()?;
+        self.stacking_snapshot_sequence = Some(sequence);
         Ok(())
     }
 
@@ -386,6 +408,66 @@ impl WindowManager {
 #[cfg(test)]
 mod workarea_tests {
     use super::*;
+
+    #[test]
+    fn stacking_snapshot_covers_only_strictly_older_extended_sequences() {
+        assert!(stacking_snapshot_stale(None, 0));
+        for snapshot in [1, 65_536, 1_u64 << 32, (1_u64 << 32) + 65_536] {
+            assert!(!stacking_snapshot_stale(Some(snapshot), snapshot - 1));
+            assert!(stacking_snapshot_stale(Some(snapshot), snapshot));
+            assert!(stacking_snapshot_stale(Some(snapshot), snapshot + 1));
+        }
+        // Identical low wire bits do not make an old echo a fresh change.
+        assert!(!stacking_snapshot_stale(Some(131_073), 65_537));
+        assert!(stacking_snapshot_stale(Some(65_537), 131_073));
+    }
+
+    #[test]
+    fn stacking_uses_real_root_structure_observations_only() {
+        let mut configure = ConfigureNotifyEvent {
+            response_type: CONFIGURE_NOTIFY_EVENT,
+            event: 1,
+            window: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            stacking_observation(&Event::ConfigureNotify(configure), 1),
+            Some(2)
+        );
+        configure.response_type |= 0x80;
+        assert_eq!(
+            stacking_observation(&Event::ConfigureNotify(configure), 1),
+            None
+        );
+        configure.response_type &= 0x7f;
+        configure.event = 2;
+        assert_eq!(
+            stacking_observation(&Event::ConfigureNotify(configure), 1),
+            None
+        );
+        for event in [
+            Event::MapNotify(MapNotifyEvent {
+                response_type: MAP_NOTIFY_EVENT,
+                event: 1,
+                window: 2,
+                ..Default::default()
+            }),
+            Event::ReparentNotify(ReparentNotifyEvent {
+                response_type: REPARENT_NOTIFY_EVENT,
+                event: 1,
+                window: 2,
+                ..Default::default()
+            }),
+            Event::CirculateNotify(CirculateNotifyEvent {
+                response_type: CIRCULATE_NOTIFY_EVENT,
+                event: 1,
+                window: 2,
+                ..Default::default()
+            }),
+        ] {
+            assert_eq!(stacking_observation(&event, 1), Some(2));
+        }
+    }
 
     #[test]
     fn workareas_have_one_rectangle_per_live_desktop_not_per_output() {

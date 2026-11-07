@@ -2,13 +2,44 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
+      - 'engineering/**'
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  msrv:
+    name: MSRV 1.85
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85.0'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: false
+      - name: Install X11 development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libx11-xcb-dev libxcb1-dev
+      - name: Check complete workspace on declared MSRV
+        run: cargo check --workspace --all-targets --all-features --locked
+
   # The WM and its runtime libraries live in the workspace. Lint + test them
   # together so the dev loop is covered.
   wm:
@@ -30,24 +61,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libx11-dev libx11-xcb-dev libxcb1-dev
-      - name: Format
-        # Documented in README.md ("Building from source") and
-        # docs/architecture.md ("Checking these claims") but never run here.
-        # No `--locked`: cargo fmt resolves no dependency graph, and rejects
-        # the flag outright, so it cannot detect a stale lock.
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Test
-        # `--all-targets` matches the `cargo check --workspace --all-targets`
-        # gate in docs/architecture.md: a target Clippy compiles is a target
-        # whose tests should run.
-        run: cargo test --workspace --all-targets --all-features --locked
-      - name: Test (default features)
-        # The only features left are the two diagnostic trace builds, so this
-        # is what catches a trace-only build breaking. It is the configuration
-        # the release binary ships.
-        run: cargo test --workspace --all-targets --locked
+      - name: Rust gates
+        # Keep local development and CI on the same command graph. The xtask is
+        # intentionally dependency-free and only delegates to Cargo; it does
+        # not hide or replace Cargo's own diagnostics.
+        run: cargo run -p maverick-xtask --locked -- check
 
   # The installer is plain bash — check its syntax so it cannot silently bitrot.
   # `installer/tests/partition.py` runs every smoke suite from
@@ -94,58 +112,17 @@ jobs:
         # must not pass against it instead.
         # There is no `default` feature and no compositor to leave out, so this
         # is one command with no feature flags — not "the only build there is".
-        run: cargo build --release -p maverick -p maverickctl --locked
-      - name: Stacking startup contracts
-        run: python3 tests/stacking-startup.py
-      - name: Xvfb stacking regression
-        run: python3 tests/xvfb-stacking.py
-      - name: Shell harness isolation
-        run: python3 tests/harness-isolation.py
-      - name: Session teardown liveness
-        run: |
-          python3 tests/session-teardown.py
-          python3 tests/session-teardown.py --exec-client
-          python3 tests/session-teardown.py --stale-group
-      - name: Live configuration reload
-        run: python3 tests/xvfb-reload.py
-      - name: Explicit layout restoration
-        run: python3 tests/xvfb-restore.py
-      - name: Floating focus and transient stacking
-        run: |
-          python3 tests/xvfb-floats.py --case focus
-          python3 tests/xvfb-floats.py --case transients
-          python3 tests/xvfb-floats.py --case metadata
-          python3 tests/xvfb-floats.py --case vertical
-      - name: Layout preservation across restart
-        run: |
-          python3 tests/xvfb-restart.py
-          python3 tests/xvfb-restart.py --pointer-focus
-      - name: Root cursor startup and ownership
-        run: |
-          python3 tests/xvfb-cursor.py
-          python3 tests/xvfb-cursor-theme.py
-      - name: X11 focus and input regressions
-        run: |
-          python3 tests/input-hint-contracts.py
-          python3 tests/xvfb-input-hint.py --wm target/release/maverick --ctl target/release/maverickctl --sanitize
-          python3 tests/xvfb-input.py --case protocol
-          python3 tests/xvfb-input.py --case ownership
-          python3 tests/xvfb-input.py --case child
-          python3 tests/xvfb-input.py --case capture
-          python3 tests/xvfb-input.py --case capture --exclusive
-      - name: C probe contracts, sanitizers and negative controls
-        run: python3 tests/c-probe-campaign.py --wm target/release/maverick --evidence /tmp/maverick-c-probes
+        run: cargo run -p maverick-xtask --locked -- release
+      - name: X11 regression campaign
+        # The Rust runner owns orchestration only. Python/C remain the current
+        # behavior oracles until each migration is independently proven.
+        run: cargo run -p maverick-xtask --locked -- x11
       - name: Preserve C probe evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: c-probe-evidence
-          path: /tmp/maverick-c-probes
+          path: |
+            /tmp/maverick-c-probes
+            /tmp/maverick-stage11.json
           if-no-files-found: ignore
-      - name: Overview rig isolation
-        run: python3 tests/overview-isolation.py
-      - name: Overview client geometry and image regression
-        run: |
-          python3 tests/xvfb-overview.py
-          python3 tests/xvfb-overview.py --compositor
-          python3 tests/xvfb-overview.py --without-composite

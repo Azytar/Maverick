@@ -26,7 +26,7 @@ XEP="$(start_xephyr "$DISP" 1280 720)" || exit 1
 CFG="$(mktemp /tmp/maverick-f2.XXXX.toml)"
 cat > "$CFG" <<'EOF'
 [general]
-n_tags = 5
+view_count = 5
 border_width = 9
 
 [colors]

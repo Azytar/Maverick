@@ -29,8 +29,8 @@ mkdir -p "$XDG_CONFIG_HOME/maverick"
 
 cat > "$RUN_CFG" <<'EOF'
 [general]
-n_tags = 4
-auto_workspace_binds = false
+view_count = 4
+auto_view_binds = false
 focus_mouse = false
 
 [keybindings]

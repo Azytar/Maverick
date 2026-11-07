@@ -214,6 +214,9 @@ pub struct WindowManager {
     client_list_dirty: bool,
     /// Deferred stack publication, independent of client membership changes.
     stacking_dirty: bool,
+    /// Extended QueryTree sequence covering older structure notifications.
+    /// This is a snapshot watermark, never a second model of server order.
+    stacking_snapshot_sequence: Option<u64>,
     /// The `Reconciler`'s record of what geometry has actually been written to
     /// X11. Every desired placement is diffed against this so
     /// `configure_window` fires only on real changes.
@@ -310,6 +313,8 @@ pub struct WindowManager {
     /// only re-issues `raise()` when the order actually changed, instead of
     /// re-raising every float/popup on every arrange.
     last_stack_order: std::collections::HashMap<usize, Vec<WindowId>>,
+    /// Rebuilt and drained by stack_overlay; capacity is shared across monitors.
+    float_stack_scratch: Vec<(usize, WindowId)>,
     /// Reconcile work the events drained this turn owe, collapsed into at most
     /// one pass per monitor.
     pending: PendingReconcile,
@@ -386,7 +391,18 @@ impl PendingReconcile {
 }
 
 impl WindowManager {
-    fn dispatch(&mut self, ev: x11rb::protocol::Event) -> Result<(), Box<dyn std::error::Error>> {
+    fn dispatch(
+        &mut self,
+        ev: x11rb::protocol::Event,
+        sequence: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if ewmh::stacking_snapshot_stale(self.stacking_snapshot_sequence, sequence)
+            && ewmh::stacking_observation(&ev, self.root).is_some_and(|win| {
+                self.engine.state.clients.contains_key(&win) || self.docks.contains_key(&win)
+            })
+        {
+            self.stacking_dirty = true;
+        }
         if trace::enabled() {
             trace::input(&ev);
         }
@@ -776,8 +792,8 @@ impl WindowManager {
         // Drain every X11 + control-socket event that is already queued before
         // the loop settles, so a burst is handled in one pass rather than one
         // pass per wakeup.
-        while let Some(ev) = self.conn.poll_for_event()? {
-            self.dispatch(ev)?;
+        while let Some((ev, sequence)) = self.conn.poll_for_event_with_sequence()? {
+            self.dispatch(ev, sequence)?;
         }
 
         // Settle before blocking, for the same reason the events above were
@@ -804,14 +820,14 @@ impl WindowManager {
         // the socket into x11rb's queue. FD readiness no longer sees those.
         // Consume one without sleeping and let the normal turn finish (including
         // control commands); the next turn drains the remaining queued events.
-        let buffered = self.conn.poll_for_event()?;
+        let buffered = self.conn.poll_for_event_with_sequence()?;
         let timeout = if buffered.is_some() {
             Some(std::time::Duration::ZERO)
         } else {
             wait_timeout(self.kbd_refresh_due, self.shutdown_deadline)
         };
-        if let Some(event) = buffered {
-            self.dispatch(event)?;
+        if let Some((event, sequence)) = buffered {
+            self.dispatch(event, sequence)?;
         }
 
         if timeout != Some(std::time::Duration::ZERO) {
@@ -823,11 +839,11 @@ impl WindowManager {
             } else {
                 &fds[..1]
             };
-            maverick_sys::wait_readable_fds(fds, timeout);
+            maverick_sys::wait_readable_fds_with_signals(fds, timeout);
             drop(wait_trace);
             // Drain for anything that arrived while we were blocked.
-            while let Some(ev) = self.conn.poll_for_event()? {
-                self.dispatch(ev)?;
+            while let Some((ev, sequence)) = self.conn.poll_for_event_with_sequence()? {
+                self.dispatch(ev, sequence)?;
             }
         }
 
@@ -1081,6 +1097,7 @@ impl WindowManager {
             drag: None,
             client_list_dirty: false,
             stacking_dirty: false,
+            stacking_snapshot_sequence: None,
             applied: crate::backend::x11::reconciler::AppliedState::default(),
             shape_mask_cache: std::collections::HashMap::new(),
             frame_extents: std::collections::HashMap::new(),
@@ -1103,6 +1120,7 @@ impl WindowManager {
             root_focus_pending: None,
             take_focus_pending: None,
             last_stack_order: std::collections::HashMap::new(),
+            float_stack_scratch: Vec::new(),
             pending: PendingReconcile::default(),
             protocols: std::cell::RefCell::new(std::collections::HashMap::new()),
             focus_probe_due: false,

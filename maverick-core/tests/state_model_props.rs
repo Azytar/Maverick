@@ -155,7 +155,7 @@ proptest! {
             !state.pending_transients.contains(&win),
             "a pending transient set still names it"
         );
-        prop_assert!(!state.x11_input_focus.is_some_and(|w| w == win), "the X focus still names it");
+        prop_assert!(state.x11_input_focus.is_none_or(|w| w != win), "the X focus still names it");
         for child in state.clients.values() {
             prop_assert!(child.transient_parent != Some(win), "a child is still parented to it");
         }
@@ -445,7 +445,7 @@ proptest! {
 proptest! {
     #[test]
     fn splitting_a_column_keeps_every_weight_inside_the_documented_band(
-        width in prop_oneof![0.05f32..=1.0, Just(0.1), Just(0.05)],
+        width in prop_oneof![(0.05f32.to_bits()..=1.0f32.to_bits()).prop_map(f32::from_bits), Just(0.1), Just(0.05)],
         windows in 1usize..=8,
         splits in 0usize..=8,
     ) {

@@ -369,6 +369,15 @@ mod tests {
     use crate::types::Action;
 
     #[test]
+    fn shrink_col_rejects_an_unrepresentable_negation() {
+        assert!(parse("shrink-col -2147483648").is_none());
+        assert_eq!(
+            parse("shrink-col 2147483647"),
+            Some(Action::GrowCol(-2147483647))
+        );
+    }
+
+    #[test]
     fn every_canonical_name_parses() {
         for (verb, kind) in ACTIONS {
             let sample = match kind {

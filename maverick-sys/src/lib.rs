@@ -49,23 +49,14 @@
 //! Two properties of that arrangement are worth stating once, because callers
 //! depend on them and neither is obvious:
 //!
-//! - **A handler is a notification, not a control path.** A trampoline only
-//!   stores a process-global `AtomicBool`; the event loop reads it at the top of
-//!   a turn and turns it into an ordinary method call. Nothing in a handler
-//!   allocates, locks, logs or touches X11, and the flags are process-global so
-//!   it does not matter which thread the kernel picks to run the trampoline on.
-//!   A process-directed signal is still *delivered* to an arbitrary thread, so
-//!   the loop's wake-up depends on the signal reaching the thread blocked in
-//!   `poll`; `poll` is never restarted by `SA_RESTART` on Linux, so the
-//!   resulting `EINTR` is what wakes it.
-//! - **A control-socket command is the other control path, and it is not this
-//!   flag.** `quit` arrives as a [`ControlCommand`] on the [`ControlHub`], not
-//!   by setting `QUIT_REQUESTED`; the two converge on the caller's shutdown
-//!   routine instead. The socket path is the stronger of the two, because the
-//!   producer writes the hub's self-pipe, so the wake is caused rather than
-//!   hoped for. There is deliberately no public setter for the quit flag, to
-//!   keep a future reader from wiring the two together and losing that
-//!   guarantee.
+//! - **A handler is a notification, not a control path.** A trampoline stores
+//!   a process-global flag and writes a permanent nonblocking eventfd. The WM's
+//!   [`wait_readable_fds_with_signals`] watches that descriptor, so delivery on
+//!   another thread or immediately before poll cannot lose the wake. Nothing
+//!   in a handler allocates, locks, logs or touches X11.
+//! - **Control commands use their own wake.** The control hub's self-pipe and
+//!   the signal eventfd are independent. Only the WM consumes signal wakes;
+//!   control-server waits use [`wait_readable_fds`] and cannot steal them.
 //!
 //! # Safety
 //!
@@ -74,8 +65,9 @@
 //! are argued once. It zero-initialises the struct, writes either a
 //! `SIG_DFL`/`SIG_IGN` constant or the address of a permanently-linked
 //! `extern "C" fn(c_int)`, passes an explicitly emptied `sa_mask`, and passes a
-//! null `oldact`. Only `AtomicBool::store` with `SeqCst` runs inside a handler,
-//! and `SeqCst` is stronger than the flag-to-flag hand-off needs. `poll` wraps
+//! null `oldact`. Handlers store atomic flags and write a nonblocking eventfd
+//! initialized before installation and never closed; the async-signal-safe
+//! write preserves errno. `poll` wraps
 //! valid `pollfd`s and treats `EINTR`/errors as wakeups. `detach_from_terminal`
 //! is best-effort, never calls `setsid`, and only redirects stdin/stdout to
 //! `/dev/null` when `isatty(STDIN)` is true. The remaining `unsafe` in this
@@ -83,7 +75,9 @@
 //! process-tree signals, which gate every `kill`/`killpg` on a recorded process
 //! start time so a recycled PID cannot be hit.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::OnceLock;
 
 /// Ordering used for the flag hand-offs between signal handler and event loop.
 /// SeqCst keeps it simple and correct; these are rare, low-contention writes.
@@ -91,6 +85,45 @@ const ORD: Ordering = Ordering::SeqCst;
 
 static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 static NEED_REGRAB: AtomicBool = AtomicBool::new(false);
+// Never closed during the process lifetime: a handler may run on any thread.
+static SIGNAL_WAKE: OnceLock<Result<OwnedFd, rustix::io::Errno>> = OnceLock::new();
+static SIGNAL_WAKE_FD: AtomicI32 = AtomicI32::new(-1);
+
+fn prepare_signal_wake() -> bool {
+    let wake = SIGNAL_WAKE.get_or_init(|| {
+        rustix::event::eventfd(
+            0,
+            rustix::event::EventfdFlags::CLOEXEC | rustix::event::EventfdFlags::NONBLOCK,
+        )
+    });
+    if let Ok(wake) = wake {
+        SIGNAL_WAKE_FD.store(wake.as_raw_fd(), ORD);
+        true
+    } else {
+        false
+    }
+}
+
+fn notify_signal_waiter() {
+    let fd = SIGNAL_WAKE_FD.load(ORD);
+    if fd < 0 {
+        return;
+    }
+    let value = 1_u64;
+    // SAFETY: the static OwnedFd is initialized before installing handlers and
+    // never closed. write(2) is async-signal-safe; this eventfd is nonblocking.
+    // Preserve the interrupted thread's errno, including on EINTR/EAGAIN. A
+    // saturated counter already represents a pending wake, so no retry is owed
+    // for EAGAIN. The stack value lives for the entire synchronous write.
+    unsafe {
+        let errno = libc::__errno_location();
+        let saved = *errno;
+        while libc::write(fd, std::ptr::from_ref(&value).cast(), size_of::<u64>()) < 0
+            && *errno == libc::EINTR
+        {}
+        *errno = saved;
+    }
+}
 
 /// The poll timeout must survive being expressed as a `timespec`.
 ///
@@ -100,6 +133,47 @@ static NEED_REGRAB: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 mod poll_timeout_tests {
     use super::*;
+
+    #[test]
+    fn waits_on_every_descriptor_without_restricting_the_public_slice_size() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        assert!(wait_readable_fds(&[], None));
+        for count in [1, 2, 5] {
+            let mut pairs: Vec<_> = (0..count)
+                .map(|_| std::os::unix::net::UnixStream::pair().unwrap())
+                .collect();
+            let fds: Vec<_> = pairs.iter().map(|(read, _)| read.as_raw_fd()).collect();
+            assert!(!wait_readable_fds(&fds, Some(std::time::Duration::ZERO)));
+            pairs[count - 1].1.write_all(b"x").unwrap();
+            assert!(wait_readable_fds(&fds, Some(std::time::Duration::ZERO)));
+        }
+    }
+
+    #[test]
+    #[ignore = "manual timing workload; run with --release --ignored --nocapture"]
+    fn poll_workload() {
+        use std::os::fd::AsRawFd;
+        let (first, _first_writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (second, _second_writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fds = [first.as_raw_fd(), second.as_raw_fd()];
+        let mut samples = Vec::new();
+        for _ in 0..7 {
+            let start = std::time::Instant::now();
+            for _ in 0..50_000 {
+                assert!(!wait_readable_fds(
+                    std::hint::black_box(&fds),
+                    Some(std::time::Duration::ZERO)
+                ));
+            }
+            samples.push(start.elapsed().as_nanos() / 50_000);
+        }
+        samples.sort_unstable();
+        println!(
+            "poll iterations=50000 median_ns={} min_ns={} max_ns={}",
+            samples[3], samples[0], samples[6]
+        );
+    }
 
     fn wait_on_idle(fd: std::os::unix::io::RawFd, d: std::time::Duration) -> bool {
         wait_readable_fds(&[fd], Some(d))
@@ -325,10 +399,13 @@ impl Signal {
                 failed.push(*sig);
             }
         }
+        // A handler without a wake descriptor cannot guarantee delivery to the
+        // WM thread. Report those handlers as unavailable if eventfd failed.
+        let wake_ready = self.handlers.is_empty() || prepare_signal_wake();
         for h in &self.handlers {
             let (sig, ok) = match h {
-                Handler::Term(sig) => (*sig, install_term(*sig)),
-                Handler::Regrab(sig) => (*sig, install_regrab(*sig)),
+                Handler::Term(sig) => (*sig, wake_ready && install_term(*sig)),
+                Handler::Regrab(sig) => (*sig, wake_ready && install_regrab(*sig)),
             };
             if !ok {
                 failed.push(sig);
@@ -345,13 +422,15 @@ impl Default for Signal {
 }
 
 /// `extern "C"` trampoline that flips the quit flag. Lives for the whole
-/// process; safe because it only touches an `AtomicBool`.
+/// process; only stores a flag and writes the permanent nonblocking eventfd.
 extern "C" fn term_trampoline(_: libc::c_int) {
     QUIT_REQUESTED.store(true, ORD);
+    notify_signal_waiter();
 }
 
 extern "C" fn regrab_trampoline(_: libc::c_int) {
     NEED_REGRAB.store(true, ORD);
+    notify_signal_waiter();
 }
 
 fn install_term(sig: libc::c_int) -> bool {
@@ -456,12 +535,35 @@ pub fn wait_readable_fds(
     fds: &[std::os::unix::io::RawFd],
     timeout: Option<std::time::Duration>,
 ) -> bool {
-    if fds.is_empty() {
+    wait_fds(fds, timeout, None)
+}
+
+/// WM-thread wait, also consuming signal notifications. A pending notification
+/// stays readable if a signal arrives before poll or on another thread. Other
+/// waiters must use `wait_readable_fds` so they cannot consume the WM's wake.
+pub fn wait_readable_fds_with_signals(
+    fds: &[std::os::unix::io::RawFd],
+    timeout: Option<std::time::Duration>,
+) -> bool {
+    wait_fds(
+        fds,
+        timeout,
+        SIGNAL_WAKE.get().and_then(|wake| wake.as_ref().ok()),
+    )
+}
+
+fn wait_fds(
+    fds: &[std::os::unix::io::RawFd],
+    timeout: Option<std::time::Duration>,
+    signal: Option<&OwnedFd>,
+) -> bool {
+    if fds.is_empty() && signal.is_none() {
         return true;
     }
     let mut pfds: Vec<rustix::event::PollFd<'_>> = fds
         .iter()
         .copied()
+        .chain(signal.map(AsRawFd::as_raw_fd))
         // SAFETY: every descriptor here is one the caller is already holding
         // open and passes in solely to be waited on, and the borrow does not
         // outlive this call.
@@ -479,6 +581,14 @@ pub fn wait_readable_fds(
         }
     });
     let r = rustix::event::poll(&mut pfds, ts.as_ref());
+    if let Some(signal) = signal.filter(|_| {
+        pfds.last()
+            .is_some_and(|p| p.revents().contains(rustix::event::PollFlags::IN))
+    }) {
+        // One eventfd read atomically drains the accumulated counter. A signal
+        // arriving afterwards leaves a new readable counter for the next wait.
+        let _ = rustix::io::read(signal, &mut [0_u8; 8]);
+    }
     match r {
         Ok(0) => false,
         Ok(_) => pfds

@@ -719,6 +719,18 @@ mod tests {
     }
 
     #[test]
+    fn reports_the_start_line_of_each_streamed_event() {
+        let mut parser = parse("# heading\n\n[general]\n# note\ngaps_inner = 4\n");
+        assert!(matches!(parser.next(), Some(Ok(Event::Section("general")))));
+        assert_eq!(parser.event_line(), 3);
+        assert!(matches!(
+            parser.next(),
+            Some(Ok(Event::KeyValue("gaps_inner", Value::Integer(4))))
+        ));
+        assert_eq!(parser.event_line(), 5);
+    }
+
+    #[test]
     fn parses_sections_and_simple_pairs() {
         let e = all("[general]\nborder_width = 2\n[colors]\nnormal = 0x45475a\n");
         assert!(matches!(e[0], Event::Section("general")));
@@ -748,6 +760,30 @@ mod tests {
     fn negative_integers() {
         let e = all("v = -50\n");
         assert!(matches!(kv(&e, "v"), Some(Value::Integer(-50))));
+    }
+
+    #[test]
+    fn negative_hex_is_rejected_in_scalars_and_arrays() {
+        for src in ["v = -0x10\n", "v = [-0x10]\n"] {
+            assert!(parse(src).collect::<Result<Vec<_>, _>>().is_err(), "{src}");
+        }
+    }
+
+    #[test]
+    fn every_grid_row_requires_an_opening_bracket() {
+        for src in ["v = [[\"a\"], x\"b\"]]\n", "v = [[\"a\"], x]\n"] {
+            assert!(parse(src).collect::<Result<Vec<_>, _>>().is_err(), "{src}");
+        }
+    }
+
+    #[test]
+    fn basic_strings_reject_literal_line_breaks() {
+        for newline in ["\n", "\r", "\r\n"] {
+            let src = format!("v = \"a{newline}b\"\n");
+            let err = parse(&src).collect::<Result<Vec<_>, _>>().unwrap_err();
+            assert_eq!(err.kind, "string");
+            assert_eq!(err.line, 1);
+        }
     }
 
     #[test]
@@ -790,8 +826,8 @@ mod tests {
 
     #[test]
     fn flat_string_list() {
-        let e = all(r#"tag_names = ["web", "code", "chat"]"#);
-        let v = kv(&e, "tag_names").unwrap();
+        let e = all(r#"view_names = ["web", "code", "chat"]"#);
+        let v = kv(&e, "view_names").unwrap();
         let list = v.as_str_list().unwrap();
         assert_eq!(list.len(), 3);
         assert_eq!(list[0], Cow::Borrowed("web"));

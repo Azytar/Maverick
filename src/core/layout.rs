@@ -1641,7 +1641,7 @@ mod tests {
             state.clients[&8].workspace,
             state.monitors[0].workspaces[1].id
         );
-        state.assert_invariants();
+        state.check_invariants().expect("state invariants");
     }
 
     /// An empty View and a single-tile View both produce valid layout state.
@@ -1763,7 +1763,7 @@ mod tests {
             "changing the layout must leave membership, identity, the carousel and \
              floating state untouched"
         );
-        state.assert_invariants();
+        state.check_invariants().expect("state invariants");
     }
 
     /// Scroll must not have learned about navigation: the layout module contains
@@ -2402,7 +2402,11 @@ mod proptests {
     /// a poisoned scroll would produce. `Camera`'s finiteness is a `State` invariant
     /// (core invariant C), so non-finite inputs are not generated here.
     fn camera_offset() -> impl Strategy<Value = f32> {
-        prop_oneof![0.0f32..=1.0, -20000.0f32..=20000.0, 0.05f32..=4.0]
+        prop_oneof![
+            0.0f32..=1.0,
+            -20000.0f32..=20000.0,
+            crate::core::test_support::positive_f32(0.05, 4.0)
+        ]
     }
 
     /// A dock reservation: a realistic thickness plus the `u32::MAX` a hostile
@@ -2485,7 +2489,13 @@ mod proptests {
     /// Row counts reach 0 so the empty-column branch is exercised, and the
     /// column list itself may be empty, which is the zero-window workspace.
     fn ribbon() -> impl Strategy<Value = Ribbon> {
-        let columns = prop::collection::vec((0.05f32..=1.0, 0usize..=6), 0..=8);
+        let columns = prop::collection::vec(
+            (
+                crate::core::test_support::positive_f32(0.05, 1.0),
+                0usize..=6,
+            ),
+            0..=8,
+        );
         (
             screen_rect(),
             prop::collection::vec(reservation(), 0..=2),
@@ -2500,11 +2510,15 @@ mod proptests {
                 any::<bool>(),
                 any::<bool>(),
                 1.0f32..=4.0,
-                0.05f32..=1.0,
+                crate::core::test_support::positive_f32(0.05, 1.0),
                 // The floor across its whole legal range plus both ends, so
                 // the property tests cover "no reduction allowed" and "reduce
                 // as far as legal" as well as the interior.
-                prop_oneof![0.05f32..=1.0, Just(1.0), Just(0.05)],
+                prop_oneof![
+                    crate::core::test_support::positive_f32(0.05, 1.0),
+                    Just(1.0),
+                    Just(0.05)
+                ],
             ),
         )
             .prop_map(

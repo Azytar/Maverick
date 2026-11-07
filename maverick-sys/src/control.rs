@@ -1176,10 +1176,9 @@ mod reply_props {
     /// True when every character of `needle` appears in `haystack` in order.
     fn is_subsequence(
         mut needle: impl Iterator<Item = char>,
-        haystack: impl Iterator<Item = char>,
+        mut haystack: impl Iterator<Item = char>,
     ) -> bool {
-        let mut haystack = haystack.peekable();
-        needle.all(|c| haystack.by_ref().find(|&h| h == c).is_some())
+        needle.all(|c| haystack.any(|h| h == c))
     }
 }
 

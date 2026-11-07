@@ -51,8 +51,29 @@ int main(void) {
         } else if (!strcmp(line, "destroy\n")) {
             XDestroyWindow(display, client);
             client = None;
+        } else if (!strcmp(line, "viewable\n")) {
+            XWindowAttributes attrs;
+            XSync(display, False);
+            if (client != None && XGetWindowAttributes(display, client, &attrs)
+                && attrs.map_state == IsViewable) {
+                puts("1 0 0 0");
+            } else {
+                puts("0 0 0 0");
+            }
+            continue;
         } else if (!strcmp(line, "enter\n")) {
             XWarpPointer(display, None, client, 0, 0, 0, 0, 10, 10);
+            XSync(display, False);
+            Window root_return = None;
+            Window child_return = None;
+            int root_x = 0, root_y = 0, win_x = 0, win_y = 0;
+            unsigned mask = 0;
+            if (!XQueryPointer(display, root, &root_return, &child_return,
+                               &root_x, &root_y, &win_x, &win_y, &mask)
+                || child_return != client) {
+                puts("0 0 0 0");
+                continue;
+            }
         } else if (!strcmp(line, "quit\n")) break;
         else if (strcmp(line, "sample\n")) return 3;
         sample(display);

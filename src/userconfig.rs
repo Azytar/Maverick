@@ -429,7 +429,7 @@ fn parse_user(source: &str, diag: &mut Diagnostics) -> Result<UserConfig, ParseE
                     apply_color_key(c, key, &value, diag);
                 }
                 Some(Cur::Plain("autostart")) => {
-                    if key == "commands" {
+                    if matches!(key, "commands" | "apps" | "programs") {
                         if let Some(grid) = grid_strings(&value) {
                             let commands = grid
                                 .into_iter()
@@ -513,7 +513,7 @@ fn annotate_event_diagnostics(
 /// field for is reported instead of dropped.
 fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "border_width" => set_u32_range(
+        "border_width" | "border_w" => set_u32_range(
             &mut g.border_width,
             key,
             value,
@@ -521,6 +521,21 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
             crate::core::layout::MAX_CFG_BORDER as u32,
             diag,
         ),
+        "gaps" => {
+            let mut legacy = None;
+            set_u32_range(
+                &mut legacy,
+                key,
+                value,
+                0,
+                crate::core::layout::MAX_CFG_GAP as u32,
+                diag,
+            );
+            if let Some(v) = legacy {
+                g.gaps_inner = Some(v);
+                g.gaps_outer = Some(v);
+            }
+        }
         "gaps_inner" => set_u32_range(
             &mut g.gaps_inner,
             key,
@@ -539,7 +554,7 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         ),
         "smart_gaps" => set_bool(&mut g.smart_gaps, key, value, diag),
         "corner_radius" => set_u32(&mut g.corner_radius, key, value, diag),
-        "view_count" => set_usize_range(&mut g.view_count, key, value, 1, 9, diag),
+        "view_count" | "n_tags" => set_usize_range(&mut g.view_count, key, value, 1, 9, diag),
         "column_width" => set_f32_range(&mut g.column_width, key, value, 0.1, 1.0, diag),
         "accordion_boost" => {
             set_f32_range(&mut g.accordion_boost, key, value, 0.0, 0.9, diag);
@@ -550,11 +565,13 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
         "overview_scale" => {
             set_f32_range(&mut g.overview_scale, key, value, 0.05, 1.0, diag);
         }
-        "auto_view_binds" => set_bool(&mut g.auto_view_binds, key, value, diag),
+        "auto_view_binds" | "auto_workspace_binds" => {
+            set_bool(&mut g.auto_view_binds, key, value, diag)
+        }
         "focus_mouse" => set_bool(&mut g.focus_mouse, key, value, diag),
         "warp_cursor" => set_bool(&mut g.warp_cursor, key, value, diag),
         "honor_initial_state" => set_bool(&mut g.honor_initial_state, key, value, diag),
-        "view_names" => {
+        "view_names" | "tag_names" => {
             if let Some(list) = value.as_str_list() {
                 let names: Vec<String> = list.iter().map(|s| s.as_ref().to_string()).collect();
                 if names.is_empty() || names.iter().any(|name| name.trim().is_empty()) {
@@ -575,9 +592,9 @@ fn apply_general_key(g: &mut GeneralCfg, key: &str, value: &Value<'_>, diag: &mu
 /// Map one `[colors]` key onto the model.
 fn apply_color_key(c: &mut ColorsCfg, key: &str, value: &Value<'_>, diag: &mut Diagnostics) {
     match key {
-        "normal" => set_u32(&mut c.normal, key, value, diag),
-        "focused" => set_u32(&mut c.focused, key, value, diag),
-        "urgent" => set_u32(&mut c.urgent, key, value, diag),
+        "normal" | "col_normal" => set_u32(&mut c.normal, key, value, diag),
+        "focused" | "col_focused" => set_u32(&mut c.focused, key, value, diag),
+        "urgent" | "col_urgent" => set_u32(&mut c.urgent, key, value, diag),
         _ => warn_unknown_key(diag, "[colors]", key),
     }
 }
@@ -616,11 +633,11 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
     match key {
         "class" => set_string(&mut row.class, key, value, diag),
         "instance" => set_string(&mut row.instance, key, value, diag),
-        "window_type" => set_string(&mut row.window_type, key, value, diag),
+        "window_type" | "type" => set_string(&mut row.window_type, key, value, diag),
         "title" => set_string(&mut row.title, key, value, diag),
         "float" => set_rule_bool(&mut row.float, key, value, diag),
         "sticky" => set_rule_bool(&mut row.sticky, key, value, diag),
-        "view" => set_usize(&mut row.view, key, value, diag),
+        "view" | "workspace" | "ws" => set_usize(&mut row.view, key, value, diag),
         "size" => {
             if let Some([w, h]) = positive_u32_pair(value) {
                 row.size = Some([w, h]);
@@ -654,7 +671,7 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
                 warn_bad(diag, key, "a number between 0.0 and 1.0");
             }
         }
-        "border_width" => set_u32_range(
+        "border_width" | "border_w" => set_u32_range(
             &mut row.border_width,
             key,
             value,
@@ -662,14 +679,14 @@ fn apply_rule_key(row: &mut RuleEntry, key: &str, value: &Value<'_>, diag: &mut 
             crate::core::layout::MAX_CFG_BORDER as u32,
             diag,
         ),
-        "ignore_initial_state" => {
+        "ignore_initial_state" | "no_initial_state" | "no_maximize" => {
             set_rule_bool(&mut row.ignore_initial_state, key, value, diag);
         }
         "honor_initial_state" => set_bool(&mut row.honor_initial_state, key, value, diag),
-        "deny_fullscreen" => {
+        "deny_fullscreen" | "no_fullscreen" => {
             set_rule_bool(&mut row.deny_fullscreen, key, value, diag);
         }
-        "true_fullscreen" => {
+        "true_fullscreen" | "exclusive_fullscreen" => {
             set_rule_bool(&mut row.true_fullscreen, key, value, diag);
         }
         _ => warn_unknown_key(diag, "[[rules]]", key),
@@ -951,22 +968,11 @@ fn warn_unknown_section_if_typo(diag: &mut Diagnostics, name: &str, array: bool)
 
 fn removed_key_replacement(section: &str, key: &str) -> Option<&'static str> {
     Some(match (section, key) {
-        ("[general]", "border_w") => "border_width",
-        ("[general]", "gaps") => "gaps_inner + gaps_outer",
+        // These old width/bias settings do not have a 1:1 semantic mapping to
+        // the current fractional column-width model, so silently translating
+        // them would be misleading. Exact aliases are handled by the table
+        // dispatchers above and never reach this function.
         ("[general]", "default_col_width" | "default_col_w" | "split_bias") => "column_width",
-        ("[colors]", "col_normal") => "normal",
-        ("[colors]", "col_focused") => "focused",
-        ("[colors]", "col_urgent") => "urgent",
-        ("[autostart]", "apps" | "programs") => "commands",
-        ("[general]", "n_tags") => "view_count",
-        ("[general]", "tag_names") => "view_names",
-        ("[general]", "auto_workspace_binds") => "auto_view_binds",
-        ("[[rules]]", "type") => "window_type",
-        ("[[rules]]", "workspace" | "ws") => "view",
-        ("[[rules]]", "border_w") => "border_width",
-        ("[[rules]]", "no_initial_state" | "no_maximize") => "ignore_initial_state",
-        ("[[rules]]", "no_fullscreen") => "deny_fullscreen",
-        ("[[rules]]", "exclusive_fullscreen") => "true_fullscreen",
         _ => return None,
     })
 }
@@ -1490,6 +1496,121 @@ pub fn action_from_str(input: &str) -> Option<Action> {
 mod tests {
     use super::*;
     use crate::types::Dir;
+    use proptest::prelude::*;
+
+    fn reference_suggestion<'a>(name: &str, candidates: &'a [&str]) -> Option<&'a str> {
+        let mut best = None;
+        for &candidate in candidates {
+            let mut previous: Vec<_> = (0..=candidate.len()).collect();
+            let mut current = vec![0; candidate.len() + 1];
+            for (i, a) in name.bytes().enumerate() {
+                current[0] = i + 1;
+                for (j, b) in candidate.bytes().enumerate() {
+                    current[j + 1] = (previous[j + 1] + 1)
+                        .min(current[j] + 1)
+                        .min(previous[j] + usize::from(a != b));
+                }
+                std::mem::swap(&mut previous, &mut current);
+            }
+            let distance = previous[candidate.len()];
+            if best.is_none_or(|(_, old)| distance < old) {
+                best = Some((candidate, distance));
+            }
+        }
+        let (candidate, distance) = best?;
+        let threshold = if name.len().max(candidate.len()) <= 6 {
+            1
+        } else {
+            2
+        };
+        (distance <= threshold).then_some(candidate)
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn suggestions_preserve_reference_ties_and_thresholds(
+            name in "[a-z_-]{0,28}",
+            candidates in proptest::collection::vec("[a-z_-]{0,20}", 0..12)
+        ) {
+            let candidates: Vec<_> = candidates.iter().map(String::as_str).collect();
+            proptest::prop_assert_eq!(nearest_name(&name, &candidates), reference_suggestion(&name, &candidates));
+        }
+    }
+
+    #[test]
+    fn suggestions_preserve_single_edits_of_every_general_key() {
+        for name in GENERAL_KEYS {
+            for index in 0..name.len() {
+                let mut typo = name.to_string();
+                typo.remove(index);
+                assert_eq!(
+                    nearest_name(&typo, GENERAL_KEYS),
+                    reference_suggestion(&typo, GENERAL_KEYS)
+                );
+                typo.insert(index, 'z');
+                assert_eq!(
+                    nearest_name(&typo, GENERAL_KEYS),
+                    reference_suggestion(&typo, GENERAL_KEYS)
+                );
+            }
+        }
+        assert_eq!(
+            nearest_name("ab", &["", "abcd"]),
+            reference_suggestion("ab", &["", "abcd"])
+        );
+        assert_eq!(nearest_name("", &[]), None);
+    }
+
+    #[test]
+    fn rule_type_normalization_keeps_the_original_diagnostic() {
+        let mut diag = Diagnostics::default();
+        let user = parse_user("[[rules]]\nwindow_type = \"DiAlOg\"\n", &mut diag).unwrap();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(cfg.rules[0].window_type.as_deref(), Some("dialog"));
+        assert!(diag.is_clean());
+        let user = parse_user("[[rules]]\nwindow_type = \"BAD_TYPE\"\n", &mut diag).unwrap();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert!(cfg.rules.is_empty());
+        assert!(diag.errors[0].contains("'BAD_TYPE'"));
+    }
+
+    #[test]
+    #[ignore = "manual timing workload; run with --release --ignored --nocapture"]
+    fn config_load_workload() {
+        for (name, source, iterations) in [
+            (
+                "small",
+                "[general]\nview_count = 3\nauto_view_binds = false\n".to_string(),
+                4_000,
+            ),
+            (
+                "sample",
+                include_str!("../config/config.toml").to_string(),
+                1_000,
+            ),
+            (
+                "long_unknown_key",
+                format!("[general]\n{} = 1\n", "x".repeat(4096)),
+                32,
+            ),
+        ] {
+            let path = write_temp(&source);
+            let mut samples = Vec::new();
+            for _ in 0..7 {
+                let start = std::time::Instant::now();
+                for _ in 0..iterations {
+                    std::hint::black_box(load_from_path_classified(std::hint::black_box(&path)));
+                }
+                samples.push(start.elapsed().as_nanos() / iterations);
+            }
+            samples.sort_unstable();
+            println!(
+                "config_load name={name} iterations={iterations} median_ns={} min_ns={} max_ns={}",
+                samples[3], samples[0], samples[6]
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
 
     /// Parse TOML text straight into the user model, panicking on a syntax
     /// error: these tests only ever feed well-formed input.
@@ -1519,6 +1640,104 @@ mod tests {
     }
 
     #[test]
+    fn bindings_reject_empty_chord_parts_and_no_symbol() {
+        for chord in ["+a", "Super++a", "Super+a+", "Super+ +a", "0x0"] {
+            assert!(keybind_from_str(chord).is_none(), "{chord}");
+        }
+        assert_eq!(
+            keybind_from_str(" Super + Control + a "),
+            keybind_from_str("Ctrl+Super+a")
+        );
+    }
+
+    #[test]
+    fn floats_are_validated_before_narrowing() {
+        for (key, value) in [
+            ("column_width", "1.0000000001"),
+            ("column_width", "0.0999999999"),
+            ("accordion_boost", "0.9000000001"),
+            ("overview_zoom_min", "0.0499999999"),
+            ("overview_scale", "1.0000000001"),
+        ] {
+            let mut diag = Diagnostics::default();
+            let user = parse_user(&format!("[general]\n{key} = {value}\n"), &mut diag).unwrap();
+            let _cfg = merge_config(compiled_config(), user, &mut diag);
+            assert_eq!(diag.errors.len(), 1, "{key}={value}: {diag:?}");
+        }
+        for value in [
+            "1.0000000001",
+            "-0.000000000000000000000000000000000000000000000000000000000001",
+        ] {
+            let mut diag = Diagnostics::default();
+            let user = parse_user(
+                &format!("[[rules]]\nclass = \"x\"\nopacity = {value}\n"),
+                &mut diag,
+            )
+            .unwrap();
+            let cfg = merge_config(compiled_config(), user, &mut diag);
+            assert_eq!(cfg.rules[0].opacity, None, "{value}: {diag:?}");
+            assert_eq!(diag.errors.len(), 1, "{value}: {diag:?}");
+        }
+    }
+
+    #[test]
+    fn known_tables_with_the_wrong_header_kind_are_diagnosed() {
+        for (header, replacement) in [
+            ("[rules]", "[[rules]]"),
+            ("[keybindings]", "[[keybindings]]"),
+            ("[[general]]", "[general]"),
+            ("[[colors]]", "[colors]"),
+            ("[[autostart]]", "[autostart]"),
+        ] {
+            let mut diag = Diagnostics::default();
+            parse_user(&format!("{header}\n"), &mut diag).unwrap();
+            assert_eq!(diag.warnings.len(), 1, "{header}: {diag:?}");
+            assert!(diag.warnings[0].starts_with("line 1:"), "{diag:?}");
+            assert!(diag.warnings[0].contains(replacement), "{diag:?}");
+        }
+    }
+
+    #[test]
+    fn wrongly_typed_autostart_keeps_the_baseline_commands() {
+        let mut baseline = compiled_config();
+        baseline.autostart = vec![vec!["baseline-command".into()]];
+        let mut diag = Diagnostics::default();
+        let user = parse_user("[autostart]\ncommands = true\n", &mut diag).unwrap();
+        let cfg = merge_config(baseline.clone(), user, &mut diag);
+        assert_eq!(cfg.autostart, baseline.autostart);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+    }
+
+    #[test]
+    fn cross_field_diagnostics_locate_the_general_table() {
+        let mut diag = Diagnostics::default();
+        let user = parse_user(
+            "# configuration\n\n[general]\nview_count = 1\n\
+             view_names = [\"a\", \"b\"]\noverview_zoom_min = 1.0\n",
+            &mut diag,
+        )
+        .unwrap();
+        let _cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert_eq!(diag.errors.len(), 1, "{diag:?}");
+        assert!(diag.warnings[0].starts_with("line 3:"), "{diag:?}");
+        assert!(diag.errors[0].starts_with("line 3:"), "{diag:?}");
+    }
+
+    #[test]
+    fn wrongly_typed_binding_fields_report_the_expected_type_at_the_value_line() {
+        let mut diag = Diagnostics::default();
+        let _user = parse_user("[[keybindings]]\nkey = false\naction = 12\n", &mut diag).unwrap();
+        assert_eq!(diag.warnings.len(), 2, "{diag:?}");
+        assert!(diag.warnings[0].starts_with("line 2:"), "{diag:?}");
+        assert!(diag.warnings[1].starts_with("line 3:"), "{diag:?}");
+        assert!(diag
+            .warnings
+            .iter()
+            .all(|message| message.contains("expected a string")));
+    }
+
+    #[test]
     fn missing_file_uses_entire_compiled_config() {
         let path = std::env::temp_dir().join("maverick-config-definitely-missing.toml");
         let _ = std::fs::remove_file(&path);
@@ -1529,7 +1748,7 @@ mod tests {
 
     #[test]
     fn broken_toml_uses_entire_compiled_config() {
-        let path = write_temp("[general\ngaps = nope");
+        let path = write_temp("[general\ngaps_inner = nope");
         let (cfg, _diag) = load_from_path(&path);
         let baseline = default_config();
         assert_eq!(cfg.gaps_inner, baseline.gaps_inner);
@@ -1575,11 +1794,34 @@ mod tests {
     }
 
     #[test]
+    fn row_semantic_errors_keep_their_table_header_line() {
+        let path = write_temp(
+            "[[keybindings]]\nkey = \"Mod4+q\"\naction = \"not-real\"\n\n\
+             [[rules]]\nclass = \"x\"\nview = 99\n",
+        );
+        let (_source, _cfg, diag) = load_from_path_classified(&path);
+        let _ = std::fs::remove_file(path);
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 1:") && e.contains("invalid action")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 5:") && e.contains("view 99")),
+            "{diag:?}"
+        );
+    }
+
+    #[test]
     fn invalid_binding_is_dropped_without_losing_valid_file_values() {
         let path = write_temp(
             r#"
 [general]
-gaps = 17
+gaps_inner = 17
+gaps_outer = 17
 
 [[keybindings]]
 key = "super+not-a-key"
@@ -1597,14 +1839,14 @@ action = "kill"
             .keybinds
             .iter()
             .any(|(_, key, action)| { *key == u32::from(b'q') && matches!(action, Action::Kill) }));
-        assert_eq!(cfg.keybinds.len(), 19); // valid q plus 18 generated workspace binds
+        assert_eq!(cfg.keybinds.len(), 19); // valid q plus 18 generated View binds
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn user_numeric_bind_keeps_other_auto_binds() {
         // A user binding on a digit slot claims only that slot; the other
-        // auto-generated workspace binds survive (there is no full
+        // auto-generated View binds survive (there is no full
         // suppression), and the claimed slot keeps the user's action.
         let user = parse_string(
             r#"
@@ -1647,7 +1889,7 @@ action = "view:2"
         let user = parse_string(
             r"
 [general]
-auto_workspace_binds = false
+auto_view_binds = false
 ",
         );
         let mut diag = Diagnostics::default();
@@ -1660,7 +1902,7 @@ auto_workspace_binds = false
         let user = parse_string(
             r#"
 [general]
-auto_workspace_binds = false
+auto_view_binds = false
 
 [[keybindings]]
 key = "super+q"
@@ -1672,7 +1914,7 @@ action = "quit"
         assert!(matches!(cfg.keybinds[0].2, Action::Quit));
     }
 
-    /// `auto_workspace_binds = false` has to hold on the config the loader
+    /// `auto_view_binds = false` has to hold on the config the loader
     /// actually returns. The merge baseline is the compiled keymap, which never
     /// contained a workspace bind; the fail-safe `default_config` does, so a
     /// baseline that already carried them would make every generated chord
@@ -1680,7 +1922,7 @@ action = "quit"
     /// merged, so nothing downstream could take them away again.
     #[test]
     fn auto_workspace_binds_false_survives_the_loader() {
-        let path = write_temp("[general]\nauto_workspace_binds = false\n");
+        let path = write_temp("[general]\nauto_view_binds = false\n");
         let (cfg, diag) = load_from_path(&path);
         assert!(
             diag.is_clean(),
@@ -1699,12 +1941,12 @@ action = "quit"
         let _ = std::fs::remove_file(path);
     }
 
-    /// Generated binds must cover the file's own `n_tags`. A baseline that
+    /// Generated binds must cover the file's own `view_count`. A baseline that
     /// generated them before the file was read would keep chords for workspaces
     /// the user just removed (`View(8)` on a three-tag WM).
     #[test]
     fn generated_workspace_binds_follow_the_files_n_tags() {
-        let path = write_temp("[general]\nn_tags = 3\n");
+        let path = write_temp("[general]\nview_count = 3\n");
         let (cfg, diag) = load_from_path(&path);
         assert!(diag.is_clean(), "{diag:?}");
         assert_eq!(cfg.n_tags, 3);
@@ -1735,7 +1977,7 @@ action = "quit"
         let user = parse_string(
             r"
 [general]
-n_tags = 3
+view_count = 3
 ",
         );
         let mut diag = Diagnostics::default();
@@ -1770,17 +2012,26 @@ n_tags = 3
     }
 
     #[test]
-    fn empty_autostart_list_disables_compiled_commands_without_warnings() {
-        for key in ["commands", "apps", "programs"] {
-            let path = write_temp(&format!("[autostart]\n{key} = []\n"));
-            let (cfg, diag) = load_from_path(&path);
-            std::fs::remove_file(path).expect("remove config fixture");
-            assert!(
-                cfg.autostart.is_empty(),
-                "{key} must clear the compiled list"
-            );
-            assert!(diag.is_clean(), "valid empty {key} list: {diag:?}");
-        }
+    fn empty_autostart_commands_disable_compiled_commands_without_warnings() {
+        let path = write_temp("[autostart]\ncommands = []\n");
+        let (cfg, diag) = load_from_path(&path);
+        std::fs::remove_file(path).expect("remove config fixture");
+        assert!(cfg.autostart.is_empty());
+        assert!(diag.is_clean(), "valid empty command list: {diag:?}");
+    }
+
+    #[test]
+    fn empty_autostart_rows_are_diagnosed_at_the_commands_line() {
+        let path = write_temp("[autostart]\ncommands = [[\"\", \"ignored\"], [\"picom\"]]\n");
+        let (cfg, diag) = load_from_path(&path);
+        let _ = std::fs::remove_file(path);
+        assert_eq!(cfg.autostart, vec![vec!["picom"]]);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(
+            diag.warnings[0].starts_with("line 2:")
+                && diag.warnings[0].contains("entry #1 has no executable"),
+            "{diag:?}"
+        );
     }
 
     #[test]
@@ -1811,34 +2062,15 @@ commands = [["example", "--flag"]]
     }
 
     #[test]
-    fn rule_fullscreen_policy_parses_and_all_aliases_agree() {
-        // Deny — refuse the app's own runtime fullscreen (F11/EWMH), but leave
-        // the built-in `Mod4+Shift+F` working.
-        for key in ["deny_fullscreen", "no_fullscreen"] {
-            let user = parse_string(&format!("[[rules]]\nclass = \"firefox\"\n{key} = true\n"));
-            let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-            assert_eq!(cfg.rules.len(), 1);
-            assert!(
-                cfg.rules[0].deny_fullscreen,
-                "'{key}' must set Rule::deny_fullscreen"
-            );
-            assert!(!cfg.rules[0].true_fullscreen);
-        }
-        // True — exclusive, ribbon-free fullscreen for games. `True` wins over
-        // `Deny` when both are set.
-        for key in ["true_fullscreen", "exclusive_fullscreen"] {
-            let user = parse_string(&format!(
-                "[[rules]]\nclass = \"game\"\n{key} = true\ndeny_fullscreen = true\n"
-            ));
-            let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-            assert_eq!(cfg.rules.len(), 1);
-            assert!(
-                cfg.rules[0].true_fullscreen,
-                "'{key}' must set Rule::true_fullscreen"
-            );
-            assert!(cfg.rules[0].deny_fullscreen);
-        }
-        // Defaults stay false.
+    fn rule_fullscreen_policy_uses_one_canonical_spelling() {
+        let user = parse_string(
+            "[[rules]]\nclass = \"game\"\ndeny_fullscreen = true\ntrue_fullscreen = true\n",
+        );
+        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
+        assert_eq!(cfg.rules.len(), 1);
+        assert!(cfg.rules[0].deny_fullscreen);
+        assert!(cfg.rules[0].true_fullscreen);
+
         let user = parse_string("[[rules]]\nclass = \"firefox\"\n");
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(!cfg.rules[0].deny_fullscreen);
@@ -1899,38 +2131,22 @@ commands = [["example", "--flag"]]
     }
 
     #[test]
-    fn rule_ignore_initial_state_parses_and_all_aliases_agree() {
-        for key in ["ignore_initial_state", "no_initial_state", "no_maximize"] {
-            let user = parse_string(&format!("[[rules]]\nclass = \"firefox\"\n{key} = true\n"));
-            let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-            assert_eq!(cfg.rules.len(), 1);
-            assert!(
-                cfg.rules[0].ignore_initial_state,
-                "'{key}' must set Rule::ignore_initial_state"
-            );
-        }
-        // Default (key absent) stays false.
+    fn rule_ignore_initial_state_uses_one_canonical_spelling() {
+        let user = parse_string("[[rules]]\nclass = \"firefox\"\nignore_initial_state = true\n");
+        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
+        assert_eq!(cfg.rules.len(), 1);
+        assert!(cfg.rules[0].ignore_initial_state);
+
         let user = parse_string("[[rules]]\nclass = \"firefox\"\n");
         let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
         assert!(!cfg.rules[0].ignore_initial_state);
     }
 
     #[test]
-    fn theme_preset_fills_colors_but_explicit_colors_win() {
-        let user = parse_string(
-            r#"
-[general]
-theme = "nord"
-"#,
-        );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        let (normal, focused, urgent) = crate::config::theme_palette("nord").unwrap();
-        assert_eq!(cfg.col_normal, normal);
-        assert_eq!(cfg.col_focused, focused);
-        assert_eq!(cfg.col_urgent, urgent);
-
-        // [colors] applied after [general], so it overrides the theme.
-        let user = parse_string(
+    fn removed_theme_key_is_reported_and_explicit_colors_still_apply() {
+        let baseline = compiled_config();
+        let mut diag = Diagnostics::default();
+        let user = parse_user(
             r#"
 [general]
 theme = "nord"
@@ -1938,24 +2154,88 @@ theme = "nord"
 [colors]
 focused = 0x00ff00
 "#,
-        );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
+            &mut diag,
+        )
+        .expect("valid TOML");
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+
+        assert_eq!(cfg.col_normal, baseline.col_normal);
         assert_eq!(cfg.col_focused, 0x00ff00);
-        assert_eq!(cfg.col_normal, normal); // untouched field still from the theme
+        assert_eq!(cfg.col_urgent, baseline.col_urgent);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(
+            diag.warnings[0].contains("[general].theme"),
+            "removed theme key must be named explicitly: {:?}",
+            diag.warnings
+        );
+        assert!(diag.errors.is_empty(), "{diag:?}");
     }
 
     #[test]
-    fn unknown_theme_name_is_ignored() {
+    fn gaps_and_borders_reject_values_above_the_layout_contract() {
+        let max_gap = crate::core::layout::MAX_CFG_GAP as u32;
+        let max_border = crate::core::layout::MAX_CFG_BORDER as u32;
+        let path = write_temp(&format!(
+            "[general]\ngaps_inner = {}\ngaps_outer = {}\nborder_width = {}\n",
+            max_gap + 1,
+            max_gap + 1,
+            max_border + 1,
+        ));
+        let (_source, cfg, diag) = load_from_path_classified(&path);
+        let _ = std::fs::remove_file(path);
         let baseline = compiled_config();
-        let user = parse_string(
-            r#"
-[general]
-theme = "not-a-real-theme"
-"#,
+        assert_eq!(cfg.gaps_inner, baseline.gaps_inner);
+        assert_eq!(cfg.gaps_outer, baseline.gaps_outer);
+        assert_eq!(cfg.border_w, baseline.border_w);
+        assert_eq!(diag.errors.len(), 3, "{diag:?}");
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 2:") && e.contains("gaps_inner")),
+            "{diag:?}"
         );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        assert_eq!(cfg.col_normal, baseline.col_normal);
-        assert_eq!(cfg.col_focused, baseline.col_focused);
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 3:") && e.contains("gaps_outer")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 4:") && e.contains("border_width")),
+            "{diag:?}"
+        );
+    }
+
+    #[test]
+    fn simple_general_range_errors_report_the_source_line() {
+        let path =
+            write_temp("[general]\ncolumn_width = 2.0\naccordion_boost = -0.1\nview_count = 42\n");
+        let (_source, cfg, diag) = load_from_path_classified(&path);
+        let _ = std::fs::remove_file(path);
+        assert_eq!(cfg.column_width, compiled_config().column_width);
+        assert_eq!(cfg.accordion_boost, compiled_config().accordion_boost);
+        assert_eq!(cfg.n_tags, compiled_config().n_tags);
+        assert_eq!(diag.errors.len(), 3, "{diag:?}");
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 2:") && e.contains("column_width")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 3:") && e.contains("accordion_boost")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.errors
+                .iter()
+                .any(|e| e.starts_with("line 4:") && e.contains("view_count")),
+            "{diag:?}"
+        );
     }
 
     /// A floor above the target is contradictory: the parser diagnoses it and
@@ -1998,16 +2278,85 @@ theme = "not-a-real-theme"
     }
 
     #[test]
-    fn gaps_legacy_alias_sets_both_inner_and_outer() {
-        let user = parse_string(
-            r"
-[general]
-gaps = 20
-",
+    fn removed_non_equivalent_settings_are_diagnosed() {
+        let cases = [
+            ("[general]\nsplit_bias = 0.5\n", "column_width"),
+            ("[general]\ndefault_col_width = 400\n", "column_width"),
+            ("[general]\ndefault_col_w = 400\n", "column_width"),
+        ];
+        for (body, replacement) in cases {
+            let mut diag = Diagnostics::default();
+            parse_user(body, &mut diag).expect("valid TOML");
+            assert_eq!(diag.warnings.len(), 1, "{body}: {diag:?}");
+            assert!(
+                diag.warnings[0].contains("was removed") && diag.warnings[0].contains(replacement),
+                "{body}: {:?}",
+                diag.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn view_names_reject_blank_entries_at_the_source_line() {
+        let path = write_temp("[general]\nview_names = [\"web\", \"   \"]\n");
+        let (_source, cfg, diag) = load_from_path_classified(&path);
+        let _ = std::fs::remove_file(path);
+        assert_eq!(cfg.tag_names, compiled_config().tag_names);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(
+            diag.warnings[0].starts_with("line 2:") && diag.warnings[0].contains("non-blank"),
+            "{diag:?}"
         );
-        let cfg = merge_config(compiled_config(), user, &mut Diagnostics::default());
-        assert_eq!(cfg.gaps_inner, 20);
-        assert_eq!(cfg.gaps_outer, 20);
+    }
+
+    #[test]
+    fn surplus_view_names_are_explicitly_reported() {
+        let user =
+            parse_string("[general]\nview_count = 2\nview_names = [\"web\", \"code\", \"chat\"]\n");
+        let mut diag = Diagnostics::default();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(cfg.tag_names, vec!["web", "code"]);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(diag.warnings[0].contains("1 trailing name"), "{diag:?}");
+    }
+
+    proptest! {
+        #[test]
+        fn exact_legacy_general_aliases_match_canonical_runtime_values(
+            gap in 0u32..=crate::core::layout::MAX_CFG_GAP as u32,
+            views in 1usize..=9,
+            auto_binds in any::<bool>(),
+        ) {
+            let mut legacy_diag = Diagnostics::default();
+            let legacy = parse_user(
+                &format!(
+                    "[general]\ngaps = {gap}\nn_tags = {views}\nauto_workspace_binds = {auto_binds}\n"
+                ),
+                &mut legacy_diag,
+            )
+            .expect("generated legacy config is valid TOML");
+            let legacy = merge_config(compiled_config(), legacy, &mut legacy_diag);
+
+            let mut canonical_diag = Diagnostics::default();
+            let canonical = parse_user(
+                &format!(
+                    "[general]\ngaps_inner = {gap}\ngaps_outer = {gap}\nview_count = {views}\nauto_view_binds = {auto_binds}\n"
+                ),
+                &mut canonical_diag,
+            )
+            .expect("generated canonical config is valid TOML");
+            let canonical = merge_config(compiled_config(), canonical, &mut canonical_diag);
+
+            prop_assert!(legacy_diag.is_clean(), "legacy diagnostics: {legacy_diag:?}");
+            prop_assert!(
+                canonical_diag.is_clean(),
+                "canonical diagnostics: {canonical_diag:?}"
+            );
+            prop_assert_eq!(legacy.gaps_inner, canonical.gaps_inner);
+            prop_assert_eq!(legacy.gaps_outer, canonical.gaps_outer);
+            prop_assert_eq!(legacy.n_tags, canonical.n_tags);
+            prop_assert_eq!(legacy.keybinds, canonical.keybinds);
+        }
     }
 
     #[test]
@@ -2029,6 +2378,61 @@ corner_radius = 10
     }
 
     #[test]
+    fn rule_numeric_fields_reject_lossy_or_out_of_range_values() {
+        let mut diag = Diagnostics::default();
+        let user = parse_user(
+            r#"
+[[rules]]
+class = "broken"
+float = true
+size = [-1, 300]
+position = [2147483648, 0]
+opacity = 1.5
+"#,
+            &mut diag,
+        )
+        .expect("valid TOML");
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert_eq!(cfg.rules.len(), 1, "the rule itself remains useful");
+        let rule = &cfg.rules[0];
+        assert_eq!(rule.size, None);
+        assert_eq!(rule.position, None);
+        assert_eq!(rule.opacity, None);
+        assert_eq!(diag.errors.len(), 3, "{diag:?}");
+        assert!(
+            diag.errors.iter().any(|e| e.contains("rule.size")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.errors.iter().any(|e| e.contains("rule.position")),
+            "{diag:?}"
+        );
+        assert!(
+            diag.errors.iter().any(|e| e.contains("rule.opacity")),
+            "{diag:?}"
+        );
+    }
+
+    #[test]
+    fn rule_numeric_fields_accept_exact_boundaries_without_casting() {
+        let user = parse_string(
+            r#"
+[[rules]]
+class = "exact"
+size = [1, 4294967295]
+position = [-2147483648, 2147483647]
+opacity = 1
+"#,
+        );
+        let mut diag = Diagnostics::default();
+        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert!(diag.is_clean(), "{diag:?}");
+        assert_eq!(cfg.rules[0].size, Some((1, u32::MAX)));
+        assert_eq!(cfg.rules[0].position, Some((i32::MIN, i32::MAX)));
+        assert_eq!(cfg.rules[0].opacity, Some(1.0));
+    }
+
+    #[test]
     fn rule_opacity_and_border_width_are_parsed() {
         let user = parse_string(
             r#"
@@ -2043,6 +2447,94 @@ border_width = 0
         assert_eq!(cfg.rules.len(), 1);
         assert_eq!(cfg.rules[0].opacity, Some(0.9));
         assert_eq!(cfg.rules[0].border_w, Some(0));
+    }
+
+    #[test]
+    fn practical_custom_keymap_and_autostart_remain_supported() {
+        let path = write_temp(
+            r#"
+[general]
+border_width = 0
+corner_radius = 0
+
+[[keybindings]]
+key = "Mod4+Return"
+action = "spawn:aura"
+
+[[keybindings]]
+key = "Mod4+Shift+p"
+action = "spawn:rofi -show run"
+
+[[keybindings]]
+key = "Mod4+p"
+action = "spawn:rofi -show drun"
+
+[[keybindings]]
+key = "Mod4+Shift+c"
+action = "kill"
+
+[[keybindings]]
+key = "Mod4+Shift+space"
+action = "toggle_float"
+
+[[keybindings]]
+key = "Mod4+Shift+f"
+action = "toggle_fullscreen"
+
+[[keybindings]]
+key = "Mod4+h"
+action = "focus:left"
+
+[[keybindings]]
+key = "Mod4+l"
+action = "focus:right"
+
+[[keybindings]]
+key = "Mod4+Shift+h"
+action = "move:left"
+
+[[keybindings]]
+key = "Mod4+Shift+l"
+action = "move:right"
+
+[[keybindings]]
+key = "Mod4+Control+h"
+action = "grow_col:-50"
+
+[[keybindings]]
+key = "Mod4+Control+l"
+action = "grow_col:50"
+
+[[keybindings]]
+key = "Mod4+Shift+q"
+action = "quit"
+
+[[keybindings]]
+key = "Mod4+o"
+action = "toggle_overview"
+
+[autostart]
+commands = [["picom"], ["polybar", "main"]]
+"#,
+        );
+        let (cfg, diag) = load_from_path(&path);
+        let _ = std::fs::remove_file(path);
+        assert!(diag.is_clean(), "{diag:?}");
+        assert_eq!(cfg.border_w, 0);
+        assert_eq!(cfg.corner_radius, 0);
+        assert_eq!(cfg.autostart.len(), 2);
+        assert_eq!(
+            cfg.keybinds.len(),
+            32,
+            "14 custom + 18 generated View binds"
+        );
+        assert!(cfg.keybinds.iter().any(|(_, _, action)| {
+            matches!(action, Action::Spawn(argv) if argv.first().is_some_and(|bin| bin == "aura"))
+        }));
+        assert!(cfg
+            .keybinds
+            .iter()
+            .any(|(_, _, action)| matches!(action, Action::ToggleOverview)));
     }
 
     #[test]
@@ -2067,7 +2559,7 @@ border_width = 0
         assert!(cfg.rules.is_empty());
         assert!(cfg.autostart.is_empty());
         assert_eq!(cfg.keybinds, default_config().keybinds);
-        // Numeric workspace binds are auto-restored when no digit keybinds exist.
+        // Numeric View binds are auto-restored when no digit keybinds exist.
         assert!(cfg
             .keybinds
             .iter()
@@ -2110,30 +2602,35 @@ border_width = 0
         let user = parse_user(&bindings, &mut diag).expect("keybinding examples parse");
         let cfg = merge_config(compiled_config(), user, &mut diag);
         assert!(diag.is_clean(), "{diag:?}");
-        assert_eq!(cfg.keybinds, default_config().keybinds);
+        let mut expected = default_config().keybinds;
+        // The sample intentionally omits the no-op layout selector.
+        let omitted = (
+            u16::from(ModMask::M4),
+            u32::from(b't'),
+            Action::SetLayout(crate::types::LayoutKind::Column),
+        );
+        assert!(expected.contains(&omitted));
+        expected.retain(|binding| binding != &omitted);
+        assert_eq!(cfg.keybinds, expected);
     }
 
     #[test]
-    fn portal_autostart_example_is_opt_in_and_parses_as_argv() {
+    fn shipped_autostart_examples_are_generic_and_opt_in() {
         let sample = include_str!("../config/config.toml");
-        let commands = sample
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("# [\"/usr/lib/"))
-            .filter(|line| line.starts_with("xdg-desktop-portal"))
-            .map(|line| format!("[\"/usr/lib/{line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let source = format!("[autostart]\ncommands = [\n{commands}\n]\n");
-        let mut diag = Diagnostics::default();
-        let user = parse_user(&source, &mut diag).expect("portal example parses");
-        let cfg = merge_config(compiled_config(), user, &mut diag);
+        assert!(
+            !sample.contains("xdg-desktop-portal"),
+            "the generic sample must not hard-code distribution-specific portal paths"
+        );
+        assert!(
+            sample.contains("# [\"picom\"]") && sample.contains("# [\"polybar\", \"main\"]"),
+            "the sample should still demonstrate ordinary argv-style autostart entries"
+        );
+
+        let (cfg, diag) = load_from_path(Path::new("config/config.toml"));
         assert!(diag.is_clean(), "{diag:?}");
-        assert_eq!(
-            cfg.autostart,
-            vec![
-                vec!["/usr/lib/xdg-desktop-portal-gtk".to_string()],
-                vec!["/usr/lib/xdg-desktop-portal".to_string()],
-            ]
+        assert!(
+            cfg.autostart.is_empty(),
+            "commented sample commands must stay opt-in"
         );
     }
 
@@ -2153,7 +2650,7 @@ border_width = 0
 
     #[test]
     fn classified_load_marks_a_broken_file_as_the_compiled_baseline() {
-        let path = write_temp("[general\ngaps = nope");
+        let path = write_temp("[general\ngaps_inner = nope");
         let (source, cfg, diag) = load_from_path_classified(&path);
         assert_eq!(source, ConfigSource::CompiledBaseline);
         assert_eq!(cfg.keybinds.len(), default_config().keybinds.len());
@@ -2189,13 +2686,13 @@ border_width = 0
         // `diag.errors` is NOT an unusable signal: a rejected value is recorded
         // while every other value in the file is merged in, so a reload must
         // still adopt this config.
-        let path = write_temp("[general]\ngaps = 17\nn_tags = 42\n");
+        let path = write_temp("[general]\ngaps_inner = 17\ngaps_outer = 17\nview_count = 42\n");
         let (source, cfg, diag) = load_from_path_classified(&path);
         assert_eq!(source, ConfigSource::UserFile);
         assert_eq!(cfg.gaps_inner, 17);
         assert_eq!(cfg.gaps_outer, 17);
         assert!(
-            diag.errors.iter().any(|e| e.contains("n_tags")),
+            diag.errors.iter().any(|e| e.contains("view_count")),
             "{:?}",
             diag.errors
         );
@@ -2244,13 +2741,49 @@ border_width = 0
         assert_eq!(diag.warnings.len(), 1, "{:?}", diag.warnings);
         let warning = &diag.warnings[0];
         assert!(
-            warning.contains("[general].honour_initial_state"),
-            "the warning must name the table and the key: {warning}"
+            warning.contains("line 2") && warning.contains("[general].honour_initial_state"),
+            "the warning must name the line, table and key: {warning}"
         );
         // `--check-config` exits on `!is_clean()`, so a warning alone is enough
         // to fail the CI gate: "the file loads" is not "the file is what you
         // wrote".
         assert!(!diag.is_clean(), "{diag:?}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn likely_table_typos_are_reported_but_future_tables_stay_silent() {
+        let typo = write_temp("[genreal]\ngaps_inner = 17\n[general]\ngaps_outer = 11\n");
+        let (_source, cfg, diag) = load_from_path_classified(&typo);
+        assert_eq!(cfg.gaps_outer, 11);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(
+            diag.warnings[0].contains("did you mean '[general]'"),
+            "{:?}",
+            diag.warnings
+        );
+        let _ = std::fs::remove_file(typo);
+
+        let future = write_temp("[compositor]\nenabled = true\n[general]\ngaps_inner = 13\n");
+        let (_source, cfg, diag) = load_from_path_classified(&future);
+        assert_eq!(cfg.gaps_inner, 13);
+        assert!(
+            diag.is_clean(),
+            "unrelated future table must stay silent: {diag:?}"
+        );
+        let _ = std::fs::remove_file(future);
+    }
+
+    #[test]
+    fn unknown_key_diagnostic_suggests_the_canonical_spelling() {
+        let path = write_temp("[general]\nhonour_initial_state = true\n");
+        let (_source, _cfg, diag) = load_from_path_classified(&path);
+        assert_eq!(diag.warnings.len(), 1, "{diag:?}");
+        assert!(
+            diag.warnings[0].contains("did you mean '[general].honor_initial_state'"),
+            "{:?}",
+            diag.warnings
+        );
         let _ = std::fs::remove_file(path);
     }
 

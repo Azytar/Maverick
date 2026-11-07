@@ -81,6 +81,9 @@ pub struct AppliedWindow {
 #[derive(Debug, Default)]
 pub struct AppliedState {
     pub windows: std::collections::HashMap<WindowId, AppliedWindow>,
+    // Reused only while coalescing one desired snapshot. This is scratch, not
+    // model state: every reconcile clears and rebuilds it from Desired.
+    last_index_scratch: std::collections::HashMap<WindowId, usize>,
 }
 
 /// The geometry X11 will actually hold for a requested `(rect, border)`.
@@ -189,7 +192,7 @@ pub enum GeometryEffect {
 /// flag and mutates ONLY `applied` (the last-X11-geometry record). It must never modify
 /// `State` logical geometry, decide layout, or read X11 events.
 pub fn reconcile(
-    desired: &DesiredState,
+    desired: &DesiredState<'_>,
     state: &State,
     applied: &mut AppliedState,
 ) -> Vec<GeometryEffect> {
@@ -204,15 +207,20 @@ pub fn reconcile(
     // is ordered back-to-front, so the *last* entry for a window is the one
     // nearest the top of the stack, and last-write-wins is both the cheapest
     // deterministic policy and the one that matches the stacking order.
-    let mut last_index: std::collections::HashMap<WindowId, usize> =
-        std::collections::HashMap::with_capacity(desired.windows.len());
-    for (i, dw) in desired.windows.iter().enumerate() {
-        last_index.insert(dw.window, i);
+    applied.last_index_scratch.clear();
+    applied.last_index_scratch.reserve(desired.len());
+    for (i, dw) in desired.iter().enumerate() {
+        applied.last_index_scratch.insert(dw.window, i);
     }
+    // The map already tells us whether coalescing is necessary. In the normal
+    // unique-placement case every entry survives, so avoid hashing each window
+    // again just to rediscover that fact. Duplicate snapshots keep the same
+    // last-write-wins filter and output order.
+    let has_duplicates = applied.last_index_scratch.len() != desired.len();
 
     let mut out = Vec::new();
-    for (i, dw) in desired.windows.iter().enumerate() {
-        if last_index[&dw.window] != i {
+    for (i, dw) in desired.iter().enumerate() {
+        if has_duplicates && applied.last_index_scratch.get(&dw.window).copied() != Some(i) {
             continue;
         }
         let dirty = state
@@ -230,7 +238,7 @@ pub fn reconcile(
     #[cfg(feature = "window-trace")]
     wtrace!(
         "reconcile desired={} effects={} applied_total={}",
-        desired.windows.len(),
+        desired.len(),
         out.len(),
         applied.windows.len()
     );
@@ -539,13 +547,11 @@ mod tests {
                 seen: true,
             },
         );
-        let desired = DesiredState {
-            windows: vec![DesiredWindow {
-                window: win,
-                rect,
-                border,
-            }],
-        };
+        let desired = DesiredState::from_windows(vec![DesiredWindow {
+            window: win,
+            rect,
+            border,
+        }]);
         let effects = reconcile(&desired, &state, &mut applied);
         assert!(
             effects.is_empty(),
@@ -572,13 +578,11 @@ mod tests {
                 seen: true,
             },
         );
-        let desired = DesiredState {
-            windows: vec![DesiredWindow {
-                window: win,
-                rect,
-                border,
-            }],
-        };
+        let desired = DesiredState::from_windows(vec![DesiredWindow {
+            window: win,
+            rect,
+            border,
+        }]);
         let effects = reconcile(&desired, &state, &mut applied);
         assert_eq!(
             effects.len(),
@@ -620,13 +624,11 @@ mod tests {
                 seen: true,
             },
         );
-        let desired = DesiredState {
-            windows: vec![DesiredWindow {
-                window: win,
-                rect,
-                border,
-            }],
-        };
+        let desired = DesiredState::from_windows(vec![DesiredWindow {
+            window: win,
+            rect,
+            border,
+        }]);
         let e1 = reconcile(&desired, &state_dirty, &mut applied);
         assert_eq!(
             e1.len(),
@@ -670,25 +672,23 @@ mod tests {
                 },
             );
         }
-        let desired = DesiredState {
-            windows: vec![
-                DesiredWindow {
-                    window: a,
-                    rect: rect_a,
-                    border,
-                },
-                DesiredWindow {
-                    window: b,
-                    rect: rect_b,
-                    border,
-                },
-                DesiredWindow {
-                    window: c,
-                    rect: rect_c_new,
-                    border,
-                },
-            ],
-        };
+        let desired = DesiredState::from_windows(vec![
+            DesiredWindow {
+                window: a,
+                rect: rect_a,
+                border,
+            },
+            DesiredWindow {
+                window: b,
+                rect: rect_b,
+                border,
+            },
+            DesiredWindow {
+                window: c,
+                rect: rect_c_new,
+                border,
+            },
+        ]);
         let effects = reconcile(&desired, &state, &mut applied);
         assert_eq!(effects.len(), 1, "only the changed window (c) emits");
         match &effects[0] {
@@ -716,7 +716,7 @@ mod tests {
             "forget must drop the applied record"
         );
         let state = State::new();
-        let desired = DesiredState { windows: vec![] };
+        let desired = DesiredState::from_windows(Vec::new());
         let effects = reconcile(&desired, &state, &mut applied);
         assert!(
             effects.is_empty(),
@@ -953,6 +953,29 @@ mod tests {
             .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
     }
 
+    #[test]
+    fn borrowed_snapshots_do_not_reuse_stale_duplicate_indices() {
+        let state = State::new();
+        let mut applied = AppliedState::default();
+        let first = Rect::new(10, 20, 100, 200);
+        let last = Rect::new(30, 40, 300, 400);
+        let duplicate = [(7, first, 1), (7, last, 2)];
+        let desired = DesiredState::from_placements(&duplicate);
+        assert_eq!(reconcile(&desired, &state, &mut applied).len(), 1);
+        assert_eq!(applied.windows[&7].rect, last);
+        assert!(reconcile(&desired, &state, &mut applied).is_empty());
+
+        // A different monitor/pass may be empty, then contain the same window
+        // at an earlier index. Scratch from the duplicate must not suppress it.
+        assert!(reconcile(&DesiredState::from_placements(&[]), &state, &mut applied).is_empty());
+        applied.forget(7);
+        let single = [(7, first, 1)];
+        let desired = DesiredState::from_placements(&single);
+        assert_eq!(reconcile(&desired, &state, &mut applied).len(), 1);
+        assert_eq!(applied.windows[&7].rect, first);
+        assert!(reconcile(&desired, &state, &mut applied).is_empty());
+    }
+
     /// One generated placement: what the layout wants for `win`, whether the
     /// client is flagged `geometry_dirty` (a pending fullscreen/maximize
     /// transition), and whether a client record exists for it at all.
@@ -1077,17 +1100,16 @@ mod tests {
     }
 
     /// The desired snapshot for a set of rows.
-    fn desired_for(rows: &[Row]) -> DesiredState {
-        DesiredState {
-            windows: rows
-                .iter()
+    fn desired_for(rows: &[Row]) -> DesiredState<'static> {
+        DesiredState::from_windows(
+            rows.iter()
                 .map(|r| DesiredWindow {
                     window: r.win,
                     rect: r.rect,
                     border: r.border,
                 })
                 .collect(),
-        }
+        )
     }
 
     /// Every field of `State`, in a form that does not depend on hash-map
@@ -1159,7 +1181,10 @@ mod tests {
         fn reconcile_writes_exactly_the_pending_configures(
             (rows, applied) in arb_rows_and_applied(),
         ) {
-            let mut applied = AppliedState { windows: applied };
+            let mut applied = AppliedState {
+                windows: applied,
+                ..Default::default()
+            };
             let state = state_for(&rows);
             let desired = desired_for(&rows);
 
@@ -1340,25 +1365,23 @@ mod tests {
         }
         // The same window in two places with different geometry — the shape a
         // producer bug would produce.
-        let desired = DesiredState {
-            windows: vec![
-                DesiredWindow {
-                    window: 1,
-                    rect: Rect::new(0, 0, 100, 100),
-                    border: 2,
-                },
-                DesiredWindow {
-                    window: 2,
-                    rect: Rect::new(200, 0, 100, 100),
-                    border: 2,
-                },
-                DesiredWindow {
-                    window: 1,
-                    rect: Rect::new(500, 500, 80, 80),
-                    border: 2,
-                },
-            ],
-        };
+        let desired = DesiredState::from_windows(vec![
+            DesiredWindow {
+                window: 1,
+                rect: Rect::new(0, 0, 100, 100),
+                border: 2,
+            },
+            DesiredWindow {
+                window: 2,
+                rect: Rect::new(200, 0, 100, 100),
+                border: 2,
+            },
+            DesiredWindow {
+                window: 1,
+                rect: Rect::new(500, 500, 80, 80),
+                border: 2,
+            },
+        ]);
 
         let mut applied = AppliedState::default();
         for round in 1..=64 {
@@ -1449,7 +1472,10 @@ mod tests {
         fn a_repeated_reconcile_emits_nothing(
             (rows, applied) in arb_rows_and_applied(),
         ) {
-            let mut applied = AppliedState { windows: applied };
+            let mut applied = AppliedState {
+                windows: applied,
+                ..Default::default()
+            };
             // Clean clients: nothing is mid-transition, so no flag can force a
             // re-poke of an unchanged geometry.
             let clean: Vec<Row> = rows.iter().map(|r| Row { dirty: false, ..r.clone() }).collect();
@@ -1473,7 +1499,10 @@ mod tests {
         fn only_a_dirty_client_is_re_poked(
             (rows, applied) in arb_rows_and_applied(),
         ) {
-            let mut applied = AppliedState { windows: applied };
+            let mut applied = AppliedState {
+                windows: applied,
+                ..Default::default()
+            };
             let state = state_for(&rows);
             let desired = desired_for(&rows);
 
@@ -1503,7 +1532,10 @@ mod tests {
         fn reconcile_never_touches_the_logical_state(
             (rows, applied) in arb_rows_and_applied(),
         ) {
-            let mut applied = AppliedState { windows: applied };
+            let mut applied = AppliedState {
+                windows: applied,
+                ..Default::default()
+            };
             let state = state_for(&rows);
             let desired = desired_for(&rows);
             let before = fingerprint(&state);

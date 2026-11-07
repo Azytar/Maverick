@@ -213,6 +213,76 @@ proptest! {
     }
 }
 
+// Reconciliation is a fixed point once the requested View count is reached.
+//
+// Config reload and monitor preservation can call this repeatedly with the same
+// count. A second call must not mint fresh identities, repair already-valid
+// carousel pointers, or rewrite View payload: doing so would turn an idempotent
+// state reconciliation into hidden work on every repeated notification.
+proptest! {
+    #[test]
+    fn reconcile_workspaces_is_idempotent_at_its_fixed_point(
+        screen in arb_screen(),
+        initial in 1usize..=6,
+        target in 0usize..=9,
+    ) {
+        let mut m = Monitor::new(screen, initial);
+
+        // Give every existing View observable state so "same length" is not
+        // enough to pass the property if reconciliation starts rebuilding rows.
+        for (i, ws) in m.workspaces.iter_mut().enumerate() {
+            ws.floats.push(0xA000 + i as u32);
+            ws.overview = i % 2 == 0;
+            ws.page_zoom = 1.0 + i as f32 * 0.125;
+        }
+
+        // Exercise pointer repair as part of the first reconciliation.
+        let last = m.workspaces.last().expect("monitor always has a View").id;
+        prop_assert!(m.goto_view(last));
+
+        m.reconcile_workspaces(target);
+
+        let ids: Vec<ViewId> = m.workspaces.iter().map(|ws| ws.id).collect();
+        let floats: Vec<Vec<u32>> = m.workspaces.iter().map(|ws| ws.floats.clone()).collect();
+        let overview: Vec<bool> = m.workspaces.iter().map(|ws| ws.overview).collect();
+        let zoom_bits: Vec<u32> = m
+            .workspaces
+            .iter()
+            .map(|ws| ws.page_zoom.to_bits())
+            .collect();
+        let current = m.carousel.current();
+        let origin = m.carousel.origin();
+
+        m.reconcile_workspaces(target);
+
+        prop_assert_eq!(
+            m.workspaces.iter().map(|ws| ws.id).collect::<Vec<_>>(),
+            ids,
+            "a fixed-point reconcile changed View identity/order"
+        );
+        prop_assert_eq!(
+            m.workspaces.iter().map(|ws| ws.floats.clone()).collect::<Vec<_>>(),
+            floats,
+            "a fixed-point reconcile changed View membership payload"
+        );
+        prop_assert_eq!(
+            m.workspaces.iter().map(|ws| ws.overview).collect::<Vec<_>>(),
+            overview,
+            "a fixed-point reconcile changed View presentation state"
+        );
+        prop_assert_eq!(
+            m.workspaces
+                .iter()
+                .map(|ws| ws.page_zoom.to_bits())
+                .collect::<Vec<_>>(),
+            zoom_bits,
+            "a fixed-point reconcile changed View zoom state"
+        );
+        prop_assert_eq!(m.carousel.current(), current, "current moved at the fixed point");
+        prop_assert_eq!(m.carousel.origin(), origin, "origin moved at the fixed point");
+    }
+}
+
 // Views stay a non-empty list, growing and shrinking through the carousel, and
 // growing or shrinking keeps the Views that survive *by identity*.
 //

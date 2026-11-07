@@ -115,7 +115,9 @@ mod self_tests {
 
 mod frame_alloc_tests {
     use super::CountAllocs;
+    use crate::backend::x11::reconciler::{reconcile, AppliedState};
     use crate::config::Cfg;
+    use crate::core::desired::DesiredState;
     use crate::core::layout::{arrange, Placements, RibbonScratch};
     use crate::core::present::present_into;
     use crate::types::{Client, Column, Focus, Monitor, Rect, State, ViewId, WindowId};
@@ -170,6 +172,132 @@ mod frame_alloc_tests {
         // Report per frame, rounding up, so "1" really means "at least one
         // allocation every frame" and 0 means none at all.
         total.div_ceil(16)
+    }
+
+    /// Allocations performed by steady-state desired-to-applied reconciliation.
+    ///
+    /// The layout/presentation buffers are already warm here, and AppliedState
+    /// has seen the geometry once, so no X11 configure effects are expected.
+    /// This isolates scratch allocations in DesiredState::from_placements and
+    /// reconcile rather than first-frame growth or a real geometry change.
+    fn reconcile_allocs_per_frame(n_windows: u32) -> u64 {
+        let state = ribbon(n_windows);
+        let cfg = Cfg::default();
+        let mut placements: Placements = Placements::new();
+        let mut scratch = RibbonScratch::default();
+
+        for _ in 0..8 {
+            arrange(&state, 0, &cfg, &mut placements, &mut scratch);
+            present_into(&state, &state.monitors[0], &mut placements);
+        }
+
+        let mut applied = AppliedState::default();
+        let desired = DesiredState::from_placements(&placements);
+        let first = reconcile(&desired, &state, &mut applied);
+        assert!(
+            !first.is_empty(),
+            "the warm-up reconcile must establish the applied geometry"
+        );
+
+        let counter = CountAllocs::start();
+        for _ in 0..16 {
+            let desired = DesiredState::from_placements(&placements);
+            let effects = reconcile(&desired, &state, &mut applied);
+            assert!(
+                effects.is_empty(),
+                "steady-state reconciliation unexpectedly emitted geometry"
+            );
+        }
+        counter.finish().div_ceil(16)
+    }
+
+    /// Stage 4 allocation regression guard for the normal build.
+    ///
+    /// Stage 4 steady-state allocation invariant.
+    ///
+    /// The original path allocated twice per reconcile: a copied Desired Vec and
+    /// a fresh duplicate-coalescing HashMap. Desired now borrows Placements and
+    /// AppliedState reuses the coalescing map as scratch, so a no-op reconcile
+    /// must not touch the heap after warm-up. window-trace is excluded because
+    /// diagnostic formatting adds unrelated allocator traffic.
+    #[test]
+    fn steady_state_reconcile_allocates_nothing() {
+        if cfg!(feature = "window-trace") {
+            return;
+        }
+        for n in [1, 5, 10, 50] {
+            let per_frame = reconcile_allocs_per_frame(n);
+            assert_eq!(
+                per_frame, 0,
+                "{n} windows: {per_frame} allocation(s) per steady-state reconcile"
+            );
+        }
+    }
+
+    /// Measure real reconciliation, including duplicate handling and changed
+    /// geometry. No X11 server or timing threshold is part of this workload.
+    #[cfg(not(feature = "window-trace"))]
+    #[test]
+    #[ignore = "manual timing workload; run with --release --ignored --nocapture"]
+    fn reconcile_workload() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        const ITERATIONS: usize = 20_000;
+        for (n, duplicates, changing) in [
+            (1, false, false),
+            (5, false, false),
+            (10, false, false),
+            (50, false, false),
+            (200, false, false),
+            (50, true, false),
+            (50, false, true),
+        ] {
+            let state = ribbon(n);
+            let mut first: Placements = (1..=n)
+                .map(|win| (win, Rect::new(win as i32, 20, 400, 900), 2))
+                .collect();
+            if duplicates {
+                first.push((1, Rect::new(30, 40, 300, 400), 3));
+            }
+            let second: Placements = first
+                .iter()
+                .map(|&(win, rect, border)| {
+                    (win, Rect::new(rect.x + 1, rect.y, rect.w, rect.h), border)
+                })
+                .collect();
+            let snapshots = [
+                DesiredState::from_placements(&first),
+                DesiredState::from_placements(&second),
+            ];
+            let mut applied = AppliedState::default();
+            assert_eq!(
+                reconcile(&snapshots[0], &state, &mut applied).len(),
+                n as usize
+            );
+            let mut samples = Vec::new();
+            for _ in 0..9 {
+                let mut effects = 0;
+                let start = Instant::now();
+                for round in 0..ITERATIONS {
+                    let snapshot = if changing { 1 - round % 2 } else { 0 };
+                    effects += black_box(reconcile(
+                        black_box(&snapshots[snapshot]),
+                        black_box(&state),
+                        black_box(&mut applied),
+                    ))
+                    .len();
+                }
+                let elapsed = start.elapsed().as_nanos() / ITERATIONS as u128;
+                assert_eq!(effects, if changing { ITERATIONS * n as usize } else { 0 });
+                samples.push(elapsed);
+            }
+            samples.sort_unstable();
+            println!(
+                "reconcile windows={n} duplicates={duplicates} changing={changing} iterations={ITERATIONS} median_ns={} min_ns={} max_ns={}",
+                samples[4], samples[0], samples[8]
+            );
+        }
     }
 
     /// The headline projection invariant: an arrange must not touch the heap.
