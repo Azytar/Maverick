@@ -82,6 +82,9 @@ pub enum Effect {
     Quit,
     /// Re-exec the WM binary in place.
     Restart,
+    /// Reload the configured TOML through the backend.
+    Reload,
     /// Publish the current state snapshot to IPC subscribers.
+    #[cfg(any(feature = "control-ipc", test))]
     PublishIpcState,
 }

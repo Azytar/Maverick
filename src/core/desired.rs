@@ -108,7 +108,7 @@ impl DoubleEndedIterator for DesiredIter<'_> {
 
 impl ExactSizeIterator for DesiredIter<'_> {}
 
-impl<'a, 'b> IntoIterator for &'b DesiredWindows<'a> {
+impl<'b> IntoIterator for &'b DesiredWindows<'_> {
     type Item = DesiredWindow;
     type IntoIter = DesiredIter<'b>;
 

@@ -4,9 +4,10 @@ members = [
     "maverick-sys",
     "maverick-x11",
     "maverick-toml",
-    "maverickctl",
     "xtask",
 ]
+exclude = ["maverickctl"]
+default-members = ["."]
 resolver = "2"
 
 [workspace.package]
@@ -58,9 +59,12 @@ x11rb = { version = "0.13", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+maverick-sys = { workspace = true, features = ["json"] }
 proptest.workspace = true
 
 [features]
+default = []
+control-ipc = ["maverick-sys/control-ipc"]
 # Both emit `[INPUT-TRACE]` / `[WINDOW-TRACE]` on stderr
 # (`cargo build --features input-trace,window-trace`); neither is on by default.
 input-trace = []

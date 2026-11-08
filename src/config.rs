@@ -300,6 +300,7 @@ pub fn compiled_config() -> Cfg {
         // wait up to SHUTDOWN_BUDGET, force-kill remaining, then cleanup.
         (shs, k!(b'q'), Action::Quit),
         (shs, k!(b'r'), Action::Restart),
+        (sct, k!(b'r'), Action::Reload),
         (sup, XK_F5, Action::Restart),
         (sup, XK_TAB, Action::FocusMon(Dir::Next)),
         (shs, XK_TAB, Action::MoveMon(Dir::Next)),

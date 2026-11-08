@@ -158,17 +158,6 @@ name = "maverick-xtask"
 version = "1.1.1"
 
 [[package]]
-name = "maverickctl"
-version = "1.1.1"
-dependencies = [
- "libc",
- "maverick-sys",
- "proptest",
- "rustix",
- "tempfile",
-]
-
-[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -63,18 +63,21 @@ folded into a fix makes that impossible. Split it.
 
 ## Build and test
 
-Rust 1.82 or newer is the minimum (`rust-version` in `Cargo.toml`). The X11
+Rust 1.85 or newer is the minimum (`rust-version` in `Cargo.toml`). The X11
 development libraries are required to link; the Debian/Ubuntu packages are
 listed in the README under *Requirements*.
 
 ```bash
-cargo build --release -p maverick -p maverickctl --locked
+cargo build --release -p maverick --locked
 cargo check --workspace --all-targets --locked
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked
 cargo test --workspace --all-targets --locked
 ```
+
+The control client is an independent repository. Prepare its pinned checkout
+using the README build instructions before running the full xtask gates.
 
 `cargo fmt --all -- --check` is read-only; `cargo fmt --all` applies. Clippy is
 run with default lints only. `--locked` is used on every command that resolves
@@ -124,9 +127,9 @@ launch clients with `maverickctl exec <test-name> <program>`, and close it with
 `maverickctl session stop <test-name>`. Instance `quit` and session `stop` have
 different scopes; always name the test target explicitly.
 
-CI (`.github/workflows/ci.yml`) runs three jobs: the workspace with strict
-Clippy and both feature sets, the installer checks, and the Xvfb stacking smoke
-test. All three must pass.
+CI (`.github/workflows/ci.yml`) checks Rust 1.85, the workspace with strict
+Clippy and both feature sets, the installer and the isolated X11 campaign.
+All four jobs must pass.
 
 `python3 tests/xvfb-overview.py` checks displayed pixels and client-side
 configure/map/unmap events across entry, navigation, repaint and exit. Its C

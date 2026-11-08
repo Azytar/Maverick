@@ -140,9 +140,14 @@ corner_radius = 0
 # [[keybindings]]
 # key = "Mod4+Shift+r"
 # action = "restart"
+
+# [[keybindings]]
+# key = "Mod4+Control+r"
+# action = "reload"
 # [[keybindings]]
 # key = "Mod4+F5"
 # action = "restart"
+
 
 # Monitor navigation
 # [[keybindings]]

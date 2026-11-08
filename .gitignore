@@ -40,3 +40,6 @@ __pycache__/
 # into the source tree.
 /.kilo/
 /.commandcode/
+
+# Independent client checkout used by the optional control gates.
+/maverickctl/

@@ -266,14 +266,17 @@ def suite_build_command_names_the_release_set():
         assert result.returncode == 0, (result.stdout[-2000:], result.stderr[-2000:])
         builds = [line for line in box.calls.splitlines() if line.startswith("cargo build")]
         assert builds, f"no cargo build was recorded:\n{box.calls}"
-        for line in builds:
-            assert "-p maverick" in line, f"build does not name maverick: {line}"
-            assert "-p maverickctl" in line, f"build does not name maverickctl: {line}"
-            assert "--release" in line, f"build is not a release build: {line}"
-            assert "--features" not in line, f"build names features: {line}"
-            assert "--no-default-features" not in line, \
-                f"build disables a default feature that does not exist: {line}"
-    print("PASS: the build command names maverick and maverickctl, and no features")
+        wm = [line for line in builds if "--manifest-path" not in line]
+        client = [line for line in builds if "--manifest-path" in line]
+        assert wm and client, builds
+        for line in wm:
+            assert "-p maverick " in line and "--release" in line, line
+            assert "--features control-ipc" in line, line
+            assert "-p maverickctl" not in line, line
+        for line in client:
+            assert "-p maverickctl" in line and "--release" in line and "--locked" in line, line
+            assert "--target-dir" in line and "maverickctl/Cargo.toml" in line, line
+    print("PASS: the build command names maverick and maverickctl, and explicit control-ipc")
 
 
 def suite_golden_output():

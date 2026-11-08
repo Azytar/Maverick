@@ -70,6 +70,7 @@ pub static ACTIONS: &[(&str, ArgKind)] = &[
     ("focus_mon", ArgKind::Dir),
     ("move_mon", ArgKind::Dir),
     ("restart", ArgKind::None),
+    ("reload", ArgKind::None),
     ("quit", ArgKind::None),
     ("toggle_overview", ArgKind::None),
     ("overview_nav", ArgKind::Dir),
@@ -110,6 +111,7 @@ pub fn name(a: &Action) -> &'static str {
         Action::FocusMon(_) => "focus_mon",
         Action::MoveMon(_) => "move_mon",
         Action::Restart => "restart",
+        Action::Reload => "reload",
         Action::Quit => "quit",
         Action::ToggleOverview => "toggle_overview",
         Action::OverviewNav(_) => "overview_nav",
@@ -332,6 +334,7 @@ pub fn parse(input: &str) -> Option<Action> {
             .flatten()
             .map(Action::MoveMon),
         "restart" => none_if_arg(has_arg, Action::Restart),
+        "reload" => none_if_arg(has_arg, Action::Reload),
         "quit" => none_if_arg(has_arg, Action::Quit),
         "toggle_overview" => none_if_arg(has_arg, Action::ToggleOverview),
         "overview_nav" => has_arg
@@ -408,6 +411,7 @@ mod tests {
             Action::NewColumn,
             Action::CollapseColumn,
             Action::Restart,
+            Action::Reload,
             Action::Quit,
             Action::ToggleOverview,
             Action::OverviewEnter,

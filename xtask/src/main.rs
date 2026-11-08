@@ -93,6 +93,128 @@ const TEST_DEFAULT_FEATURES: Step = Step {
     args: &["test", "--workspace", "--all-targets", "--locked"],
 };
 
+const CLIENT_CHECK: Step = Step {
+    label: "independent client check",
+    program: "cargo",
+    args: &[
+        "check",
+        "--manifest-path",
+        "maverickctl/Cargo.toml",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+    ],
+};
+const CLIENT_FMT: Step = Step {
+    label: "independent client format",
+    program: "cargo",
+    args: &[
+        "fmt",
+        "--manifest-path",
+        "maverickctl/Cargo.toml",
+        "--all",
+        "--",
+        "--check",
+    ],
+};
+const CLIENT_CLIPPY: Step = Step {
+    label: "independent client clippy",
+    program: "cargo",
+    args: &[
+        "clippy",
+        "--manifest-path",
+        "maverickctl/Cargo.toml",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+    ],
+};
+const CLIENT_TEST: Step = Step {
+    label: "independent client tests",
+    program: "cargo",
+    args: &[
+        "test",
+        "--manifest-path",
+        "maverickctl/Cargo.toml",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+    ],
+};
+const CLIENT_RELEASE: Step = Step {
+    label: "independent client release",
+    program: "cargo",
+    args: &[
+        "build",
+        "--release",
+        "--manifest-path",
+        "maverickctl/Cargo.toml",
+        "--target-dir",
+        "target",
+        "--locked",
+    ],
+};
+
+const MINIMAL_CLIPPY: Step = Step {
+    label: "isolated Minimal clippy",
+    program: "cargo",
+    args: &[
+        "clippy",
+        "-p",
+        "maverick",
+        "--all-targets",
+        "--no-default-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+    ],
+};
+const MINIMAL_TEST: Step = Step {
+    label: "isolated Minimal tests",
+    program: "cargo",
+    args: &[
+        "test",
+        "-p",
+        "maverick",
+        "--all-targets",
+        "--no-default-features",
+        "--locked",
+    ],
+};
+const MINIMAL_API: Step = Step {
+    label: "Minimal control API exclusion",
+    program: "cargo",
+    args: &[
+        "test",
+        "-p",
+        "maverick-sys",
+        "--doc",
+        "--no-default-features",
+        "--locked",
+    ],
+};
+const MINIMAL_RELEASE: Step = Step {
+    label: "Minimal release build",
+    program: "cargo",
+    args: &[
+        "build",
+        "--release",
+        "-p",
+        "maverick",
+        "--no-default-features",
+        "--target-dir",
+        "target/minimal",
+        "--locked",
+    ],
+};
+
 const X11_STEPS: &[Step] = &[
     Step {
         label: "stacking startup contracts",
@@ -311,8 +433,8 @@ const RELEASE: Step = Step {
         "--release",
         "-p",
         "maverick",
-        "-p",
-        "maverickctl",
+        "--features",
+        "maverick/control-ipc",
         "--locked",
     ],
 };
@@ -328,6 +450,14 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
+    // Always resolve fixtures and release artifacts from the workspace, even
+    // when invoked with --manifest-path from another directory.
+    env::set_current_dir(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .ok_or("missing workspace directory")?,
+    )
+    .map_err(|error| format!("cannot enter workspace: {error}"))?;
     let mut args = env::args().skip(1);
     let task = Task::parse(args.next().as_deref())?;
     if let Some(extra) = args.next() {
@@ -342,11 +472,28 @@ fn run() -> Result<(), String> {
             CLIPPY_DEFAULT_FEATURES,
             TEST_ALL_FEATURES,
             TEST_DEFAULT_FEATURES,
+            MINIMAL_CLIPPY,
+            MINIMAL_TEST,
+            MINIMAL_API,
+            CLIENT_FMT,
+            CLIENT_CHECK,
+            CLIENT_CLIPPY,
+            CLIENT_TEST,
         ]),
-        Task::Fmt => run_steps(&[FMT]),
-        Task::Clippy => run_steps(&[CLIPPY, CLIPPY_DEFAULT_FEATURES]),
-        Task::Test => run_steps(&[TEST_ALL_FEATURES, TEST_DEFAULT_FEATURES]),
-        Task::Release => run_steps(&[RELEASE]),
+        Task::Fmt => run_steps(&[FMT, CLIENT_FMT]),
+        Task::Clippy => run_steps(&[
+            CLIPPY,
+            CLIPPY_DEFAULT_FEATURES,
+            MINIMAL_CLIPPY,
+            CLIENT_CLIPPY,
+        ]),
+        Task::Test => run_steps(&[
+            TEST_ALL_FEATURES,
+            TEST_DEFAULT_FEATURES,
+            MINIMAL_TEST,
+            CLIENT_TEST,
+        ]),
+        Task::Release => run_steps(&[MINIMAL_RELEASE, RELEASE, CLIENT_RELEASE]),
         Task::X11 => {
             run_steps(X11_STEPS)?;
             run_steps(FOCUS_X11_STEPS)

@@ -28,9 +28,7 @@ here has a `file:line` behind it.
                    X11
 ```
 
-The workspace holds six crates — the root package `maverick` plus the five members
-at `Cargo.toml:2-8` — and every one of them is built from this tree. Four are
-libraries the window manager links; two of them are the `maverick-core` and
+The WM links four libraries from this workspace. Two are `maverick-core` and
 `maverick-x11` in the diagram above, and two more sit alongside that path rather
 than inside it:
 
@@ -39,10 +37,11 @@ than inside it:
 - **`maverick-sys`** — the OS boundary: signals, `poll`, uid/gid, process-tree
   signalling, instance identity, and the Unix-socket control protocol.
 
-**`maverickctl`** is the sixth crate, and it is separate from the correctness
-path: it ships the control client binary, with CLI parsing, the control-socket
-client, instance discovery and session orchestration. It links `maverick-sys`
-for the shared protocol surface and never links the window manager.
+**[`maverickctl`](https://github.com/Azytar/maverickctl)** has an independent
+workspace and lockfile. Its CLI, socket client, discovery and session
+orchestration depend on its own `maverick-protocol` crate, without linking the
+WM, X11 or `maverick-sys`. Minimal compiles no control listener, hub, identity
+registry or control threads. `control-ipc` explicitly enables those resources.
 
 Configuration is data. It is validated, normalised, and reported on at load
 time (`src/userconfig.rs`), and it is never consulted to decide what a window's

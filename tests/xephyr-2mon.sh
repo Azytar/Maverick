@@ -45,6 +45,9 @@ MH=800           # monitor height
 TOTAL_W=2560     # MW*2
 MAVERICK_BIN="${MAVERICK_BIN:-./target/debug/maverick}"
 MSG_BIN="${MSG_BIN:-./target/debug/maverickctl}"
+for binary in "$MAVERICK_BIN" "$MSG_BIN"; do
+    [ -x "$binary" ] || { echo "FAIL: required binary is not executable: $binary" >&2; exit 1; }
+done
 # Private runtime dir (mktemp, like common.sh): never rm -rf the session's
 # $XDG_RUNTIME_DIR — a previous revision did exactly that when the variable
 # was already set, wiping the live user runtime dir. Short path avoids SUN_LEN.
@@ -286,7 +289,8 @@ done
 echo; echo "########## S4 WorkspaceSwitch (per-monitor active_ws) ##########"
 for m in 0 1; do
     setmon "$m"; sleep 0.2
-    "$MSG_BIN" view 2 >/dev/null 2>&1; sleep 0.3
+    "$MSG_BIN" msg view 2 >/dev/null || { bad "S4 mon$m: view 2 dispatch failed"; exit 1; }
+    sleep 0.3
     D="$(spawn_win "R6_WS${m}2")"; sleep 0.4
     TL="$(tree | tree_lines)"; ROW="$(echo "$TL" | awk -v i="$D" '$1==i')"
     DMON="$(echo "$ROW" | awk '{print $2}')"
@@ -297,7 +301,8 @@ for m in 0 1; do
     else
         bad "S4 mon$m: win mon=$DMON active_ws=$DAWS (expected mon$m, ws1)"
     fi
-    "$MSG_BIN" view 1 >/dev/null 2>&1; sleep 0.3
+    "$MSG_BIN" msg view 1 >/dev/null || { bad "S4 mon$m: view 1 dispatch failed"; exit 1; }
+    sleep 0.3
     DAWS0="$(state | python3 -c "import sys,json;print(json.load(sys.stdin)['monitors'][$m]['active_ws'])")"
     [ "$DAWS0" = "0" ] && ok "S4 mon$m: switched back to workspace 1 (index 0)" || bad "S4 mon$m: back-switch active_ws=$DAWS0"
 done

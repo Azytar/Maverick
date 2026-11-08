@@ -47,6 +47,7 @@ def startup_files(box):
 STUB_OK = """#!/bin/sh
 case "$1" in
   --version) echo "maverick 0.0.0-test"; exit 0 ;;
+  --build-profile) echo "${MAVERICK_STUB_PROFILE:-control}"; exit 0 ;;
   session)   [ "${2:-}" = "--help" ] && echo "maverickctl sessions - test stub"; exit 0 ;;
   --help)    echo "usage: test stub"; exit 0 ;;
 esac
@@ -59,6 +60,7 @@ exit 0
 STUB_NO_SESSIONS = """#!/bin/sh
 case "$1" in
   --version) echo "maverick 0.0.0-test"; exit 0 ;;
+  --build-profile) echo "${MAVERICK_STUB_PROFILE:-control}"; exit 0 ;;
   session)   echo "maverickctl: unknown command 'session'" >&2; exit 1 ;;
   --help)    echo "usage: test stub"; exit 0 ;;
 esac
@@ -131,6 +133,8 @@ class Sandbox:
                      self.repo / "target/release", self.target / "release"):
             path.mkdir(parents=True)
         shutil.copytree(INSTALLER_DIR, self.repo / "installer")
+        (self.repo / "maverickctl").mkdir()
+        (self.repo / "maverickctl/Cargo.toml").write_text('[package]\nname="maverickctl"\nversion="1.1.1"\n')
         (self.repo / "config/config.toml").write_text("[general]\nview_count = 4\n")
         self.stubs = base / "stubs"
         self.stubs.mkdir()
@@ -156,9 +160,13 @@ class Sandbox:
         env.update({k: str(v) for k, v in extra.items()})
         return env
 
-    def install(self, *args, env=None, timeout=60):
+    def install(self, *args, env=None, timeout=60, profile="control", local_controller=True):
         command = ["bash", str(self.repo / "installer/install.sh"), "--yes", "--no-anim", "--lang", "en"]
         command += list(args)
+        if local_controller:
+            command += ["--controller-source", str(self.repo / "maverickctl")]
+        if profile is not None and not any(a in ("--minimal", "--with-control") for a in args):
+            command += ["--with-control" if profile == "control" else "--minimal"]
         result = subprocess.run(command, env=env or self.env(), capture_output=True,
                                 text=True, timeout=timeout)
         self.calls = self.log.read_text() if self.log.exists() else ""
@@ -181,6 +189,9 @@ def interactive_install(box, keys, args=()):
     env = box.env(SHELL="/bin/bash", TERM="xterm-256color")
     command = ["bash", str(box.repo / "installer/install.sh"), "--no-build", "--lang", "en"]
     command += list(args)
+    command += ["--controller-source", str(box.repo / "maverickctl")]
+    if not any(a in ("--minimal", "--with-control") for a in args):
+        command += ["--with-control"]
     proc = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
                             env=env, close_fds=True)
     os.close(slave)
@@ -579,9 +590,10 @@ def suite_interactive_build_progress():
         # would pass without covering anything.
         env = box.env(SHELL="/bin/bash", TERM="xterm-256color", NO_COLOR="",
                       MAVERICK_TEST_BUILD_DELAY="3")
-        command = ["bash", str(box.repo / "installer/install.sh"), "--yes",
+        command = ["bash", str(box.repo / "installer/install.sh"), "--yes", "--with-control",
                    "--no-anim", "--no-path", "--lang", "en",
-                   "--prefix", str(box.prefix)]
+                   "--prefix", str(box.prefix),
+                   "--controller-source", str(box.repo / "maverickctl")]
         proc = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
                                 env=env, close_fds=True)
         os.close(slave)
@@ -690,6 +702,7 @@ def suite_cli_contract():
                                 capture_output=True, text=True)
         assert result.returncode == 2, (option, result.returncode)
     print("PASS: CLI argument contract")
+
 
 
 def main():

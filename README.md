@@ -14,11 +14,12 @@ Views are logical containers, not X11 windows: creating, selecting and dropping
 one is a state transition, and nothing about it requires a round trip to the
 server.
 
-Maverick ships two binaries. `maverick` is the window manager.
-`maverickctl` is a separate control client that never links the window manager
-and never touches X11; it talks to a running instance over that instance's Unix
-control socket. Installation is source-based: there are no release archives or
-prebuilt binaries.
+Maverick builds Minimal by default: one `maverick` binary, with X11 management
+and no remote-control server. The explicit `control-ipc` feature enables remote
+control. `maverickctl` is an independent client project that never links the WM
+or opens an X display. Installation is source-based; no prebuilt release binary
+is required. The client is maintained in [Azytar/maverickctl](https://github.com/Azytar/maverickctl),
+with the installer and CI pinned to `60ca498354643bac7b8a7b47b0e20e44692a5e39`.
 
 [Overview](#overview) · [What Maverick is not](#what-maverick-is-not) ·
 [Architecture](#architecture) · [Project structure](#project-structure) ·
@@ -311,7 +312,7 @@ The boundaries that matter:
 | `maverick-x11/` | Shared Xlib/XCB connection bootstrap; links `X11` and `X11-xcb` |
 | `maverick-sys/` | OS/FFI boundary, instance identity, control socket protocol server, minimal JSON |
 | `maverick-toml/` | Zero-dependency TOML-subset parser |
-| `maverickctl/` | Control client: CLI, control-socket IPC client, discovery, session lifecycle |
+| [Azytar/maverickctl](https://github.com/Azytar/maverickctl) | Independent client, discovery and session lifecycle, with its own Cargo workspace and lockfile |
 | `installer/` | The installer, its shell library, and its test suite |
 | `tests/` | Real-X11 probes, integration scripts, installer smoke test |
 
@@ -344,7 +345,6 @@ Maverick/
 ├── maverick-sys/         libc FFI, instance identity, control protocol server
 ├── maverick-toml/        zero-dependency TOML-subset parser
 ├── maverick-x11/         Xlib/XCB connection bootstrap
-├── maverickctl/          the `maverickctl` control client
 ├── src/
 │   ├── main.rs           CLI, startup, signals, backend wiring
 │   ├── config.rs         compiled defaults
@@ -401,8 +401,9 @@ Relevant environment variables:
 
 ## Installation
 
-Installation is source-based. The installer builds both binaries from this
-workspace with `cargo build --release -p maverick -p maverickctl`.
+The installer defaults to Minimal for a fresh installation. `--with-control`
+builds the WM with `control-ipc` and builds the independent client separately.
+Existing control installations retain their mode unless explicitly migrated.
 
 ```bash
 git clone https://github.com/Azytar/Maverick.git
@@ -414,6 +415,9 @@ The default prefix is `$HOME/.local`, which needs no privileges. The installer
 refuses to run as root, never invokes `sudo`, and never enables a service.
 
 ```text
+--minimal              WM only, recommended for new installations
+--with-control         WM with optional remote control and client
+--controller-source DIR  prepared independent client checkout
 --system               install into /usr/local instead
 --prefix DIR           install into DIR
 --xsessions-dir DIR    also install the session file into DIR (the only write
@@ -435,7 +439,8 @@ What it installs, and where:
 | path | what |
 | --- | --- |
 | `<prefix>/bin/maverick` | the window manager |
-| `<prefix>/bin/maverickctl` | the control client |
+| `<prefix>/bin/maverickctl` | the optional control client (`--with-control`) |
+| `<prefix>/share/maverick/install.manifest` | installer ownership/profile record |
 | `<prefix>/share/xsessions/maverick.desktop` | the X11 session entry |
 
 Outside the prefix the installer writes only files belonging to the invoking
@@ -453,7 +458,8 @@ rather than escalated around, so a system-wide install needs write access to
 `/usr/local` arranged in advance.
 
 Each step fails loudly. The installer runs the binaries it just installed —
-`maverick --version`, `maverickctl --help`, `maverickctl session --help` — and a
+`maverick --version`, plus `maverickctl --help`
+and `maverickctl session --help` for control installations — and a
 partial, stale or broken set is reported as a failure rather than as a successful
 install. It is safe to run repeatedly: a second run converges, fixes
 umask-hostile permissions and does not duplicate the `PATH` block.
@@ -469,10 +475,12 @@ Verify an installation with:
 
 ```bash
 maverick --version
+maverick --build-profile
+# For control installations:
 maverickctl --version
 ```
 
-To uninstall, delete the two binaries and the session file from the prefix, and
+To uninstall, delete the installed binaries, session file and installer manifest from the prefix, and
 remove the block between the `# >>> maverick (install.sh) >>>` markers from any
 startup file it touched.
 
@@ -491,19 +499,20 @@ Alternatively, select the installed Maverick session in the display manager.
 
 ```bash
 maverick --check-config ~/.config/maverick/config.toml   # validate, start nothing
-maverick --config ~/.config/maverick/config.toml --name desktop
+maverick --config ~/.config/maverick/config.toml
 maverick --help
 ```
 
 | flag | effect |
 | --- | --- |
-| `--name <id>` | label the instance for control and identification |
-| `--session-id <id>` | publish the instance under a fixed session id (`[A-Za-z0-9_-]`), which is what `maverickctl session` uses; the default is random |
+| `--name <id>` | control builds only: label the instance for control and identification |
+| `--session-id <id>` | control builds only: publish the instance under a fixed session id (`[A-Za-z0-9_-]`), which is what `maverickctl session` uses; the default is random |
 | `--replace` | take over from a running window manager, adopting its windows |
 | `--debug` | log at debug level, equivalent to `MAVERICK_LOG=debug` |
 | `--log-level <level>` | `off`, `error`, `warn`, `info`, `debug` or `trace`; overrides `--debug` |
 | `--config <path>` | read the configuration from `<path>` instead of `$XDG_CONFIG_HOME/maverick/config.toml`; reused by reload and restart |
 | `--check-config [path]` | validate a configuration and exit: `0` clean, `1` on warnings or errors. Starts no window manager and opens no display |
+| `--build-profile` | print `minimal` or `control` without starting a WM |
 | `-v`, `--version` | print the version and exit |
 | `-h`, `--help` | show the built-in help |
 
@@ -740,7 +749,7 @@ autostart does not disable services activated independently by the session.
 
 ## maverickctl
 
-`maverickctl` is a separate control client. It never links the window manager and
+`maverickctl` requires a WM compiled with `control-ipc`. It is a separate control client and never links the window manager and
 never opens an X display; it speaks to a running instance over that instance's
 Unix control socket, which is peer-checked with `SO_PEERCRED` inside a private
 `0700` runtime directory.
@@ -799,6 +808,8 @@ query topic from a typo.
 `process`. `maverickctl --help` gives the complete command list.
 
 ## Sessions
+
+These optional orchestration commands require the control build and independent client.
 
 `maverickctl session` manages whole graphical sessions: a nested X server, a
 Maverick, the programs launched into it, a cookie, logs and a lifecycle.
@@ -883,10 +894,20 @@ has no animation subsystem.
 ## Building from source
 
 ```bash
-cargo build --release -p maverick -p maverickctl
+cargo build --release -p maverick --locked
+# Optional control build and independent client:
+cargo build --release -p maverick --features control-ipc --locked
+git clone https://github.com/Azytar/maverickctl.git maverickctl
+git -C maverickctl checkout --detach 60ca498354643bac7b8a7b47b0e20e44692a5e39
+cargo build --release --manifest-path maverickctl/Cargo.toml --locked
 cargo check --workspace --all-targets
 cargo fmt --all -- --check      # read-only form; `cargo fmt --all` to apply
 ```
+
+The optional `maverickctl/` directory is an ignored independent checkout, not
+vendored source. The complete xtask gates use it; ordinary Minimal builds need
+neither the checkout nor a client download. The installer also accepts
+`--controller-source DIR` for a separate development checkout.
 
 ## Testing
 
@@ -907,14 +928,13 @@ python3 installer/tests/partition.py    # the installer behaviour suite
 
 Real-X11 harnesses live in `tests/`. `tests/xvfb-stacking.py` is the automated
 regression, and the `tests/xephyr-*.sh` scripts are manual integration
-scenarios. They are **not** all isolated to the same standard — some older
-helpers in `tests/common.sh` kill processes by name or use fixed displays — so a
-script should be read before it is run, and the legacy suite reserved for a
-disposable graphical session.
+scenarios. Read each harness before running it. The shared harness uses private
+configuration/runtime directories, refuses occupied displays and stops only
+registered children. Nested-server results do not establish physical-session
+compatibility or input latency.
 
-CI (`.github/workflows/ci.yml`) runs three jobs: the workspace with strict
-Clippy and both feature sets, the installer checks, and an Xvfb stacking smoke
-test.
+CI (`.github/workflows/ci.yml`) checks Rust 1.85, the workspace with strict
+Clippy and both feature sets, the installer, and the isolated X11 campaign.
 
 ## Status
 
@@ -957,3 +977,40 @@ previous session.
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE).
+
+### Optional control builds
+
+`cargo build --release -p maverick` builds Minimal: the X11 WM without a control
+listener, thread, discovery record or control API. Keyboard actions, TOML rules,
+autostart, signals and X11 restart remain available. `Super+Control+R` reloads
+the current TOML; `Super+Shift+R` restarts.
+
+`cargo build --release -p maverick --features control-ipc` enables remote control.
+The independent client is published at https://github.com/Azytar/maverickctl.
+The reference copy in `maverickctl/` is excluded from the WM
+workspace, with its own Cargo.lock, protocol crate, tests and CI configuration.
+It builds with `cargo build --release --manifest-path maverickctl/Cargo.toml` and
+has no dependency on the WM repository or X11 engine. The reference copy remains for comparison during the development transition.
+CI checks out the published client before compiling and running the control campaign.
+
+The installer offers `--minimal` and `--with-control`. Fresh installations
+recommend Minimal and do not build or fetch the client. Existing control
+installations keep their mode unless explicitly migrated. Control builds fetch immutable commit
+`60ca498354643bac7b8a7b47b0e20e44692a5e39` from the independent repository.
+`--controller-source DIR` explicitly selects a local developer checkout instead.
+Git is needed only when fetching the pinned client; Minimal and `--no-build`
+never fetch it.
+
+`--no-build` verifies `maverick --build-profile` before replacing any binary.
+An explicit transition to Minimal refuses to replace an owned WM still running
+in the old mode. Client removal requires an installer manifest, matching hash,
+current ownership and a regular file; personal or modified client files remain.
+
+The Xvfb campaign runs the same 21 Rust tests against both release variants,
+then independent native/control clients. Separate Minimal checks prevent
+workspace feature unification from hiding the dependency boundary; a compile-fail
+check verifies that the Minimal system crate exports no ControlServer,
+ControlHub or InstanceInfo. These development changes do not publish a release
+or automatically rebuild/migrate existing installations.
+
+Arch and nested-display validation commands are in [tests/ARCH_VALIDATION.md](tests/ARCH_VALIDATION.md).

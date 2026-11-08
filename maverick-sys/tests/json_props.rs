@@ -7,6 +7,8 @@
 //! legally contain, and it has to be reversible, because the ficha reader
 //! recovers its fields by unescaping.
 
+#![cfg(feature = "json")]
+
 mod common;
 
 use common::{escape_soup, regex_s};

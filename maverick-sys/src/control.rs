@@ -81,7 +81,9 @@
 //!   character boundary ([`single_line`]), so a hub payload can never make a
 //!   handler unwind mid-write.
 
-use std::io::{self, BufRead, BufReader, Write};
+#[cfg(test)]
+use std::io::BufRead;
+use std::io::{self, BufReader, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -112,13 +114,7 @@ const MAX_CONCURRENT: usize = 32;
 /// handler slots free for commands. Same-UID local only, but a wedged bar must
 /// not be able to wedge WM control.
 pub const MAX_SUBSCRIBERS: usize = 16;
-/// Maximum accepted protocol line (64 KiB). Prevents a single client from
-/// OOMing the per-connection thread with a 1 GiB `read_line`.
-pub const MAX_LINE_LEN: usize = 64 * 1024;
-/// Longest command the client will send (64 KiB). The client refuses longer
-/// commands before touching the socket; the server independently bounds every
-/// inbound line at [`MAX_LINE_LEN`].
-pub const MAX_CMD_LEN: usize = 64 * 1024;
+pub use crate::protocol::{MAX_CMD_LEN, MAX_LINE_LEN};
 
 /// The uid of the process on the other end of a connected Unix socket.
 ///
@@ -390,20 +386,15 @@ fn handle_conn(
     };
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => break,
-        }
-        // Bound memory: a hostile client sending a 1 GiB line without `\n`
-        // would otherwise OOM this thread via unbounded `read_line` growth.
-        if line.len() > MAX_LINE_LEN {
-            let _ = writer.write_all(b"error line too long\n");
-            break;
-        }
+        let line = match crate::protocol::read_frame(&mut reader) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(_) => {
+                let _ = writer.write_all(b"error invalid or oversized line\n");
+                break;
+            }
+        };
         // Drop the line terminator, tolerating a telnet-style trailing `\r`.
         let cmd = line.trim_end_matches(['\n', '\r']).trim();
         if cmd.is_empty() {
@@ -480,6 +471,7 @@ fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -
     // the replacement takes to start, which can be shorter than one poll.
     let restarting = hub.is_restarting();
     match cmd {
+        "protocol" => format!("protocol {}\n", crate::protocol::PROTOCOL_VERSION),
         PING_CMD if restarting => "error restarting\n".to_string(),
         STATE_CMD if restarting => "error restarting\n".to_string(),
         PING_CMD => format!("pong {safe_name}\n"),

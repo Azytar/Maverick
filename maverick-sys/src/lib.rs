@@ -75,6 +75,11 @@
 //! process-tree signals, which gate every `kill`/`killpg` on a recorded process
 //! start time so a recycled PID cannot be hit.
 
+#![cfg_attr(
+    not(feature = "control-ipc"),
+    doc = "The Minimal dependency exposes no control API:\n\n```compile_fail\nuse maverick_sys::{ControlServer, ControlHub, InstanceInfo};\n```"
+)]
+
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::OnceLock;
@@ -600,18 +605,27 @@ fn wait_fds(
     }
 }
 
+#[cfg(feature = "control-ipc")]
 pub mod control;
+#[cfg(feature = "control-ipc")]
 pub mod hub;
+#[cfg(feature = "control-ipc")]
 pub mod identity;
+#[cfg(any(feature = "json", test))]
 pub mod json;
+#[cfg(feature = "control-ipc")]
+pub mod protocol;
 
+#[cfg(feature = "control-ipc")]
 pub use control::ControlServer;
+#[cfg(feature = "control-ipc")]
 pub use hub::{ControlCommand, ControlHub};
+#[cfg(feature = "control-ipc")]
 pub use identity::{self_info, InstanceInfo, DEFAULT_NAME};
 
 /// Shared pieces for the property tests that are compiled into the library
 /// because the functions they cover are private.
-#[cfg(test)]
+#[cfg(all(test, feature = "control-ipc"))]
 pub(crate) mod prop_support {
     use proptest::prelude::*;
     use proptest::string::string_regex;
@@ -684,6 +698,7 @@ pub(crate) mod prop_support {
     /// test that touches the runtime root sees the same constant. Each such test
     /// calls this *before* it touches anything, which is what makes the single
     /// write ordered before every read rather than racing one.
+    #[cfg(feature = "control-ipc")]
     pub fn runtime_root() -> &'static std::path::Path {
         use std::sync::OnceLock;
         static ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
@@ -720,6 +735,7 @@ pub(crate) mod prop_support {
     /// another process is part-way through its own fixture in the same runtime
     /// root: a directory that still holds a socket simply fails to be removed
     /// rather than being emptied.
+    #[cfg(feature = "control-ipc")]
     pub fn retire(name: &str) {
         let dir =
             crate::identity::try_session_dir(name).expect("a fixture owns a valid session id");
@@ -733,6 +749,7 @@ pub(crate) mod prop_support {
     /// unexpected content inside the fixture's own directory stops the removal
     /// rather than being destroyed with it.
     #[test]
+    #[cfg(feature = "control-ipc")]
     fn retiring_a_fixture_directory_is_scoped_by_ownership() {
         runtime_root();
         crate::identity::ensure_runtime_dir().expect("runtime dir");

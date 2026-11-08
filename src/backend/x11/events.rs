@@ -802,6 +802,7 @@ impl WindowManager {
                 }
                 if changed {
                     self.write_net_wm_state(e.window);
+                    #[cfg(feature = "control-ipc")]
                     self.publish_state();
                 }
             }
@@ -948,7 +949,7 @@ impl WindowManager {
                     .get(mon_of)
                     .and_then(|m| m.focused);
                 if focused != Some(cw) {
-                    self.focus(Some(cw))?;
+                    self.focus_pointer(Some(cw))?;
                 }
             }
         }

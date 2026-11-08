@@ -12673,6 +12673,7 @@ mod unit_tests {
             Spawn,
             Quit,
             Restart,
+            Reload,
             PublishIpcState,
         }
 
@@ -12696,6 +12697,7 @@ mod unit_tests {
                 Effect::Spawn(_) => EffectKind::Spawn,
                 Effect::Quit => EffectKind::Quit,
                 Effect::Restart => EffectKind::Restart,
+                Effect::Reload => EffectKind::Reload,
                 Effect::PublishIpcState => EffectKind::PublishIpcState,
             }
         }

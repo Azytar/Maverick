@@ -23,6 +23,7 @@
 //! The two together are what let `WindowManager::shutdown` say which half it
 //! skipped and why, instead of losing both and reporting nothing.
 
+#[cfg(feature = "control-ipc")]
 use maverick_sys::ControlServer;
 use maverick_x11::XConn;
 
@@ -148,7 +149,8 @@ pub(crate) struct LocalTeardown {
 /// again, and joining it would turn the local half into a wait on a thread that
 /// can only be released by the process exiting. The socket is unlinked by the
 /// drop itself, so nothing on disk outlives the process either way.
-pub(crate) fn run_local(
+#[cfg(feature = "control-ipc")]
+pub(crate) fn run_local_control(
     session_id: &str,
     control: &mut Option<ControlServer>,
     end: TraceEnd,
@@ -175,7 +177,17 @@ pub(crate) fn run_local(
     }
 }
 
-#[cfg(test)]
+/// Minimal owns only the optional trace on its local shutdown path.
+#[cfg(not(feature = "control-ipc"))]
+pub(crate) fn run_local(end: TraceEnd) -> LocalTeardown {
+    LocalTeardown {
+        ficha_removed: false,
+        control_dropped: false,
+        trace: trace::dump(end),
+    }
+}
+
+#[cfg(all(test, feature = "control-ipc"))]
 mod tests {
     use super::*;
 
@@ -255,7 +267,7 @@ mod tests {
         assert!(ficha.is_file(), "the record must exist before the teardown");
         assert!(socket.exists(), "the socket must exist before the teardown");
 
-        let report = run_local(sid, &mut control, TraceEnd::CleanExit);
+        let report = run_local_control(sid, &mut control, TraceEnd::CleanExit);
 
         assert!(report.ficha_removed, "the ficha step did not run");
         assert!(report.control_dropped, "the control handle was not held");
@@ -275,7 +287,7 @@ mod tests {
     fn a_session_with_no_id_still_completes() {
         let _guard = test_lock();
         let mut control = None;
-        let report = run_local("", &mut control, TraceEnd::CleanExit);
+        let report = run_local_control("", &mut control, TraceEnd::CleanExit);
         assert!(!report.ficha_removed, "there was no record to remove");
         assert!(!report.control_dropped, "no control handle was held");
     }
@@ -378,7 +390,7 @@ mod tests {
                 "{:?}: wrong decision for the X half",
                 case.reason
             );
-            let report = run_local(case.sid, &mut None, case.end);
+            let report = run_local_control(case.sid, &mut None, case.end);
 
             assert!(
                 report.ficha_removed,
