@@ -1103,20 +1103,31 @@ impl WindowManager {
     }
 
     pub(super) fn focus(&mut self, win: Option<Window>) -> Result<(), Box<dyn std::error::Error>> {
-        self.focus_with_camera_policy(win, true)
+        self.focus_with_camera_policy(win, true, true)
+    }
+
+    /// Pointer focus may retarget the camera but must not move the pointer.
+    pub(super) fn focus_pointer(
+        &mut self,
+        win: Option<Window>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.focus_with_camera_policy(win, true, false)?;
+        self.pending.suppress_warp(self.engine.state.sel_mon);
+        Ok(())
     }
 
     pub(super) fn restore_focus(
         &mut self,
         win: Option<Window>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.focus_with_camera_policy(win, false)
+        self.focus_with_camera_policy(win, false, false)
     }
 
     fn focus_with_camera_policy(
         &mut self,
         win: Option<Window>,
         retarget_camera: bool,
+        warp_pointer: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let valid_win = win.filter(|w| self.engine.state.clients.contains_key(w));
         self.take_focus_pending = None;
@@ -1296,11 +1307,6 @@ impl WindowManager {
             // tile makes that tile usable instead of leaving it peeking
             // off-screen.
             //
-            // The recenter moves the just-focused window under the pointer; the
-            // `warp_cursor` pass the mark below schedules puts the pointer back
-            // on it, so the *next* click at the same spot cannot land on
-            // whatever scrolled under the cursor.
-            //
             // `retarget_focus_to_window` is the pure core helper the keyboard
             // path's `ideal_scroll` retarget also funnels through, and it is
             // `#[must_use]`: the monitor index it hands back is exactly the one
@@ -1333,7 +1339,7 @@ impl WindowManager {
             // (guarded in `arrange_full`) so a focus change mid-drag cannot
             // un-hide or mis-place windows.
             self.pending
-                .mark(retargeted.unwrap_or(mon_i), retarget_camera.then_some(w));
+                .mark(retargeted.unwrap_or(mon_i), warp_pointer.then_some(w));
 
             let _ = self.conn.change_property32(
                 PropMode::REPLACE,
@@ -1343,7 +1349,7 @@ impl WindowManager {
                 &[w],
             );
 
-            if retarget_camera && self.engine.cfg.warp_cursor {
+            if warp_pointer && self.engine.cfg.warp_cursor {
                 // Ordinary focus may warp immediately; the pending layout pass
                 // finishes it using settled geometry. Restoring a selection
                 // must leave the pointer where the user had it.

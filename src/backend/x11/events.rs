@@ -949,7 +949,7 @@ impl WindowManager {
                     .get(mon_of)
                     .and_then(|m| m.focused);
                 if focused != Some(cw) {
-                    self.focus(Some(cw))?;
+                    self.focus_pointer(Some(cw))?;
                 }
             }
         }

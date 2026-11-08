@@ -337,12 +337,12 @@ impl WindowManager {
         if !focused_present {
             if let Some(cw) = client_win {
                 if self.engine.state.monitors[mi].focused != Some(cw) {
-                    self.focus(Some(cw))?;
+                    self.focus_pointer(Some(cw))?;
                     // `focus` already refreshes the overlay stacking, so a
                     // separate restack is redundant.
                 }
             } else if e.event == self.root {
-                self.focus(None)?;
+                self.focus_pointer(None)?;
             }
         } else if let Some(fw) = self.engine.state.monitors[mi].focused {
             if let Some(cw) = client_win {
@@ -405,7 +405,7 @@ impl WindowManager {
                             view_i,
                             Some(fw),
                         );
-                        self.focus(Some(p))?;
+                        self.focus_pointer(Some(p))?;
                         // The click was consumed to tear down the overlay; do not
                         // replay the press (it would re-deliver to the now-empty
                         // spot and unfocus the window we just focused).
@@ -429,7 +429,7 @@ impl WindowManager {
                     //    window this also clears its `MAXIMIZED_*` flags and
                     //    rewrites `_NET_WM_STATE`, keeping EWMH state consistent.
                     if self.transient_of(cw, &[fw]) {
-                        self.focus(Some(cw))?;
+                        self.focus_pointer(Some(cw))?;
                     } else if self
                         .engine
                         .state
@@ -443,13 +443,13 @@ impl WindowManager {
                             .engine
                             .execute(crate::core::commands::ToggleFullscreen(Some(fw)));
                         self.run_effects(effects)?;
-                        self.focus(Some(cw))?;
+                        self.focus_pointer(Some(cw))?;
                     } else {
                         let effects = self
                             .engine
                             .execute(crate::core::commands::ToggleMaximize(Some(fw)));
                         self.run_effects(effects)?;
-                        self.focus(Some(cw))?;
+                        self.focus_pointer(Some(cw))?;
                     }
                 }
             }
@@ -522,11 +522,8 @@ impl WindowManager {
         }
 
         // `prev_focused` / `drag_started` are consumed by the trace and
-        // allow_events branches below. The pointer warp after a focus change is
-        // deliberately *not* repeated here: `render::focus()` owns it and
-        // honours `cfg.warp_cursor`, and a second warp would fight it — each
-        // click on a neighbouring tile would move the pointer twice and desync
-        // the next click's hit-test, most visibly on floats.
+        // allow_events branches below. Pointer focus suppresses both immediate
+        // and deferred warps, including when dismissing an overlay.
         let _ = prev_focused;
         let _ = drag_started;
 

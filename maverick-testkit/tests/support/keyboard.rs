@@ -238,3 +238,56 @@ fn keyboard_reload_changes_geometry_without_restarting_clients() -> Result<(), B
     }
     Ok(())
 }
+
+#[test]
+#[ignore = "needs Xvfb and an already compiled release WM"]
+fn pointer_click_preserves_position_with_warp_enabled() -> Result<(), Box<dyn Error>> {
+    use x11rb::protocol::xproto::{
+        ChangeWindowAttributesAux, EventMask, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT,
+        MOTION_NOTIFY_EVENT,
+    };
+    let (mut session, conn, root) = start_with_config(
+        "[general]\ncolumn_width=0.4\nfocus_mouse=false\nwarp_cursor=true\n[autostart]\ncommands=[]\n",
+    )?;
+    let active = atom(&conn, b"_NET_ACTIVE_WINDOW")?;
+    let a = map_client(&conn, root, false)?;
+    conn.change_window_attributes(
+        a,
+        &ChangeWindowAttributesAux::default()
+            .event_mask(EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE),
+    )?
+    .check()?;
+    wait_managed(&mut session, &conn, root, &[a])?;
+    let b = map_client(&conn, root, false)?;
+    wait_managed(&mut session, &conn, root, &[a, b])?;
+    wait_for(&mut session, "initial keyboard-style warp settled", || {
+        let geometry = conn.get_geometry(b)?.reply()?;
+        let pointer = conn.query_pointer(root)?.reply()?;
+        Ok(window_list(&conn, root, active)? == [b]
+            && pointer.root_x == geometry.x + i16::try_from(geometry.width / 2)?
+            && pointer.root_y == geometry.y + i16::try_from(geometry.height / 2)?)
+    })?;
+    let geometry = conn.get_geometry(a)?.reply()?;
+    let x = geometry.x + i16::try_from(geometry.width / 2)?;
+    let y = geometry.y + i16::try_from(geometry.height / 2)?;
+    assert!(x >= 0 && y >= 0, "click target must be visible");
+    conn.xtest_fake_input(MOTION_NOTIFY_EVENT, 0, 0, root, x, y, 0)?
+        .check()?;
+    for event in [BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT] {
+        conn.xtest_fake_input(event, 1, 0, root, 0, 0, 0)?.check()?;
+    }
+    conn.flush()?;
+    wait_for(&mut session, "clicked tile takes real focus", || {
+        Ok(window_list(&conn, root, active)? == [a] && conn.get_input_focus()?.reply()?.focus == a)
+    })?;
+    for _ in 0..30 {
+        let pointer = conn.query_pointer(root)?.reply()?;
+        assert_eq!(
+            (pointer.root_x, pointer.root_y),
+            (x, y),
+            "pointer focus warped the cursor"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
+}

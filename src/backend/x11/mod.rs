@@ -391,6 +391,13 @@ impl PendingReconcile {
         self.monitors.is_empty()
     }
 
+    /// Pointer input cancels movement without discarding the owed layout pass.
+    fn suppress_warp(&mut self, mon: usize) {
+        if let Some(focus) = self.monitors.get_mut(&mon) {
+            *focus = None;
+        }
+    }
+
     /// Hand over everything owed, leaving the set empty for the next turn.
     fn take(&mut self) -> std::collections::BTreeMap<usize, Option<Window>> {
         std::mem::take(&mut self.monitors)
