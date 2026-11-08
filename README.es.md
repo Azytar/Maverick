@@ -17,8 +17,8 @@ estado, y nada de eso requiere un viaje de ida y vuelta al servidor.
 Maverick compila Minimal por defecto: el binario `maverick` conserva la gestión
 X11 y no incluye servidor de control remoto. `control-ipc` habilita el control
 opcional. `maverickctl` es un proyecto Cargo independiente, sin enlazar el gestor
-ni abrir una pantalla X11. Su código permanece junto al gestor mientras se
-completan la publicación independiente y la referencia remota inmutable.
+ni abrir una pantalla X11. Se mantiene en [Azytar/maverickctl](https://github.com/Azytar/maverickctl),
+fijado por el instalador y CI a `60ca498354643bac7b8a7b47b0e20e44692a5e39`.
 
 [Panorámica](#panorámica) · [Lo que Maverick no es](#lo-que-maverick-no-es) ·
 [Arquitectura](#arquitectura) · [Estructura del proyecto](#estructura-del-proyecto) ·
@@ -269,7 +269,7 @@ Las fronteras que importan:
 | `maverick-x11/` | Arranque compartido de la conexión Xlib/XCB; enlaza `X11` y `X11-xcb` |
 | `maverick-sys/` | Frontera del SO/FFI, identidad de instancia, servidor del protocolo de control, JSON mínimo |
 | `maverick-toml/` | Parser de un subconjunto de TOML sin dependencias |
-| `maverickctl/` | Cliente de control: CLI, cliente IPC por socket, descubrimiento, ciclo de vida de sesiones |
+| [Azytar/maverickctl](https://github.com/Azytar/maverickctl) | Cliente independiente: CLI, sockets, descubrimiento y sesiones; workspace y lockfile propios |
 | `installer/` | El instalador, su biblioteca shell y su suite de tests |
 | `tests/` | Sondas sobre X11 real, scripts de integración, test de humo del instalador |
 
@@ -302,7 +302,6 @@ Maverick/
 ├── maverick-sys/         FFI de libc, identidad de instancia, servidor de control
 ├── maverick-toml/        parser de un subconjunto de TOML sin dependencias
 ├── maverick-x11/         arranque de la conexión Xlib/XCB
-├── maverickctl/          el cliente de control `maverickctl`
 ├── src/
 │   ├── main.rs           CLI, arranque, señales, cableado del backend
 │   ├── config.rs         defaults compilados
@@ -813,10 +812,17 @@ Maverick dibuja a través de X11 y no tiene subsistema de animación.
 cargo build --release -p maverick --locked
 # Modalidad con control y cliente independiente:
 cargo build --release -p maverick --features control-ipc --locked
+git clone https://github.com/Azytar/maverickctl.git maverickctl
+git -C maverickctl checkout --detach 60ca498354643bac7b8a7b47b0e20e44692a5e39
 cargo build --release --manifest-path maverickctl/Cargo.toml --locked
 cargo check --workspace --all-targets
 cargo fmt --all -- --check      # forma de solo lectura; `cargo fmt --all` aplica
 ```
+
+El directorio opcional `maverickctl/` es un checkout independiente ignorado por
+Git. Los gates completos de xtask lo utilizan; compilar Minimal no requiere
+descargar ni compilar el cliente. El instalador acepta `--controller-source DIR`
+para usar otro checkout de desarrollo.
 
 ## Pruebas
 
@@ -838,14 +844,12 @@ python3 installer/tests/partition.py    # la suite de comportamiento del instala
 
 Los harnesses sobre X11 real viven en `tests/`. `tests/xvfb-stacking.py` es la
 regresión automatizada, y los scripts `tests/xephyr-*.sh` son escenarios de
-integración manuales. **No** están todos aislados con el mismo rigor —algunos
-helpers antiguos de `tests/common.sh` matan procesos por nombre o usan displays
-fijos—, así que conviene leer un script antes de ejecutarlo y reservar la suite
-legacy para una sesión gráfica desechable.
+integración manuales. Lee cada harness antes de ejecutarlo. El harness común
+usa directorios privados, rechaza displays ocupados y detiene solo sus procesos
+registrados. Un servidor anidado no acredita compatibilidad ni latencia física.
 
-CI (`.github/workflows/ci.yml`) ejecuta tres trabajos: el workspace con Clippy
-estricto y ambos conjuntos de características, las comprobaciones del instalador,
-y un test de humo de apilado con Xvfb.
+CI (`.github/workflows/ci.yml`) comprueba Rust 1.85, el workspace con Clippy
+estricto y ambas modalidades, el instalador y la campaña X11 aislada.
 
 ## Estado
 

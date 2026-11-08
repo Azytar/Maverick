@@ -4,7 +4,8 @@
 `installer/` is what you run.
 
 ```bash
-./installer/install.sh            # install maverick + maverickctl into $HOME/.local
+./installer/install.sh --minimal  # install only maverick into $HOME/.local
+./installer/install.sh --with-control  # enable control and install maverickctl
 ./installer/install.sh --help     # every option
 ```
 
@@ -17,8 +18,13 @@ partition: all suites passed
 
 ## What it builds and installs
 
-Two binaries, both built from this workspace with `cargo build --release -p
-maverick -p maverickctl` and installed into `<prefix>/bin`:
+Minimal builds only `maverick`, without control IPC, and never downloads or builds
+the client. With control, the installer enables `control-ipc` and separately
+builds the independent client pinned at
+`60ca498354643bac7b8a7b47b0e20e44692a5e39` from
+[Azytar/maverickctl](https://github.com/Azytar/maverickctl). Use
+`--controller-source DIR` to select a local development checkout explicitly.
+An existing installation's mode is preserved unless a mode is requested.
 
 | binary | crate | role |
 |---|---|---|
@@ -27,7 +33,7 @@ maverick -p maverickctl` and installed into `<prefix>/bin`:
 
 `maverickctl` is an independent Unix client that talks to a running Maverick
 over its control socket. It is a separate binary by design, not a mode of
-`maverick`, so it is built by name and installed as its own file. There is no
+`maverick`, so it uses its own Cargo manifest and lockfile. There is no
 third binary: the obsolete `maverick-msg` and `maverick-setup` names are absent
 from the workspace and a test asserts they never reappear in an install.
 
@@ -42,9 +48,8 @@ no wallpaper or animation subsystem, no panel, launcher, notification daemon
 or session manager, and the installer offers no switch for any of them: the
 `--with-compositor` / `--without-compositor` / `--no-compositor` /
 `--no-default-features` flags are rejected with a message and exit status 2,
-because there is nothing to select. The `maverick` package has exactly two
-features, `input-trace` and `window-trace`, both diagnostic and both off by
-default; the installer never passes `--features`.
+because these switches do not select a supported installation mode.
+`input-trace` and `window-trace` remain optional diagnostic Cargo features.
 
 Nothing else is installed either. There is no documentation, no man page, no
 icon theme, no shell completion, no showcase asset and no demo entry point in
@@ -56,7 +61,8 @@ fabricate them.
 Inside the prefix (`--prefix DIR`, default `$HOME/.local`, or `--system` for
 `/usr/local`):
 
-- `<prefix>/bin/maverick`, `<prefix>/bin/maverickctl` — mode 0755
+- `<prefix>/bin/maverick`, and `maverickctl` with control — mode 0755
+- `<prefix>/share/maverick/install.manifest` — mode and owned-client digest
 - `<prefix>/share/xsessions/maverick.desktop` — the session entry, mode 0644
 
 Outside the prefix, only the caller's own files, and only after being asked:
@@ -79,9 +85,12 @@ decision, and the installer prints the session file's path instead.
 It is safe to run repeatedly: a second run converges, repairs umask-hostile
 permissions, replaces the binaries as a staged set (a failure leaves the
 previous set intact) and does not duplicate the `PATH` block. It verifies what
-it installed by executing `maverick --version`, `maverickctl --help` and
-`maverickctl session --help`, so a partial, stale or broken set is reported as
-a failure rather than as a successful install.
+it installed by executing `maverick --version` and checking its build profile,
+plus `maverickctl --help` and `maverickctl session --help` in control mode.
+Switching to Minimal removes the client only when it is an unchanged regular
+file owned by a previous installation. Foreign files, modified clients,
+symlinks and FIFOs are preserved. Existing personal configuration is retained
+unless replacement is explicitly requested.
 
 The build directory is `CARGO_TARGET_DIR` as given, defaulting to a cache
 directory under `$XDG_CACHE_HOME` — never the checkout. The disk-space

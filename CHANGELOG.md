@@ -13,6 +13,13 @@ before it makes no compatibility promise.
 
 ### Changed
 
+- Minimal builds omit the control listener, discovery records and control
+  threads. Enable `control-ipc` explicitly for the independent `maverickctl`
+  client; installation pins its source to an immutable commit and preserves
+  personal configuration and foreign clients when changing modes.
+- Super+Control+R reloads configuration without requiring remote control.
+- Pointer focus leaves the cursor in place even when automatic cursor warping
+  is enabled; keyboard focus continues to warp to the selected window.
 - Column resize commands are ignored while the target column or focused window
   is fullscreen. Leaving fullscreen preserves the previous column width instead
   of applying size changes made invisibly during fullscreen.
