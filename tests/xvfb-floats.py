@@ -114,8 +114,10 @@ def main():
                 def ready():
                     if wm.poll() is not None:
                         raise RuntimeError("Maverick exited during startup")
-                    return "window id #" in subprocess.check_output(
-                        ["xprop", "-root", "_NET_SUPPORTING_WM_CHECK"], env=env, text=True, timeout=3)
+                    # An ephemeral X11 readiness probe can become the last
+                    # client and reset Xvfb while the WM is opening its display.
+                    response = ctl("query", "tree", check=False)
+                    return bool(response) and bool(json.loads(response).get("monitors"))
 
                 wait_for(ready, "WM did not claim the private display")
                 probes = {}
