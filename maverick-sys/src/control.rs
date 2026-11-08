@@ -384,6 +384,9 @@ fn handle_conn(
         Ok(w) => w,
         Err(_) => return,
     };
+    if writer.set_write_timeout(Some(READ_TIMEOUT)).is_err() {
+        return;
+    }
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let mut reader = BufReader::new(stream);
     loop {
@@ -425,6 +428,13 @@ fn handle_conn(
             break;
         }
 
+        // Dispatch can also request restart/quit. Read-only queries must stay
+        // outside this gate because their replies require the WM to drain.
+        let _receipt = (matches!(cmd, QUIT_CMD | RESTART_CMD)
+            || cmd.strip_prefix(DISPATCH_CMD).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace())
+            }))
+        .then(|| hub.begin_command_reply());
         let response = dispatch_line(cmd, name, identity_json, hub);
         if writer.write_all(response.as_bytes()).is_err() {
             break;
