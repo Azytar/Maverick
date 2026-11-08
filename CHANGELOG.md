@@ -13,6 +13,8 @@ before it makes no compatibility promise.
 
 ### Changed
 
+- Control restart and quit commands cannot execute before their socket receipt
+  has been written; pending receipts never block the WM event loop.
 - Minimal builds omit the control listener, discovery records and control
   threads. Enable `control-ipc` explicitly for the independent `maverickctl`
   client; installation pins its source to an immutable commit and preserves
