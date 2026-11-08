@@ -135,8 +135,15 @@ The previous remote CI runs were independently checked: Maverick
 [Rust 1.85/stable](https://github.com/Azytar/maverickctl/actions/runs/42443058350).
 Those baseline runs do not establish CI success for newly prepared branches.
 Initial SSH authentication failed with `Permission denied (publickey)`; the
-existing GPG/SSH agent exposed no identities. Publication results belong in
-the delivery record after the SSH push attempt.
+existing GPG/SSH agent exposed no identities. Final SSH pushes for both
+repositories also returned exit 128 with that error. No work branch was
+published and no new CI run was triggered. All three prepared branches are
+retained in persistent local checkouts; no HTTPS push was substituted.
+
+Release binaries and the standalone X11 test runner are retained in the cache.
+Generated debug caches were removed after verification to reclaim disk space.
+The runner path and hash are recorded in the JSON evidence; rerunning it
+requires explicit WM/profile environment variables.
 
 ## Remaining physical observation
 

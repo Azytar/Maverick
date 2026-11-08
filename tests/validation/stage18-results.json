@@ -214,5 +214,24 @@
       "sha256": "ea19a9697c3950537ddb0c37568ca1eb60b3fdab6c8a9b693efbf14bfea78504",
       "bytes": 784128
     }
+  },
+  "publication": {
+    "transport": "SSH",
+    "published": false,
+    "exit_code": 128,
+    "error": "git@github.com: Permission denied (publickey).",
+    "wm_attempted": {
+      "engineering/stage18-validation": "943bad6a66c91c83b9c9efd0ee287a50d4ed803a",
+      "engineering/stage19-integration": "8f987798b3e4afa664dd590591cdf7964b23ab2a"
+    },
+    "client_attempted": {
+      "engineering/stage19-integration": "3f9e8ce46ef775aa820a46f7edd0b2a98a19bf0f"
+    },
+    "new_ci": "not triggered"
+  },
+  "retained_test_runner": {
+    "path": "/home/axiom/.cache/maverick-stage18-validation/bin/owned-x11-tests",
+    "sha256": "0b9c44617c059e4f9826c2be3406e147c157015bab1eb826ef866701bdb149f7",
+    "note": "Use explicit MAVERICK_TEST_WM and MAVERICK_TEST_PROFILE; optional MAVERICK_TEST_XSERVER=xephyr."
   }
 }
