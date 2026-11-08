@@ -235,6 +235,9 @@ fn keyboard_reload_changes_geometry_without_restarting_clients() -> Result<(), B
             Ok(conn.get_geometry(window)?.reply()?.border_width == border)
         })?;
         assert_eq!(conn.get_input_focus()?.reply()?.focus, window);
+        // Start the next key interval after the WM's observable reload, not
+        // after injection: a loaded WM may process that injection much later.
+        thread::sleep(Duration::from_millis(80));
     }
     Ok(())
 }

@@ -78,14 +78,17 @@ def main():
                 wait_for(lambda: "1024, 768" in subprocess.check_output(
                     ["xprop", "-root", "_NET_DESKTOP_GEOMETRY"], env=env, text=True), "RandR geometry stale")
                 print("PASS: nested RandR resize updates EWMH geometry", flush=True)
-                for _ in range(5):
+                for attempt in range(50):
                     ctl("restart")
-                    wait_for(lambda: ctl("state", check=False).returncode == 0, "restart readiness")
+                    wait_for(lambda: (scratch / "server.log").read_text().count("maverick ready")
+                             >= attempt + 2 and ctl("state", check=False).returncode == 0,
+                             "restart did not complete a new startup")
                     assert wm.poll() is None
                 ctl("reload")
                 ctl("quit", "--yes")
                 assert wm.wait(timeout=8) == 0
-                print("PASS: five control restarts, reload and owned shutdown", flush=True)
+                assert (scratch / "server.log").read_text().count("maverick ready") == 51
+                print("PASS: 50 acknowledged control restarts, reload and owned shutdown", flush=True)
             finally:
                 for child in reversed(children):
                     if child.poll() is None:
