@@ -7,9 +7,8 @@
 #   SCENARIO A — click-to-focus must NOT warp the pointer. The cursor stays
 #                exactly where the user clicked; the clicked window becomes
 #                active (`_NET_ACTIVE_WINDOW`).
-#   SCENARIO B — a TORN-OFF tile (ToggleFloat on a tiled window) keeps its
-#                tiled ORIGIN: dropping it back over a tiled window re-inserts
-#                it into the tree (the intended drop-to-tile feature).
+#   SCENARIO B — a toggled float stays floating after drag release; only an
+#                explicit ToggleFloat returns it to the tiled tree.
 #   SCENARIO C — a NATIVE float (WM_TRANSIENT_FOR dialog): must be born into
 #                `ws.floats` with its own requested geometry (300x200 centred
 #                on its parent), never a tile rectangle.
@@ -38,7 +37,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 tree()  { DISPLAY="$DISP" "$MSG_BIN" query tree 2>/dev/null; }
-dispatch() { DISPLAY="$DISP" "$MSG_BIN" dispatch "$@" >/dev/null 2>&1; sleep 0.3; }
+dispatch() { DISPLAY="$DISP" "$MSG_BIN" dispatch "$@" >/dev/null || fail "dispatch failed: $*"; sleep 0.3; }
 
 active_win() { DISPLAY="$DISP" xprop -root -notype _NET_ACTIVE_WINDOW 2>/dev/null | grep -oE '0x[0-9a-f]+' | head -1; }
 
@@ -112,14 +111,14 @@ hostile_stop() {
     sleep 0.3
 }
 
-# Mod4+drag: from (x1,y1) to (x2,y2), left button
+# Mod4+drag: from (x1,y1) to (x2,y2), optional button (default left).
 mod4_drag() {
-    xdotool keydown super
-    xdotool mousemove "$1" "$2"; sleep 0.15
-    xdotool mousedown 1; sleep 0.15
-    xdotool mousemove "$3" "$4"; sleep 0.25
-    xdotool mouseup 1; sleep 0.15
-    xdotool keyup super
+    DISPLAY="$DISP" xdotool keydown super
+    DISPLAY="$DISP" xdotool mousemove "$1" "$2"; sleep 0.15
+    DISPLAY="$DISP" xdotool mousedown "${5:-1}"; sleep 0.15
+    DISPLAY="$DISP" xdotool mousemove "$3" "$4"; sleep 0.25
+    DISPLAY="$DISP" xdotool mouseup "${5:-1}"; sleep 0.15
+    DISPLAY="$DISP" xdotool keyup super
     sleep 0.4
 }
 
@@ -132,11 +131,12 @@ echo "── starting Xephyr + maverick on $DISP"
 # with a fatal XIO that kills the WM mid-suite) — same policy as
 # xephyr-suite.sh: validate focus/float logic on the plain X11 path.
 start_xephyr "$DISP" 1280 720 >/dev/null || exit 1
-mav_launch "$DISP" >/dev/null || exit 1
+CFG="$MAV_TEST_RUNTIME/pointer.toml"
+printf '[general]\ncolumn_width = 0.4\nfocus_mouse = false\nwarp_cursor = true\n[autostart]\ncommands = []\n' >"$CFG"
+mav_launch "$DISP" --config "$CFG" >/dev/null || exit 1
 
-# Two tiled windows; switch to Grid so both are fully visible for clicking.
-# Two tiled windows side by side (Column-only since Grid was removed; both
-# tiles are visible for clicking without any layout switch).
+# Two 40% columns fit on screen. Warp is enabled so click-to-focus must
+# actively suppress it rather than passing because warp is disabled.
 hostile_start A
 hostile_cmd A "create"
 WIN_A_DEC=$(( $(hostile_winid A) ))
@@ -173,11 +173,7 @@ else
     fail "active window after click = $ACTIVE, expected clicked window id $WIN_A_DEC"
 fi
 
-echo "── SCENARIO B: torn-off tile (tiled origin) may drop back into the tree"
-# Focus is on A (scenario A clicked it). Move keyboard focus to B (the column
-# to the right), toggle it floating (same funnel as the keybind), then drag it
-# back over tiled window A and release: drop-to-tile must re-insert it because
-# its ORIGIN is tiled.
+echo "── SCENARIO B: drag preserves floating; explicit toggle restores tiling"
 dispatch focus-right
 sleep 0.3
 FOCUSED_NOW="$(DISPLAY="$DISP" "$MSG_BIN" query focused 2>/dev/null | grep -oE '"window":[0-9]+' | grep -oE '[0-9]+')"
@@ -191,11 +187,21 @@ sleep 0.3
 case " $(float_ids) " in *" $WIN_B_DEC "*) : ;;
     *) fail "toggle_float did not float window B" ;; esac
 read TBX TBY <<< "$(geom_center "$WIN_B_DEC")"
-read AAX AAY <<< "$(geom_center "$WIN_A_DEC")"
+read AGX AGY AGW AGH <<< "$(win_geom "$WIN_A_DEC")"
+AAX=$((AGX + AGW / 4)); AAY=$((AGY + AGH / 2))
+GEOM_A_BEFORE="$(win_geom "$WIN_A_DEC")"
+GEOM_B_BEFORE="$(win_geom "$WIN_B_DEC")"
+[ "$TBX $TBY" != "$AAX $AAY" ] || fail "drag requires distinct endpoints"
 mod4_drag "$TBX" "$TBY" "$AAX" "$AAY"
+case " $(float_ids) " in *" $WIN_B_DEC "*)
+    pass "drag release preserves floating membership" ;;
+    *) fail "drag release unexpectedly re-tiled the float" ;; esac
+[ "$(win_geom "$WIN_A_DEC")" = "$GEOM_A_BEFORE" ] || fail "float drag changed the tiled neighbour"
+[ "$(win_geom "$WIN_B_DEC")" != "$GEOM_B_BEFORE" ] || fail "float drag did not move the window"
+dispatch toggle_float
 case " $(tiled_ids) " in *" $WIN_B_DEC "*)
-    pass "torn-off tile re-joined the tiling tree on release (drop-to-tile intact)" ;;
-    *) fail "torn-off tile could not re-join the tree (gate too strict?)" ;; esac
+    pass "explicit ToggleFloat returns the window to the tiled tree" ;;
+    *) fail "explicit ToggleFloat failed to restore tiling" ;; esac
 
 echo "── SCENARIO C: native float (transient dialog) born with its own geometry"
 hostile_start C
@@ -245,6 +251,18 @@ dispatch view 1
 sleep 0.4
 case " $(float_ids) " in *" $WIN_C_DEC "*) pass "native float survived the workspace switch" ;;
     *) fail "native float lost after workspace switch" ;; esac
+
+echo "── SCENARIO F: right drag resizes the native float without changing tiles"
+read RX RY RW RH <<< "$(win_geom "$WIN_C_DEC")"
+GEOM_B_BEFORE="$(win_geom "$WIN_B_DEC")"
+SX=$((RX + RW - 20)); SY=$((RY + RH - 20))
+EX=$((SX + 60)); EY=$((SY + 40))
+[ "$EX" -lt 1280 ] && [ "$EY" -lt 720 ] || fail "resize endpoint must be inside Xephyr"
+mod4_drag "$SX" "$SY" "$EX" "$EY" 3
+read RX2 RY2 RW2 RH2 <<< "$(win_geom "$WIN_C_DEC")"
+[ "$RW2" -gt "$RW" ] && [ "$RH2" -gt "$RH" ] || fail "right drag did not grow the float"
+[ "$(win_geom "$WIN_B_DEC")" = "$GEOM_B_BEFORE" ] || fail "float resize changed a tile"
+pass "right drag grows the native float and preserves the tiled neighbour"
 
 hostile_stop A; hostile_stop B; hostile_stop C
 echo "ALL SCENARIOS PASSED"

@@ -56,6 +56,7 @@ fn transient_hierarchy_survives_focus_and_parent_destruction() -> Result<(), Box
                         && (target != peer || above(peer, grandchild)))
                 },
             )?;
+            wait_settled_stacking(&mut session, &conn, root, &windows)?;
             assert_stacking(&conn, root, &windows)?;
         }
         let death_order = if parent_first {
@@ -81,6 +82,7 @@ fn transient_hierarchy_survives_focus_and_parent_destruction() -> Result<(), Box
             wait_for(&mut session, "surviving peer focus", || {
                 Ok(window_list(&conn, root, active)? == [peer])
             })?;
+            wait_settled_stacking(&mut session, &conn, root, &live)?;
             assert_stacking(&conn, root, &live)?;
         }
     }

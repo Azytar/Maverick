@@ -64,16 +64,32 @@ impl XvfbSession {
         let config = root.join("maverick.toml");
         fs::write(&config, contents)?;
 
-        let mut command = isolated_command(&root, None, OsStr::new("Xvfb"));
-        command.args([
-            "-displayfd",
-            "1",
-            "-screen",
-            "0",
-            "800x600x24",
-            "-nolisten",
-            "tcp",
-        ]);
+        let backend = env::var("MAVERICK_TEST_XSERVER").unwrap_or_else(|_| "xvfb".into());
+        let mut command = match backend.as_str() {
+            "xvfb" => {
+                let mut command = isolated_command(&root, None, OsStr::new("Xvfb"));
+                command.args(["-screen", "0", "800x600x24"]);
+                command
+            }
+            "xephyr" => {
+                let host = env::var_os("DISPLAY")
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| io::Error::other("Xephyr requires a host DISPLAY"))?;
+                let mut command = isolated_command(&root, None, OsStr::new("Xephyr"));
+                command.env("DISPLAY", host);
+                if let Some(authority) = env::var_os("XAUTHORITY") {
+                    command.env("XAUTHORITY", authority);
+                }
+                command.args(["-screen", "800x600", "-no-host-grab"]);
+                command
+            }
+            _ => {
+                return Err(io::Error::other(
+                    "MAVERICK_TEST_XSERVER must be xvfb or xephyr",
+                ))
+            }
+        };
+        command.args(["-displayfd", "1", "-nolisten", "tcp", "-ac"]);
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

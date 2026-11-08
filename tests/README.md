@@ -11,7 +11,7 @@ cargo run -p maverick-xtask --locked -- x11
 
 `check` runs default-feature and all-feature Rust tests. `x11` explicitly runs
 ignored `maverick-testkit` tests against both Minimal and control release WMs, with two test threads,
-then the retained external-client campaign against control. There are 21 Rust X11 tests per profile. A missing dependency or release
+then the retained external-client campaign against control. There are 22 Rust X11 tests per profile. A missing dependency or release
 binary is an error. Ordinary `cargo test` does not execute ignored X11 tests.
 
 ## Rust testkit contracts
@@ -24,10 +24,13 @@ invalid state actions, malformed hints, unexpected connection loss, and owned
 process cleanup. XTEST drives real key grabs for column collapse, vertical
 navigation/movement, Views/carousel, Overview and exec/restart. WM_HINTS tests
 observe both real and published focus for 600 ms per eligibility transition,
-including refusals, flagless/missing hints, remap and focus fallback.
+including refusals, flagless/missing hints, remap and focus fallback. A pointer
+regression enables cursor warping, verifies the initial warp, clicks another
+tile and checks cursor coordinates for 600 ms after focus changes.
 
-The fixture owns each child through `Child`; it never selects a host DISPLAY
-or signals a discovered PID. Xvfb assigns the display through `-displayfd`,
+The fixture owns each child through `Child`; the WM never selects a host DISPLAY
+or signals a discovered PID. The optional Xephyr backend inherits the host
+DISPLAY/XAUTHORITY only for the server. Both backends allocate through `-displayfd`,
 with TCP disabled. HOME/XDG paths are private, runtime directories use mode
 0700, and desktop/session/LD_PRELOAD variables are removed from child commands.
 No client or assertion needs a control socket or maverickctl. Protocol helpers

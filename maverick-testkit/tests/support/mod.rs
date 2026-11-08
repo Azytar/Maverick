@@ -343,3 +343,31 @@ pub fn settled_geometry(
     })?;
     Ok(last)
 }
+
+pub fn wait_settled_stacking(
+    session: &mut XvfbSession,
+    conn: &RustConnection,
+    root: Window,
+    windows: &[Window],
+) -> Result<(), Box<dyn Error>> {
+    let stacking = atom(conn, b"_NET_CLIENT_LIST_STACKING")?;
+    let mut last = None;
+    let mut stable_since = Instant::now();
+    wait_for(session, "settled real and published stacking", || {
+        let real = server_stack(conn, root, windows)?;
+        let published: Vec<_> = window_list(conn, root, stacking)?
+            .into_iter()
+            .filter(|window| windows.contains(window))
+            .collect();
+        if real.len() != windows.len() || real != published {
+            last = None;
+            stable_since = Instant::now();
+            return Ok(false);
+        }
+        if last.as_ref() != Some(&real) {
+            last = Some(real);
+            stable_since = Instant::now();
+        }
+        Ok(stable_since.elapsed() >= Duration::from_millis(200))
+    })
+}
