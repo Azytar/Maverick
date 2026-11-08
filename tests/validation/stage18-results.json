@@ -1,0 +1,218 @@
+{
+  "date": "2026-11-08",
+  "host": "Arch Linux; Linux 7.2.10-x412dap-r2 x86_64",
+  "rust": "1.99.0 (b940084d7 2026-09-28)",
+  "cargo": "1.99.0 (5f94df478 2026-08-27)",
+  "wm_base": "1987f550cea14d54dc482c1fc51ec0dbc786299c",
+  "main_unchanged": "7276eb1165540552c372c9ff32d2ad9f1f71440e",
+  "wm_integration": "8f987798b3e4afa664dd590591cdf7964b23ab2a",
+  "client_pin": "60ca498354643bac7b8a7b47b0e20e44692a5e39",
+  "client_integration": "3f9e8ce46ef775aa820a46f7edd0b2a98a19bf0f",
+  "physical_session_validation": "not performed",
+  "checks": [
+    {
+      "check": "WM engineering check",
+      "command": "cargo run -p maverick-xtask --locked -- check",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-check-ack.log",
+      "sha256": "3f7fa556da773ffec23de7a990e26466efd6ab5cfa3073f611970bd1411c8f90"
+    },
+    {
+      "check": "WM engineering release",
+      "command": "cargo run -p maverick-xtask --locked -- release",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-release-ack.log",
+      "sha256": "6bd4c92bf79618f8a67f51f79942442ceb2617fc76910950ed02a8254ee62c7d"
+    },
+    {
+      "check": "WM engineering X11",
+      "command": "cargo run -p maverick-xtask --locked -- x11",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-x11-ack.log",
+      "sha256": "404b3acbbabe42a19b6f09fa7899b9a86b48900ba9305c8b398546421a81f529"
+    },
+    {
+      "check": "WM integration check",
+      "command": "CARGO_INCREMENTAL=0 cargo run -p maverick-xtask --locked -- check",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage19-check-ack.log",
+      "sha256": "2ef66c7e5736560c030e45e138d9b9744e7b7461d4961be5f594992f61a55af2"
+    },
+    {
+      "check": "WM integration release",
+      "command": "CARGO_INCREMENTAL=0 cargo run -p maverick-xtask --locked -- release",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage19-release-ack.log",
+      "sha256": "2e03f77f2cf43c847be00cbacf1eceff28f76f05f58aa7d83aba4d1d3b2e1171"
+    },
+    {
+      "check": "WM integration X11",
+      "command": "CARGO_INCREMENTAL=0 cargo run -p maverick-xtask --locked -- x11",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage19-x11-ready.log",
+      "sha256": "8438f76b4ebe84ccc020597ad8f2499123d7ad32dbb6ab50d4256055dd48ce2b"
+    },
+    {
+      "check": "Independent client tests",
+      "command": "cargo test --workspace --all-targets --all-features --locked",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverickctl-stage18-tests-fixed.log",
+      "sha256": "09e4eb06728e3616174432b84b5684c3dd7dcf3fea51a9ff7978ec4d6878e9e9"
+    },
+    {
+      "check": "Independent client clippy",
+      "command": "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverickctl-stage18-clippy-fixed.log",
+      "sha256": "00d23e71205e053d768aba2eb581f11640f22cbb0d106fd79708bc1af3afca40"
+    },
+    {
+      "check": "Installer full suite",
+      "command": "python3 installer/tests/partition.py",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-installer-final.log",
+      "sha256": "2b26a187e5c799ce7304e9dee8cfb5a0d64c4b57526b2986ceb3fa76ff1d938a"
+    },
+    {
+      "check": "Real artifact installation/migration",
+      "command": "python3 tests/stage18-install-real.py",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-install-real-ack.log",
+      "sha256": "d01e5e2a704e0437776009466a8c481ec1273242b439205daf558fb3413c1920"
+    },
+    {
+      "check": "Live control and 50 completed restarts",
+      "command": "python3 tests/stage18-control-live.py",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-control-live-ack.log",
+      "sha256": "473ced4fc529eeafcec3c7a50bd4a85f007fdd075893557e3827eb562a11109c"
+    },
+    {
+      "check": "Pointer/float/resize on Xephyr",
+      "command": "bash tests/xephyr-pointer-float.sh with explicit release binaries",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-final-xephyr-pointer-resize.log",
+      "sha256": "17efe599d14215c93e9ffd03e120870a2a43687670af1b35381c927301ccdf67"
+    },
+    {
+      "check": "Two logical monitors on Xephyr",
+      "command": "bash tests/xephyr-2mon.sh with explicit release binaries",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-final-xephyr-2mon.sh.log",
+      "sha256": "386b3a6f6def8530f5f7148890b16542e58d1fa52980f83362159fcf9583a251"
+    },
+    {
+      "check": "Overview on Xephyr",
+      "command": "bash tests/xephyr-overview.sh with explicit release binaries",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-final-xephyr-overview.sh.log",
+      "sha256": "69df3f5052b839b5047e495fd67958d94c9012346ae56681e1dbbdf579109024"
+    },
+    {
+      "check": "Config across repeated restarts on Xephyr",
+      "command": "bash tests/xephyr-restart-config.sh with explicit release binaries",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-final-xephyr-restart-config.sh.log",
+      "sha256": "c5e388d9ba64ab90834cfc7deb96768a534337189575061372fdad5194ccf119"
+    },
+    {
+      "check": "EWMH workarea on Xephyr",
+      "command": "bash tests/xephyr-ewmh-workarea.sh with explicit release binaries",
+      "exit_code": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-final-xephyr-ewmh-workarea.sh.log",
+      "sha256": "21e2159e3d180196afcfc45c5064aee34ff8f426297d0c62c888a582945fb10d"
+    },
+    {
+      "check": "stage18 Xephyr minimal",
+      "command": "owned_xvfb-98bce7d22032f4e0 --ignored --nocapture --test-threads=1; MAVERICK_TEST_XSERVER=xephyr; explicit WM/profile",
+      "exit_code": 0,
+      "passed": 22,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-xephyr-minimal-ack.log",
+      "sha256": "a3b610995e65614e7a1c45e0aaf5fba82dcc103d91e46c7e1d5ef5974513b5af"
+    },
+    {
+      "check": "stage18 Xephyr control",
+      "command": "owned_xvfb-98bce7d22032f4e0 --ignored --nocapture --test-threads=1; MAVERICK_TEST_XSERVER=xephyr; explicit WM/profile",
+      "exit_code": 0,
+      "passed": 22,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-xephyr-control-ack.log",
+      "sha256": "3acf20b88efe3ce1cf067e581384866780a02f49cc78bcaef14b3cfea015020c"
+    },
+    {
+      "check": "stage19 Xephyr minimal",
+      "command": "owned_xvfb-98bce7d22032f4e0 --ignored --nocapture --test-threads=1; MAVERICK_TEST_XSERVER=xephyr; explicit WM/profile",
+      "exit_code": 0,
+      "passed": 22,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage19-xephyr-minimal-ack.log",
+      "sha256": "694581a1aab90859ddb81726516fd9a77b9b8d1c1483f18936008c545a453f8d"
+    },
+    {
+      "check": "stage19 Xephyr control",
+      "command": "owned_xvfb-98bce7d22032f4e0 --ignored --nocapture --test-threads=1; MAVERICK_TEST_XSERVER=xephyr; explicit WM/profile",
+      "exit_code": 0,
+      "passed": 22,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage19-xephyr-control-ack.log",
+      "sha256": "b930a4638713b8e5aae62a934727e52b298462f7a60701628b996f47343463c6"
+    },
+    {
+      "check": "default fullscreen/pointer Xephyr minimal",
+      "command": "bash tests/xephyr-fs-pointer.sh; explicit WM release profile",
+      "exit_code": 0,
+      "passed": 8,
+      "failed": 0,
+      "optional_trace_assertions": "skipped: stock binary",
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-xephyr-default-pointer-minimal.log",
+      "sha256": "4aedc3906111fcfa59855ff662bbc2058dcea0135304705dc375606ed00fb67e"
+    },
+    {
+      "check": "default fullscreen/pointer Xephyr control",
+      "command": "bash tests/xephyr-fs-pointer.sh; explicit WM release profile",
+      "exit_code": 0,
+      "passed": 8,
+      "failed": 0,
+      "optional_trace_assertions": "skipped: stock binary",
+      "log": "/home/axiom/.cache/maverick-stage18-validation/logs/maverick-stage18-xephyr-default-pointer-control.log",
+      "sha256": "7350088c502912908de4993e0c236434efc47e25c0da3eac23516d8735ba812d"
+    }
+  ],
+  "binaries": {
+    "stage18-minimal": {
+      "path": "/home/axiom/.cache/maverick-stage18-validation/wm-target/minimal/release/maverick",
+      "sha256": "abf256ed5e5f6133339afdf663d40742199d5c3e300b24829689aec246481745",
+      "bytes": 1272736
+    },
+    "stage18-control": {
+      "path": "/home/axiom/.cache/maverick-stage18-validation/wm-target/release/maverick",
+      "sha256": "3436af0e06edbf0434312af8fb80b89be92f4956f3b8fa3a42142a74be168217",
+      "bytes": 1424136
+    },
+    "stage18-client": {
+      "path": "/home/axiom/.cache/maverick-stage18-validation/wm-target/release/maverickctl",
+      "sha256": "ea19a9697c3950537ddb0c37568ca1eb60b3fdab6c8a9b693efbf14bfea78504",
+      "bytes": 784128
+    },
+    "stage19-minimal": {
+      "path": "/home/axiom/.cache/maverick-stage18-validation/integration-target/minimal/release/maverick",
+      "sha256": "abf256ed5e5f6133339afdf663d40742199d5c3e300b24829689aec246481745",
+      "bytes": 1272736
+    },
+    "stage19-control": {
+      "path": "/home/axiom/.cache/maverick-stage18-validation/integration-target/release/maverick",
+      "sha256": "3436af0e06edbf0434312af8fb80b89be92f4956f3b8fa3a42142a74be168217",
+      "bytes": 1424136
+    },
+    "stage19-client": {
+      "path": "/home/axiom/.cache/maverick-stage18-validation/integration-target/release/maverickctl",
+      "sha256": "ea19a9697c3950537ddb0c37568ca1eb60b3fdab6c8a9b693efbf14bfea78504",
+      "bytes": 784128
+    }
+  }
+}
