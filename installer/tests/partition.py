@@ -125,6 +125,7 @@ ORIGINAL_SUITES = [
     smoke.suite_foreign_or_modified_controller_survives,
     smoke.suite_minimal_transition_refuses_a_running_owned_wm,
     smoke.suite_manifest_cannot_escape_the_prefix,
+    smoke.suite_pinned_controller_is_only_fetched_for_control,
     smoke.suite_local_install,
     smoke.suite_default_prefix_is_user_local,
     smoke.suite_path_setup,

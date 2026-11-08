@@ -981,19 +981,20 @@ autostart, signals and X11 restart remain available. `Super+Control+R` reloads
 the current TOML; `Super+Shift+R` restarts.
 
 `cargo build --release -p maverick --features control-ipc` enables remote control.
-The independent client is prepared in `maverickctl/`, excluded from the WM
+The independent client is published at https://github.com/Azytar/maverickctl.
+The reference copy in `maverickctl/` is excluded from the WM
 workspace, with its own Cargo.lock, protocol crate, tests and CI configuration.
 It builds with `cargo build --release --manifest-path maverickctl/Cargo.toml` and
-has no dependency on the WM repository or X11 engine. Its source remains here
-until publication and an immutable remote client pin are available; extraction
-must not make a working installation depend on an unpublished commit.
+has no dependency on the WM repository or X11 engine. The reference copy remains for comparison during the development transition.
+CI checks out the published client before compiling and running the control campaign.
 
 The installer offers `--minimal` and `--with-control`. Fresh installations
 recommend Minimal and do not build or fetch the client. Existing control
-installations keep their mode unless explicitly migrated. Control builds use
-the prepared independent client checkout (`--controller-source DIR` can select
-another local checkout). The final remote download path remains pending client
-publication; no mutable remote branch or invented revision is used.
+installations keep their mode unless explicitly migrated. Control builds fetch immutable commit
+`60ca498354643bac7b8a7b47b0e20e44692a5e39` from the independent repository.
+`--controller-source DIR` explicitly selects a local developer checkout instead.
+Git is needed only when fetching the pinned client; Minimal and `--no-build`
+never fetch it.
 
 `--no-build` verifies `maverick --build-profile` before replacing any binary.
 An explicit transition to Minimal refuses to replace an owned WM still running

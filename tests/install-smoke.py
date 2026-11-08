@@ -160,9 +160,11 @@ class Sandbox:
         env.update({k: str(v) for k, v in extra.items()})
         return env
 
-    def install(self, *args, env=None, timeout=60, profile="control"):
+    def install(self, *args, env=None, timeout=60, profile="control", local_controller=True):
         command = ["bash", str(self.repo / "installer/install.sh"), "--yes", "--no-anim", "--lang", "en"]
         command += list(args)
+        if local_controller:
+            command += ["--controller-source", str(self.repo / "maverickctl")]
         if profile is not None and not any(a in ("--minimal", "--with-control") for a in args):
             command += ["--with-control" if profile == "control" else "--minimal"]
         result = subprocess.run(command, env=env or self.env(), capture_output=True,
@@ -187,6 +189,7 @@ def interactive_install(box, keys, args=()):
     env = box.env(SHELL="/bin/bash", TERM="xterm-256color")
     command = ["bash", str(box.repo / "installer/install.sh"), "--no-build", "--lang", "en"]
     command += list(args)
+    command += ["--controller-source", str(box.repo / "maverickctl")]
     if not any(a in ("--minimal", "--with-control") for a in args):
         command += ["--with-control"]
     proc = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
@@ -589,7 +592,8 @@ def suite_interactive_build_progress():
                       MAVERICK_TEST_BUILD_DELAY="3")
         command = ["bash", str(box.repo / "installer/install.sh"), "--yes", "--with-control",
                    "--no-anim", "--no-path", "--lang", "en",
-                   "--prefix", str(box.prefix)]
+                   "--prefix", str(box.prefix),
+                   "--controller-source", str(box.repo / "maverickctl")]
         proc = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
                                 env=env, close_fds=True)
         os.close(slave)
@@ -801,6 +805,40 @@ def suite_minimal_transition_refuses_a_running_owned_wm():
     print("PASS: a profile switch cannot leave the old owned control process running")
 
 
+def suite_pinned_controller_is_only_fetched_for_control():
+    pin = "60ca498354643bac7b8a7b47b0e20e44692a5e39"
+    for profile in ("minimal", "control"):
+        for mismatch in (False, True):
+            with tempfile.TemporaryDirectory(prefix="maverick-pin-") as d:
+                box = Sandbox(Path(d))
+                log = box.base / "git-calls"
+                executable(box.tools / "git", f'''#!/bin/sh
+printf '%s\\n' "$*" >> "{log}"
+if [ "$1" = init ]; then
+  mkdir -p "$3"
+  cp "{box.repo}/maverickctl/Cargo.toml" "$3/Cargo.toml"
+elif [ "$3" = rev-parse ]; then
+  echo "{'0' * 40 if mismatch else pin}"
+fi
+''')
+                result = box.install("--prefix", str(box.prefix), "--no-path",
+                                     profile=profile, local_controller=False,
+                                     env=box.env(MAVERICK_STUB_PROFILE=profile))
+                if profile == "minimal":
+                    assert result.returncode == 0, (result.stdout, result.stderr)
+                    assert not log.exists(), "Minimal fetched a controller"
+                elif mismatch:
+                    assert result.returncode != 0 and "commit mismatch" in result.stderr
+                    assert not (box.prefix / "bin/maverick").exists()
+                else:
+                    assert result.returncode == 0, (result.stdout, result.stderr)
+                    calls = log.read_text()
+                    assert f"fetch --quiet --depth=1 https://github.com/Azytar/maverickctl.git {pin}" in calls
+                    assert "checkout --quiet --detach FETCH_HEAD" in calls
+                    assert not Path(calls.splitlines()[0].split()[-1]).exists(), "temporary checkout leaked"
+    print("PASS: only control fetches the exact client pin; mismatches stop installation")
+
+
 def suite_manifest_cannot_escape_the_prefix():
     with tempfile.TemporaryDirectory(prefix="maverick-manifest-") as d:
         box = Sandbox(Path(d))
@@ -825,6 +863,7 @@ def main():
         suite_foreign_or_modified_controller_survives,
         suite_minimal_transition_refuses_a_running_owned_wm,
         suite_manifest_cannot_escape_the_prefix,
+        suite_pinned_controller_is_only_fetched_for_control,
         suite_local_install,
         suite_default_prefix_is_user_local,
         suite_path_setup,

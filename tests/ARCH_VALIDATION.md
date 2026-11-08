@@ -38,4 +38,5 @@ These legacy nested rigs use the control profile. The new Rust fixtures test
 Minimal through X11/XTEST alone. Record command exit statuses and any observed
 focus, fullscreen, pointer, restart or monitor failure. Do not infer real-client
 compatibility or physical latency from Xvfb timings. Main integration remains
-pending that evidence and final independent-client publication/pinning.
+pending that evidence; the independent client is published and pinned at
+`60ca498354643bac7b8a7b47b0e20e44692a5e39`.

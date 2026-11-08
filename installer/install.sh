@@ -102,10 +102,9 @@ X11 session entry. Existing control installations keep their mode unless you
 explicitly select --minimal. Personal configuration is never removed.
 
 --with-control enables the WM control listener and installs maverickctl.
-The independent client checkout is currently prepared beside the WM at
-maverickctl/; --controller-source selects another prepared local checkout.
-Remote client publication is required before a pinned remote source can
-replace this temporary local source. Minimal never builds or fetches it.
+The independent client is fetched from Azytar/maverickctl at the immutable
+commit pinned in this installer. --controller-source selects a local developer
+checkout instead. Minimal never builds or fetches the client.
 
 Existing artifacts passed to --no-build must report the selected profile;
 a stale control binary cannot silently be installed as Minimal.
@@ -235,7 +234,8 @@ else
     PROFILE_EXPLICIT=true
 fi
 if [[ "$INSTALL_PROFILE" == control ]]; then RUNTIME_BINS+=(maverickctl); fi
-CONTROLLER_SOURCE="${CONTROLLER_SOURCE:-$APP_DIR/../maverickctl}"
+CONTROLLER_COMMIT=60ca498354643bac7b8a7b47b0e20e44692a5e39
+CONTROLLER_REPOSITORY=https://github.com/Azytar/maverickctl.git
 WM_CARGO_ARGS=(-p maverick --no-default-features)
 if [[ "$INSTALL_PROFILE" == control ]]; then WM_CARGO_ARGS+=(--features control-ipc); fi
 INSTALL_MANIFEST="$PREFIX/share/maverick/install.manifest"
@@ -273,11 +273,13 @@ export CARGO_TARGET_DIR
 }
 
 INSTALL_TMP=""
+CONTROLLER_TMP=""
 STAGE_DIR=""
 # Both cleanups are idempotent and are called from the exit handler, so a
 # failure at any point leaves no staging directory and no temporary file
 # behind. STAGE_DIR is cleared once the set has been committed.
 install_cleanup() {
+    if [[ -n "$CONTROLLER_TMP" ]]; then rm -rf -- "$CONTROLLER_TMP"; fi
     if [[ -n "$INSTALL_TMP" ]]; then rm -rf -- "$INSTALL_TMP"; fi
 }
 stage_cleanup() {
@@ -350,10 +352,26 @@ step_deps() {
     # and which packages install it lives with the probe, in lib/setup.sh.
     if [[ "$NO_BUILD" != true ]]; then
         check_x11_linkable
+        prepare_controller
     fi
     _animate 8 "$DEPS_DETAIL"
     _nap 0.2
     _step_end 0 "$DEPS_DETAIL"
+}
+
+prepare_controller() {
+    [[ "$INSTALL_PROFILE" == control ]] || return 0
+    if [[ -z "$CONTROLLER_SOURCE" ]]; then
+        command -v git >/dev/null 2>&1 || die 'git is required to fetch the pinned independent client'
+        CONTROLLER_TMP="$(mktemp -d /tmp/maverick-controller.XXXXXX)"
+        CONTROLLER_SOURCE="$CONTROLLER_TMP/source"
+        git init -q "$CONTROLLER_SOURCE"
+        git -C "$CONTROLLER_SOURCE" fetch --quiet --depth=1 "$CONTROLLER_REPOSITORY" "$CONTROLLER_COMMIT"
+        git -C "$CONTROLLER_SOURCE" checkout --quiet --detach FETCH_HEAD
+        [[ "$(git -C "$CONTROLLER_SOURCE" rev-parse HEAD)" == "$CONTROLLER_COMMIT" ]] \
+            || die 'independent client commit mismatch'
+    fi
+    [[ -f "$CONTROLLER_SOURCE/Cargo.toml" ]] || die "independent controller source is missing: $CONTROLLER_SOURCE"
 }
 
 build_controller() {
@@ -785,7 +803,7 @@ main() {
     if [[ -L "$INSTALL_MANIFEST" || ( -e "$INSTALL_MANIFEST" && ( ! -O "$INSTALL_MANIFEST" || ! -f "$INSTALL_MANIFEST" ) ) ]]; then
         die "installer manifest is not an owned regular file: $INSTALL_MANIFEST"
     fi
-    if [[ "$INSTALL_PROFILE" == control && "$NO_BUILD" != true ]]; then
+    if [[ "$INSTALL_PROFILE" == control && "$NO_BUILD" != true && -n "$CONTROLLER_SOURCE" ]]; then
         [[ -f "$CONTROLLER_SOURCE/Cargo.toml" ]] || die "independent controller source is missing: $CONTROLLER_SOURCE"
     fi
     confirm_install

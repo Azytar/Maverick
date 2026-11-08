@@ -366,7 +366,9 @@ sesión X11. `--with-control` añade el servidor y el cliente independiente;
 con control conservan su modalidad salvo cambio explícito. `--no-build` verifica
 el perfil del artefacto. El instalador no elimina clientes ajenos o modificados,
 y exige cerrar el Maverick anterior antes de cambiar su instalación a Minimal.
-La descarga remota fijada del cliente queda pendiente de su publicación.
+El instalador descarga el cliente desde `Azytar/maverickctl`, fijado al commit
+`60ca498354643bac7b8a7b47b0e20e44692a5e39`; solo esa descarga requiere Git.
+Minimal y `--no-build` no descargan el cliente.
 
 La instalación es desde código fuente. El instalador compila el gestor según la
 modalidad elegida y, cuando se solicita control, compila el cliente desde su

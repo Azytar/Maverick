@@ -27,6 +27,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Checkout pinned independent client
+        uses: actions/checkout@v4
+        with:
+          repository: Azytar/maverickctl
+          ref: 60ca498354643bac7b8a7b47b0e20e44692a5e39
+          path: maverickctl
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: '1.85.0'
@@ -50,6 +57,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout pinned independent client
+        uses: actions/checkout@v4
+        with:
+          repository: Azytar/maverickctl
+          ref: 60ca498354643bac7b8a7b47b0e20e44692a5e39
+          path: maverickctl
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -90,6 +104,13 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout pinned independent client
+        uses: actions/checkout@v4
+        with:
+          repository: Azytar/maverickctl
+          ref: 60ca498354643bac7b8a7b47b0e20e44692a5e39
+          path: maverickctl
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install X11 test and development dependencies
