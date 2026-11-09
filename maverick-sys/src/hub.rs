@@ -82,6 +82,14 @@ pub enum ControlCommand {
     Reload,
     /// Execute a named action, e.g. `focus-left`, `cycle-layout`, `view 3`.
     Dispatch(String),
+    /// Protocol-v2 operation. Unlike `Dispatch`, this carries a correlation id
+    /// and a one-shot reply owned by the WM thread, so the socket server cannot
+    /// confuse queue acceptance with semantic execution.
+    Operation {
+        request_id: u64,
+        action: String,
+        reply: SyncSender<String>,
+    },
     /// A structured read-only query ("workspaces", "tree", "focused", …).
     /// The WM answers by sending the result JSON through `reply`; the server
     /// thread blocks on the channel until it arrives (2 s timeout).
