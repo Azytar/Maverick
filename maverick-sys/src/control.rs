@@ -557,9 +557,9 @@ fn dispatch_line(cmd: &str, name: &str, identity_json: &str, hub: &ControlHub) -
                     }
                     return match rx.recv_timeout(std::time::Duration::from_secs(2)) {
                         Ok(result) => format!("{}\n", single_line(&result)),
-                        Err(_) => format!(
-                            "{{\"request_id\":{request_id},\"status\":\"timeout\"}}\n"
-                        ),
+                        Err(_) => {
+                            format!("{{\"request_id\":{request_id},\"status\":\"timeout\"}}\n")
+                        }
                     };
                 }
             }
