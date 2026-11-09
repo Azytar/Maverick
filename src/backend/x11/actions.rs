@@ -349,6 +349,31 @@ impl WindowManager {
                         log::warn!("control: unknown dispatch action '{line}'");
                     }
                 }
+                maverick_sys::ControlCommand::Operation {
+                    request_id,
+                    action: line,
+                    reply,
+                } => {
+                    let result = if let Some(action) = parse_action(&line) {
+                        match self.do_action(action) {
+                            Ok(()) => format!(
+                                "{{\"request_id\":{request_id},\"status\":\"executed\"}}"
+                            ),
+                            Err(error) => {
+                                log::warn!("control: operation {request_id} failed: {error}");
+                                format!(
+                                    "{{\"request_id\":{request_id},\"status\":\"rejected\",\"error\":\"execution_failed\"}}"
+                                )
+                            }
+                        }
+                    } else {
+                        log::warn!("control: unknown operation action '{line}'");
+                        format!(
+                            "{{\"request_id\":{request_id},\"status\":\"rejected\",\"error\":\"unknown_action\"}}"
+                        )
+                    };
+                    let _ = reply.send(result);
+                }
                 maverick_sys::ControlCommand::Query { topic, reply } => {
                     // Answer structured queries from live state; the client is
                     // blocked on the channel until the reply lands. State is
