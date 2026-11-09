@@ -215,7 +215,12 @@
       "bytes": 784128
     }
   },
-  "publication": {
+  "retained_test_runner": {
+    "path": "/home/axiom/.cache/maverick-stage18-validation/bin/owned-x11-tests",
+    "sha256": "0b9c44617c059e4f9826c2be3406e147c157015bab1eb826ef866701bdb149f7",
+    "note": "Use explicit MAVERICK_TEST_WM and MAVERICK_TEST_PROFILE; optional MAVERICK_TEST_XSERVER=xephyr."
+  },
+  "initial_publication_attempt": {
     "transport": "SSH",
     "published": false,
     "exit_code": 128,
@@ -228,10 +233,5 @@
       "engineering/stage19-integration": "3f9e8ce46ef775aa820a46f7edd0b2a98a19bf0f"
     },
     "new_ci": "not triggered"
-  },
-  "retained_test_runner": {
-    "path": "/home/axiom/.cache/maverick-stage18-validation/bin/owned-x11-tests",
-    "sha256": "0b9c44617c059e4f9826c2be3406e147c157015bab1eb826ef866701bdb149f7",
-    "note": "Use explicit MAVERICK_TEST_WM and MAVERICK_TEST_PROFILE; optional MAVERICK_TEST_XSERVER=xephyr."
   }
 }

@@ -134,11 +134,12 @@ The previous remote CI runs were independently checked: Maverick
 [4/4 jobs](https://github.com/Azytar/Maverick/actions/runs/42443220880), client
 [Rust 1.85/stable](https://github.com/Azytar/maverickctl/actions/runs/42443058350).
 Those baseline runs do not establish CI success for newly prepared branches.
-Initial SSH authentication failed with `Permission denied (publickey)`; the
-existing GPG/SSH agent exposed no identities. Final SSH pushes for both
-repositories also returned exit 128 with that error. No work branch was
-published and no new CI run was triggered. All three prepared branches are
-retained in persistent local checkouts; no HTTPS push was substituted.
+The initial SSH attempts failed with `Permission denied (publickey)` because
+no identity was available. They published no branches and triggered no CI.
+Axiom subsequently authorized publication and provided a loaded SSH agent;
+SSH fetches then succeeded. The failed attempts remain historical evidence in
+`initial_publication_attempt`. Publication uses only work branches over SSH,
+without changing either main branch or substituting an HTTPS push.
 
 Release binaries and the standalone X11 test runner are retained in the cache.
 Generated debug caches were removed after verification to reclaim disk space.
