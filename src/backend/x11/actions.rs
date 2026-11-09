@@ -356,9 +356,9 @@ impl WindowManager {
                 } => {
                     let result = if let Some(action) = parse_action(&line) {
                         match self.do_action(action) {
-                            Ok(()) => format!(
-                                "{{\"request_id\":{request_id},\"status\":\"executed\"}}"
-                            ),
+                            Ok(()) => {
+                                format!("{{\"request_id\":{request_id},\"status\":\"executed\"}}")
+                            }
                             Err(error) => {
                                 log::warn!("control: operation {request_id} failed: {error}");
                                 format!(
